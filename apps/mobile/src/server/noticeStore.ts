@@ -1,4 +1,5 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
+import { noticeStorageWords } from "@dohc/interface-words/notices";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
   NOTICE_ID_MAX_CHARS,
@@ -10,10 +11,10 @@ import {
   type NoticeMark,
 } from "@dohc/workspace-contracts/relay";
 import type { AccountState, SignIn } from "./account";
-import { each, isFields } from "./api";
+import { each } from "./api";
 import { ServerError, shownProblem } from "./client";
 import { sleep } from "./deviceFlow";
-import type { NoticeFiles } from "./noticeFiles";
+import type { KeptStore, Row } from "./keptStore";
 import {
   noticeRecord,
   readNotices,
@@ -42,16 +43,31 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // the relay starts the whole list over without it. The relay sends nothing when it stops showing a row for another
 // reason, such as its file becoming secret: that row goes at the next whole read.
 //
-// Marks. Each mark waits in order, on disk, until the server takes it. One request is on its way at a time, and sends
-// the oldest waiting marks in the order they were made, so a later mark always lands after an earlier one, even when
-// the earlier one's answer was lost and both go again. The list shows each row with its waiting marks applied. A mark
-// the server took is applied to the row held then, unless a newer change to the row arrived meanwhile. Either way it
-// stays on disk, marked taken with what it left the row as sent (expiry included), until a list saved after it has
-// landed. A relaunch in between gives the list file's row that recorded result, if the row is the one sent or older,
-// and never sends the mark again. One whose row the list file lacks stays on disk until the next whole list is saved.
-// A failed save of the marks file is owed: the store tries it again, backing off, until a save lands, and shows the
-// failure meanwhile, since a close then loses every mark the disk doesn't hold. Each save writes the whole queue, so
-// any later save pays it.
+// Disk. The whole list and the waiting marks are rows of kept.db (keptStore.ts), with the account's server and user.
+// Each commit carries everything kept.db lacks: new marks, in order, the removal of marks the server took, and the list
+// when it changed, which otherwise waits a moment so a burst of changes saves once. A commit that fails is tried again,
+// backing off, and shows meanwhile, since a close then loses what kept.db lacks. Each mark has a key made on the phone
+// when it's made, so a retry after a commit that landed yet reported failure finds its row instead of adding another.
+// A failed read of the marks at the start is shown and tried again the same way; until it lands no mark sends, so none
+// overtakes a mark an earlier run left.
+//
+// Marks. A mark shows, sends, and resolves `mark` as kept, only once its row has committed. One request is on its way
+// at a time, and sends the oldest committed marks in the order they were made, so a later mark always lands after an
+// earlier one, even when the earlier one's answer was lost and both go again. The list shows each row with its
+// committed marks applied. A mark the server took is applied to the row held then, unless a newer change to the row
+// arrived meanwhile, and its row goes in the same commit as the list it left. Once the store has stopped, as after a
+// 401, it adds no mark and saves no list, but still removes the rows of marks the server answered: those answered
+// before the stop, those whose removal waited behind a commit on its way, and those whose answer arrived after the
+// sign-in ended. A stopped store tries each such removal once, after any commit on its way, with no backing off. Only
+// Sign out's hold stops a removal. Marks wait through a 401, and send after a sign-in to their own server and account.
+// Only Sign out deletes them, with the outbox's rows, and nothing writes or sends while Sign out holds kept.db. The list
+// goes at each change of sign-in.
+//
+// What this doesn't promise. A mark goes again when the server took it but the commit that removes its row never
+// lands: the app closed while that commit failed, or a stopped store's one try failed. The relay can't tell a repeat:
+// a mark carries no base sequence. So if another device changed the row in between, the repeat undoes that change. The
+// old file protocol had the same gap whenever its own record of the answer failed. The fix is on the relay: ignore a
+// mark made against an older row.
 
 export const NOTICE_RETRY_MS = 1000;
 export const NOTICE_RETRY_MAX_MS = 30_000;
@@ -59,10 +75,14 @@ export const NOTICE_FAILURES_SHOWN = 3;
 /** A held read that answers sooner than this with nothing new counts toward backing off. */
 export const NOTICE_QUICK_ANSWER_MS = 1000;
 
-export interface PendingMark {
+/** A mark in the order made: its kept.db row's key, whether that row has committed, and who waits for it to. */
+interface PendingMark {
+  readonly key: string;
   readonly noticeId: string;
   readonly mark: NoticeMark;
   readonly atMs: number;
+  kept: boolean;
+  settle?: (kept: boolean) => void;
 }
 
 /** What a mark the server took left its row as, expiry included. */
@@ -72,20 +92,19 @@ interface MarkResult {
   readonly expiresAtMs: number;
 }
 
-/**
- * A mark the server took, kept until a list file saved after it has landed. `taken` is the change sequence of the row
- * it applied to when sent, and `result` what it left that row as; both null when the phone held no such row.
- */
-interface TakenMark extends PendingMark {
-  readonly taken: number | null;
-  readonly result: MarkResult | null;
-}
-
 /** The longest wait a timer takes; a later expiry is checked again then. */
 const TIMER_MAX_MS = 2 ** 31 - 1;
+/** How long a changed list waits to be saved, unless a commit carries it first. */
+const NOTICE_LIST_SAVE_MS = 1000;
 
-/** Why reads or marks are failing: the server's answer, or, for marks, a save to this phone's storage. */
-export type NoticeProblem = ServerProblemKind | "storage";
+/** What failed on this phone's storage, by what it means for the person's changes (`noticeStorageWords`). */
+export type NoticeStorageProblem = keyof typeof noticeStorageWords;
+
+/** Why reads or marks are failing: the server's answer, or, for marks, this phone's storage. */
+export type NoticeProblem = ServerProblemKind | NoticeStorageProblem;
+
+export const isStorageProblem = (problem: NoticeProblem): problem is NoticeStorageProblem =>
+  problem in noticeStorageWords;
 
 /** Whether reads or marks are failing: why, and how many times the store has shown so, to report each once. */
 export interface NoticeFailure {
@@ -107,24 +126,25 @@ export interface NoticeStore {
   readonly instance: number;
   state(): NoticeListState;
   subscribe(listener: () => void): () => void;
-  /** Starts, or starts again after `pause`, from a whole read. The first call reads the files. */
+  /** Starts, or starts again after `pause`, from a whole read. The first call reads kept.db. */
   resume(): void;
+  /** Stops reading, and saves a changed list now, as when the app goes to the background. */
   pause(): void;
   stop(): void;
   /** Reads the whole list again at once. */
   refresh(): void;
-  /** Sends the waiting marks again at once, and saves them again if a save is owed. */
+  /** Sends the waiting marks again at once, and reads or commits again what failed on kept.db. */
   retryMarks(): void;
-  mark(noticeId: string, mark: NoticeMark): void;
+  /**
+   * Resolves true once the mark's row commits, which may take retries, and only then shows it. Resolves false when it
+   * is never kept: Sign out holds kept.db, which the store reports, or the store stops first.
+   */
+  mark(noticeId: string, mark: NoticeMark): Promise<boolean>;
   markAllRead(): void;
 }
 
 const NONE: NoticeFailure = { problem: null, failures: 0 };
 const EMPTY: NoticeListState = { notices: [], known: false, reads: NONE, marks: NONE };
-
-/** The account's scope, for its files. */
-export const noticeScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
-  JSON.stringify([signIn.origin, signIn.userId, "phone"]);
 
 /** The row as `mark` leaves it, at `atMs`. */
 export function applyMark(row: NoticeRecord, mark: NoticeMark, atMs: number): NoticeRecord {
@@ -149,35 +169,23 @@ function retention(row: NoticeRecord): number {
 const isMark = (value: unknown): value is NoticeMark =>
   value === "read" || value === "unread" || value === "dismissed" || value === "restore";
 
-/** A mark as the marks file holds it: waiting, or taken with the row's change sequence. */
-function savedMark(item: unknown): PendingMark | TakenMark | null {
-  if (
-    !isFields(item) ||
-    !isNoticeLine(item.noticeId, NOTICE_ID_MAX_CHARS) ||
-    !isMark(item.mark) ||
-    typeof item.atMs !== "number" ||
-    !Number.isFinite(item.atMs)
-  )
-    return null;
-  const mark = { noticeId: item.noticeId, mark: item.mark, atMs: item.atMs };
-  if (item.taken === undefined) return mark;
-  const { taken, result } = item;
-  if (taken !== null && !(typeof taken === "number" && Number.isSafeInteger(taken))) return null;
-  if (result === null) return { ...mark, taken, result };
-  return isFields(result) &&
-    (result.readAtMs === null || typeof result.readAtMs === "number") &&
-    (result.dismissedAtMs === null || typeof result.dismissedAtMs === "number") &&
-    typeof result.expiresAtMs === "number"
-    ? {
-        ...mark,
-        taken,
-        result: {
-          readAtMs: result.readAtMs,
-          dismissedAtMs: result.dismissedAtMs,
-          expiresAtMs: result.expiresAtMs,
-        },
-      }
+/** A mark as its kept.db row holds it, or null for a row this build can't read. */
+function savedMark(row: Row): PendingMark | null {
+  const { key, notice_id: noticeId, mark, at_ms: atMs } = row;
+  return typeof key === "string" &&
+    isNoticeLine(noticeId, NOTICE_ID_MAX_CHARS) &&
+    isMark(mark) &&
+    typeof atMs === "number"
+    ? { key, noticeId, mark, atMs, kept: true }
     : null;
+}
+
+function parsed(text: unknown): unknown {
+  try {
+    return typeof text === "string" ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -222,12 +230,13 @@ function visibilityKey(list: WorkspaceList): string | null {
 let instances = 0;
 
 /**
- * Deletes the Notice files each time the account's sign-in changes: sign-out, a 401, or a new sign-in. The saved
- * sign-in read at launch keeps them, and a launch with none deletes them.
+ * Deletes every account's Notice list from kept.db each time the account's sign-in changes: sign-out, a 401, or a new
+ * sign-in. The saved sign-in read at launch keeps it, and a launch with none deletes it. Marks stay for their account.
+ * At Sign out this runs after the checkpoint, but finds nothing: Sign out's own commit deleted every list before it.
  */
-export function clearNoticesOnSignInChange(
+export function clearNoticeListsOnSignInChange(
   account: { state(): AccountState; subscribe(listener: () => void): () => void },
-  files: Pick<NoticeFiles, "clear">,
+  store: Pick<KeptStore, "transaction">,
 ): () => void {
   const signInOf = (state: AccountState) => (state.status === "signed-in" ? state.signIn : null);
   let serving = account.state();
@@ -237,22 +246,30 @@ export function clearNoticesOnSignInChange(
     serving = next;
     const changed =
       last.status === "loading" ? next.status === "signed-out" : signInOf(next) !== signInOf(last);
-    if (changed) void files.clear();
+    if (changed)
+      store.transaction((sql) => sql.run("DELETE FROM notice_lists", [])).catch(() => undefined);
   });
 }
 
 export function createNoticeStore(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly list: Pick<WorkspaceListStore, "state" | "subscribe">;
-  readonly files?: NoticeFiles | null;
+  readonly store: Pick<KeptStore, "read" | "transaction">;
+  /**
+   * Sign out holds kept.db's rows (the outbox's `holding`): meanwhile this store adds and removes no row, saves no
+   * list, and sends nothing.
+   */
+  readonly held?: () => boolean;
+  readonly listSaveMs?: number;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }): NoticeStore {
-  const { signIn, list } = options;
-  const files = options.files ?? null;
+  const { signIn, list, store } = options;
+  const held = options.held ?? (() => false);
+  const listSaveMs = options.listSaveMs ?? NOTICE_LIST_SAVE_MS;
   const now = options.now ?? Date.now;
   const wait = options.sleep ?? sleep;
-  const scope = noticeScope(signIn);
+  const account = [signIn.origin, signIn.userId];
   const listeners = new Set<() => void>();
   const everything = new AbortController();
 
@@ -260,11 +277,14 @@ export function createNoticeStore(options: {
   let rows = new Map<string, NoticeRecord>();
   /** A whole list being read, page by page, until its last page. */
   let building: Map<string, NoticeRecord> | null = null;
+  /** Committed marks first, then those whose rows haven't committed yet, each in the order made. */
   let marks: PendingMark[] = [];
-  /** Marks the server took whose effect the list file may not hold yet. */
-  let settling: TakenMark[] = [];
-  /** Taken marks a relaunch found whose row the list file lacks: they settle with the next whole list. */
-  let unplaced: TakenMark[] = [];
+  /** Keys of kept.db rows of marks the server took or refused, or this build can't read, still to delete. */
+  let gone: string[] = [];
+  /** The list changed since kept.db last took it; `listVersion` counts its changes. */
+  let listChanged = false;
+  let listVersion = 0;
+  let listTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * What the marks the server took left each row as, and the row's sequence when sent. A read the server answered
    * before a mark landed can arrive after its answer: its row, at that sequence or older, takes the result again. A row
@@ -278,18 +298,29 @@ export function createNoticeStore(options: {
   let state = EMPTY;
 
   let started = false;
+  /** kept.db's list was read, or failed to read: reads may start. */
   let loaded = false;
+  /** kept.db's marks were read: marks may send, after every mark an earlier run left. */
+  let marksLoaded = false;
+  let loading = false;
   let running = false;
   let stopped = false;
   let pull: AbortController | null = null;
   let sending = false;
   /** Ends the marks' wait between tries: Try again, and a move to the background. */
   let kick = new AbortController();
-  /** Failed saves of the marks file since the last one landed. While above 0, a save is owed. */
+  /** A commit is on its way; `again` when more waits for the next. */
+  let saving = false;
+  let again = false;
+  /** Failed commits since the last one landed. While above 0, a commit is owed. */
   let saveFailures = 0;
-  /** The send's failure, shown unless an owed save's failure is. */
+  /** Failed reads of the marks since the store started. */
+  let loadFailures = 0;
+  /** The send's failure, shown unless kept.db's is. */
   let sendProblem: ServerProblemKind | null = null;
-  /** Ends the wait before an owed save's next try: a newer save, or the store's end. */
+  /** What is failing on kept.db, a commit or the read of the marks, shown over a send's failure. */
+  let diskProblem: NoticeStorageProblem | null = null;
+  /** Ends the wait before an owed commit's next try: a newer commit, or the store's end. */
   let saveWait: AbortController | null = null;
   let lastKey: string | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -297,6 +328,24 @@ export function createNoticeStore(options: {
   let expiry: ReturnType<typeof setTimeout> | null = null;
 
   const live = () => !stopped && signIn.isCurrent();
+  const writable = () => live() && !held();
+  /** The marks whose rows have committed, which alone show and send. */
+  const committed = () => {
+    const end = marks.findIndex((mark) => !mark.kept);
+    return end < 0 ? marks : marks.slice(0, end);
+  };
+
+  /** Shows a failure of kept.db, or takes one back to show the send's failure, if any, as a new report. */
+  function diskFailed(problem: NoticeStorageProblem | null) {
+    if (problem === diskProblem) return;
+    diskProblem = problem;
+    const shown = problem ?? sendProblem;
+    markFailure =
+      shown === null
+        ? { ...markFailure, problem: null }
+        : { problem: shown, failures: markFailure.failures + 1 };
+    publish();
+  }
   const ended = (error: unknown) =>
     error instanceof ServerError &&
     (error.problem === "cancelled" || error.problem === "signed-out");
@@ -315,7 +364,7 @@ export function createNoticeStore(options: {
     // and is pruned without the entry. The held row, given the result's expiry, goes in the same pass.
     for (const [id, entry] of acked) if (entry.result.expiresAtMs <= at) acked.delete(id);
     const waiting = new Map<string, PendingMark[]>();
-    for (const mark of marks) {
+    for (const mark of committed()) {
       const found = waiting.get(mark.noticeId);
       if (found) found.push(mark);
       else waiting.set(mark.noticeId, [mark]);
@@ -350,67 +399,111 @@ export function createNoticeStore(options: {
     );
   }
 
+  /** The list changed: a commit soon carries it, unless one sooner does. */
   function saveList() {
-    if (known && live()) files?.writeList(scope, () => [...rows.values()]);
-  }
-
-  /** The marks file: taken marks still settling, then the waiting ones, in order. */
-  function saveMarks() {
-    if (!live() || !files) return;
-    void files.writeMarks(scope, [...unplaced, ...settling, ...marks]).then(marksSaved);
+    if (!known || !live()) return;
+    listChanged = true;
+    listVersion += 1;
+    if (listTimer === null && !saving) listTimer = setTimeout(persist, listSaveMs);
   }
 
   /**
-   * Takes how a save of the whole marks queue ended. The files answer in the order the saves were made, so the last
-   * answer is the newest queue's. A failure shows at once and is tried again; a save that lands takes the failure back.
+   * Commits what kept.db lacks, in one transaction: new marks in order, the removal of `gone`, and a changed list. Once
+   * the store has stopped, as after a 401, only the removal commits: it records what the server already took.
    */
-  function marksSaved(landed: boolean) {
+  function persist() {
+    if (listTimer !== null) clearTimeout(listTimer);
+    listTimer = null;
+    if (held() || (!live() && gone.length === 0)) return;
+    if (saving) {
+      again = true;
+      return;
+    }
+    saving = true;
+    again = false;
+    const fresh = marks.filter((mark) => !mark.kept);
+    const removed = [...gone];
+    const version = listVersion;
+    const listed = listChanged && known ? JSON.stringify([...rows.values()]) : null;
+    // What the commit means for the person if it fails.
+    const failure: NoticeStorageProblem =
+      fresh.length > 0 ? "unkept" : removed.length > 0 ? "unrecorded" : "unsaved";
+    void store
+      .transaction(async (sql) => {
+        // A Sign out that started meanwhile deletes the account's rows: none is added or removed after it.
+        if (held()) return null;
+        const adding = live();
+        if (adding)
+          for (const mark of fresh)
+            await sql.run(
+              "INSERT INTO notice_marks (key, origin, account_id, notice_id, mark, at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (key) DO NOTHING",
+              [mark.key, ...account, mark.noticeId, mark.mark, mark.atMs],
+            );
+        for (const key of removed) await sql.run("DELETE FROM notice_marks WHERE key = ?", [key]);
+        if (adding && listed !== null)
+          await sql.run(
+            "INSERT INTO notice_lists (origin, account_id, rows) VALUES (?, ?, ?) ON CONFLICT (origin, account_id) DO UPDATE SET rows = excluded.rows",
+            [...account, listed],
+          );
+        return adding;
+      })
+      .then(
+        (added) => {
+          saving = false;
+          if (added === null) return;
+          gone = gone.filter((key) => !removed.includes(key));
+          if (added) {
+            for (const mark of fresh) {
+              mark.kept = true;
+              mark.settle?.(true);
+            }
+            if (listed !== null && listVersion === version) listChanged = false;
+          }
+          // A stopped store commits the removals that came while this commit was on its way.
+          if (!live()) return void (gone.length > 0 && persist());
+          saved(null);
+        },
+        () => {
+          saving = false;
+          // Stopped, it doesn't back off. It commits again only if new removals came meanwhile, and that commit also
+          // carries the ones that just failed.
+          if (!live()) return void (gone.some((key) => !removed.includes(key)) && persist());
+          saved(failure);
+        },
+      );
+  }
+
+  /**
+   * Takes how a commit ended: null when it landed, or what failed. One that lands shows its marks, sends them, and
+   * takes a failure back; one that fails shows at once and is tried again, backing off.
+   */
+  function saved(failure: NoticeStorageProblem | null) {
     saveWait?.abort();
     saveWait = null;
     if (!live()) return;
-    if (landed) {
-      if (saveFailures === 0) return;
-      saveFailures = 0;
-      // A send failure it covered shows again as a new report.
-      markFailure =
-        sendProblem === null
-          ? { ...markFailure, problem: null }
-          : { problem: sendProblem, failures: markFailure.failures + 1 };
-      return publish();
+    if (failure === null) {
+      if (saveFailures > 0) {
+        saveFailures = 0;
+        diskFailed(loadFailures > 0 && !marksLoaded ? "unread" : null);
+      }
+      publish();
+      if (again || gone.length > 0 || marks.some((mark) => !mark.kept)) persist();
+      else if (listChanged && listTimer === null) listTimer = setTimeout(persist, listSaveMs);
+      // A commit that lands may follow a read of the marks that failed.
+      if (started) void load();
+      return void send();
     }
     saveFailures += 1;
-    if (saveFailures === 1) {
-      markFailure = { problem: "storage", failures: markFailure.failures + 1 };
-      publish();
-    }
+    diskFailed(failure);
     const own = new AbortController();
     saveWait = own;
     const delay = Math.min(NOTICE_RETRY_MS * 2 ** (saveFailures - 1), NOTICE_RETRY_MAX_MS);
     void wait(delay, own.signal).then(
       () => {
-        if (saveWait === own) saveMarks();
+        if (saveWait === own) persist();
       },
       () => undefined,
     );
-  }
-
-  /** Saves the list now, and only once it has landed drops the taken marks it holds from the marks file. */
-  function settle() {
-    if (settling.length === 0 || !live()) return;
-    if (!files || !known) {
-      settling = [];
-      return saveMarks();
-    }
-    const done = new Set(settling);
-    void files
-      .writeListThenMarks(scope, [...rows.values()], () => {
-        settling = settling.filter((entry) => !done.has(entry));
-        return [...unplaced, ...settling, ...marks];
-      })
-      .then((result) => {
-        // A list that fails leaves the marks file as it was, owed or not.
-        if (result !== "list-failed") marksSaved(result === "saved");
-      });
   }
 
   /** Takes one change into `target`, unless it holds a newer one. A row the list withholds isn't kept. */
@@ -497,12 +590,6 @@ export function createNoticeStore(options: {
         known = true;
         for (const id of acked.keys()) if (!rows.has(id)) acked.delete(id);
         saveList();
-        // A whole list read since the relaunch holds what the server took.
-        if (unplaced.length > 0) {
-          settling.push(...unplaced);
-          unplaced = [];
-          settle();
-        }
       } else if (!building && page.changes.length > 0) saveList();
       cursor = page.nextCursor;
       caughtUp = !page.hasMore;
@@ -519,19 +606,37 @@ export function createNoticeStore(options: {
     }
   }
 
-  function add(noticeIds: readonly string[], next: NoticeMark) {
-    if (!live() || noticeIds.length === 0) return;
+  /** Shows and sends the marks once their rows commit, and resolves then whether they were kept. */
+  function add(noticeIds: readonly string[], next: NoticeMark): Promise<boolean> {
+    if (!live() || noticeIds.length === 0) return Promise.resolve(false);
+    if (held()) {
+      // Each tap says again why nothing happened.
+      markFailure = { problem: "held", failures: markFailure.failures + 1 };
+      publish();
+      return Promise.resolve(false);
+    }
     const at = now();
-    for (const noticeId of noticeIds) marks.push({ noticeId, mark: next, atMs: at });
-    saveMarks();
-    publish();
-    void send();
+    const kept = noticeIds.map(
+      (noticeId) =>
+        new Promise<boolean>((settle) =>
+          marks.push({
+            key: crypto.randomUUID(),
+            noticeId,
+            mark: next,
+            atMs: at,
+            kept: false,
+            settle,
+          }),
+        ),
+    );
+    persist();
+    return Promise.all(kept).then((each) => each.every(Boolean));
   }
 
-  /** Reports a send failure. While a save is owed, its failure stays shown instead: a close would lose marks. */
+  /** Reports a send failure. While kept.db is failing, its failure stays shown instead: a close would lose marks. */
   function sendFailed(problem: ServerProblemKind) {
     sendProblem = problem;
-    if (saveFailures === 0) markFailure = { problem, failures: markFailure.failures + 1 };
+    if (diskProblem === null) markFailure = { problem, failures: markFailure.failures + 1 };
   }
 
   function nudge() {
@@ -540,11 +645,12 @@ export function createNoticeStore(options: {
   }
 
   /**
-   * Records what a mark the server took left its row as, from the row as it was sent, after any earlier mark of the
-   * same request. Applies that to the row held only if no newer change to it arrived after it was sent.
+   * What a mark the server took left its row, from the row as it was sent, after any earlier mark of the same request,
+   * or null when the phone held no such row. Applies that to the row held only if no newer change to it arrived after
+   * it was sent.
    */
-  function taken(mark: PendingMark, sent: NoticeRecord | undefined): TakenMark {
-    if (!sent) return { ...mark, taken: null, result: null };
+  function taken(mark: PendingMark, sent: NoticeRecord | undefined): MarkResult | null {
+    if (!sent) return null;
     const next = applyMark(sent, mark.mark, mark.atMs);
     const result: MarkResult = {
       readAtMs: next.readAtMs,
@@ -556,40 +662,18 @@ export function createNoticeStore(options: {
       if (target && row && row.changeSeq === sent.changeSeq)
         target.set(mark.noticeId, { ...row, ...result });
     }
-    return { ...mark, taken: sent.changeSeq, result };
-  }
-
-  /**
-   * After a relaunch, applies a taken mark's recorded result to the list file's row, if that row is the one it applied
-   * to or older, as when the list's save was still waiting when the mark went. A newer row is another device's change
-   * and keeps its own. The expiry is the one the server's answer set, never one from now. Resolves whether the list now
-   * holds the mark's effect; false only when the list file lacks the row.
-   */
-  function replay(mark: TakenMark): boolean {
-    const result = mark.result;
-    if (!result || mark.taken === null) return true;
-    const row = rows.get(mark.noticeId);
-    if (!row) return false;
-    if (
-      row.changeSeq > mark.taken ||
-      (row.readAtMs === result.readAtMs &&
-        row.dismissedAtMs === result.dismissedAtMs &&
-        row.expiresAtMs === result.expiresAtMs)
-    )
-      return true;
-    rows.set(mark.noticeId, { ...row, ...result });
-    return true;
+    return result;
   }
 
   async function send() {
-    if (sending || !loaded || !running || !live()) return;
+    if (sending || !marksLoaded || !running || !writable()) return;
     sending = true;
     let failures = 0;
     let shown = false;
     try {
-      while (marks.length > 0 && running && live()) {
+      while (committed().length > 0 && running && writable()) {
         // In order, with nothing folded together: a Read after an Undo needs the Undo's restore to land first.
-        const batch = marks.slice(0, NOTICE_MARKS_PER_REQUEST);
+        const batch = committed().slice(0, NOTICE_MARKS_PER_REQUEST);
         // Each row as sent, so a taken mark's result never builds on a newer change.
         const sentRows = new Map(batch.map((entry) => [entry.noticeId, rows.get(entry.noticeId)]));
         let refused = false;
@@ -624,37 +708,38 @@ export function createNoticeStore(options: {
             continue;
           }
         }
-        if (!live()) return;
+        if (!live()) {
+          // The server took them, though the sign-in ended meanwhile: their rows still go.
+          gone.push(...batch.map((entry) => entry.key));
+          return persist();
+        }
         // A failure after this one is reported again.
         failures = 0;
         shown = false;
         if (!refused) {
           sendProblem = null;
-          if (markFailure.problem !== null && saveFailures === 0)
+          if (markFailure.problem !== null && diskProblem === null)
             markFailure = { ...markFailure, problem: null };
         }
         // The sent marks go. Marks made meanwhile wait for the next request.
         const sent = new Set(batch);
         marks = marks.filter((entry) => !sent.has(entry));
-        // Every taken mark settles, whether or not a newer change to its row came first: the marks file records it as
-        // taken, then the list as it is now lands, then it leaves the marks file.
+        gone.push(...batch.map((entry) => entry.key));
         if (!refused)
           for (const entry of batch) {
             const sent = sentRows.get(entry.noticeId);
-            const mark = taken(entry, sent);
-            if (sent && mark.result) {
-              sentRows.set(entry.noticeId, { ...sent, ...mark.result });
-              // A newer row held already ends the entry: a read on its way brings that row or a newer one.
-              const superseded = [rows, building].some(
-                (target) => (target?.get(entry.noticeId)?.changeSeq ?? -1) > sent.changeSeq,
-              );
-              if (!superseded)
-                acked.set(entry.noticeId, { seq: sent.changeSeq, result: mark.result });
-            }
-            if (known) settling.push(mark);
+            const result = taken(entry, sent);
+            if (!sent || !result) continue;
+            sentRows.set(entry.noticeId, { ...sent, ...result });
+            // A newer row held already ends the entry: a read on its way brings that row or a newer one.
+            const superseded = [rows, building].some(
+              (target) => (target?.get(entry.noticeId)?.changeSeq ?? -1) > sent.changeSeq,
+            );
+            if (!superseded) acked.set(entry.noticeId, { seq: sent.changeSeq, result });
           }
-        saveMarks();
-        settle();
+        // The marks' rows go in the same commit as the list they left.
+        if (!refused) saveList();
+        persist();
         publish();
         if (refused) restart();
       }
@@ -683,34 +768,60 @@ export function createNoticeStore(options: {
     if (changed) restart();
   }
 
+  /**
+   * Reads the account's list and marks from kept.db. A list that can't be read is the server's to give again. Marks
+   * that can't be read show as a failure and are read again, backing off; until then none sends, so none overtakes
+   * them.
+   */
   async function load() {
-    const [savedRows, savedMarks] = await Promise.all([
-      files ? files.readList(scope) : null,
-      files ? files.readMarks(scope) : null,
-    ]);
+    if (loading || marksLoaded) return;
+    loading = true;
+    let found: readonly NoticeRecord[] | null = null;
+    let saved: readonly Row[] | null = null;
+    try {
+      const [listed] = await store.read(
+        "SELECT rows FROM notice_lists WHERE origin = ? AND account_id = ?",
+        account,
+      );
+      found = listed ? each(parsed(listed.rows), noticeRecord) : null;
+      saved = await store.read(
+        "SELECT key, notice_id, mark, at_ms FROM notice_marks WHERE origin = ? AND account_id = ? ORDER BY sequence",
+        account,
+      );
+    } catch {
+      // Reported below.
+    }
+    loading = false;
     if (!live()) return;
-    const found = savedRows === null ? null : each(savedRows, noticeRecord);
-    // Rows read from the server meanwhile are newer than the file's.
+    // Rows read from the server meanwhile are newer than kept.db's.
     if (found && !known) {
       rows = new Map(found.map((row) => [row.noticeId, row]));
       known = true;
     }
-    // Marks made meanwhile come after the file's. A taken mark's recorded result applies to the list file's row, and
-    // settles again so a list saved after it lands before it leaves the marks file.
-    const saved = savedMarks === null ? null : each(savedMarks, savedMark);
-    const waiting: PendingMark[] = [];
-    for (const entry of saved ?? []) {
-      if (!("taken" in entry)) waiting.push(entry);
-      else if (found && replay(entry)) settling.push(entry);
-      // Kept, never sent, until a list holding its effect is saved.
-      else unplaced.push(entry);
+    if (saved) {
+      // Marks made meanwhile come after kept.db's; one already committed this run is held already.
+      const mine = new Set(marks.map((mark) => mark.key));
+      const earlier: PendingMark[] = [];
+      for (const row of saved) {
+        const mark = savedMark(row);
+        if (!mark) gone.push(String(row.key));
+        else if (!mine.has(mark.key)) earlier.push(mark);
+      }
+      marks = [...earlier, ...marks];
+      marksLoaded = true;
+      if (diskProblem === "unread") diskFailed(null);
+    } else {
+      loadFailures += 1;
+      if (saveFailures === 0) diskFailed("unread");
+      const delay = Math.min(NOTICE_RETRY_MS * 2 ** (loadFailures - 1), NOTICE_RETRY_MAX_MS);
+      void wait(delay, everything.signal).then(load, () => undefined);
     }
-    marks = [...waiting, ...marks];
-    loaded = true;
-    // Shown first, so a row past its expiry goes before the list is saved.
-    followList();
-    settle();
-    startPull();
+    if (!loaded) {
+      loaded = true;
+      // Shown first, so a row past its expiry goes before the list is saved.
+      followList();
+      startPull();
+    } else publish();
     void send();
   }
 
@@ -732,6 +843,7 @@ export function createNoticeStore(options: {
       }
       publish();
       restart();
+      void load();
       void send();
     },
     pause() {
@@ -741,12 +853,18 @@ export function createNoticeStore(options: {
       pull?.abort();
       pull = null;
       building = null;
+      if (listChanged) persist();
     },
     stop() {
       stopped = true;
       running = false;
+      // Marks not kept yet resolve as not kept. A commit whose body already ran may still land their rows; they then
+      // send at that account's next sign-in.
+      for (const mark of marks) if (!mark.kept) mark.settle?.(false);
       if (expiry !== null) clearTimeout(expiry);
       expiry = null;
+      if (listTimer !== null) clearTimeout(listTimer);
+      listTimer = null;
       unsubscribe?.();
       kick.abort();
       saveWait?.abort();
@@ -758,14 +876,14 @@ export function createNoticeStore(options: {
     },
     retryMarks() {
       nudge();
-      if (saveFailures > 0) saveMarks();
+      if (saveFailures > 0) persist();
+      if (started) void load();
       void send();
     },
-    mark(noticeId, next) {
-      if (isNoticeLine(noticeId, NOTICE_ID_MAX_CHARS)) add([noticeId], next);
-    },
+    mark: (noticeId, next) =>
+      isNoticeLine(noticeId, NOTICE_ID_MAX_CHARS) ? add([noticeId], next) : Promise.resolve(false),
     markAllRead() {
-      add(
+      void add(
         state.notices.filter((row) => row.readAtMs === null).map((row) => row.noticeId),
         "read",
       );

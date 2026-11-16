@@ -33,8 +33,37 @@ export const noticesWords = {
   marksFailed: "dohc could not save your changes to notices.",
   /** In a mention's row when the read that would offer Reply failed. The row keeps Open, with Try again. */
   targetReadFailed: "dohc could not read this message.",
-  /** Under marksFailed when this phone's storage would not take the changes: a close before they send loses them. */
-  marksNotStored: "They are not stored on this phone yet. Keep dohc open until they send.",
+} as const;
+
+/**
+ * The phone's reports when its own storage fails for Notices, each with Try again unless it says otherwise. `unkept`:
+ * a Done or Read isn't saved, so it neither shows nor sends yet, and a close loses it. `unrecorded`: the server
+ * answered a change, taking or refusing it, but the phone couldn't record that, so a close may send it again. Its words
+ * hold for both answers. `unsaved`: only the phone's copy of the
+ * list. `unread`: the phone couldn't read the changes it kept, so none sends yet. `held`: a Sign out that hasn't
+ * finished holds this phone's storage, so Done and Read do nothing; it has no Try again.
+ */
+export const noticeStorageWords = {
+  unkept: {
+    title: "dohc could not save your changes to notices on this phone.",
+    body: "They show and send once saved. Keep dohc open while it tries again.",
+  },
+  unrecorded: {
+    title: "dohc could not finish saving your notices on this phone.",
+    body: "The server answered your last changes. If dohc closes before this saves, it may send them again.",
+  },
+  unsaved: {
+    title: "dohc could not save your notices on this phone.",
+    body: "The server still has them, and dohc reads them again when it opens.",
+  },
+  unread: {
+    title: "dohc could not read the changes to notices saved on this phone.",
+    body: "None of your changes send until it can. Keep dohc open while it tries again.",
+  },
+  held: {
+    title: "dohc could not change this notice.",
+    body: "Sign out hasn't finished on this phone. Sign out again in Settings.",
+  },
 } as const;
 
 export const syncStatusWords = {

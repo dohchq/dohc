@@ -4,26 +4,34 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { onTestFinished } from "vitest";
 import {
+  CACHE_FILE,
+  CACHE_SCHEMA,
+  createCacheStore,
   createKeptStore,
   KEPT_FILE,
   KEPT_SCHEMA,
+  type CacheStore,
   type KeptStore,
   type Row,
   type SqlConnection,
   type SqlValue,
+  type StoreFile,
 } from "./keptStore";
 
-// kept.db on Node's built-in SQLite, for tests: real SQL in a real file. Each launch opens its own connection to one
-// file, as each run of the app opens the phone's. `crash` ends every launch made so far, as the app closing would: its
-// connection closes, which rolls back a transaction it held open, and nothing the ended launches started ever settles.
+// kept.db and cache.db on Node's built-in SQLite, for tests: real SQL in real files, side by side in one folder. Each
+// launch opens its own connection to its file, as each run of the app opens the phone's. `crash` ends every launch made
+// so far, as the app closing would: its connection closes, which rolls back a transaction it held open, and nothing the
+// ended launches started ever settles. Each file has its own fault controls.
 
 const ioError = () => Object.assign(new Error("disk I/O error"), { code: "ERR_SQLITE_ERROR" });
 const never = <T>() => new Promise<T>(() => undefined);
 
-export interface KeptDisk {
+export interface FileDisk<S> {
   readonly path: string;
   /** Fails each write statement that matches, so its transaction rolls back. */
   failWrites: RegExp | null;
+  /** Fails each SELECT that matches, as a read the disk couldn't serve. */
+  failReads: RegExp | null;
   /**
    * Fails each COMMIT whose transaction ran a statement that matches, as a failed flush does: after rolling back, or,
    * when it `lands`, after committing.
@@ -48,17 +56,40 @@ export interface KeptDisk {
   crash(): void;
   /** Runs SQL on its own connection, as an earlier build left the file. */
   sql(source: string, ...params: SqlValue[]): Row[];
+  /** One run of the app's store over this file. */
+  launch(): S;
+}
+
+export interface KeptDisk extends FileDisk<KeptStore> {
   /** The outbox's rows' sequences, in order. */
   rows(): number[];
   /** A row's record, parsed. */
   record(sequence: number): unknown;
-  /** One run of the app's kept.db over this disk. */
-  launch(): KeptStore;
+  /** cache.db, beside kept.db. */
+  readonly cache: FileDisk<CacheStore>;
 }
 
 export function keptDisk(): KeptDisk {
   const folder = mkdtempSync(join(tmpdir(), "kept-"));
-  const path = join(folder, KEPT_FILE);
+  const kept = fileDisk(join(folder, KEPT_FILE), KEPT_SCHEMA, createKeptStore);
+  const cache = fileDisk(join(folder, CACHE_FILE), CACHE_SCHEMA, createCacheStore);
+  onTestFinished(() => {
+    kept.crash();
+    cache.crash();
+    rmSync(folder, { recursive: true, force: true });
+  });
+  return Object.assign(kept, {
+    cache,
+    rows: () =>
+      kept.sql("SELECT sequence FROM outbox ORDER BY sequence").map((row) => Number(row.sequence)),
+    record(sequence: number) {
+      const [row] = kept.sql("SELECT record FROM outbox WHERE sequence = ?", sequence);
+      return typeof row?.record === "string" ? JSON.parse(row.record) : null;
+    },
+  });
+}
+
+function fileDisk<S>(path: string, schema: string, create: (file: StoreFile) => S): FileDisk<S> {
   const open = new Set<DatabaseSync>();
   let run = 0;
   let held: { readonly promise: Promise<void>; readonly release: () => void } | null = null;
@@ -67,10 +98,6 @@ export function keptDisk(): KeptDisk {
     held?.release();
     held = null;
   };
-  onTestFinished(() => {
-    disk.crash();
-    rmSync(folder, { recursive: true, force: true });
-  });
 
   function connect(): SqlConnection {
     const mine = run;
@@ -80,6 +107,7 @@ export function keptDisk(): KeptDisk {
     const call = <T>(body: () => T | Promise<T>): Promise<T> =>
       Promise.resolve().then(() => (mine !== run ? never<T>() : body()));
     const write = (source: string) => {
+      if (/^\s*SELECT/.test(source) && disk.failReads?.test(source)) throw ioError();
       if (/^\s*(SELECT|PRAGMA)/.test(source)) return;
       if (disk.damaged) throw new Error("database disk image is malformed");
       if (disk.failWrites?.test(source)) throw ioError();
@@ -129,9 +157,10 @@ export function keptDisk(): KeptDisk {
     };
   }
 
-  const disk: KeptDisk = {
+  const disk: FileDisk<S> = {
     path,
     failWrites: null,
+    failReads: null,
     failCommits: null,
     locked: false,
     damaged: false,
@@ -158,20 +187,14 @@ export function keptDisk(): KeptDisk {
     sql(source, ...params) {
       const database = new DatabaseSync(path);
       try {
-        database.exec(KEPT_SCHEMA);
+        database.exec(schema);
         return database.prepare(source).all(...params);
       } finally {
         database.close();
       }
     },
-    rows: () =>
-      disk.sql("SELECT sequence FROM outbox ORDER BY sequence").map((row) => Number(row.sequence)),
-    record(sequence) {
-      const [row] = disk.sql("SELECT record FROM outbox WHERE sequence = ?", sequence);
-      return typeof row?.record === "string" ? JSON.parse(row.record) : null;
-    },
     launch: () =>
-      createKeptStore({
+      create({
         open: async () => {
           if (disk.locked)
             throw Object.assign(new Error("The phone hasn't been unlocked since it started."), {

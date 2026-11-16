@@ -19,11 +19,10 @@ import {
 import { canOpenApps } from "../apps/canOpenApps";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
-import { createCacheFiles } from "../server/cacheFiles";
-import { createKeptDatabase } from "../server/keptDatabase";
-import { createNoticeFiles } from "../server/noticeFiles";
+import { createCacheRows } from "../server/cacheRows";
+import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
 import {
-  clearNoticesOnSignInChange,
+  clearNoticeListsOnSignInChange,
   createNoticeStore,
   type NoticeStore,
 } from "../server/noticeStore";
@@ -77,29 +76,30 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 //
 // The open workspace's reads live in one store, made for its sign-in and workspace (src/server/openWorkspace.ts).
 // Switching workspace, signing out and a new sign-in each make another and stop the last, so nothing the last one
-// started can reach the screen. Its feed runs while the app is in the foreground. The read cache keeps a copy on disk,
-// saved before the app goes to the background, so a relaunch shows what was read last. It empties, on disk too,
-// whenever the sign-in changes or ends.
+// started can reach the screen. Its feed runs while the app is in the foreground. The read cache keeps a copy in
+// cache.db, saved before the app goes to the background, so a relaunch shows what was read last. Whenever the sign-in
+// changes or ends, it empties and deletes cache.db; at Sign out, that comes after kept.db's commit.
 //
 // The account's Notices live in their own store, beside the list, so they outlive the open workspace
 // (src/server/noticeStore.ts). It reads while the app is in the foreground, and reads the whole list again on each
-// return, when the account's workspace list is read again too. Its files empty whenever the sign-in changes or ends.
+// return, when the account's workspace list is read again too. Its list and marks are in kept.db. The list goes
+// whenever the sign-in changes or ends; the marks wait for their account, and go at Sign out.
 //
 // The outbox (src/server/outbox.ts) is the account's too, beside the cache and outside any workspace's store. It sends
-// only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
-// write's result hands it off. An app-state change tries again whatever failed, and asks again at once. Only where its
-// Sign out delete stands reaches the screen, so the rest of its changes render nothing.
+// only with its records' own account, keeps them through a 401, and deletes them, with the account's Notice rows, at
+// Sign out. A read that shows a saved write's result hands it off. An app-state change tries again whatever failed, and
+// asks again at once. Only where its Sign out delete stands reaches the screen, so the rest of its changes render
+// nothing.
 //
 // A running app (src/apps/appStore.ts) ends before anything else happens at Sign out, a sign-in change, a workspace
 // switch and Show on phone off.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
   const [teardown] = useState(() => appTeardown(runner));
-  // Sign out deletes the account's outbox rows: the sign-in ends, and its token goes, once that delete has committed.
-  // With phone writes off it sends nothing, not even records an earlier build kept. kept.db opens once per install.
-  const [outbox] = useState(() =>
-    createOutbox({ store: createKeptDatabase(), sends: phoneWrites }),
-  );
+  // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
+  // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
+  const [kept] = useState(createKeptDatabase);
+  const [outbox] = useState(() => createOutbox({ store: kept, sends: phoneWrites }));
   const [account] = useState(() =>
     createAccount({
       store: secureSignInStore,
@@ -113,7 +113,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => teardown.follow(account), [account, teardown]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
-  const [cache] = useState(() => createReadCache(createCacheFiles()));
+  const [cache] = useState(() => createReadCache(createCacheRows(createCacheDatabase())));
   useEffect(() => cache.follow(account), [account, cache]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);
@@ -167,12 +167,14 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [signIn, currentWorkspaceId, runner],
   );
   useEffect(() => () => apps?.stop(), [apps]);
-  const [noticeFiles] = useState(() => createNoticeFiles());
-  useEffect(() => clearNoticesOnSignInChange(account, noticeFiles), [account, noticeFiles]);
+  useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);
   // As the open workspace's store: making one starts nothing, and the effect runs it.
   const notices = useMemo(
-    () => (signIn && list ? createNoticeStore({ signIn, list, files: noticeFiles }) : null),
-    [signIn, list, noticeFiles],
+    () =>
+      signIn && list
+        ? createNoticeStore({ signIn, list, store: kept, held: outbox.holding })
+        : null,
+    [signIn, list, kept, outbox],
   );
   useEffect(() => {
     if (!open || !list || !notices) return;
@@ -194,14 +196,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       open.pause();
       notices.pause();
       cache.flush();
-      void noticeFiles.flush();
     });
     return () => {
       subscription.remove();
       open.stop();
       notices.stop();
     };
-  }, [open, list, notices, cache, noticeFiles]);
+  }, [open, list, notices, cache]);
 
   // Wakes, one sign-in's and open workspace's store's: a sign-in change or a workspace switch stops every read and wait
   // the last one started, before any screen or Notice row wants its conversations again. A Notice row reads its own

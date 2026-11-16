@@ -1,7 +1,7 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import type { AccountState, SignIn } from "./account";
 import { accountWorkspace, each } from "./api";
-import type { CacheFiles, SavedView } from "./cacheFiles";
+import type { CacheRows, SavedView } from "./cacheRows";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
 import {
@@ -207,9 +207,9 @@ export interface Cached {
 }
 
 /**
- * Views read for each server, account and workspace, in memory and, given `files`, on disk (cacheFiles.ts), with each
- * account's workspace list on disk. It empties whenever the sign-in changes or ends, on disk too. Each change is saved
- * soon after; dropping a scope deletes its file.
+ * Views read for each server, account and workspace, in memory and, given `files`, in cache.db (cacheRows.ts), with
+ * each account's workspace list there too. It empties whenever the sign-in changes or ends, deleting cache.db. Each
+ * change is saved soon after; dropping a scope deletes its row.
  */
 export interface ReadCache {
   entries(scope: string): readonly Cached[];
@@ -242,7 +242,7 @@ export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceI
 const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
 
-export function createReadCache(files?: CacheFiles): ReadCache {
+export function createReadCache(files?: CacheRows): ReadCache {
   const scopes = new Map<string, Map<string, Cached>>();
   // A drop moves its scope's generation on, and a clear every scope's, so a restore that a delete overtakes adds nothing.
   let epoch = 0;

@@ -1,8 +1,12 @@
+import { Directory, Paths } from "expo-file-system";
 import { deleteDatabaseAsync, openDatabaseAsync, type SQLiteDatabase } from "expo-sqlite";
 import { prepareKeptFolder } from "../../modules/durable-file";
 import {
+  CACHE_FILE,
+  createCacheStore,
   createKeptStore,
   KEPT_FILE,
+  type CacheStore,
   type KeptStore,
   type Row,
   type SqlConnection,
@@ -13,6 +17,16 @@ export function createKeptDatabase(): KeptStore {
   return createKeptStore({
     open: async () => connection(await openDatabaseAsync(KEPT_FILE, {}, await prepareKeptFolder())),
     remove: async () => deleteDatabaseAsync(KEPT_FILE, await prepareKeptFolder()),
+  });
+}
+
+/** cache.db through expo-sqlite, in Caches, which the system may clear. Make one per install. */
+export function createCacheDatabase(): CacheStore {
+  const folder = new Directory(Paths.cache, "dohc-cache").uri;
+  return createCacheStore({
+    open: async () => connection(await openDatabaseAsync(CACHE_FILE, {}, folder)),
+    // It rejects when there is no file, which leaves nothing to delete.
+    remove: () => deleteDatabaseAsync(CACHE_FILE, folder).catch(() => undefined),
   });
 }
 

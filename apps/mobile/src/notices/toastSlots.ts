@@ -1,5 +1,6 @@
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { noticesWords } from "@dohc/interface-words/notices";
+import type { NoticeMark } from "@dohc/workspace-contracts/relay";
 import type { ToastMessage } from "./Toast";
 
 // Which toast the tabs show. One shows at a time. A toast holding the only Undo for a change stays until it's closed
@@ -13,6 +14,19 @@ export interface ToastSlots {
 }
 
 export const NO_TOASTS: ToastSlots = { shown: null, waiting: null };
+
+/**
+ * Done on a Notice from the server: its toast, with Undo, shows only once the phone has kept the dismissal. One not
+ * kept shows nothing here; the store reports why. Undo's restore is made after the dismissal, so it lands after it.
+ */
+export async function markDone(
+  mark: (noticeId: string, mark: NoticeMark) => Promise<boolean>,
+  noticeId: string,
+  show: (message: ToastMessage) => void,
+): Promise<void> {
+  if (await mark(noticeId, "dismissed"))
+    show(doneToast(noticeId, () => void mark(noticeId, "restore")));
+}
 
 /** The toast after Done on a Notice from the server: its only Undo, which restores it. */
 export function doneToast(noticeId: string, restore: () => void): ToastMessage {
