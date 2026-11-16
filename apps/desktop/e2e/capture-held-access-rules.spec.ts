@@ -9,6 +9,7 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import { activityPin, desktopPins } from "../src/testPins";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -223,8 +224,9 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect(removedRow).toContainText("Members: View → set in Members settings");
     await shoot(page, "notices-rows");
 
-    // Details leads with the rule dohc recorded and when dohc noticed the
-    // change, before the notice's own words and each change.
+    // Details leads with the rule dohc recorded, when dohc noticed the
+    // change, and what members keep meanwhile, then each change. The row
+    // shows the notice's own words, so Details leaves them out.
     await removedRow.getByRole("button", { name: "Details" }).click();
     const details = removedRow.locator("pre");
     await expect(details).toHaveText(
@@ -367,10 +369,37 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     );
     await expect(resolvedRow).not.toContainText("can't read that level");
     expect(await buttonNames(resolvedRow)).toEqual(["Restore rule", "Remove rule"]);
+    // dohc holds the workspace's rule again, so the earlier Restore's Undo
+    // goes. Its words stay.
+    await expect(restored).toHaveCount(1);
+    await expect(restored.getByRole("button", { name: "Undo" })).toHaveCount(0);
     await shoot(page, "removed-root-resolved");
+
+    // The level changes in Settings after the row showed it. Coming back
+    // from Settings reads it again, and the row updates where it stands.
+    await supplyMembers(app, "edit");
+    await page.getByTestId(activityPin("settings")).click();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
+    await openNotices();
+    await expect(resolvedRow).toContainText("Members: View → Edit", { timeout: 30_000 });
+    await expect(resolvedRow).toHaveCount(1);
+    await shoot(page, "level-read-again");
+
+    // Another window changes it again before the owner chooses. Remove rule
+    // reads it first, so the choice does not run and the row shows the level
+    // it would give now.
+    await supplyMembers(app, "view");
+    await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
+    await expect(resolvedRow).toContainText("Members: View → View", { timeout: 30_000 });
+    await expect(resolvedRow.getByRole("button", { name: "Remove rule" })).toBeEnabled();
+    expect((await status()).heldAccessRules?.map((hold) => hold.folder)).toEqual([""]);
+    await expect(rows.filter({ hasText: "Removed the workspace's access rule." })).toHaveCount(0);
+    await shoot(page, "level-changed-before-choice");
     await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
     const removedDone = rows.filter({
-      hasText: "Removed the workspace's access rule. Members can now comment.",
+      hasText: "Removed the workspace's access rule. Members can now view.",
     });
     await expect(removedDone).toHaveCount(1, { timeout: 30_000 });
     await expect
