@@ -79,6 +79,7 @@ import {
 } from "./accountOperationRoutes";
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
+import type { PhonePages } from "./phonePages";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
 import type { OwnerLiveSockets } from "./namedLiveRoutes";
 import { bearerAccountSession, createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
@@ -246,6 +247,8 @@ export interface CreateSyncRelayHandlerOptions {
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
   serverCopies?: () => ServerCopies | undefined;
+  // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
+  phonePages?: () => PhonePages | undefined;
   // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;
   // This server's public HTTPS origin, which issues its accounts' actor keys. The phone's chat writes need it.
@@ -359,6 +362,7 @@ export function createSyncRelayHandler({
   pressDataset,
   serverRuns = () => undefined,
   serverCopies = () => undefined,
+  phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
   relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
@@ -686,6 +690,7 @@ export function createSyncRelayHandler({
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
         phoneApps,
+        ...(phonePages ? { phonePages } : {}),
       })
     : undefined;
   // The owner's computers claim wakes here; the phone reads wakes through its operations route.

@@ -934,6 +934,8 @@ export interface SyncRelayStorage {
   serviceActivationRetirements(
     workspaceId: string,
   ): import("./serviceActivationRetirement").ServiceActivationRetirement[];
+  /** Whether the relay holds a Y.Doc update for the document on main, so some computer has opened it live. */
+  mainLiveLineageExists(document: { workspaceId: string; objectId: string }): boolean;
   /** Whether the document has a restore that has neither resumed nor been declined. */
   serviceRestoreInProgress(document: { workspaceId: string; objectId: string }): boolean;
   serviceActivationRetirementDecision(

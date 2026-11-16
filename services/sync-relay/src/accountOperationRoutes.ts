@@ -17,6 +17,7 @@ import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
+import type { PhonePages } from "./phonePages";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
@@ -62,9 +63,10 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 }
 
 /**
- * A signed-in account's reads, chat writes, read marks, wake retries, and
- * conversation contexts in a workspace it owns, through this server's copy
- * of it, while it shows on the phone; its published apps (phoneApps.ts); its change feed, at
+ * A signed-in account's reads, chat writes, read marks, wake retries,
+ * conversation contexts, and a phone's page opens for live editing in a
+ * workspace it owns, through this server's copy of it, while it shows on the
+ * phone; its published apps (phoneApps.ts); its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -94,6 +96,8 @@ export function createAccountOperationRoute(options: {
   serverUrl?: string;
   /** The workspace's published apps, their review and approval, and launch grants. */
   phoneApps?: PhoneApps;
+  /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
+  phonePages?: () => PhonePages | undefined;
 }) {
   const { storage, limiter } = options;
   const session = (request: Request) =>
@@ -107,15 +111,22 @@ export function createAccountOperationRoute(options: {
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const caller = await session(request);
-    if (!limiter.allow(caller.sessionId, options.nowMs())) {
+    const page = route.operation === "openPage";
+    if (
+      !limiter.allow(caller.sessionId, options.nowMs()) ||
+      // An open can enroll a page, so the account's sign-ins also share one pace for it.
+      (page && !limiter.allow(`account:${caller.userId}`, options.nowMs()))
+    ) {
       throw new RelayError(
         "server_busy",
         "This sign-in is asking faster than your server answers. Try again shortly.",
       );
     }
     const app = options.phoneApps !== undefined && isPhoneAppOperation(route.operation);
-    // The feeds and the app operations read only the relay's own tables; every other operation needs a copy.
-    if (!feed && !wakeFeed && !app && options.copies() === undefined) throw copiesUnavailable();
+    // The feeds, the app operations, and a page open read only the relay's own tables and its live host; every other
+    // operation needs a copy.
+    if (!feed && !wakeFeed && !app && !page && options.copies() === undefined)
+      throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
@@ -133,6 +144,7 @@ export function createAccountOperationRoute(options: {
         mark ||
         retry ||
         context ||
+        page ||
         isAccountOperation(route.operation)
       ) ||
       !reaches(caller.userId)
@@ -196,6 +208,20 @@ export function createAccountOperationRoute(options: {
         ok: true,
         result: options.phoneApps!.run(caller, route.workspaceId, route.operation, args),
       });
+    // A page open reads only the relay's own tables and the live host.
+    if (page) {
+      const pages = options.phonePages?.();
+      const result = pages
+        ? await pages.open({
+            caller,
+            workspaceId: route.workspaceId,
+            args,
+            authorize,
+            signal: request.signal,
+          })
+        : { status: "refused", reason: "live_hosting_unsupported" };
+      return jsonResponse({ ok: true, result });
+    }
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = {
       reason: "account",

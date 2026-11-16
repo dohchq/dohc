@@ -804,7 +804,7 @@ export function createServiceHostEnrollmentRoutes(options: {
         });
       }
       // `{shareId}` enrolls the share's documents, and with `retry` only those that have no row. `{path}` is the owner's
-      // Resume, and `{path, open: true}` the owner's desktop asking for a document it holds owner edits for.
+      // Resume, and `{path, open: true}` the owner's desktop opening a document, which may enroll it for the first time.
       if (
         Object.keys(input).some((key) => !["path", "shareId", "retry", "open"].includes(key)) ||
         (input.shareId !== undefined && typeof input.shareId !== "string") ||
@@ -858,16 +858,15 @@ export function createServiceHostEnrollmentRoutes(options: {
       let row: ServiceHostEnrollment;
       if (input.open === true) {
         // A refusal is an answer, not an error: the desktop stops asking until its owner opens the document again or Resumes.
-        // Only a retained row refuses, since an owner open never inserts one.
         try {
           row = storage.ensureOwnedLiveDocument({ ...common, intent: "owner-open" });
         } catch (error) {
-          if (!(error instanceof LiveHostingRefusal) || !retained) throw error;
+          if (!(error instanceof LiveHostingRefusal)) throw error;
           return response(
             {
               ok: true,
-              path: retained.path,
-              objectId: retained.objectId,
+              path: retained?.path ?? path,
+              ...(retained ? { objectId: retained.objectId } : {}),
               changed: false,
               ...(error.reason === "paused"
                 ? { status: "paused" }
