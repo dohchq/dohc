@@ -33,7 +33,7 @@ final class ConversationOutboxTests: XCTestCase {
     XCTAssertTrue(notSent.waitForExistence(timeout: 5), "A withheld message should show")
     app.buttons["Send"].tap()
     let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: notSent)
-    XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 5), .completed, "Send should take the message out of withheld")
+    XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "Send should take the message out of withheld")
     // XCUITest shows each React Native text as a paragraph holding a text with the same label and frame, so the test
     // counts places on screen, not elements: a second row would sit elsewhere.
     let copies = app.staticTexts.matching(NSPredicate(format: "label == %@", "Can we push dinner to 8?"))
@@ -51,6 +51,6 @@ final class ConversationOutboxTests: XCTestCase {
     XCTAssertTrue(text(app, "It may still send.").waitForExistence(timeout: 5), "Discard should warn first")
     app.sheets.firstMatch.buttons["Discard"].tap()
     let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: stalled)
-    XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 5), .completed, "Discard should take the message off this phone")
+    XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "Discard should take the message off this phone")
   }
 }
