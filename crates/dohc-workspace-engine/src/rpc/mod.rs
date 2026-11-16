@@ -17,6 +17,7 @@ pub(super) mod markdown_recovery;
 pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
 pub(super) mod reads;
+pub(super) mod rebuild;
 pub(crate) mod recovery_copies;
 pub(super) mod relay;
 pub(crate) mod replica;

@@ -17,6 +17,7 @@ pub mod live_application_ingress;
 mod read_methods;
 #[cfg(test)]
 mod reader_runtime_tests;
+pub mod rebuild_manifest;
 pub mod root_binding;
 mod rpc;
 
@@ -117,6 +118,9 @@ pub struct EngineService {
     /// EngineServices in one process, back this with a shared/global semaphore to
     /// keep the ceiling aggregate.
     blob_egress_budget: BlobEgressBudget,
+    /// Roots whose copy is closed for a rebuild, with its id. See
+    /// `rpc::rebuild`.
+    rebuilding_roots: Mutex<HashMap<std::path::PathBuf, String>>,
 }
 
 impl Default for EngineService {
@@ -256,6 +260,7 @@ impl EngineService {
             #[cfg(test)]
             bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
+            rebuilding_roots: Mutex::new(HashMap::new()),
         }
     }
 

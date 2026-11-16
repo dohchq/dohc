@@ -192,6 +192,7 @@ impl EngineService {
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
         self.guard_replica_request(&mut request)?;
+        self.guard_rebuilding_request(&mut request)?;
         super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
@@ -218,6 +219,7 @@ impl EngineService {
         mut request: Request,
     ) -> Result<ServiceResponse, WireError> {
         self.guard_replica_request(&mut request)?;
+        self.guard_rebuilding_request(&mut request)?;
         let id = request.id;
         super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
