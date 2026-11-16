@@ -138,7 +138,11 @@ export async function releaseRetiredOwnerNotes(options: {
     signal: AbortSignal,
   ): ReturnType<OwnerJournalRead>;
   /** Releases the note; the engine ends a Stop the relay retired on its own. */
-  release(binding: LiveObjectBinding, acceptedCursor: number, signal: AbortSignal): Promise<unknown>;
+  release(
+    binding: LiveObjectBinding,
+    acceptedCursor: number,
+    signal: AbortSignal,
+  ): Promise<unknown>;
   assertCurrent(): void;
   onComplete?(row: OwnerLiveStop): void;
 }) {
