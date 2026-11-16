@@ -2508,3 +2508,32 @@ fn a_write_after_the_workspace_folder_moved_is_refused() {
         lines(&["write private/access.yaml", "write private/new.md"])
     );
 }
+
+/// History Undo reads its plan through the store's held folder, which only
+/// Unix keeps after `.dohc/engine` moves. Once the store left the workspace
+/// folder, Undo is refused before any of its turns writes: it restores no
+/// file and records no plan.
+#[cfg(unix)]
+#[test]
+fn an_undo_after_the_store_moved_records_nothing() {
+    let f = Fixture::new();
+    f.versioned_write(write("team/a.md", "alpha", "m-alpha"))
+        .expect("write");
+    f.versioned_delete(delete("team/a.md", "d-alpha"))
+        .expect("delete");
+    let before = f.moments();
+    f.move_store_away();
+    let refused = f.undo(OP, "undo-moved");
+    let stray = f.move_store_back();
+    assert!(moved(&refused), "{refused:?}");
+    assert_eq!(stray, Vec::<String>::new(), "written where the store was");
+    assert!(!f.root().join("team/a.md").exists());
+    assert_eq!(f.moments(), before);
+    let plans: i64 = rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .query_row("SELECT count(*) FROM history_undo_plans", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(plans, 0, "a pending Undo plan was recorded");
+}

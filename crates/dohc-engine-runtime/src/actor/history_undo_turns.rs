@@ -330,7 +330,10 @@ impl ActorHandle {
             let probe = tests::TurnProbe::new(&request, phase, member);
             #[cfg(not(test))]
             let _ = (request, phase, member);
-            let outcome = work(store, cache);
+            // Every turn reads or writes the store, so none runs once the
+            // workspace folder no longer holds it.
+            let outcome =
+                crate::actor::access_order::check_root().and_then(|()| work(store, cache));
             #[cfg(test)]
             probe.finish();
             outcome
