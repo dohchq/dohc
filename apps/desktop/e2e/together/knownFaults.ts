@@ -6,9 +6,7 @@
 import { test } from "@playwright/test";
 
 export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
-  "same new empty line, the line's maker first": 4037,
-  "same new empty line, the line's maker second": 4037,
-  "both add a line after the same last line, one just after the other": 4037,
+  "both add a line after the same last line, one just after the other": 4177,
   "both join the same line": 4038,
   "joins of neighbouring lines": 4038,
   "a join and a split of one line": 4038,
@@ -24,8 +22,7 @@ export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
  */
 export const LEFT_OUT: Readonly<Record<string, number>> = {
   "joining and splitting lines": 4038,
-  "typing on a line that is empty": 4037,
-  "starting a new line where someone else starts one": 4037,
+  "starting a new line where someone else starts one": 4177,
 };
 
 /**

@@ -163,29 +163,6 @@ function isToldOfRemoved(page: Seen, text: string): void {
   expect(page.words).toContain(text);
 }
 
-/**
- * Two people's words ended on one new last line. The page of `stopped` holds both, in either
- * order, and says editing stopped. The other two pages hold only `kept`, and go on editing.
- * `below` is what stands under that line on every page. Nothing else in the note changed.
- */
-function oneIsStoppedOnASharedLine(
-  end: Ending,
-  stopped: "one" | "two",
-  kept: string,
-  refused: string,
-  below: readonly string[] = [],
-): void {
-  expect(end[stopped].words).toContain("Editing stopped");
-  expect(
-    end[stopped].lines.map((text) => (text === `${refused}${kept}` ? `${kept}${refused}` : text)),
-  ).toEqual([...START, `${kept}${refused}`, ...below]);
-  for (const other of [stopped === "one" ? end.two : end.one, end.watcher]) {
-    expect(other.stopped).toBe(false);
-    expect(other.lines).toEqual([...START, kept, ...below]);
-  }
-  for (const page of pages(end)) expect(page.boxes).toBe("__");
-}
-
 for (const makerFirst of [true, false]) {
   const name = `same new empty line, the line's maker ${makerFirst ? "first" : "second"}`;
   test(name, async ({ scene }) => {
@@ -206,12 +183,7 @@ for (const makerFirst of [true, false]) {
     await clickAt(lines(late.page).last());
     await type(late, word(late));
 
-    judge(
-      name,
-      await ending(scene, late),
-      (end) => nothingLost(end, "MAKERWORD", "OTHERWORD"),
-      (end) => oneIsStoppedOnASharedLine(end, makerFirst ? "two" : "one", word(early), word(late)),
-    );
+    judge(name, await ending(scene, late), (end) => nothingLost(end, "MAKERWORD", "OTHERWORD"));
   });
 }
 
@@ -245,7 +217,10 @@ test("both add a line after the same last line, one just after the other", async
     },
     // The second person's caret was put in the first person's new line, so both typed on one
     // line, and the second person's own new line stays empty below it.
-    (end) => oneIsStoppedOnASharedLine(end, "two", "ONEWORD", "TWOWORD", [""]),
+    (end) => {
+      const joined = end.one.lines.includes("ONEWORDTWOWORD") ? "ONEWORDTWOWORD" : "TWOWORDONEWORD";
+      everyPageShows(end, [...START, joined, ""]);
+    },
   );
 });
 
