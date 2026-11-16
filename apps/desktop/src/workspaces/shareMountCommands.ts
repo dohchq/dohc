@@ -168,6 +168,8 @@ export function createShareMountCommands<WorkspaceSummary>(
       if (!target.relayUrl) {
         throw new Error("Only a prepared share mount can be created.");
       }
+      // Every stored mount meets this, not only the code a person pastes.
+      assertMountableSelector(target.grantedSelector);
       const projection = dependencies.projectionFor(owner);
       await projection.create();
       try {

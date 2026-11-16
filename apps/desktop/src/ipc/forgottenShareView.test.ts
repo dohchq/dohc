@@ -183,6 +183,34 @@ const reopened = (shareView: Partial<ShareViewIdentity> = {}): ShareViewIdentity
 });
 
 describe("Open folder on a forgotten share's folder", () => {
+  // Forget works whatever step a rebuild of the copy reached, and leaves the
+  // folder and the rebuild's state as they were: the engine keeps the copy
+  // closed. Opening the folder again carries the rebuild, so the copy shows
+  // Updating access and its rebuild resumes.
+  it.each(["closed", "planned", "swapping", "swapped", "converged"])(
+    "forgets a copy whose rebuild is %s, and reopens it closed",
+    async (phase) => {
+      const { share, h } = await forgottenShare(`forgotten-share-rebuild-${phase}-`, {
+        ...opened,
+        rebuild: { rebuildId: "rebuild-1" },
+      });
+      await mkdir(join(share.rootPath, ".dohc", "local"), { recursive: true });
+      await writeFile(
+        join(share.rootPath, ".dohc", "local", "rebuild.json"),
+        JSON.stringify({ rebuildId: "rebuild-1", phase }),
+      );
+      const before = await folderContents(share.rootPath);
+      await h.forget("ws-share-view");
+      expect(h.registry.list()).toEqual([]);
+      expect(await folderContents(share.rootPath)).toEqual(before);
+      const attached = await h.openFolder(share.rootPath);
+      expect(attached.shareView).toMatchObject({ updatingAccess: true });
+      expect(h.registry.find("ws-share-view")?.shareView?.rebuild).toEqual({
+        rebuildId: "rebuild-1",
+      });
+    },
+  );
+
   it("registers the folder as that share again, with names unknown, and removes the record", async () => {
     const { share, h } = await forgottenShare("forgotten-share-");
     await h.forget("ws-share-view");

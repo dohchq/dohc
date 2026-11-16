@@ -39,6 +39,9 @@ interface ForgottenShareView {
   // its notice is gone. Pulls resume past that content, so none rebuilds it.
   ended?: true;
   skippedOps?: ShareSkippedOps | null;
+  // A copy forgotten while the engine held it closed for a rebuild opens
+  // closed, and the rebuild resumes.
+  rebuildId?: string;
 }
 
 const filled = (value: unknown): value is string => typeof value === "string" && value.length > 0;
@@ -70,7 +73,8 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     grantedSelector === null ||
     (raw.granterUserId !== undefined && !filled(raw.granterUserId)) ||
     (raw.receivedIdentity !== undefined && receivedIdentity === undefined) ||
-    (raw.ended !== undefined && raw.ended !== true)
+    (raw.ended !== undefined && raw.ended !== true) ||
+    (raw.rebuildId !== undefined && (!filled(raw.rebuildId) || raw.rebuildId.length > 200))
   ) {
     return null;
   }
@@ -86,6 +90,7 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     ...(receivedIdentity ? { receivedIdentity } : {}),
     ...(raw.ended === true ? { ended: true } : {}),
     ...(skippedOps !== undefined ? { skippedOps } : {}),
+    ...(filled(raw.rebuildId) ? { rebuildId: raw.rebuildId } : {}),
   };
 }
 
@@ -199,6 +204,7 @@ export function createForgottenShareViews(dependencies: {
       ...(receivedIdentity ? { receivedIdentity } : {}),
       ...(shareView.ended === true ? { ended: true } : {}),
       ...(skippedOps !== undefined ? { skippedOps } : {}),
+      ...(filled(shareView.rebuild?.rebuildId) ? { rebuildId: shareView.rebuild.rebuildId } : {}),
     };
   }
 
@@ -263,6 +269,7 @@ export function createForgottenShareViews(dependencies: {
             unsavedPaths: null,
             ...(record.ended ? { ended: true } : {}),
             ...(record.skippedOps ? { skippedOps: record.skippedOps } : {}),
+            ...(record.rebuildId ? { rebuild: { rebuildId: record.rebuildId } } : {}),
           },
         };
         register(entry);
