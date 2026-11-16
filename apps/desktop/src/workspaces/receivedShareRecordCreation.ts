@@ -8,6 +8,7 @@ import type {
   ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 import { recordedShareSelector } from "./shareViewRecords";
+import { shareViewLevels } from "./shareViewReach";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import type { CreationPartial } from "@dohc/cli/creation";
@@ -39,14 +40,22 @@ export async function createReceivedShareRecord(
   },
 ): Promise<ReceivedRecordDraft | CreationPartial> {
   const { resolved } = host;
-  // A joined workspace's grant names the whole workspace and no paths.
+  // A joined workspace's grant names the whole workspace and no paths. A new
+  // record lands in the Collection's folder, so it takes the level there.
+  const levels = shareViewLevels({
+    shareId: resolved.shareId,
+    recipientUserId: resolved.recipientUserId,
+    grantedSelector: resolved.grantedSelector,
+    ...(resolved.reach === undefined ? {} : { reach: resolved.reach }),
+  });
   const covers = (grant: ShareViewSelector | null) =>
-    grant?.access === "edit" &&
-    grant.versionId === null &&
-    (grant.wholeWorkspace === true ||
-      grant.paths.some(
-        (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
-      ));
+    grant?.versionId === null &&
+    (grant.wholeWorkspace === true
+      ? levels.in(host.collectionPath) === "edit"
+      : grant.access === "edit" &&
+        grant.paths.some(
+          (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
+        ));
   if (resolved.kind !== "standalone")
     throw new Error("Open this share as a workspace to create a record.");
   if (resolved.ended || !resolved.shareId) throw new ShareUnavailableError();

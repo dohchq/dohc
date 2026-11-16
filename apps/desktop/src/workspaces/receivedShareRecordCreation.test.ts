@@ -7,6 +7,7 @@ import type {
   ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
+import type { ShareViewSelector } from "./shareViewInfo";
 
 const selector = { paths: ["trip"], versionId: null, access: "edit" as const };
 const id = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -19,6 +20,7 @@ function fixture() {
     rootPath: "C:/draft",
     schedulingRootPath: "C:/draft",
     shareId: "share",
+    recipientUserId: "me",
     granterEmail: "owner@test",
     grantedSelector: selector,
     ended: false,
@@ -45,7 +47,7 @@ function fixture() {
       resolved,
       collectionPath: "trip/Tasks",
       files: { read, change },
-      checkAuthority: vi.fn<() => Promise<typeof selector | null>>(async () => selector),
+      checkAuthority: vi.fn<() => Promise<ShareViewSelector | null>>(async () => selector),
       assertCurrent: vi.fn(),
       recordStatus: vi.fn(
         async (
@@ -92,6 +94,34 @@ describe("received-share record drafts", () => {
     });
     const below = fixture();
     below.host.resolved.grantedSelector = { ...membership, access: "comment" };
+    await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
+    expect(below.host.files.change).not.toHaveBeenCalled();
+  });
+
+  // The same levels the CLI and MCP read (desktopCliServer.test.ts).
+  it("takes the level of the Collection's folder from the stored reach", async () => {
+    const membership = {
+      paths: [],
+      versionId: null,
+      wholeWorkspace: true as const,
+      access: "view" as const,
+    };
+    const reach = (trip: "comment" | "edit") => ({
+      revision: "r1",
+      visibilityRevision: "v1",
+      rootLevel: "view",
+      folders: [{ path: "trip", level: trip }],
+    });
+    const f = fixture();
+    Object.assign(f.host.resolved, { grantedSelector: membership, reach: reach("edit") });
+    f.host.checkAuthority.mockResolvedValue(membership);
+    expect(await createReceivedShareRecord(input, f.host)).toMatchObject({
+      path: "trip/Tasks/One.md",
+    });
+    const below = fixture();
+    Object.assign(below.host.resolved, { grantedSelector: membership, reach: reach("comment") });
     await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow(
       "This Collection does not have Edit access.",
     );

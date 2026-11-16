@@ -56,7 +56,11 @@ import type {
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
-import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import {
+  shareViewLevelAt,
+  shareViewLevelIn,
+  type ShareViewWriteScope,
+} from "../workspaces/shareWriteGate";
 import type { JoinedGroupInput } from "../workspaces/joinedGroupCreate";
 import type { ReceivedRecordDraft } from "../workspaces/receivedShareRecordCreation";
 import type { CreateCollectionRecordPayload } from "../ipc/bridgeContract";
@@ -808,16 +812,16 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               return await cliCollectionEdit((context) =>
                 setCollectionRecordFields(context, input),
               );
-            if (view.access !== "edit")
-              throw new Error(needsEdit("Changing a Collection record", view.access));
+            const level = shareViewLevelAt(view, input.recordPath);
+            if (level !== "edit") throw new Error(needsEdit("Changing a Collection record", level));
             return await setCollectionRecordFields(joinedRecordContext(), input);
           },
           createRecord: async (input) => {
             const view = sharedViewOf(workspace.workspaceId);
             if (view?.membership !== true)
               return await runCollectionRecordCreation(cliCollectionEdit, input);
-            if (view.access !== "edit")
-              throw new Error(needsEdit("Adding a Collection record", view.access));
+            const level = shareViewLevelIn(view, input.collectionPath);
+            if (level !== "edit") throw new Error(needsEdit("Adding a Collection record", level));
             const created = await withPhysicalWorkspaceOperation(
               workspace.workspaceId,
               async (operation) => {
@@ -962,6 +966,9 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             path,
             origin,
             assertEditable: async (resolved) => {
+              // An existing page takes the level at its current path.
+              const level = view?.membership === true ? shareViewLevelAt(view, resolved) : "edit";
+              if (level !== "edit") throw new Error(needsEdit("Editing a page", level));
               const source = await lossyNoteText(workspace.rootPath, resolved);
               if (
                 source !== null &&
@@ -987,7 +994,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true) {
-            if (view.access !== "edit") throw new Error(needsEdit("Adding a page", view.access));
+            const level = shareViewLevelAt(view, path);
+            if (level !== "edit") throw new Error(needsEdit("Adding a page", level));
             const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             if (
               folder !== "" &&

@@ -1,12 +1,8 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { isRecord } from "@dohc/workspace-core/records";
 import { relayUrlsMatch } from "@dohc/workspace-contracts/relay-values";
-import {
-  readableShareLevel,
-  shareViewGranterEmail,
-  shareViewIdentityIsIntact,
-  shareViewIsPresent,
-} from "./shareViewMarker";
+import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
+import { shareViewLevels } from "./shareViewReach";
 import { recordedShareSelector } from "./shareViewRecords";
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
@@ -29,9 +25,15 @@ import { recordedShareSelector } from "./shareViewRecords";
 // rule: a hand-copied re-implementation in a test proves only that the copy
 // behaves.
 export interface ShareViewWriteScope {
-  // The level the PINNED grant names, or null when the grant cannot be read
-  // or the marker lost its identity.
+  // The highest level the share view has anywhere, or null when the grant
+  // cannot be read or the marker lost its identity. For a path share, or a
+  // joined workspace with no stored reach yet, the level the PINNED grant
+  // names.
   access: ShareAccess | null;
+  // The level at one path and inside one folder (`shareViewLevels`). Absent,
+  // every path takes `access`.
+  levelAt?: (path: string) => ShareAccess | null;
+  levelIn?: (folder: string) => ShareAccess | null;
   ended: boolean;
   // The pinned grant is the whole workspace: a joined workspace.
   membership?: boolean;
@@ -94,6 +96,22 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
   return scope.access === "edit";
 }
 
+/** The level a share view has at one file path, by the rule every gate asks. */
+export function shareViewLevelAt(scope: ShareViewWriteScope, path: string): ShareAccess | null {
+  return scope.levelAt ? scope.levelAt(path) : scope.access;
+}
+
+/** The level inside one folder, "" for the root, where a new file lands. */
+export function shareViewLevelIn(scope: ShareViewWriteScope, folder: string): ShareAccess | null {
+  return scope.levelIn ? scope.levelIn(folder) : scope.access;
+}
+
+/** Whether a share view takes the recipient's own write at one path. */
+export function shareViewTakesLocalWritesAt(scope: ShareViewWriteScope, path: string): boolean {
+  if (scope.ended || scope.writer === "other") return false;
+  return shareViewLevelAt(scope, path) === "edit";
+}
+
 /**
  * Which create and import actions a workspace offers, given the share view it
  * is, or null for an ordinary workspace. The Explorer menu and the command
@@ -144,9 +162,12 @@ export function shareViewWriteScopeOf(
   const marker = isRecord(shareView) ? shareView : {};
   const membership = recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true;
   const ended = marker.ended === true;
+  const levels = shareViewLevels(marker);
   return {
     granterEmail: shareViewGranterEmail(marker),
-    access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
+    access: levels.highest,
+    levelAt: levels.at,
+    levelIn: levels.in,
     ended,
     membership,
     ...(membership && !ended ? { writer: shareViewWriterOf(marker, credentials) } : {}),

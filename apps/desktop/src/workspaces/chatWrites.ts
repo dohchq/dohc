@@ -22,6 +22,7 @@ import {
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { recordedShareSelector } from "./shareViewRecords";
+import { shareViewLevels } from "./shareViewReach";
 import { joinedByAccount } from "./shareWriteGate";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -185,6 +186,9 @@ export function createChatWrites(dependencies: {
   betweenDispatchScans<Result>(workspaceId: string, write: () => Promise<Result>): Promise<Result>;
   // Tells open windows the workspace's chats changed, for writes they did not make.
   notifyRenderer(workspaceId: string): void;
+  // Where a file sits now in a joined workspace's store, or null when it
+  // sits nowhere. A file's thread takes the level at that path.
+  currentPathOf(workspaceId: string, objectId: string): Promise<string | null>;
 }) {
   const {
     findWorkspace,
@@ -202,16 +206,25 @@ export function createChatWrites(dependencies: {
     scanChatDispatch,
     betweenDispatchScans,
     notifyRenderer,
+    currentPathOf,
   } = dependencies;
 
-  // A joined workspace at Comment or Edit posts in its Groups and comments on
-  // its files, which the relay's append lane admits. Every other received share is read-only for
+  // A joined workspace at Comment or Edit somewhere posts in its Groups and
+  // comments on its files, which the relay's append lane admits. Each target
+  // then needs its own level (`targetInReach`). Every other received share is read-only for
   // chat, whatever its cached relay capability: there is no durable per-row
   // relay receipt yet.
   function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
     const view = workspace.shareView;
     const pin = recordedShareSelector(view?.grantedSelector);
-    return !!view && view.ended !== true && pin?.wholeWorkspace === true && pin.access !== "view";
+    const highest = shareViewLevels(view).highest;
+    return (
+      !!view &&
+      view.ended !== true &&
+      pin?.wholeWorkspace === true &&
+      highest !== null &&
+      highest !== "view"
+    );
   }
 
   function chatWorkspace(workspaceId: string): ChatWorkspace {
@@ -245,6 +258,10 @@ export function createChatWrites(dependencies: {
   // Whether a target in a joined workspace is one a member writes to: a Group,
   // which is an ordinary channel and never General, a direct message or an
   // agent's chat; or a file's thread.
+  //
+  // The level decides too. A Group takes the member level until Group rules
+  // exist. A file's thread takes the level at the file's current path, by
+  // the rule every gate asks (`shareViewLevels`).
   async function targetInReach(
     place: ChatWritePlace,
     target: ChatRelayIdentityTarget,
@@ -256,7 +273,8 @@ export function createChatWrites(dependencies: {
         workspaceId: place.workspaceId,
         threadId: target.threadId,
       });
-      return thread.linkedFile !== undefined && thread.channelId === undefined;
+      if (thread.linkedFile === undefined || thread.channelId !== undefined) return false;
+      return await fileTakesComments(place.workspaceId, thread.linkedFile.objectId);
     }
     if (wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null) return false;
     const channelId =
@@ -268,7 +286,19 @@ export function createChatWrites(dependencies: {
           });
     if (!channelId) return false;
     const channels = await place.store.listChannels({ workspaceId: place.workspaceId });
-    return channels.some((channel) => channel.id === channelId && channel.kind === "channel");
+    return (
+      takesPosts(shareViewLevels(findWorkspace(place.workspaceId)?.shareView).member) &&
+      channels.some((channel) => channel.id === channelId && channel.kind === "channel")
+    );
+  }
+
+  const takesPosts = (level: string | null) => level === "comment" || level === "edit";
+
+  async function fileTakesComments(workspaceId: string, objectId: string): Promise<boolean> {
+    const path = await currentPathOf(workspaceId, objectId);
+    return (
+      path !== null && takesPosts(shareViewLevels(findWorkspace(workspaceId)?.shareView).at(path))
+    );
   }
 
   function hasJoinedChannels(workspaceId: string): boolean {
@@ -608,6 +638,10 @@ export function createChatWrites(dependencies: {
         : writableWorkspace(place.workspaceId, false);
     admitted();
     const linkedFile = await input.linkedFile();
+    // A joined workspace comments on a file where its path takes Comment or Edit.
+    if (joinedWorkspace && !(await fileTakesComments(place.workspaceId, linkedFile.objectId))) {
+      throw new SharedFileReadOnlyError("Only people who can comment post here.");
+    }
     // The recheck and the store call share one synchronous block.
     admitted();
     const thread = await place.store.createThread({

@@ -197,7 +197,13 @@ function fixture() {
     scanChatDispatch: vi.fn(async () => undefined),
     notifyRenderer: vi.fn(),
   };
+  // Where each file sits now: the file the tests comment on sits in plans.
+  const currentPathOf = vi.fn(
+    async (_workspaceId: string, objectId: string): Promise<string | null> =>
+      objectId === "object" ? "plans/day-1.md" : null,
+  );
   const writes = createChatWrites({
+    currentPathOf,
     findWorkspace: () => row,
     warmCredentials,
     currentCredentials: () => credentials,
@@ -247,6 +253,7 @@ function fixture() {
     place,
     attachments,
     channel,
+    currentPathOf,
     setDisplayName: (name: string) => {
       displayName = name;
     },
@@ -995,6 +1002,37 @@ describe("chat writes", () => {
         expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
       },
     );
+
+    // The relay lists each folder's level. A file's thread takes the level at
+    // the file's current path, and a Group the member level.
+    it("takes a file comment's level from the folder the file sits in now", async () => {
+      const reach = (plans: "view" | "comment") => ({
+        revision: "r1",
+        visibilityRevision: "v1",
+        rootLevel: "comment",
+        folders: [{ path: "plans", level: plans }],
+      });
+      const test = member("comment");
+      Object.assign(test.row.shareView!, { reach: reach("view") });
+      const linkedFile = async () => ({ objectId: "object", pathHint: "plans/day-1.md" });
+      await expect(
+        test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
+      ).rejects.toThrow("Only people who can comment post here.");
+      onFile(test);
+      await expect(test.writeEach.send()).rejects.toThrow(JOINED_REACH);
+      expectNothingWritten(test);
+      // The file moved out of plans, so the root's level applies.
+      test.currentPathOf.mockResolvedValue("day-1.md");
+      await test.writeEach.send();
+      expect(test.store.sendMessage).toHaveBeenCalledOnce();
+
+      const group = member("view");
+      Object.assign(group.row.shareView!, { reach: reach("comment") });
+      await expect(group.writeEach.send()).rejects.toThrow(JOINED_REACH);
+      onFile(group);
+      await group.writeEach.send();
+      expect(group.store.sendMessage).toHaveBeenCalledOnce();
+    });
 
     it("refuses a file comment signed out or as another account", async () => {
       for (const credentials of [null, signedIn("user-2")]) {

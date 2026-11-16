@@ -23,7 +23,11 @@ import {
   serverHistorySources,
 } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
-import { createEngineFileResolver, workspaceFileRef } from "./workspaces/resolveEngineFiles";
+import {
+  createEngineFileResolver,
+  resolveEngineFileTargets,
+  workspaceFileRef,
+} from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import {
   writeTypingCheckpointSync,
@@ -610,6 +614,7 @@ import {
   workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
+import { shareViewLevels } from "./workspaces/shareViewReach";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -6913,15 +6918,24 @@ const localDatasetHostFor = async (
     operation.assertCurrent();
     return host;
   });
-// Sends a joined workspace's own Group posts to the owner, at Comment or
-// Edit, for the account that joined. Anything else sends nothing.
+// Sends a joined workspace's own Group posts and file comments to the owner,
+// with Comment or Edit somewhere, for the account that joined. The engine and
+// relay check each one's own level. Anything else sends nothing.
 function shareViewChatPush(
   workspace: RegistryEntry & { attachmentId?: symbol },
   relay: { baseUrl: string; token: string },
 ): Promise<unknown> | null {
   const view = workspace.shareView;
   const pin = recordedShareSelector(view?.grantedSelector);
-  if (!view || view.ended || !view.shareId || pin?.wholeWorkspace !== true || pin.access === "view")
+  const highest = shareViewLevels(view).highest;
+  if (
+    !view ||
+    view.ended ||
+    !view.shareId ||
+    pin?.wholeWorkspace !== true ||
+    highest === null ||
+    highest === "view"
+  )
     return null;
   return receivedShareEngine
     .relayFor({
@@ -6973,6 +6987,15 @@ const chatWrites = createChatWrites({
   betweenDispatchScans: (workspaceId, write) =>
     chatDispatchService.betweenScans(workspaceId, write),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  currentPathOf: async (workspaceId, objectId) => {
+    const workspace = findWorkspace(workspaceId);
+    if (!workspace) return null;
+    const [found] =
+      (await withEngineAdapter(workspace, (adapter, assertCurrent) =>
+        resolveEngineFileTargets(adapter, workspaceId, [{ objectId }], assertCurrent),
+      )) ?? [];
+    return found?.status === "found" ? found.path : null;
+  },
 });
 
 let ownerAppPublicationForCli:
@@ -7438,7 +7461,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       !marker ||
       !marker.relayUrl ||
       !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
-      marker.grantedSelector?.access !== "edit" ||
+      shareViewLevels(marker).highest !== "edit" ||
       (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")
     ) {
       throw new SharedDocumentWaitingError({
@@ -7459,6 +7482,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       shareId: marker.shareId,
       selector: marker.grantedSelector,
       accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
+      levelAt: (path) => shareViewLevels(findWorkspace(workspace.workspaceId)?.shareView).at(path),
       isOnline: () => net.isOnline(),
       recordDelivery: (path) =>
         requireEngineSessions()

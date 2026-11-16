@@ -248,6 +248,11 @@ export interface ShareViewIdentity {
   // routes name. Neither grants anything; the relay decides every action.
   role?: "admin" | "member";
   membersWorkspaceId?: string;
+  // A joined workspace's reach as the relay last listed it: the level of each
+  // folder where a rule changes it, and the two revisions the pull compares.
+  // Replaced whole, so the gates never see half of an old set
+  // (`shareViewLevels`).
+  reach?: import("@dohc/security-contract/listed-reach").ListedReach;
   // Paths capture could not save before a restriction. Null protects the whole
   // copy when capture failed before it could enumerate paths. Reopen to resume.
   unsavedPaths?: string[] | null;

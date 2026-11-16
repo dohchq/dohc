@@ -65,6 +65,7 @@ import {
   shareViewWriterOf,
   type ShareViewWriter,
 } from "./shareWriteGate";
+import { shareViewLevels } from "./shareViewReach";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import type { CredentialSessionCache } from "./credentialSessionCache";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
@@ -94,6 +95,8 @@ export interface ResolvedShareViewFilesTarget {
   shareId: string | null;
   granterEmail: string | null;
   grantedSelector: unknown;
+  /** A joined workspace's stored reach, as the registry holds it. */
+  reach?: unknown;
   ended: boolean;
   relayUrl?: string | null;
   recipientEmail?: string | null;
@@ -428,7 +431,7 @@ function writableSelector(target: ActiveShareViewFilesTarget, writer: ShareViewW
   if (
     target.kind === "mount" ||
     !shareViewTakesLocalWrites({
-      access: selector.access,
+      access: targetLevels(target).highest,
       ended: target.ended,
       writer,
     })
@@ -448,6 +451,23 @@ function joinedWorkspace(target: ActiveShareViewFilesTarget): boolean {
     !target.ended &&
     recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true
   );
+}
+
+function targetLevels(target: ResolvedShareViewFilesTarget) {
+  return shareViewLevels({
+    shareId: target.shareId,
+    recipientUserId: target.recipientUserId,
+    grantedSelector: target.grantedSelector,
+    ...(target.reach === undefined ? {} : { reach: target.reach }),
+  });
+}
+
+// The level at the path a change touches: an existing file's current path,
+// or the path a new one takes. The relay decides again when it is sent.
+function assertEditableAt(target: ActiveShareViewFilesTarget, path: string): void {
+  if (targetLevels(target).at(path) === "edit") return;
+  const granter = target.granterEmail ?? "the person who shared it";
+  throw new SharedFileReadOnlyError(`${path} is read-only for you. Ask ${granter} for Edit.`);
 }
 
 function assertPathWithinGrant(
@@ -770,13 +790,15 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     assertAdmitted: () => void,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
-    if (change.kind === "save" || change.kind === "create") {
-      assertPathWithinGrant(selector, change.path);
+    const assertWritable = (path: string) => {
+      assertPathWithinGrant(selector, path);
+      assertEditableAt(target, prepareSharePath(path)?.path ?? path);
+    };
+    if (change.kind === "save" || change.kind === "create" || change.kind === "delete") {
+      assertWritable(change.path);
     } else if (change.kind === "move") {
-      assertPathWithinGrant(selector, change.fromPath);
-      assertPathWithinGrant(selector, change.toPath);
-    } else if (change.kind === "delete") {
-      assertPathWithinGrant(selector, change.path);
+      assertWritable(change.fromPath);
+      assertWritable(change.toPath);
     }
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
@@ -841,7 +863,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
             assertAdmitted,
-            assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
+            assertPathAllowed: assertWritable,
           });
           break;
       }
