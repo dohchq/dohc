@@ -65,7 +65,7 @@ fn reads_text_typed_into_a_line_someone_else_deleted() {
         let body = a.get_or_insert_xml_fragment("body");
         let txn = a.transact();
         let line = body.get(&txn, 0).unwrap().into_xml_element().unwrap();
-        match line.as_ref().id() {
+        match AsRef::<yrs::branch::Branch>::as_ref(&line).id() {
             BranchID::Nested(id) => id,
             BranchID::Root(_) => panic!("a paragraph is nested"),
         }

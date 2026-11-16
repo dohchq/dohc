@@ -69,6 +69,7 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOrigi
             },
             reconnect: vi.fn(async () => {}),
             disconnect: vi.fn(),
+            onRemovedText: () => () => {},
           };
         },
       };

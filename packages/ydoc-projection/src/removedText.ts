@@ -10,6 +10,7 @@ export const INLINE_NODES: ReadonlySet<string> = new Set([
   "inlineAtom",
   "mathInline",
   "escapedPunctuation",
+  "rawInline",
 ]);
 
 /** Text a merged change removed without its author having seen it. */
@@ -229,6 +230,8 @@ function inline(element: Y.XmlElement): string {
       return `{{${attribute(element, "source") || `atom:${attribute(element, "atomId")}`}}}`;
     case "escapedPunctuation":
       return attribute(element, "value");
+    case "rawInline":
+      return attribute(element, "source");
     default:
       return `[${element.nodeName}]`;
   }

@@ -13,13 +13,14 @@ use yrs::deleted_content::{deleted_runs, DeletedElement, DeletedRun, Places};
 use yrs::{Any, StateVector, Transact, ID};
 
 /// The editor's inline nodes, as in removedText.ts's `INLINE_NODES`.
-const INLINE_NODES: [&str; 6] = [
+const INLINE_NODES: [&str; 7] = [
     "hardBreak",
     "image",
     "wikilink",
     "inlineAtom",
     "mathInline",
     "escapedPunctuation",
+    "rawInline",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +147,7 @@ fn inline(element: DeletedElement<'_>) -> String {
             }
         }
         "escapedPunctuation" => attribute(element, "value"),
+        "rawInline" => attribute(element, "source"),
         name => format!("[{name}]"),
     }
 }
@@ -330,6 +332,8 @@ mod tests {
             image.insert_attribute(&mut txn, "alt", "cat");
             image.insert_attribute(&mut txn, "src", "c.png");
             second.insert(&mut txn, 2, XmlTextPrelim::new(" after"));
+            let raw = second.insert(&mut txn, 3, XmlElementPrelim::empty("rawInline"));
+            raw.insert_attribute(&mut txn, "source", "<kbd>");
             match first.get(&txn, 0) {
                 Some(XmlOut::Text(text)) => text.insert(&mut txn, 3, " more"),
                 _ => panic!("no text"),
@@ -346,7 +350,7 @@ mod tests {
         assert_eq!(merge(&host, &typed), None);
         assert_eq!(
             merge(&host, &deleted),
-            removed(" more\n![cat](c.png) after", true)
+            removed(" more\n![cat](c.png) after<kbd>", true)
         );
     }
 }

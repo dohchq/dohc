@@ -187,10 +187,13 @@ describe("text a merged change removes without having seen it", () => {
       image.setAttribute("alt", "A cat");
       (body.get(1) as Y.XmlElement).insert(1, [image, new Y.XmlElement("hardBreak")]);
       (body.get(1) as Y.XmlElement).insert(3, [new Y.XmlText("second")]);
+      const raw = new Y.XmlElement("rawInline");
+      raw.setAttribute("source", "<kbd>");
+      (body.get(1) as Y.XmlElement).insert(4, [raw]);
     });
     const deleted = change(ben, (body) => body.delete(0, 2));
 
-    expect(receive(ana, deleted)?.text).toBe(" first\n![A cat](cat.png)\nsecond");
+    expect(receive(ana, deleted)?.text).toBe(" first\n![A cat](cat.png)\nsecond<kbd>");
   });
 
   it("keeps note order for typing added at a line's start, one character at a time", () => {
