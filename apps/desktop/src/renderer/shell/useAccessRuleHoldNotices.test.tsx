@@ -550,6 +550,31 @@ describe("useAccessRuleHoldNotices", () => {
     );
   });
 
+  it("runs a choice only on the newest read of the level, not an older answer that arrives late", async () => {
+    const h = harness([ROOT_REMOVED], membersAt("comment"));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Comment"] }));
+    // The press's read is slow and still answers Comment.
+    let answerLate: (value: unknown) => void = () => {};
+    h.bridge.workspaceMembers.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerLate = resolve;
+        }),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    // Settings saves Edit meanwhile, and that newer read answers first.
+    h.bridge.workspaceMembers.mockImplementation(membersAt("edit"));
+    act(() => h.readMemberLevel());
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Edit"] }));
+    await act(async () => answerLate({ status: "ready", view: { memberLevel: "comment" } }));
+    await waitFor(() =>
+      expect(h.row("")!.message).toMatch(/^dohc didn't apply your choice because/),
+    );
+    expect(h.row("")).toMatchObject({ rows: ["Members: View → Edit"] });
+    expect(h.row("")!.action?.busy).toBeUndefined();
+    expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+  });
+
   it("says where the level is set, with Open Members, when dohc can't read it", async () => {
     const h = harness([ROOT_REMOVED], membersUnread);
     await waitFor(() => expect(h.row("")).toBeDefined());

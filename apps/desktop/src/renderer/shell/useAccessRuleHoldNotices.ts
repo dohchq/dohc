@@ -259,24 +259,29 @@ export function useAccessRuleHoldNotices(
   const levelKeyRef = useRef(levelKey);
   levelKeyRef.current = levelKey;
   const levelAsked = useRef(0);
+  const latestRead = useRef<Promise<MemberLevel>>(Promise.resolve(null));
   // Resolves to the level as Members settings has it now. Only the latest
-  // read updates the rows, so an earlier answer arriving late shows nothing.
+  // read updates the rows, and an earlier read resolves to the latest one's
+  // answer, so a late answer neither shows nor lets a choice run.
   const readLevel = (asked: string): Promise<MemberLevel> => {
     const order = ++levelAsked.current;
     const key = levelKeyRef.current;
-    return bridge()
+    const read = bridge()
       .workspaceMembers({ workspaceId: asked, request: { action: "list" } })
       .then(
         (result) => (result.status === "ready" ? result.view.memberLevel : null),
         () => null,
       )
-      .then((read) => {
-        if (levelAsked.current === order && currentWorkspace.current === asked) {
-          levelRef.current = read;
-          setMemberLevel({ workspaceId: asked, key, level: read });
+      .then((level): MemberLevel | Promise<MemberLevel> => {
+        if (levelAsked.current !== order) return latestRead.current;
+        if (currentWorkspace.current === asked) {
+          levelRef.current = level;
+          setMemberLevel({ workspaceId: asked, key, level });
         }
-        return read;
+        return level;
       });
+    latestRead.current = read;
+    return read;
   };
   const readLevelRef = useRef(readLevel);
   readLevelRef.current = readLevel;
