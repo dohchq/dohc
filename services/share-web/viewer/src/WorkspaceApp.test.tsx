@@ -56,7 +56,7 @@ afterEach(async () => {
 });
 
 function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
-  groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean; user?: string} = {}) {
+  groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean; user?: string; signOutFails?: boolean} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
@@ -77,7 +77,10 @@ function server(options: {level?: Level; levelChangedBy?: string; signedIn?: boo
     const headers = new Headers(init?.headers);
     if (url.pathname === "/api/account/session") return jsonResponse({user: signedIn ? {id: user(), name: user() === "sam" ? "Sam Rivera" : "Lee Park"} : null});
     if (url.pathname === "/api/account/sign-in") {signedIn = true; return jsonResponse({ok: true});}
-    if (url.pathname === "/api/account/sign-out") {signedIn = false; return jsonResponse({ok: true});}
+    if (url.pathname === "/api/account/sign-out") {
+      if (options.signOutFails) return jsonResponse({ok: false, error: "internal"}, 500);
+      signedIn = false; return jsonResponse({ok: true});
+    }
     // share-web gives an account that holds no membership the answer it gives an unknown grant.
     if (options.member === false && (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))) return jsonResponse({ok: false, error: "not found"}, 404);
     if (url.pathname.startsWith("/api/view/")) {
@@ -839,6 +842,16 @@ it("refuses an account that is not a member, names it, and offers Switch account
   expect(container.querySelector(".state-message p")?.textContent).toBe("This browser is signed in as Sam Rivera, not the account the owner invited.");
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
+});
+
+it("says so when Switch account cannot sign out, and keeps the button to try again", async () => {
+  server({member: false, signOutFails: true}); await render();
+  await settle(() => text().includes("dohc could not open this workspace with this account."));
+  await click("Switch account");
+  await settle(() => container.querySelector('.state-message [role="alert"]') !== null);
+  expect(container.querySelector('.state-message [role="alert"]')?.textContent).toBe("dohc could not sign you out. Retry sign-out.");
+  const button = [...container.querySelectorAll<HTMLButtonElement>(".state-message button")].find(node => node.textContent === "Switch account");
+  expect(button?.disabled).toBe(false);
 });
 
 it("loads in the shape of the workspace it opens: the files, the page and the side panel", async () => {

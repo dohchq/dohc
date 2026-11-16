@@ -367,7 +367,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   </StatePage>;
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
     <p>This browser is signed in as {account.name}, not the account the owner invited.</p>
-    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Switch account</button>{kept}
+    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>{signingOut ? "Signing out…" : "Switch account"}</button>
+    {signOutError && <p role="alert">{signOutError}</p>}{kept}
   </StatePage>;
   if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc couldn't open this workspace.">
     <p>Check your connection, then choose Try again.</p>
