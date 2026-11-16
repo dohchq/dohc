@@ -1397,8 +1397,8 @@ it("saves a live room's taken edits before ending the Edit access that hosts the
   }
 });
 
-// Proves: ending one person's Edit access keeps the note's live room open when another Edit grant
-// still hosts the note, so the people still editing it stay connected.
+// Proves: ending one person's Edit access asks the note's live room to stay open while the note is
+// still hosted, as when another Edit grant still covers it.
 it("keeps the live room of a note another Edit grant still hosts when one person's access ends", async () => {
   const f = await fixture(),
     enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
@@ -1409,8 +1409,7 @@ it("keeps the live room of a note another Edit grant still hosts when one person
   const rooms: Pick<LiveRooms, "saveFirst"> = {
     async saveFirst(_note, then, _signal, options) {
       const result = await then();
-      // As the rooms do: they end unless the note is still hosted.
-      ends.push(!options?.whileHosted || !f.storage.serviceHostDocumentEnabled(enrolled));
+      ends.push({ ...options, hosted: f.storage.serviceHostDocumentEnabled(enrolled) });
       return result;
     },
   };
@@ -1422,7 +1421,7 @@ it("keeps the live room of a note another Edit grant still hosts when one person
   );
   expect(ended.status, await ended.clone().text()).toBe(200);
   expect(f.storage.getShareGrant(scope.grantId)?.status).toBe("revoked");
-  expect(ends).toEqual([false]);
+  expect(ends).toEqual([{ whileHosted: true, hosted: true }]);
 });
 
 // Proves: a Stop whose reply was lost is done in the relay's durable state.

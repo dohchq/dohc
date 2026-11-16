@@ -149,11 +149,12 @@ export function createShareGrantRoutes(
   publicEditRelease?: PublicEditRelease,
   liveRooms: () => Pick<LiveRooms, "saveFirst"> | undefined = () => undefined,
 ) {
-  // Ending Edit access ends the hosting of the notes no other share covers, and a note's live room
-  // saves through that hosting, so the edits its room took are saved first. A note another share
-  // still hosts keeps its room, so the people still editing it stay connected. Access always ends,
-  // whatever becomes of the request: edits not saved in time stay in the room and go to the note's
-  // copy when it pauses. Only an error from ending access itself reaches the caller.
+  // Ending Edit access can end the hosting of the notes it covered, and a note's live room saves
+  // through that hosting, so the edits its room took are saved first. A note still hosted after,
+  // as when another Edit grant covers it, keeps its room, so the people still editing it stay
+  // connected. Access always ends, whatever becomes of the request: edits not saved in time stay
+  // in the room and go to the note's copy when it pauses. Only an error from ending access itself
+  // reaches the caller.
   const endAccess = async <T>(shareId: string, endsEdit: boolean, end: () => T): Promise<T> => {
     const rooms = liveRooms();
     if (!endsEdit || !rooms) return end();
