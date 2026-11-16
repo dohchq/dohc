@@ -369,6 +369,10 @@ function ConversationForAccount(props: ConversationProps) {
     setDraftState(value);
     store.setDraft(conversationId, value);
   };
+  // Words New message hands over while this conversation already shows.
+  useEffect(() => store.onHandOff((key) => {
+    if (key === conversationId) setDraftState(store.draft(key));
+  }), [store, conversationId]);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-send:${conversationId}`;
@@ -725,10 +729,7 @@ function NewMessageForAccount(props: NewMessageProps) {
   };
   // Words written here go along to the conversation, unless it already holds words of its own.
   const openExisting = (conversationId: string) => {
-    if (draft.trim() && !store.draft(conversationId).trim()) {
-      store.setDraft(conversationId, draft);
-      setDraft("");
-    }
+    if (draft.trim() && store.handOff(conversationId, draft)) setDraft("");
     props.onOpenConversation(conversationId, title);
   };
   const [sending, setSending] = useState(false);

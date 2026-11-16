@@ -35,6 +35,8 @@ export function createDirectStore(api: Api) {
   const readSent = new Map<string, number>();
   // Unsent typing and each failed send's id, so Try again never sends twice.
   const drafts = new Map<string, string>();
+  // Told when New message hands its words to a conversation, so one already showing takes them.
+  const handedOff = new Set<(key: string) => void>();
   const unsent = new Map<string, { messageId: string; body: string }>();
 
   const set = (next: DirectListState) => {
@@ -151,6 +153,17 @@ export function createDirectStore(api: Api) {
     setDraft(key: string, value: string): void {
       if (value) drafts.set(key, value);
       else drafts.delete(key);
+    },
+    /** Gives `value` to `key`'s draft unless it holds words of its own. True when it took them. */
+    handOff(key: string, value: string): boolean {
+      if (drafts.get(key)?.trim()) return false;
+      drafts.set(key, value);
+      for (const listener of [...handedOff]) listener(key);
+      return true;
+    },
+    onHandOff(listener: (key: string) => void): () => void {
+      handedOff.add(listener);
+      return () => handedOff.delete(listener);
     },
     /** The id to send `body` with: the failed send's id when the words are the same. */
     messageIdFor(key: string, body: string): string {

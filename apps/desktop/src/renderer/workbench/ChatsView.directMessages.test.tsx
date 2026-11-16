@@ -820,6 +820,23 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
   });
 
+  it("hands New message's words to the conversation when it already shows elsewhere", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
+    history([sent(2, "sam", "See you at nine")]);
+    // The conversation shows in one group the whole time; New message opens in another.
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    const shown = await screen.findByTestId("chats-dm-view");
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct-new" } });
+    const newMessage = await screen.findByTestId("chats-dm-new");
+    await user.click(await within(newMessage).findByTestId("chats-dm-new-member"));
+    await user.type(within(newMessage).getByTestId("chats-dm-new-composer"), "Lunch?");
+    fireEvent.click(await within(newMessage).findByTestId("chats-dm-new-open-existing"));
+    await waitFor(() => expect((within(shown).getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe("Lunch?"));
+  });
+
   it("opens the existing conversation when Members' Message names someone already in one", async () => {
     signedIn([conversation()]);
     members([{ memberId: "sam", name: "Sam Rivera" }]);
