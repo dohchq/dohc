@@ -121,6 +121,18 @@ function stateWhen(
     });
   });
 }
+// A remote edit changes the doc without changing the provider's state.
+function docWhen(doc: Y.Doc, condition: () => boolean): Promise<void> {
+  if (condition()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!condition()) return;
+      doc.off("update", check);
+      resolve();
+    };
+    doc.on("update", check);
+  });
+}
 // Preserve the logical HTTPS origin and real cookie while using owned loopback I/O.
 // This executes the production adapter but does not exercise browser UI or TLS.
 async function browserRequest(
@@ -957,25 +969,12 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       )
     ).lastApplied!;
     results.namedAck = ack;
-    // TEMP diagnostic: which step stalls after the owner's pass.
-    const diag = (label: string) =>
-      console.error(
-        `[diag] ${label}`,
-        JSON.stringify({
-          at: Date.now(),
-          state: provider.state(),
-          frontmatter: provider.doc.getMap("frontmatter").toJSON(),
-        }),
-      );
-    const diagTimer = setInterval(() => diag("waiting"), 15_000).unref();
-    diag("owner pass start");
     expect(await runOwnerPass()).toBe("acknowledged");
-    diag("owner pass returned");
-    await stateWhen(
-      provider,
+    // The pass ends at the room's receipt, before the room sends the edit on.
+    await docWhen(
+      provider.doc,
       () => provider.doc.getMap("frontmatter").get("ownerConcurrent") === "survives-restart",
     );
-    diag("named saw owner edit");
     const beforeIdleCursor = provider.state().lastApplied?.journalCursor ?? 0;
     expect(
       provider.edit(() =>
@@ -989,10 +988,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
           (state.lastApplied?.journalCursor ?? 0) > beforeIdleCursor && state.pendingUpdates === 0,
       )
     ).lastApplied!;
-    diag("named edit applied");
     expect(await runOwnerPass()).toBe("empty");
-    diag("idle owner pass returned");
-    clearInterval(diagTimer);
     const accepted = await owner!.ownerYDocPrepareEnrollment(nativeRequest(), target);
     if (accepted.status !== "observed") throw new Error("Owner draft disappeared after restart.");
     const acceptedDraft = await owner!.ownerYDocOpenDraft(nativeRequest(), {
