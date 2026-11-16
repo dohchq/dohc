@@ -104,7 +104,7 @@ import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
-import { createLiveRooms, type LiveRooms } from "./liveRoom";
+import { createLiveRooms, LiveRoomBindingEndedError, type LiveRooms } from "./liveRoom";
 import { liveRoomPaused } from "./storage/liveRoomPauses";
 import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
@@ -1239,7 +1239,11 @@ if (namedLiveConfig) {
               document,
               actor: { kind: "owner", userId: ownerUserId },
             });
-            if (current.kind !== "current") throw new Error("The owner's binding is not current.");
+            // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
+            if (current.kind !== "current")
+              throw current.reason === "stale-document"
+                ? new LiveRoomBindingEndedError()
+                : new Error("The owner's binding is not current.");
             return captureOwnerLiveFrameHost({
               authenticatedUserId: ownerUserId,
               storage,
