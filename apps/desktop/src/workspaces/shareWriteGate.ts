@@ -43,9 +43,9 @@ export interface ShareViewWriteScope {
 /**
  * Who is signed in, against the account that joined a workspace. Its level
  * belongs to that account, so "other" takes no local write and sends nothing.
- * Signed out, a local change waits until that account is back, while a relay
- * action has no account to go as. Three values, so neither door can borrow
- * the other's answer.
+ * Signed out, a local change still lands and is sent once that account is
+ * back, while a relay action has no account to go as. Three values, so
+ * neither door can borrow the other's answer.
  */
 export type ShareViewWriter = "joined" | "other" | "signed-out";
 
