@@ -149,20 +149,44 @@ fn signal(pick: impl FnOnce(&AccessRuleSignals) -> &AtomicU64) {
     });
 }
 
-/// Install the commit-point check on the actor's thread. The workspace root
-/// is the folder that holds the store's `.dohc/engine` folder. A store kept
-/// anywhere else belongs to no workspace on disk, so it has no rules to order.
-pub(super) fn install(db_path: &Path, signals: Arc<AccessRuleSignals>) {
-    SIGNALS.with(|cell| *cell.borrow_mut() = Some(signals));
-    let root = super::shown_path(db_path)
+/// The workspace folder that holds the store at `named`, the path the
+/// store was opened by, read from its name alone: the folder above
+/// `.dohc/engine`.
+fn workspace_folder(named: &Path) -> Option<PathBuf> {
+    let named = std::path::absolute(named).ok()?;
+    named
         .parent()
         .filter(|engine| engine.file_name().is_some_and(|name| name == "engine"))
         .and_then(Path::parent)
         .filter(|dohc| dohc.file_name().is_some_and(|name| name == ".dohc"))
         .and_then(Path::parent)
-        .map(Path::to_path_buf);
+        .map(Path::to_path_buf)
+}
+
+/// Install the commit-point check on the actor's thread. `named` is the
+/// store's path by name, which the supervisor was given; the store itself
+/// may be open through a descriptor's path. A store bound to a workspace
+/// must sit in that workspace's `.dohc/engine` folder, or it does not open.
+/// Only a store kept anywhere else, bound to no workspace, has no rules to
+/// order.
+pub(super) fn install(
+    named: &Path,
+    bound: bool,
+    signals: Arc<AccessRuleSignals>,
+) -> Result<(), StorageError> {
+    SIGNALS.with(|cell| *cell.borrow_mut() = Some(signals));
+    let root = match workspace_folder(named) {
+        Some(folder) => Some(folder),
+        None if bound => {
+            return Err(StorageError::InvalidInput {
+                reason: "workspace store is outside its workspace folder",
+            });
+        }
+        None => None,
+    };
     ROOT.with(|cell| *cell.borrow_mut() = root);
     dohc_engine_sync::install_moment_order_check(std::rc::Rc::new(check_moment));
+    Ok(())
 }
 
 fn root() -> Option<PathBuf> {
@@ -2561,7 +2585,7 @@ mod tests {
                 ),
             }
         }
-        install(&db, Arc::new(AccessRuleSignals::default()));
+        install(&db, true, Arc::new(AccessRuleSignals::default())).unwrap();
         begin_command();
         dohc_engine_sync::adopt_join_identity(
             &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,

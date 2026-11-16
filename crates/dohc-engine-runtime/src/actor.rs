@@ -338,16 +338,7 @@ impl WorkspaceActor {
         self
     }
 
-    /// Spawn the actor's worker thread and open the store. Blocks until the
-    /// open completes so open errors (including the fingerprint fence)
-    /// propagate synchronously. `spawn` is intentionally synchronous — a
-    /// workspace open is an infrequent, off-hot-path operation the supervisor
-    /// drives without holding its registry lock.
-    ///
-    /// `work`, when given, counts the store open's SQLite work and then each
-    /// command the actor serves, so a caller can tell a long open from a
-    /// stuck one. `held_limit` is the daemon's, which the actor's held
-    /// proofs share with every other actor's.
+    #[cfg(test)]
     pub(crate) fn spawn(
         db_path: PathBuf,
         identity: EngineDbIdentity,
@@ -357,6 +348,7 @@ impl WorkspaceActor {
         held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
+            db_path.clone(),
             db_path,
             identity,
             generation,
@@ -368,27 +360,7 @@ impl WorkspaceActor {
         )
     }
 
-    pub(crate) fn spawn_root_bound(
-        db_path: PathBuf,
-        identity: EngineDbIdentity,
-        generation: u64,
-        now_ms: i64,
-        root_token: String,
-        work: Option<Arc<AtomicU64>>,
-        held_limit: HeldProofLimit,
-    ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(
-            db_path,
-            identity,
-            generation,
-            now_ms,
-            ActorOpenMode::ReadWrite,
-            Some(root_token),
-            work,
-            held_limit,
-        )
-    }
-
+    #[cfg(test)]
     /// Spawn an actor whose store connection is query-only and never runs the
     /// writer open ritual.
     pub(crate) fn spawn_read_only(
@@ -399,6 +371,7 @@ impl WorkspaceActor {
         held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
+            db_path.clone(),
             db_path,
             identity,
             generation,
@@ -410,6 +383,7 @@ impl WorkspaceActor {
         )
     }
 
+    #[cfg(all(test, unix))]
     pub(crate) fn spawn_passive(
         db_path: PathBuf,
         identity: EngineDbIdentity,
@@ -420,6 +394,7 @@ impl WorkspaceActor {
         held_limit: HeldProofLimit,
     ) -> Result<Self, RuntimeError> {
         Self::spawn_with_mode(
+            db_path.clone(),
             db_path,
             identity,
             generation,
@@ -431,8 +406,22 @@ impl WorkspaceActor {
         )
     }
 
+    /// Spawn the actor's worker thread and open the store. Blocks until the
+    /// open completes so open errors (including the fingerprint fence)
+    /// propagate synchronously. It is intentionally synchronous — a
+    /// workspace open is an infrequent, off-hot-path operation the supervisor
+    /// drives without holding its registry lock.
+    ///
+    /// `work`, when given, counts the store open's SQLite work and then each
+    /// command the actor serves, so a caller can tell a long open from a
+    /// stuck one. `held_limit` is the daemon's, which the actor's held
+    /// proofs share with every other actor's.
+    ///
+    /// `named_path` is the store's path by name; `db_path` is the path SQLite
+    /// opens it by, which may go through a descriptor for its folder.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_mode(
+        named_path: PathBuf,
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
@@ -481,7 +470,10 @@ impl WorkspaceActor {
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
                 worker_main(
-                    db_path,
+                    StorePaths {
+                        named: named_path,
+                        open: db_path,
+                    },
                     now_ms,
                     mode,
                     root_token,
@@ -1232,8 +1224,15 @@ fn replay_retained_owner_private(store: &mut EngineStore) {
     clippy::too_many_arguments,
     reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
 )]
+/// The store a worker opens: by the path SQLite opens, and by its name,
+/// which the access-rule ordering step reads its workspace from.
+struct StorePaths {
+    named: PathBuf,
+    open: PathBuf,
+}
+
 fn worker_main(
-    db_path: PathBuf,
+    paths: StorePaths,
     now_ms: i64,
     mode: ActorOpenMode,
     root_token: Option<String>,
@@ -1278,7 +1277,14 @@ fn worker_main(
             }
         })
     };
-    access_order::install(&db_path, access_rules);
+    let StorePaths {
+        named,
+        open: db_path,
+    } = paths;
+    if let Err(err) = access_order::install(&named, root_token.is_some(), access_rules) {
+        let _ = startup_tx.send(Err(err));
+        return;
+    }
     let mut store = match if matches!(mode, ActorOpenMode::ReadOnly) {
         EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
             if store.is_passive() {
@@ -1912,7 +1918,10 @@ pub(crate) mod test_support {
         let access_rules = actor.access_rules.clone();
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
-                db,
+                StorePaths {
+                    named: db.clone(),
+                    open: db,
+                },
                 2,
                 ActorOpenMode::ReadWrite,
                 None,

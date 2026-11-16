@@ -39,6 +39,21 @@ impl Fixture {
     fn local() -> Self {
         let scratch = ScratchDir::new().expect("scratch");
         let db = engine_db_path(&scratch).expect("db");
+        Self::with_store(scratch, db)
+    }
+
+    /// A replicating store kept outside any workspace's `.dohc/engine`
+    /// folder, with files captured from the scratch folder.
+    fn standalone() -> Self {
+        let scratch = ScratchDir::new().expect("scratch");
+        let folder = scratch.path().join("stores");
+        std::fs::create_dir_all(&folder).expect("store folder");
+        let f = Self::with_store(scratch, folder.join("engine.db"));
+        f.replicate();
+        f
+    }
+
+    fn with_store(scratch: ScratchDir, db: PathBuf) -> Self {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version(WS, "main", 1, &NoFaults)
@@ -1976,4 +1991,55 @@ fn every_writer_puts_a_pending_rule_before_its_file() {
         );
         assert!(journal.len() > before.len() + 1, "{name}: {journal:?}");
     }
+}
+
+/// A store opened for a workspace must sit in that workspace's
+/// `.dohc/engine` folder: anywhere else it would have no rules to order, so
+/// it does not open.
+#[test]
+fn a_workspace_store_outside_its_workspace_folder_does_not_open() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.path().join("stores").join("engine.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    for passive in [false, true] {
+        let opened = if passive {
+            supervisor.open_passive_root_bound(&db, 1, "root-token", None)
+        } else {
+            supervisor.open_root_bound(&db, 1, "root-token", None)
+        };
+        assert!(
+            matches!(
+                &opened,
+                Err(RuntimeError::Storage(dohc_engine_storage::StorageError::InvalidInput { reason }))
+                    if reason.contains("outside its workspace folder")
+            ),
+            "passive {passive}: {:?}",
+            opened.map(|_| ())
+        );
+    }
+}
+
+/// A store bound to no workspace, kept outside any `.dohc/engine` folder,
+/// opens and writes with no rules to order.
+#[test]
+fn a_store_outside_any_workspace_writes_without_ordering() {
+    let f = Fixture::standalone();
+    // Neither rule waits to settle, and the widening holds nothing.
+    f.put("team/access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.capture_ok(&["team/access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.put("team/a.md", "alpha 2");
+    f.capture_ok(&["team/access.yaml", "team/a.md"]);
+    assert!(f.holds().is_empty());
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write team/a.md",
+            "write team/access.yaml",
+            "write team/a.md"
+        ])
+    );
 }
