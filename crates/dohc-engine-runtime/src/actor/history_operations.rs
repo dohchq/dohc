@@ -387,6 +387,9 @@ impl ActorHandle {
                 let recorder = Arc::clone(&recorder);
                 match self
                     .run(move |store, _| {
+                        // Once the workspace folder no longer holds the
+                        // store, the jobs stay pending for a later replay.
+                        super::access_order::check_root()?;
                         place_undo_members(
                             store,
                             &ws,

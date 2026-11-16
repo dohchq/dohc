@@ -2274,6 +2274,83 @@ fn a_rule_over_a_drawings_assets_holds_its_delete_and_rollback() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+impl Fixture {
+    fn pending_jobs(&self) -> Vec<String> {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .prepare(
+                "SELECT job_id FROM materialization_jobs WHERE workspace_id=?1 \
+                 AND status='pending' ORDER BY job_id",
+            )
+            .unwrap()
+            .query_map([WS], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn place(
+        &self,
+        undo: dohc_engine_runtime::HistoryUndoResult,
+    ) -> dohc_engine_runtime::HistoryUndoResult {
+        self.runtime.block_on(self.actor.history_undo_place(
+            WS.to_owned(),
+            undo,
+            self.root().to_path_buf(),
+            Arc::new(()),
+            61,
+            |_| {},
+        ))
+    }
+}
+
+/// History Undo commits its inverse moments, then places their files in
+/// later turns. A store that left the workspace folder between the two
+/// places nothing: the jobs stay pending, and place once the store is back.
+#[test]
+fn an_undo_placed_after_the_store_moved_places_nothing() {
+    let f = Fixture::movable();
+    f.versioned_write(write("team/a.md", "alpha", "m-alpha"))
+        .expect("write");
+    f.versioned_delete(delete("team/a.md", "d-alpha"))
+        .expect("delete");
+    let undo = f
+        .runtime
+        .block_on(f.actor.history_undo_in_turns(
+            WS.to_owned(),
+            OP.to_owned(),
+            "undo-then-move".to_owned(),
+            None,
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            60,
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("undo");
+    let pending = f.pending_jobs();
+    assert!(!pending.is_empty(), "the Undo left its placement for later");
+    assert!(!f.root().join("team/a.md").exists());
+    f.move_store_away();
+    let placed = f.place(undo.clone());
+    let stray = f.move_store_back();
+    // Placed, written where the store was, the file, the jobs still pending.
+    let state = (
+        placed.materialized,
+        stray,
+        f.root().join("team/a.md").exists(),
+        f.pending_jobs() == pending,
+    );
+    assert_eq!(state, (false, Vec::new(), false, true));
+    assert!(f.place(undo).materialized, "placed once the store is back");
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/a.md")).unwrap(),
+        "alpha"
+    );
+}
+
 const OP: &str = "dohc-operation:remove-team";
 const COPY: &str = "dohc-operation:copy-rule";
 
