@@ -299,6 +299,16 @@ describe("public Markdown schema", () => {
       );
     }
   });
+  // Proves: a checkpoint's long format key is refused before projection, whose own mark-name
+  // pattern takes time quadratic in the key's length.
+  it("refuses a long format key before projection without stalling", () => {
+    refused(
+      encode("Text", (doc) => {
+        const text = (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+        text.format(0, text.length, { ["x".repeat(1 << 18)]: true });
+      }),
+    );
+  });
   it("preserves nullable link attributes and canonical frontmatter bigint", () => {
     const checkpoint = encode(
       "---\ninteger: 9223372036854775807\n---\n\n[text](https://example.com)",
@@ -1129,6 +1139,16 @@ describe("live edit format guard", () => {
     for (const [name, edit] of Object.entries(edits))
       expect(liveEditFitsNote(note, sent(note, edit)), name).toBe(false);
     expect(liveEditFitsNote(note, new Uint8Array([1, 2, 3]))).toBe(false);
+  });
+
+  // Proves: a long mark name is refused in time linear in its length, so it can't hold up admission.
+  it("refuses a long unknown mark name without stalling", () => {
+    const note = markdownToYDoc(markdown);
+    const edit = sent(note, (page) => words(page).format(0, 2, { ["x".repeat(1 << 18)]: true }));
+    expect(liveEditFitsNote(note, edit)).toBe(false);
+    // The name is read from the key's start: a line break before a known mark's name keeps it unknown.
+    const split = sent(note, (page) => words(page).format(0, 2, { "x\nbold--12345678": {} }));
+    expect(liveEditFitsNote(note, split)).toBe(false);
   });
 
   it("follows a run of typing back to where it starts", () => {

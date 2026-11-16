@@ -716,8 +716,11 @@ export interface LiveUpdateJournalCommitInput {
 export interface LiveRoomSave {
   /** Everyone whose taken edits the save holds. */
   readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
-  /** Runs inside the transaction that commits the save, with the save's journal cursor. */
-  readonly committed: (journalCursor: number) => void;
+  /**
+   * Runs inside the transaction that commits the save, with the save's journal cursor. What it
+   * returns runs once that transaction has committed.
+   */
+  readonly committed: (journalCursor: number) => () => void;
 }
 export type RelayLiveUpdateJournalResult =
   | {
@@ -793,6 +796,10 @@ export interface SyncRelayStorage {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
     nextCursor: string | null;
   };
+  retiredAcceptedCursor(workspaceId: string, objectId: string): number | null;
+  readRetiredJournalPage(
+    input: Parameters<typeof import("./serviceActivationRetirement").readRetiredJournalPage>[1],
+  ): import("./serviceActivationRetirement").RetiredJournalPage | null;
   currentServiceHostWorkspace(
     workspaceId: string,
     includeUndrained?: boolean,

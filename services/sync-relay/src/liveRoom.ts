@@ -39,6 +39,7 @@ import {
   advanceLiveRoomPosition,
   appendLiveRoomEdit,
   deleteSavedLiveRoomEdits,
+  recordLiveRoomSave,
   liveRoomDocuments,
   liveRoomEdits,
   liveRoomLineageIsCurrent,
@@ -441,14 +442,18 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             authors,
             committed(journalCursor) {
               deleteSavedLiveRoomEdits(storage, room.document, through);
-              room.savedThrough = through;
-              // The save's journal row is in the room already, and a page that joins may have
-              // read the note through it. Its echo changes nothing, so it moves no position.
-              room.position = Math.max(room.position, journalCursor);
-              room.saves.set(journalCursor, through);
-              if (room.saves.size > REMEMBERED_SAVES)
-                room.saves.delete(room.saves.keys().next().value!);
-              committed = true;
+              recordLiveRoomSave(storage, room.document, journalCursor, through);
+              // The room moves on only once the save's transaction has committed.
+              return () => {
+                room.savedThrough = through;
+                // The save's journal row is in the room already, and a page that joins may have
+                // read the note through it. Its echo changes nothing, so it moves no position.
+                room.position = Math.max(room.position, journalCursor);
+                room.saves.set(journalCursor, through);
+                if (room.saves.size > REMEMBERED_SAVES)
+                  room.saves.delete(room.saves.keys().next().value!);
+                committed = true;
+              };
             },
           },
         },
@@ -729,12 +734,22 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     let reading = false;
     let read: LiveFrameLease<NamedFrameAppliedUpdate> | undefined;
     let failed: { error: unknown } | undefined;
+    // A lease holds reserved output bytes until it is released, so none outlives the feed.
+    lifetime.addEventListener(
+      "abort",
+      () => {
+        read?.release();
+        read = undefined;
+      },
+      { once: true },
+    );
     function startRead() {
       if (reading || read || failed) return;
       reading = true;
       sync.nextApplied(lifetime).then(
         (lease) => {
           reading = false;
+          if (lifetime.aborted) return lease.release();
           try {
             // The room takes the owner's next edits against all the owner has been shown.
             applyFeed(room, lease.value.updateBytes);

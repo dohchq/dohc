@@ -107,6 +107,7 @@ export const RELAY_ENTRY_PATTERNS = [
   "/health",
   "/sync/:workspaceId/live-host",
   "/sync/:workspaceId/live-host/kept-edits",
+  "/sync/:workspaceId/live-host/journal",
   "/sync/live/personal-document",
   "/sync/live/named-tickets",
   "/sync/live/desktop-open",
@@ -155,7 +156,9 @@ export function relayEntryPattern(
   if (isServiceHostEnrollmentPath(pathname))
     return pathname.endsWith("/kept-edits")
       ? "/sync/:workspaceId/live-host/kept-edits"
-      : "/sync/:workspaceId/live-host";
+      : pathname.endsWith("/journal")
+        ? "/sync/:workspaceId/live-host/journal"
+        : "/sync/:workspaceId/live-host";
   if (pathname.startsWith("/sync/named-chat/")) return "/sync/named-chat/*";
   if (pathname.startsWith("/sync/push/")) return "/sync/push/*";
   return LITERAL_ENTRIES.has(pathname) ? (pathname as RelayEntryPattern) : undefined;

@@ -839,9 +839,15 @@ function validBodyAttribute(nodeName: string, key: string, value: unknown): bool
 }
 
 // y-prosemirror appends an eight-character hash to nonexclusive mark names.
-const markNameOf = (name: string) => /(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
+const markNameOf = (name: string) => /^(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
+// Projection reads each format key with y-prosemirror's own unanchored pattern, which takes time quadratic in
+// the key's length. A key longer than any mark name with its hash is refused before projection.
+let maxFormatKeyLength: number | undefined;
 
 function validateMarkAttributes(name: string, value: unknown): void {
+  maxFormatKeyLength ??=
+    Math.max(...Object.keys(getDohcProseMirrorSchema().marks).map((mark) => mark.length)) + 10;
+  if (name.length > maxFormatKeyLength) refuse("invalid-schema");
   const markName = markNameOf(name);
   if (markName !== "link" || value === null || typeof value !== "object") return;
   for (const key of ["href", "target", "rel", "class", "title"]) {

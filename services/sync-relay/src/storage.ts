@@ -508,6 +508,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
+  retiredAcceptedCursor(workspaceId: string, objectId: string) {
+    return this.readTx(() =>
+      serviceActivationRetirementStorage.retiredAcceptedCursor(this, workspaceId, objectId),
+    );
+  }
+  readRetiredJournalPage(
+    input: Parameters<typeof serviceActivationRetirementStorage.readRetiredJournalPage>[1],
+  ) {
+    return serviceActivationRetirementStorage.readRetiredJournalPage(this, input);
+  }
   currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
     const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(
       this,
@@ -2110,8 +2120,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     try {
       return this.owner.write(run);
     } finally {
-      if (this.unavailable.aborted || JSON.stringify(revision.get()) !== before)
-        notifyRelayWrite(this);
+      // A committed write must not fail because this read did, so a failed read counts as a change.
+      let changed = true;
+      try {
+        changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
+      } catch {}
+      if (changed) notifyRelayWrite(this);
     }
   }
 

@@ -53,6 +53,8 @@ export function createLiveRoomPauseRoutes(storage: SyncRelayStorage) {
         !SHA256_HEX_PATTERN.test(body.sha256)
       )
         throw badRequest("Invalid copy digest.");
+      // Ownership can end while the body is read.
+      if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw notFound();
       const recorded = recordLiveRoomCopyWritten(context, workspaceId, pauseId, body.sha256);
       if (recorded === "none") throw notFound();
       if (recorded === "mismatch") throw relayError("conflict", "The copy's digest differs.");

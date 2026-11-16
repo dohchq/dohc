@@ -65,8 +65,20 @@ export function initializeRoomMigration(
     Date.now(),
   );
 }
+// Each room save's journal row, with the last room position it holds. An owner who catches up on
+// the journal after its room closed reads it, to let go of the room edits the save holds.
+export const LIVE_ROOM_SAVES = "sync_relay_live_room_saves";
+const saves = {
+  [LIVE_ROOM_SAVES]: `CREATE TABLE ${LIVE_ROOM_SAVES} (
+  journal_cursor INTEGER PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  rows_through INTEGER NOT NULL CHECK (rows_through BETWEEN 1 AND journal_cursor-1),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT`,
+} as const;
 export function initializeLiveRoomSchema(db: SqliteDb): void {
   initializeRoomMigration(db, MIGRATION, objects);
+  initializeRoomMigration(db, "live-room-saves-v1", saves);
 }
 
 export interface LiveRoomEdit {
@@ -195,6 +207,20 @@ export function deleteSavedLiveRoomEdits(
   storage.db
     .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position<=?`)
     .run(...documentParams(document), throughPosition);
+}
+
+/** Records a room save's journal row. Runs inside the journal transaction that commits it. */
+export function recordLiveRoomSave(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  journalCursor: number,
+  rowsThrough: number,
+): void {
+  storage.db
+    .prepare(
+      `INSERT INTO ${LIVE_ROOM_SAVES}(journal_cursor,workspace_id,rows_through) VALUES (?,?,?)`,
+    )
+    .run(journalCursor, document.workspaceId, rowsThrough);
 }
 
 /** The notes with edits taken and not saved. */

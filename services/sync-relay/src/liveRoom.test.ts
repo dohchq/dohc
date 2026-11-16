@@ -27,6 +27,7 @@ import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
+import { readRetiredJournalPage } from "./storage/serviceActivationRetirement.js";
 
 const open: Fixture[] = [];
 const rooms_: { close(): Promise<void> }[] = [];
@@ -247,8 +248,15 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
 
 const rowBytes = (row: Record<string, unknown>) => new Uint8Array(row.update_bytes as Uint8Array);
 
-/** The owner's computer. Its own capture's feed brings every journal row as it is committed. */
-function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
+/**
+ * The owner's computer. Its own capture's feed brings every journal row as it is committed, and
+ * counts the leases it hands out and those released.
+ */
+function ownerDesktop(
+  f: Fixture,
+  room: ReturnType<typeof rooms>,
+  leases = { out: 0, released: 0 },
+) {
   const lifetime = new AbortController();
   const binding = f.storage.resolveCurrentLiveDocumentBinding({
     document: f.input.evidence.document,
@@ -279,7 +287,11 @@ function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
             const row = f.journalRows().journal.find((r) => Number(r.journal_cursor) > fed);
             if (row) {
               fed = Number(row.journal_cursor);
-              return { value: { journalCursor: fed, updateBytes: rowBytes(row) }, release() {} };
+              leases.out += 1;
+              return {
+                value: { journalCursor: fed, updateBytes: rowBytes(row) },
+                release: () => void (leases.released += 1),
+              };
             }
             await new Promise((resolve) => setTimeout(resolve, 5));
           }
@@ -463,6 +475,151 @@ it("gives the owner others' edits as rows, and each save the last row it holds, 
   expect(savedAuthors(f)).toEqual([ana, olu]);
   expect(unsaved(f)).toEqual([]);
   expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+});
+
+// Proves: each save's last room row outlives the room, so an owner who catches up on a retired
+// note's journal once its room is gone still lets go of the room rows each save holds.
+it("keeps each save's last row with its journal row, for a retired note's journal pages", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const owner = ownerDesktop(f, room),
+    a = editor(f, room, ana);
+  await owner.open();
+  await a.open();
+  const first = position(await a.submit(a.change("title", "Lisbon")));
+  await owner.next();
+  const own = position(await owner.submit(owner.change("place", "Porto")));
+  const saved = [await owner.next(), await owner.next()];
+  const storage = f.storage as StorageContext,
+    document = f.input.evidence.document;
+  const page = (input: { restoreFenceGeneration?: number; after?: number; budgetBytes?: number }) =>
+    readRetiredJournalPage(storage, {
+      workspaceId: document.workspaceId,
+      objectId: document.objectId,
+      lineageClaimId: document.lineageClaimId,
+      restoreFenceGeneration: 0,
+      after: 0,
+      budgetBytes: 1 << 20,
+      ...input,
+    });
+  expect(page({})).toBeNull();
+  // The note's activation retired at F, the last of its journal rows.
+  const journal = storage.db
+    .prepare("SELECT journal_cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor")
+    .all()
+    .map((row) => Number(row.journal_cursor));
+  const acceptedCursor = journal.at(-1)!;
+  expect(acceptedCursor).toBe(saved[1]!.journalCursor);
+  storage.db
+    .prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,
+      object_id,lineage_claim_id,source_json,binding_json,state_digest,owner_user_id,completion_json,accounted_bytes,
+      retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json)
+      VALUES ('namespace','activation','workspace','main',?,?,'{}','{}',?,'owner','{}',1,1,0,?,2,'{}')`)
+    .run(document.objectId, document.lineageClaimId, "a".repeat(64), acceptedCursor);
+  const all = page({})!;
+  expect(all.acceptedCursor).toBe(acceptedCursor);
+  expect(all.nextAfter).toBeNull();
+  expect(all.rows.map((row) => row.journalCursor)).toEqual(journal);
+  expect(all.rows.filter((row) => row.rowsThrough !== undefined)).toEqual(
+    saved.map((frame, index) => ({
+      journalCursor: frame.journalCursor,
+      rowsThrough: [first, own][index],
+      updateBytes: expect.any(Uint8Array),
+    })),
+  );
+  // A small budget still takes one row a page, and the last page ends at F.
+  const pages = [page({ budgetBytes: 1 })!];
+  while (pages.at(-1)!.nextAfter !== null)
+    pages.push(page({ budgetBytes: 1, after: pages.at(-1)!.nextAfter! })!);
+  expect(pages.map((next) => next.rows.map((row) => row.journalCursor))).toEqual(
+    journal.map((cursor) => [cursor]),
+  );
+  expect(page({ restoreFenceGeneration: 1 })).toBeNull();
+});
+
+// Proves: a save whose transaction rolls back after the room was told of it leaves the room's edits
+// unsaved, so the room saves them again.
+it("saves an edit again when its save's transaction rolls back", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const a = editor(f, room, ana);
+  await a.open();
+  // The first journal commit fails after its last write, as a failed continuity marker update
+  // does: the transaction rolls back and storage stays open.
+  const storage = f.storage as StorageContext;
+  const tx = storage.tx.bind(storage);
+  let failures = 1;
+  storage.tx = <T>(run: () => T) =>
+    tx(() => {
+      const result = run();
+      if (failures && typeof result === "object" && result !== null && "reply" in result) {
+        failures -= 1;
+        throw new Error("The write failed.");
+      }
+      return result;
+    });
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(savedAuthors(f)).toEqual([ana]));
+  expect(failures).toBe(0);
+  expect(unsaved(f)).toEqual([]);
+});
+
+// Proves: a save that committed is not saved again when a read the storage makes after its
+// commit fails.
+it("saves an edit once when a read after its save's commit fails", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const a = editor(f, room, ana);
+  await a.open();
+  // A host listening for writes makes each one read the database's revision before and after.
+  // The first such write is the save's, and its read after the commit fails.
+  const stop = observeRelayWrites(f.storage, () => {});
+  const storage = f.storage as StorageContext;
+  const prepare = storage.db.prepare.bind(storage.db);
+  let reads = 0;
+  storage.db.prepare = ((sql: string) => {
+    const statement = prepare(sql);
+    if (!sql.startsWith("SELECT total_changes()")) return statement;
+    return {
+      get: () => {
+        reads += 1;
+        if (reads === 2) throw new Error("The read failed.");
+        return statement.get();
+      },
+    };
+  }) as typeof storage.db.prepare;
+  try {
+    expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+    await vi.waitFor(() => expect(savedAuthors(f)).toEqual([ana]));
+    // Saving what the room holds would save the edit again if the room still counted it unsaved.
+    await room.saveFirst(f.input.evidence.document, () => {}, AbortSignal.timeout(5_000));
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(savedAuthors(f)).toEqual([ana]);
+    expect(unsaved(f)).toEqual([]);
+  } finally {
+    storage.db.prepare = prepare;
+    stop();
+  }
+});
+
+// Proves: a lease the owner's feed read and holds for the owner's next read is released when the
+// owner closes, as each holds reserved output bytes.
+it("releases the owner's held feed lease when the owner closes", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const leases = { out: 0, released: 0 };
+  const owner = ownerDesktop(f, room, leases),
+    a = editor(f, room, ana);
+  const sync = await owner.open();
+  await a.open();
+  // The owner waits on its feed, and Ana's edit reaches it first as a room row.
+  const next = owner.next();
+  const first = position(await a.submit(a.change("title", "Lisbon")));
+  expect(await next).toEqual({ journalCursor: first, roomRow: true });
+  // The save's row then comes on the feed, and waits for a read the owner never makes.
+  await vi.waitFor(() => expect(leases.out).toBe(1));
+  sync.close();
+  expect(leases.released).toBe(1);
 });
 
 it("sends an owner who reconnects the rows no save holds, oldest first", async () => {
@@ -792,6 +949,37 @@ it("keeps a pause's copy until the owner's desktop records it written, and resum
   await expect(
     call("POST", pauseId, "copy-written", { sha256: "0".repeat(64) }),
   ).rejects.toMatchObject({ code: "conflict" });
+  // Ownership that ends while the body is read, as when the owner's account is being deleted,
+  // records nothing.
+  let owned = true;
+  const ending = createLiveRoomPauseRoutes(
+    Object.assign(Object.create(f.storage), {
+      workspaceIsOwnedBy: (workspaceId: string, userId: string) =>
+        owned && f.storage.workspaceIsOwnedBy(workspaceId, userId),
+    }),
+  );
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        owned = false;
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ sha256 })));
+        controller.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  await expect(
+    ending(
+      new Request("https://relay.invalid/", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit),
+      { route: "live-pauses", workspaceId: "workspace", pauseId, action: "copy-written" },
+      "owner",
+    ),
+  ).rejects.toMatchObject({ code: "not_found" });
+  expect(new Uint8Array(await (await call("GET", pauseId, "copy")).arrayBuffer())).toEqual(copy);
   expect((await call("POST", pauseId, "copy-written", { sha256 })).status).toBe(200);
   await expect(call("GET", pauseId, "copy")).rejects.toMatchObject({ code: "not_found" });
   expect(liveRoomPaused(storage, f.input.evidence.document)).toBe(true);
