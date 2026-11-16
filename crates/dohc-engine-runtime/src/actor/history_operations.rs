@@ -52,6 +52,12 @@ impl ActorHandle {
     ) -> Result<HistoryOperation, RuntimeError> {
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
+                super::access_order::order_writer(
+                    store,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &[super::access_order::Touch::write(&input.to_path)],
+                )?;
                 let policy = crate::search::read_engine_search_policy(&root);
                 let outcome = store.write_with(
                     faults.as_ref(),

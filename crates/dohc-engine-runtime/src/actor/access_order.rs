@@ -23,7 +23,7 @@
 //! needs one refuses the moment and is judged again, with its commit or hold,
 //! when the command ends ([`finish_command`]). So that writers rarely meet
 //! that refusal, capture ([`order_capture`]) and the versioned text and
-//! binary writes, renames and deletes ([`order_writer`]) and Undo
+//! binary writes, renames, deletes and Duplicate ([`order_writer`]) and Undo
 //! ([`order_undo`]) run [`order_paths`] before their transaction: it commits a
 //! changed rule first. Rollback, merge and conflict resolution run through
 //! [`ordered`], which runs the same step over the paths they will change and,

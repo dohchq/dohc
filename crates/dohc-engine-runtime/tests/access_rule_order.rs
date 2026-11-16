@@ -2025,10 +2025,17 @@ fn edit_on_feature(f: &Fixture) -> Result<(), RuntimeError> {
 /// moment, so rollback, merge and conflict resolution are judged before they
 /// change anything: under a folder held for its owner each is refused and
 /// records nothing. Rolling back a move is judged at both of its paths.
+/// Duplicate is judged at its copy.
 #[test]
 fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
     type Step = fn(&Fixture) -> Result<(), RuntimeError>;
-    let cases: [(&str, &str, Step, Step); 4] = [
+    let cases: [(&str, &str, Step, Step); 5] = [
+        (
+            "duplicate into a held folder",
+            "team",
+            |f| f.versioned_write(write("src/a.md", "alpha", "m-alpha")),
+            |f| f.duplicate("src/a.md", "team/copy.md"),
+        ),
         (
             "rollback into a held folder",
             "team",
@@ -2097,9 +2104,14 @@ fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
         }
     }
     // Nor are they let through once the store left the workspace folder.
-    let moved_cases: [(&str, Step, Step); 2] = [
+    let moved_cases: [(&str, Step, Step); 3] = [
         ("rollback", move_team_to_crew, |f| f.rollback("m-move")),
         ("merge", edit_on_feature, Fixture::merge_feature),
+        (
+            "duplicate",
+            |f| f.versioned_write(write("team/a.md", "alpha", "m-alpha")),
+            |f| f.duplicate("team/a.md", "team/copy.md"),
+        ),
     ];
     for (name, prepare, writer) in moved_cases {
         let f = Fixture::movable();
@@ -2116,6 +2128,26 @@ fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+impl Fixture {
+    fn duplicate(&self, from: &str, to: &str) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.duplicate_file(
+                DuplicateFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: from.to_owned(),
+                    to_path: to.to_owned(),
+                    operation_id: "dohc-operation:duplicate".to_owned(),
+                    author_json: None,
+                    now_ms: 45,
+                },
+                self.root().to_path_buf(),
+                Arc::new(NoFaults),
+            ))
+            .map(drop)
+    }
 }
 
 const OP: &str = "dohc-operation:remove-team";
