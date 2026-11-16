@@ -114,15 +114,16 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     await admin.connect();
     await admin.query(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
-          import.meta.url,
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await pool.query(
+        readFileSync(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
+      );
     const authOptions = {
       pool,
       baseURL: "https://auth.example.test",

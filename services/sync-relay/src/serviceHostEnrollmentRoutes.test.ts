@@ -29,6 +29,8 @@ import type { ServiceHostedHold } from "./serviceHostedReplication";
 import { RecoveryCopyRefusal, type ServiceKeptEdits } from "./storage/serviceKeptEdits";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { heldDocumentFixture } from "./heldDocument.test-helper";
+import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createSessionActorResolver, type SessionKind } from "@dohc/workspace-auth/session";
 import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 import { jsonBody, request, testHandler } from "./testing";
 import type { KnownRefusalWord } from "./serverLogWords";
@@ -214,6 +216,41 @@ it("answers a live documents list its client closed quietly, and still logs any 
   f.resolveActor.mockRejectedValueOnce(new Error("actor lookup failed"));
   expect((await handle(closed(new ClientClosedRequest()))).status).toBe(500);
   expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "Error");
+});
+
+it("refuses the owner's phone session on every live-host route, and serves the owner's computer", async () => {
+  const f = await fixture();
+  // The production resolver over the owner's own sign-in, as a phone and as a computer.
+  const routes = (clientKind: SessionKind) =>
+    createServiceHostEnrollmentRoutes({
+      storage: f.storage,
+      history: f.history,
+      host: f.host,
+      resolveActor: createSessionActorResolver({
+        api: {
+          getSession: async () => ({
+            user: { id: "owner-1" },
+            session: {
+              id: `${clientKind}-session`,
+              userId: "owner-1",
+              expiresAt: 8e12,
+              clientKind,
+            },
+          }),
+        },
+      } as unknown as WorkspaceAuth),
+    });
+  const phone = routes("phone");
+  const requests = () => [
+    f.request(),
+    f.request("GET", undefined, {}, "?refusals=1"),
+    f.request("POST", { shareId: scope.shareId, path: binding.currentPath }),
+    f.request("DELETE", { objectId: binding.objectId }),
+    f.request("POST", { outboxId: "outbox" }, {}, "/kept-edits"),
+  ];
+  for (const request of requests())
+    expect((await phone(request)).status, `${request.method} ${request.url}`).toBe(401);
+  expect((await routes("desktop")(f.request())).status).toBe(200);
 });
 
 it("requires bearer owner authority, rejects ambient credentials and rejects unknown parameters", async () => {

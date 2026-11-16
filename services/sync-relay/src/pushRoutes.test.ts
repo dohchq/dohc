@@ -1,9 +1,12 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import {
+  createAccountSessionResolver,
   UnauthorizedError,
   type AccountSession,
   type ResolveAccountSession,
+  type SessionKind,
 } from "@dohc/workspace-auth/session";
 import { isPushStatus } from "@dohc/workspace-contracts/push-subscriptions";
 import { parsePushVapidPublicKey } from "./pushRoutes";
@@ -69,13 +72,24 @@ function sessions() {
     valid,
     resolve,
     signIn(token: string, userId: string, expiresAtMs = 1_000_000, displayName = "Alice") {
-      valid.set(token, { userId, sessionId: `sign-in-${token}`, expiresAtMs, displayName });
+      valid.set(token, {
+        userId,
+        sessionId: `sign-in-${token}`,
+        expiresAtMs,
+        clientKind: "browser",
+        displayName,
+      });
     },
   };
 }
 
 async function fixture(
-  options: { vapid?: string | null; storage?: SyncRelayStorage; hosts?: ReadonlySet<string> } = {},
+  options: {
+    vapid?: string | null;
+    storage?: SyncRelayStorage;
+    hosts?: ReadonlySet<string>;
+    resolve?: ResolveAccountSession;
+  } = {},
 ) {
   const storage = options.storage ?? (await testStorage());
   const auth = sessions();
@@ -83,7 +97,7 @@ async function fixture(
   const handler = testHandler(storage, {
     namedBrowserSessionLimits: limits,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
-    resolveAccountSession: auth.resolve,
+    resolveAccountSession: options.resolve ?? auth.resolve,
     nowMs: () => clock,
     pushHosts: options.hosts ?? new Set(["push.example.test"]),
     ...(options.vapid === null ? {} : { pushVapidPublicKey: options.vapid ?? VAPID }),
@@ -345,6 +359,38 @@ describe("push subscriptions", () => {
     ).toBe(400);
     expect(f.auth.resolve).not.toHaveBeenCalled();
     expect(rows(f.storage)).toHaveLength(1);
+  });
+
+  it("refuses a phone's session sent as a cookie", async () => {
+    const kinds = new Map<string, SessionKind>([
+      ["phone-1", "phone"],
+      ["browser-1", "browser"],
+    ]);
+    // Better Auth answers for the cookie; the relay's default account resolver judges its kind.
+    const auth = {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const token = /^session=([\w-]+)$/u.exec(headers.get("cookie") ?? "")?.[1];
+          const clientKind = token === undefined ? undefined : kinds.get(token);
+          return clientKind
+            ? {
+                user: { id: "alice" },
+                session: {
+                  id: `sign-in-${token}`,
+                  userId: "alice",
+                  expiresAt: 1_000_000,
+                  clientKind,
+                },
+              }
+            : null;
+        },
+      },
+    } as unknown as WorkspaceAuth;
+    const f = await fixture({ resolve: createAccountSessionResolver(auth) });
+    expect((await f.status("phone-1")).status).toBe(401);
+    expect((await f.subscribe("phone-1")).status).toBe(401);
+    expect(rows(f.storage)).toEqual([]);
+    expect(await body(await f.status("browser-1"))).toMatchObject({ enabled: false });
   });
 
   it("refuses a link holder, who has no account session", async () => {

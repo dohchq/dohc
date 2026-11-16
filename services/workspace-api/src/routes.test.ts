@@ -26,7 +26,7 @@ function gateway(
     handler: handler ?? (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
     api: {
       getSession: async () => null,
-      deviceVerify: async () => ({ status: "pending" }),
+      deviceVerify: async () => ({ status: "pending", deviceKind: "phone" }),
       ...overrides,
     },
   };
@@ -49,8 +49,10 @@ function get(path: string, init: RequestInit = {}): Request {
 
 /** A Better Auth APIError carries its payload on `body`. */
 class ApiError extends Error {
-  constructor(readonly body: { error: string; error_description: string }) {
-    super(body.error_description);
+  constructor(
+    readonly body: { error: string; error_description: string } | { code: string; message: string },
+  ) {
+    super("error" in body ? body.error_description : body.message);
   }
 }
 
@@ -354,7 +356,7 @@ describe("device verification page", () => {
         getSession: async () => SIGNED_IN,
         deviceVerify: async ({ query }) => {
           claimed.push(query.user_code);
-          return { status: "pending" };
+          return { status: "pending", deviceKind: "phone" };
         },
       }),
     })(get("/device?user_code=ABCD-EFGH"));
@@ -364,9 +366,37 @@ describe("device verification page", () => {
     expect(body).toContain("Approve");
     expect(body).toContain("Deny");
     expect(body).toContain("ada@example.com");
+    expect(body).toContain("Connect this phone to dohc?");
     expect(body).toContain(
       "<p>Only approve this if you just started signing in on your phone.</p>",
     );
+    expect(body).toContain('data-device-kind="phone"');
+  });
+
+  it("names a computer's sign-in as one", async () => {
+    const body = await (
+      await router({
+        auth: gateway({
+          getSession: async () => SIGNED_IN,
+          deviceVerify: async () => ({ status: "pending", deviceKind: "desktop" }),
+        }),
+      })(get("/device?user_code=ABCD-EFGH"))
+    ).text();
+    expect(body).toContain("Connect this computer to dohc?");
+    expect(body).toContain("It can read and change your workspaces.");
+    expect(body).toContain('data-device-kind="desktop"');
+    expect(body).toContain("signing in on your computer.");
+  });
+
+  it("offers no decision on a code without a known kind", async () => {
+    const response = await router({
+      auth: gateway({
+        getSession: async () => SIGNED_IN,
+        deviceVerify: async () => ({ status: "pending", deviceKind: null }),
+      }),
+    })(get("/device?user_code=ABCD-EFGH"));
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toContain('id="approve"');
   });
 
   it("explains an expired code and offers no decision", async () => {
@@ -384,6 +414,26 @@ describe("device verification page", () => {
     const body = await response.text();
     expect(response.status).toBe(400);
     expect(body).toContain("expired");
+    expect(body).not.toContain('id="approve"');
+  });
+
+  it("refuses a phone's session with a way to sign in on a computer, and offers no decision", async () => {
+    const response = await router({
+      auth: gateway({
+        getSession: async () => SIGNED_IN,
+        deviceVerify: async () => {
+          throw new ApiError({
+            code: "PHONE_SESSION_REFUSED",
+            message: "A phone sign-in can't do this. Use dohc on a computer.",
+          });
+        },
+      }),
+    })(get("/device?user_code=ABCD-EFGH"));
+    const body = await response.text();
+    expect(response.status).toBe(403);
+    expect(body).toContain("Approve this on a computer");
+    expect(body).toContain('id="sign-out-sign-in"');
+    expect(body).toContain('data-next="/account/sign-in?next=');
     expect(body).not.toContain('id="approve"');
   });
 
@@ -409,7 +459,7 @@ describe("device verification page", () => {
       await router({
         auth: gateway({
           getSession: async () => SIGNED_IN,
-          deviceVerify: async () => ({ status: "approved" }),
+          deviceVerify: async () => ({ status: "approved", deviceKind: "desktop" }),
         }),
       })(get("/device?user_code=ABCD-EFGH"))
     ).text();

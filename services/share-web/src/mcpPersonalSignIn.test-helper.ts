@@ -98,7 +98,12 @@ export class TestAccounts implements CredentialFence {
     const token = this.sessionToken(request);
     const userId = token === null ? undefined : this.sessions.get(token);
     if (token === null || userId === undefined) throw new UnauthorizedError();
-    return { userId, sessionId: token, expiresAtMs: Number.MAX_SAFE_INTEGER };
+    return {
+      userId,
+      sessionId: token,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "browser",
+    };
   };
 
   async readEpoch(userId: string): Promise<number> {

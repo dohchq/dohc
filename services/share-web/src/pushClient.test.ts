@@ -69,7 +69,12 @@ async function fixture(relayOverride?: (incoming: Request) => Promise<Response>)
       userId = cookie?.slice(cookieName.length + 1);
     if (!cookie?.startsWith(`${cookieName}=`) || !userId || userId.includes(";"))
       throw new UnauthorizedError();
-    return { userId, sessionId: `sign-in-${userId}`, expiresAtMs: Number.MAX_SAFE_INTEGER };
+    return {
+      userId,
+      sessionId: `sign-in-${userId}`,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "browser",
+    };
   });
   const relay = createSyncRelayHandler({
     storage,

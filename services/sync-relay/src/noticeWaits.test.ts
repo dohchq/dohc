@@ -82,6 +82,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
       userId: match[1]!,
       sessionId: rename ?? match[2]!,
       expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
     } satisfies AccountSession;
   };
   const holdSession = (nth: number) => {
@@ -107,7 +108,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
   };
   const hub = new DiscussionActivityHub();
   const h = testHandler(storage, {
-    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
     accountSessions,
     discussionActivity: hub,
     nowMs: () => NOW,

@@ -32,7 +32,11 @@ describe.skipIf(!available)("account deletion against Postgres", () => {
     await admin.connect();
     await admin.query('CREATE SCHEMA "' + schema + '"');
     pool = new Pool({ connectionString, options: "-c search_path=" + schema });
-    for (const name of ["0001_better_auth.sql", "0004_account_deletion.sql"])
+    for (const name of [
+      "0001_better_auth.sql",
+      "0004_account_deletion.sql",
+      "0007_session_client_kind.sql",
+    ])
       await pool.query(
         await readFile(
           new URL(
@@ -194,14 +198,14 @@ describe.skipIf(!available)("account deletion against Postgres", () => {
     await pool.query(`UPDATE "session" SET "createdAt"=now()-interval '1 day' WHERE "userId"=$1`, [
       f.userId,
     ]);
-    const device = await f.auth.api.deviceCode({ body: { client_id: "desktop" } });
+    const device = await f.auth.api.deviceCode({ body: { client_id: "dohc-desktop" } });
     expect((await f.claim(device.user_code)).status).toBe(200);
     expect((await f.post("/device/approve", { userCode: device.user_code })).status).toBe(200);
     const token = await f.auth.api.deviceToken({
       body: {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: device.device_code,
-        client_id: "desktop",
+        client_id: "dohc-desktop",
       },
     });
     const previewResponse = await f.post("/account/deletion-preview", {}, token.access_token);
@@ -279,7 +283,7 @@ describe.skipIf(!available)("account deletion against Postgres", () => {
       `INSERT INTO "deviceCode" (id,"deviceCode","userCode","userId","expiresAt",status) VALUES($1,$1,$1,$2,now()+interval '10 minutes','approved')`,
       ["approved-device", f.userId],
     );
-    const device = await f.post("/device/code", { client_id: "desktop" });
+    const device = await f.post("/device/code", { client_id: "dohc-desktop" });
     const codes = (await device.json()) as { user_code: string };
     expect(device.status).toBe(200);
     expect((await f.claim(codes.user_code)).status).toBe(200);
@@ -311,7 +315,7 @@ describe.skipIf(!available)("account deletion against Postgres", () => {
     ).toBeGreaterThanOrEqual(400);
     await expect(
       pool.query(
-        `INSERT INTO "session" (id,token,"expiresAt","createdAt","updatedAt","userId") VALUES('raced-session','raced-token',now()+interval '1 day',now(),now(),$1)`,
+        `INSERT INTO "session" (id,token,"expiresAt","createdAt","updatedAt","userId","clientKind") VALUES('raced-session','raced-token',now()+interval '1 day',now(),now(),$1,'desktop')`,
         [f.userId],
       ),
     ).rejects.toMatchObject({ code: "42501" });
