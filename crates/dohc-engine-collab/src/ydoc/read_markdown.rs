@@ -39,6 +39,8 @@ pub(super) enum Child {
     Text(Vec<(String, Marks)>),
 }
 
+/// A field added here that `attrs` writes must also be compared in
+/// `writes_as`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Marks {
     bold: bool,
@@ -662,11 +664,30 @@ impl<'a> Reader<'a> {
         rest
     }
 
+    /// A `$$` span's text, `$$` included, where each later line drops what
+    /// its containers put before it.
+    fn math_text(&self, range: &Range<usize>) -> String {
+        let mut lines = self.src[range.clone()].split('\n');
+        let mut text = lines.next().unwrap_or_default().to_owned();
+        for line in lines {
+            text.push('\n');
+            text.push_str(self.strip_containers(line));
+        }
+        text
+    }
+
     fn line_start(&self, at: usize) -> usize {
         self.src[..at].rfind('\n').map_or(0, |newline| newline + 1)
     }
 
     fn event(&mut self, event: Event<'a>, range: Range<usize>) -> Result<(), Unreadable> {
+        if self.image.is_some() && matches!(event, Event::DisplayMath(_)) {
+            let text = self.math_text(&range);
+            if let Some(image) = &mut self.image {
+                image.alt.push_str(&text);
+            }
+            return Ok(());
+        }
         if let Some(image) = &mut self.image {
             match event {
                 Event::Start(Tag::Image { .. }) => image.open += 1,
@@ -687,7 +708,6 @@ impl<'a> Reader<'a> {
                 Event::Text(text) | Event::Code(text) | Event::InlineMath(text) => {
                     image.alt.push_str(&text);
                 }
-                Event::DisplayMath(_) => image.alt.push_str(&self.src[range]),
                 Event::SoftBreak | Event::HardBreak => image.alt.push('\n'),
                 _ => {}
             }
@@ -729,22 +749,16 @@ impl<'a> Reader<'a> {
             }
             Event::DisplayMath(_) => {
                 self.text_block(range.start)?;
+                let text = self.math_text(&range);
                 // A block can't keep a link or a mark around it.
                 if self.marks != Marks::default() {
-                    let source = &self.src[range.clone()];
-                    self.push_text(source, Some(range.start), &range);
+                    let at = (text == self.src[range.clone()]).then_some(range.start);
+                    self.push_text(&text, at, &range);
                     return Ok(());
-                }
-                // Each later line drops what its containers put before it.
-                let mut lines = self.src[range.start + 2..range.end - 2].split('\n');
-                let mut tex = lines.next().unwrap_or_default().to_owned();
-                for line in lines {
-                    tex.push('\n');
-                    tex.push_str(self.strip_containers(line));
                 }
                 self.push_piece(
                     Piece::DisplayMath {
-                        tex,
+                        tex: text[2..text.len() - 2].to_owned(),
                         source: range.clone(),
                     },
                     &range,
@@ -1474,11 +1488,7 @@ impl<'a> Reader<'a> {
         pieces
             .into_iter()
             .map(|piece| match piece {
-                Piece::DisplayMath { source, .. } => Piece::Text {
-                    text: self.src[source.clone()].to_owned(),
-                    marks: Marks::default(),
-                    at: Some(source.start),
-                },
+                Piece::DisplayMath { tex, source } => math_piece(self.src, &tex, &source),
                 piece => piece,
             })
             .collect()
@@ -1526,11 +1536,7 @@ impl<'a> Reader<'a> {
             let line_end = index + 1 == count
                 || matches!(pieces.peek(), Some((_, Piece::Text { text, .. })) if text.starts_with('\n'));
             if !(line_start && line_end) {
-                current.push(Piece::Text {
-                    text: self.src[source.clone()].to_owned(),
-                    marks: Marks::default(),
-                    at: Some(source.start),
-                });
+                current.push(math_piece(self.src, &tex, &source));
                 continue;
             }
             if let Some(Piece::Text { text, .. }) = current.last_mut() {
@@ -2041,6 +2047,18 @@ fn paired(pieces: Vec<Piece>, src: &str, pair: Pair) -> Vec<Piece> {
     out
 }
 
+/// A `$` span as unmarked text, with its offset when that text is its
+/// source.
+fn math_piece(src: &str, tex: &str, source: &Range<usize>) -> Piece {
+    let text = format!("$${tex}$$");
+    let at = (src[source.clone()] == text).then_some(source.start);
+    Piece::Text {
+        text,
+        marks: Marks::default(),
+        at,
+    }
+}
+
 /// A source text piece cut at each of `cuts` that falls inside it.
 fn split(piece: Piece, cuts: &[usize]) -> Vec<Piece> {
     let Piece::Text {
@@ -2107,11 +2125,15 @@ fn mark(mut piece: Piece, src: &str, pair: Pair) -> Piece {
                 at: None,
             };
         }
-        // A math block can't hold the mark, so the span stays its source
-        // text with it.
-        Piece::DisplayMath { source, .. } => {
+        // A math block can't hold the mark, so the span stays text with it,
+        // read as the highlight reads source.
+        Piece::DisplayMath { tex, .. } => {
+            let text = format!("$${tex}$$");
             piece = Piece::Text {
-                text: src[source.clone()].to_owned(),
+                text: match pair {
+                    Pair::Highlight => text.replace("\\=", "="),
+                    Pair::Underline => text,
+                },
                 marks: Marks {
                     highlight: pair == Pair::Highlight,
                     underline: pair == Pair::Underline,

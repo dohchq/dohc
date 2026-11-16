@@ -45,6 +45,7 @@ fn a_formula_in_a_container_reads_without_the_container_prefix() {
 /// formula from an alt and a link from a formula on its own line.
 #[test]
 fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
+    let mut failures = Vec::new();
     for (source, kept) in [
         ("[$$x$$](u)\n", [r#""insert":"$$x$$""#, r#""href":"u""#]),
         ("**$$x$$**\n", [r#""insert":"$$x$$""#, r#""bold""#]),
@@ -52,13 +53,59 @@ fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
         ("==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
         ("++$$x$$++\n", [r#""insert":"$$x$$""#, r#""underline""#]),
         ("# ==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
+        // A formula over lines keeps none of its containers' markers.
+        (
+            "> ==$$a\n> b$$==\n",
+            [r#""insert":"$$a\nb$$""#, r#""highlight""#],
+        ),
+        (
+            "- **$$a\n  b$$**\n",
+            [r#""insert":"$$a\nb$$""#, r#""bold""#],
+        ),
+        (
+            "> a $$x\n> y$$ b\n",
+            [r#""insert":"a $$x\ny$$ b""#, r#""tag":"blockquote""#],
+        ),
+        (
+            "> a $$x\n> y$$\n> ---\n",
+            [r#""insert":"a $$x\ny$$""#, r#""heading""#],
+        ),
+        (
+            "> ![$$a\n> b$$](u)\n",
+            [r#""alt":"$$a\nb$$""#, r#""src":"u""#],
+        ),
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
         let body = doc.canonical_content()["body"].to_string();
         for kept in kept {
-            assert!(body.contains(kept), "{source:?}: {kept} in {body}");
+            if !body.contains(kept) {
+                failures.push(format!("{source:?}: {kept} in {body}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The writer escapes `=` in a highlight, so a formula there reads back
+/// as the same text however often it is written.
+#[test]
+fn a_formula_in_a_highlight_reads_back_as_written() {
+    for source in ["==$$x=y$$==\n", "# ==$$a==b$$==\n"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        let first = doc.canonical_content()["body"].to_string();
+        for _ in 0..2 {
+            let written = doc.project_richdoc().unwrap();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &written)
+                .unwrap();
+            assert_eq!(
+                doc.canonical_content()["body"].to_string(),
+                first,
+                "{source:?} written as {written:?}"
+            );
         }
     }
 }
