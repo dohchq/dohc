@@ -758,7 +758,10 @@ export function ChannelView({
       </div>
       {access === "read-only" ? (
         <div className="chat-read-only">
-          <p>{readOnlyNote}</p>
+          <p className="chat-read-only-note">
+            <Icon name="lock" size={14} />
+            <span>{readOnlyNote}</span>
+          </p>
           {/* Text the person wrote before they could no longer post stays theirs to copy, until they discard it. */}
           {draft ? (
             <>

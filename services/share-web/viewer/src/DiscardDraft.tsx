@@ -14,7 +14,7 @@ const DRAFT: Words = {
 export const UNSENT_EDITS: Words = {
   title: "Discard your unsent edits?",
   body: ["Only this tab has them. Copy or download them first to keep them."],
-  keep: "Keep them",
+  keep: "Cancel",
   discard: "Discard",
 };
 
@@ -41,7 +41,7 @@ export function DiscardDraft({
       <button autoFocus className="handoff-button secondary" onClick={cancel}>
         {words.keep}
       </button>
-      <button className="handoff-button primary" onClick={confirm}>
+      <button className="handoff-button danger" onClick={confirm}>
         {words.discard}
       </button>
     </dialog>

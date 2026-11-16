@@ -571,8 +571,8 @@ it("opens a page in the live editor at Edit, as the signed-in account", async ()
 
 // The unsent edits need the person only once dohc cannot send them.
 it.each([
-  ["quarantined", "Editing stopped. dohc could not send your unsent edits.", null],
-  ["disconnected", "Editing paused. Check your connection, then retry.", "Retry connection"],
+  ["quarantined", "Editing stopped. dohc could not send your unsent edits. Copy or download them, then discard them to keep editing.", null],
+  ["disconnected", "Editing paused. Check your connection.", "Retry connection"],
 ] as const)("shows a %s session's unsent edits above the page, with the state in the band", async (status, sentence, retry) => {
   const session = await editing({level: "edit"});
   expect(container.querySelector('[aria-label="Unsent edits"]')).toBeNull();
@@ -664,11 +664,13 @@ it("keeps a later draft's unsent text after the person discarded an earlier one"
   vi.mocked(memberDocument).mockReturnValueOnce({session: next as never, close: vi.fn()});
   await act(async () => first.drop("disconnected"));
   await settle(() => recovery() !== null);
-  // Discard asks first, in the same words, then opens the current file.
+  // Discard acts at once and opens the current file. Its row above the page keeps Undo, so nothing asks first.
   await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Discard")!.click());
-  expect(container.querySelector("dialog h2")?.textContent).toBe("Discard your unsent edits?");
-  await act(async () => container.querySelector<HTMLButtonElement>("dialog .handoff-button.primary")!.click());
+  expect(container.querySelector("dialog")).toBeNull();
   await settle(() => next.reconnect.mock.calls.length === 1);
+  const gone = () => container.querySelector<HTMLElement>('[aria-label="Discarded edits"]');
+  expect(gone()?.textContent).toContain("Discarded your unsent edits to plan.md.");
+  expect(Object.values(sessionStorage).some(value => value.includes("Leave at ten."))).toBe(false);
   await act(async () => next.type("Leave at eleven."));
   options.level = "comment";
   await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
@@ -676,6 +678,35 @@ it("keeps a later draft's unsent text after the person discarded an earlier one"
   // Only the discarded draft went.
   expect(container.querySelectorAll('[aria-label="Unsent edits"]')).toHaveLength(1);
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at eleven.");
+  // Undo brings the discarded text back beside the later one.
+  await act(async () => [...gone()!.querySelectorAll("button")].find(node => node.textContent === "Undo")!.click());
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] textarea')].map(node => (node as HTMLTextAreaElement).value))
+    .toEqual([expect.stringContaining("Leave at ten."), expect.stringContaining("Leave at eleven.")]);
+});
+
+it("asks before another file closes a page with unsent edits, with Cancel and a danger Discard", async () => {
+  const session = await editing({level: "edit"});
+  await act(async () => session.drop("disconnected"));
+  await settle(() => recovery() !== null);
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>("#workspace-files .file")].find(node => node.textContent === "to-pack.md")!.click());
+  const dialog = container.querySelector("dialog")!;
+  expect(dialog.querySelector("h2")?.textContent).toBe("Discard your unsent edits?");
+  expect([...dialog.querySelectorAll("button")].map(node => node.textContent)).toEqual(["Cancel", "Discard"]);
+  expect(dialog.querySelector("button:last-of-type")?.className).toBe("handoff-button danger");
+  await act(async () => [...dialog.querySelectorAll("button")].find(node => node.textContent === "Cancel")!.click());
+  expect(container.querySelector("dialog")).toBeNull();
+  expect(container.querySelector(".file.selected")?.textContent).toBe("plan.md");
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+});
+
+it("names the open page's unsent edits by its folder when a kept row has the same file name", async () => {
+  writeDraft("unsent-edits", JSON.stringify([{id: 1, accountId: "sam", path: "welcome/plan.md", text: "Hello."}]));
+  const session = await editing({level: "edit"});
+  await act(async () => session.drop("disconnected"));
+  await settle(() => container.querySelectorAll('[aria-label="Unsent edits"]').length === 2);
+  expect([...container.querySelectorAll('[aria-label="Unsent edits"] summary')].map(node => node.textContent)).toEqual([
+    // The kept row names itself against the other kept rows only.
+    "Unsent edits to plan.md", "Unsent edits to trip/plan.md"]);
 });
 
 it("keeps the unsent text when Try again opens the page again", async () => {
@@ -954,6 +985,8 @@ it("shows a file's Comments at View with no comment controls", async () => {
   expect(commentsPanel().querySelector("textarea, form")).toBeNull();
   expect([...commentsPanel().querySelectorAll("button")].map(node => node.textContent)).not.toContain("Send");
   expect(commentsPanel().textContent).toContain("Only people who can comment post here.");
+  // The lock says why there is no composer, as on the desktop.
+  expect(commentsPanel().querySelector(".chat-read-only .chat-read-only-note .icon rect")).not.toBeNull();
 });
 
 it("copies a toast's text with the Copy button beside it", async () => {

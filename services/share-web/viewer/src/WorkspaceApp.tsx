@@ -74,7 +74,7 @@ function writeUnsent(list: readonly Unsent[]): void {
 }
 
 /** The file's name, or where another kept file has the same name, the fewest folders before it that tell the two apart. */
-function shownPath(path: string, all: readonly Unsent[]): string {
+function shownPath(path: string, all: readonly {path: string}[]): string {
   const parts = path.split("/"), others = all.map(item => item.path.split("/")).filter(other => other.join("/") !== path);
   for (let count = 1; count < parts.length; count++) {
     const tail = parts.slice(-count).join("/");
@@ -144,8 +144,8 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   // The account last signed in on this page. Signed out, its kept edits still show, so an ended session keeps them in view.
   // Before any account signs in, as after a reload, none show: the tab may hold another person's text.
   const [lastAccount, setLastAccount] = useState<string | null>(null);
-  const keep = useCallback((accountId: string, path: string, text: string) =>
-    setUnsent(list => [...list, {id: ++unsentId.current, accountId, path, text}]), []);
+  const keep = useCallback((accountId: string, path: string, text: string, discarded?: boolean) =>
+    setUnsent(list => [...list, {id: ++unsentId.current, accountId, path, text, ...(discarded ? {discarded: true as const} : {})}]), []);
   const discarded = (id: number, value: boolean) => setUnsent(list => list.map(item => item.id !== id ? item
     : value ? {...item, discarded: true} : {id: item.id, accountId: item.accountId, path: item.path, text: item.text}));
   const shown = unsent.filter(item => item.accountId === lastAccount);
@@ -161,16 +161,17 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   const kept = shown.length ? <UnsentEdits unsent={shown} onDiscard={id => discarded(id, true)} onUndo={id => discarded(id, false)}
     onForget={id => setUnsent(list => list.filter(item => item.id !== id))}/> : null;
   return <>
-    <MemberEntry grantId={grantId} onUnsent={keep} onAccount={setLastAccount} toastSlot={toastSlot} kept={kept}/>
+    <MemberEntry grantId={grantId} onUnsent={keep} onAccount={setLastAccount} toastSlot={toastSlot} kept={kept}
+      nameFor={path => shownPath(path, shown)}/>
     {/* Toasts land at the window's bottom right. */}
     <div className="workspace-corner"><div className="toast-slot" ref={setToastSlot}/></div>
   </>;
 }
 
 /** Signs the member in, then opens the workspace. */
-function MemberEntry({grantId, onUnsent, onAccount, toastSlot, kept}: {
-  grantId: string | null; onUnsent(accountId: string, path: string, text: string): void; onAccount(id: string): void;
-  toastSlot: HTMLElement | null; kept: ReactNode;
+function MemberEntry({grantId, onUnsent, onAccount, toastSlot, kept, nameFor}: {
+  grantId: string | null; onUnsent(accountId: string, path: string, text: string, discarded?: boolean): void; onAccount(id: string): void;
+  toastSlot: HTMLElement | null; kept: ReactNode; nameFor(path: string): string;
 }) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   useEffect(() => {if (account) onAccount(account.id);}, [account, onAccount]);
@@ -223,7 +224,7 @@ function MemberEntry({grantId, onUnsent, onAccount, toastSlot, kept}: {
   </div>;
   return <MemberWorkspace key={`${account.id}\n${grantId}`} grantId={grantId} account={account} signingOut={pending === "sign-out"}
     signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded}
-    onUnsent={(path, text) => onUnsent(account.id, path, text)} toastSlot={toastSlot} kept={kept}/>;
+    onUnsent={(path, text, discarded) => onUnsent(account.id, path, text, discarded)} toastSlot={toastSlot} kept={kept} nameFor={nameFor}/>;
 }
 
 /**
@@ -298,9 +299,11 @@ function WorkspaceOpening() {
   </div>;
 }
 
-function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent, toastSlot, kept}: {
+function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent, toastSlot, kept, nameFor}: {
   grantId: string; account: Account; signingOut: boolean; signOutError: string | null; onSignOut(): void; onSessionEnded(): void;
-  onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null; kept: ReactNode;
+  onUnsent(path: string, text: string, discarded?: boolean): void; toastSlot: HTMLElement | null; kept: ReactNode;
+  // The open page's row is named as the kept rows name theirs, so two of the same name read apart.
+  nameFor(path: string): string;
 }) {
   const session = memberSession(grantId);
   const [attempt, setAttempt] = useState(0);
@@ -438,9 +441,10 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
               <h1 className="page-title">{fileTitle(selected.path)}</h1>
               <main className="content">
                 {live ? <Suspense fallback={readView}>
-                  <MemberLivePage key={selected.path} grantId={grantId} accountId={account.id} path={selected.path} readView={readView}
+                  <MemberLivePage key={selected.path} grantId={grantId} accountId={account.id} path={selected.path}
+                    draftName={nameFor(selected.path)} readView={readView}
                     statusSlot={statusSlot} bandSlot={bandSlot} draftSlot={draftSlot} toastSlot={toastSlot} leave={leave}
-                    onUnsent={text => onUnsent(selected.path, text)}/>
+                    onUnsent={(text, discarded) => onUnsent(selected.path, text, discarded)}/>
                 </Suspense> : readView}
               </main>
             </> : <div className="empty-state"><p>No files in this workspace yet. This page shows them as soon as they arrive.</p></div>}

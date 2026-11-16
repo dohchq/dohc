@@ -23,8 +23,8 @@
 .page-band:empty { display: none; }
 .page-band p { display: flex; min-width: 0; align-items: center; gap: 6px; margin: 0; }
 .page-band .live-ring { border-color: color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; }
-.page-band button { flex: none; border: 0; padding: 0; background: none; color: var(--viewer-subtle); cursor: pointer; font: inherit; white-space: nowrap; }
-.page-band button:hover { color: var(--viewer-ink); }
+.page-band button { flex: none; height: 24px; border: 1px solid var(--viewer-line-strong); border-radius: 6px; padding: 0 8px; background: var(--viewer-paper); color: var(--viewer-ink); cursor: pointer; font: inherit; font-weight: 500; white-space: nowrap; }
+.page-band button:hover { background: var(--viewer-hover); }
 
 /* Toasts land at the window's bottom right, one above another. */
 .workspace-corner { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }

@@ -57,7 +57,7 @@ function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean):
   // In the band, the unsent edits show above the page with their own Copy, Download and Discard.
   if (band && (state.status === "quarantined" || state.status === "closed"))
     return state.status === "quarantined"
-      ? "Editing stopped. dohc could not send your unsent edits."
+      ? "Editing stopped. dohc could not send your unsent edits. Copy or download them, then discard them to keep editing."
       : "Editing stopped.";
   if (state.status === "quarantined")
     return "Editing stopped. Review your draft before opening the current file.";
@@ -71,11 +71,11 @@ function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean):
   if (state.reason === "link-full")
     return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable")
-    return "dohc could not open the file for editing. Try again.";
+    return "dohc could not open the file for editing.";
   if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";
-  return "Editing paused. Check your connection, then retry.";
+  return "Editing paused. Check your connection.";
 }
 type Removed = { id: string; text: string };
 
@@ -274,10 +274,16 @@ export function NamedDocumentEditor({
     </p>
   );
   const retryLabel =
-    state.reason === "authority-unavailable" || state.reason === "host-unavailable" || state.reason === "live-stopped" || liveConnectionLimitMessage(state.reason)
+    state.reason === "authority-unavailable" ||
+    state.reason === "host-unavailable" ||
+    state.reason === "live-stopped" ||
+    liveConnectionLimitMessage(state.reason)
       ? "Try again"
       : "Retry connection";
-  const retry = state.status === "disconnected" && !FINAL.includes(state.reason ?? "") && (() => void session.reconnect());
+  const retry =
+    state.status === "disconnected" &&
+    !FINAL.includes(state.reason ?? "") &&
+    (() => void session.reconnect());
   const inBand = bandSlot !== undefined && !working;
   return (
     <section
