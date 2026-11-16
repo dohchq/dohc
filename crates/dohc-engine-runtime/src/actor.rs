@@ -1223,10 +1223,6 @@ fn replay_retained_owner_private(store: &mut EngineStore) {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
-)]
 /// The store a worker opens: by the path SQLite opens, and by its name and
 /// file, which the access-rule ordering step reads its workspace from.
 struct StorePaths {
@@ -1235,6 +1231,10 @@ struct StorePaths {
     identity: EngineDbIdentity,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
+)]
 fn worker_main(
     paths: StorePaths,
     now_ms: i64,
