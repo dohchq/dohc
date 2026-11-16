@@ -92,7 +92,9 @@
 .chat-lanes [role="tab"] { border: 0; border-radius: 6px; padding: 3px 10px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 12px; }
 .chat-lanes [role="tab"][aria-selected="true"] { background: var(--viewer-paper); color: var(--viewer-ink); box-shadow: 0 0 0 1px var(--viewer-line); }
 .chat-lanes [role="tab"]:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
-.chat-thread-head { display: flex; flex: none; align-items: center; gap: 4px; padding: 0 12px 4px 8px; }
+.chat-thread-head { display: flex; flex: none; align-items: center; gap: 8px; padding: 0 12px 4px 8px; }
+/* The halo sits inside the button, so it neither touches "Thread" nor hangs past the panel's edge. */
+.chat-thread-head .icon-button:focus-visible { outline-offset: -2px; }
 .chat-thread-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .chat-replies { display: block; margin-top: 0; border: 0; border-radius: 6px; padding: 2px 6px; margin-left: -6px; background: transparent; color: var(--viewer-accent); cursor: pointer; font-size: 12px; font-weight: 500; }
 .chat-replies:hover { background: var(--viewer-hover); }
