@@ -6,6 +6,13 @@
 //! own while the store serves. A check that finds damage marks the store, so
 //! the next open checks the pages before it serves and refuses the store.
 //!
+//! This is a chosen trade: a store that is already damaged when it opens is
+//! read and written until the check ends, where an open that checks first
+//! never touches it. In that time a write can make the damage worse, and a
+//! damaged row that still reads as valid can reach a workspace file, a live
+//! note's saved text, or the relay. Blob content is checked against its hash
+//! on those paths. Backups and recovery check for themselves.
+//!
 //! The check reads one snapshot of the store from start to end, and the WAL
 //! cannot restart while it does. It is a held reader: before it starts it
 //! measures the WAL, and once the WAL presses it gives way to the writer and
