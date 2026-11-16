@@ -1397,6 +1397,34 @@ it("saves a live room's taken edits before ending the Edit access that hosts the
   }
 });
 
+// Proves: ending one person's Edit access keeps the note's live room open when another Edit grant
+// still hosts the note, so the people still editing it stay connected.
+it("keeps the live room of a note another Edit grant still hosts when one person's access ends", async () => {
+  const f = await fixture(),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  f.raw
+    .exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,
+    created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('edit-2','${scope.shareId}','user','editor-2',NULL,'edit',1,'active',0,NULL,NULL)`);
+  const ends: unknown[] = [];
+  const rooms: Pick<LiveRooms, "saveFirst"> = {
+    async saveFirst(_note, then, _signal, options) {
+      const result = await then();
+      // As the rooms do: they end unless the note is still hosted.
+      ends.push(!options?.whileHosted || !f.storage.serviceHostDocumentEnabled(enrolled));
+      return result;
+    },
+  };
+  const h = testHandler(f.storage, { liveRooms: () => rooms });
+  const ended = await h(
+    request("owner-1", `/sync/shares/${scope.shareId}/grants/${scope.grantId}/revoke`, {
+      ...jsonBody({ workspaceId: scope.workspaceId }),
+    }),
+  );
+  expect(ended.status, await ended.clone().text()).toBe(200);
+  expect(f.storage.getShareGrant(scope.grantId)?.status).toBe("revoked");
+  expect(ends).toEqual([false]);
+});
+
 // Proves: a Stop whose reply was lost is done in the relay's durable state.
 // Reading it reports the document retired, and a second Stop replays that
 // retirement at its fence without preparing again.

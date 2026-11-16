@@ -1131,6 +1131,33 @@ it("saves every taken edit before a step that closes the note, taking none until
   await expect(a.next()).rejects.toThrow();
 });
 
+it("keeps the room open after one person's access ends while the note is still hosted", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  const signal = new AbortController().signal;
+  const whileHosted = { whileHosted: true };
+  expect(await room.saveFirst(f.input.evidence.document, () => "ended", signal, whileHosted)).toBe(
+    "ended",
+  );
+  expect(savedAuthors(f)).toEqual([ana]);
+  // Both stay connected and keep editing together.
+  expect((await b.submit(b.change("place", "Porto"))).result).toBe("success");
+  await a.next();
+  expect(a.doc.getMap("frontmatter").get("place")).toBe("Porto");
+  // Once the note's hosting ends with the access, the room ends.
+  vi.spyOn(f.storage, "serviceHostDocumentEnabled").mockReturnValue(false);
+  expect(await room.saveFirst(f.input.evidence.document, () => "ended", signal, whileHosted)).toBe(
+    "ended",
+  );
+  await expect(a.next()).rejects.toThrow();
+});
+
 it("runs a step at once when the note's taken edits are on a lineage that ended", async () => {
   const f = note();
   const room = rooms(f, {}, { answers: Array<"retry">(100).fill("retry") });
