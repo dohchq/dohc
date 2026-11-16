@@ -20,6 +20,7 @@ import {
   chatMessageAppend,
   chatThreadCreate,
   closeTestStorages,
+  createShare,
   json,
   jsonBody,
   logOp,
@@ -557,9 +558,19 @@ describe("what a member reaches", () => {
     await ownerWrite(h, "public/deep/hello.md", "PUBLIC CONTENT");
     // A member learns of a reach change from their pages (decision 18A).
     expect((await h(request("ana", `/sync/shares/${shareId}/reach`))).status).toBe(404);
-    const signature = async () =>
-      ((await json(await pull(h, "ana", shareId))).reach as { signature: string }).signature;
-    const first = await signature();
+    const listed = async () =>
+      (await json(await pull(h, "ana", shareId))).reach as Record<string, unknown>;
+    const signature = async () => (await listed()).signature;
+    const reach = await listed();
+    expect(Object.keys(reach).sort()).toEqual([
+      "folders",
+      "rootLevel",
+      "signature",
+      "visibilitySignature",
+    ]);
+    expect(reach.rootLevel).toBe("comment");
+    expect(reach.folders).toEqual([{ path: "", level: "comment" }]);
+    const first = reach.signature;
     const body = await pulledText(h, "ana", shareId);
     expect(body).not.toContain("private/");
     expect(body).not.toContain(sha256("PRIVATE CONTENT"));
@@ -574,6 +585,10 @@ describe("what a member reaches", () => {
     const opened = await signature();
     expect(opened).not.toBe(first);
     expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
+    expect((await listed()).folders).toEqual([
+      { path: "", level: "comment" },
+      { path: "private", level: "view" },
+    ]);
     await ownerWrite(h, "private/access.yaml", "");
     // The signature is a function of reach, so the same reach signs the same.
     expect(await signature()).toBe(first);
@@ -681,6 +696,116 @@ describe("what a member reaches", () => {
     expect(admin.signature, "role change").not.toBe(last.signature);
     // An admin reaches every folder, so no move crosses their edge.
     expect(admin.marks).toEqual([]);
+  });
+
+  it("changes the visibility signature only when what a member reaches changes, and lists both on every pull page", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "team/access.yaml", "members: comment\n");
+    await ownerWrite(h, "team/a.md", "a");
+    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    await ownerWrite(h, "view/b.md", "b");
+    await ownerWrite(h, "closed/access.yaml", "");
+    await ownerWrite(h, "shut/access.yaml", "");
+    const signatures = async () => {
+      // Each page reads the reach in its own transaction, a Group pull's too.
+      const [files, group] = await Promise.all(
+        [undefined, GROUP].map(async (wireId) => {
+          const page = await pull(h, "ana", shareId, wireId);
+          expect(page.status).toBe(200);
+          return (await json(page)).reach as { signature: string; visibilitySignature: string };
+        }),
+      );
+      expect(group).toEqual(files);
+      expect(files!.visibilitySignature).toMatch(/^[0-9a-f]{64}$/);
+      return { signature: files!.signature, visibilitySignature: files!.visibilitySignature };
+    };
+    let last = await signatures();
+    const expectChanged = async (step: string, signature: boolean, visibility: boolean) => {
+      const next = await signatures();
+      expect(next.signature !== last.signature, `${step}: signature`).toBe(signature);
+      expect(next.visibilitySignature !== last.visibilitySignature, `${step}: visibility`).toBe(
+        visibility,
+      );
+      last = next;
+    };
+    await ownerWrite(h, "team/a.md", "edited");
+    await expectChanged("content edit", false, false);
+    await ownerWrite(h, "team/access.yaml", "members: view\n");
+    await expectChanged("level-only rule change", true, false);
+    await ownerWrite(h, "team/access.yaml", "");
+    await expectChanged("hiding a folder", true, true);
+    await ownerWrite(h, "team/access.yaml", "members: edit\n");
+    await expectChanged("revealing a folder", true, true);
+    await ownerWrite(h, "empty/access.yaml", "");
+    await expectChanged("hiding a folder with no other files", true, true);
+    // A move changes no reach: the listed levels already place the moved file,
+    // and a move across the edge is marked in the pull.
+    await ownerRename(h, "team/a.md", "view/a.md");
+    await expectChanged("move between two levels", false, false);
+    await ownerRename(h, "view/b.md", "closed/b.md");
+    await expectChanged("move into a hidden folder", false, false);
+    expect(await pulledText(h, "ana", shareId)).toContain('"reachMove":"departure"');
+    await ownerRename(h, "closed/b.md", "shut/b.md");
+    await expectChanged("move between hidden folders", false, false);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    await expectChanged("member level change", true, false);
+    // A held read that ends on a changed level lists the reach too.
+    const ended = await h(
+      request("ana", `/sync/shares/${shareId}/log?since=0&limit=10&hold=5000&level=comment`),
+    );
+    expect(ended.status).toBe(200);
+    expect(await json(ended)).toMatchObject({ levelChanged: true, reach: last });
+  });
+
+  it("lists the ruled folders where a member's level differs from its parent's, and no hidden one", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    for (const [folder, rule] of [
+      ["same", "members: comment\n"],
+      ["view", "members: view\n"],
+      ["view/edit", "members: edit\n"],
+      ["view/same", "members: view\n"],
+      ["private", ""],
+      ["private/open", "members: edit\n"],
+      // Two case twins with their own rules are listed apart.
+      ["Team", "members: edit\n"],
+      ["TEAM", "members: edit\n"],
+      // A twin that hides hides its twin too.
+      ["Docs", "members: edit\n"],
+      ["DOCS", ""],
+      // A ruled folder lists with no other file in it.
+      ["empty", "members: view\n"],
+    ])
+      await ownerWrite(h, `${folder}/access.yaml`, rule!);
+    await ownerWrite(h, "team/unruled.md", "a twin with no rule takes its parent's level");
+    const inventory = async () => {
+      const response = await pull(h, "ana", shareId);
+      expect(response.status, await response.clone().text()).toBe(200);
+      return (await json(response)).reach as Record<string, unknown>;
+    };
+    const listed = await inventory();
+    expect(listed.rootLevel).toBe("comment");
+    expect(listed.folders).toEqual([
+      { path: "", level: "comment" },
+      { path: "TEAM", level: "edit" },
+      { path: "Team", level: "edit" },
+      { path: "empty", level: "view" },
+      { path: "view", level: "view" },
+      { path: "view/edit", level: "edit" },
+    ]);
+    expect(JSON.stringify(listed)).not.toContain("private");
+    expect(JSON.stringify(listed)).not.toContain("Docs");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const admin = await inventory();
+    expect(admin.rootLevel).toBe("edit");
+    expect(admin.folders).toEqual([{ path: "", level: "edit" }]);
   });
 
   it("checks proposals, pages and Comments at the folder target, including hidden and folded ancestors", async () => {

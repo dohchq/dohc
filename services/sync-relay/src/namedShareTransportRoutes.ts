@@ -216,10 +216,11 @@ export function createNamedShareTransportRoutes(
         : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
-      // A member's page carries their keyed reach signature, read in the
-      // page's own transaction: a change tells the member to look again.
+      // A member's page, a Group pull's included, lists their reach as the
+      // page's own transaction read it: its levels, and keyed signatures that
+      // tell the member when the levels, or what they reach, changed.
       let reach: MemberReach | undefined;
-      const signed = () => (reach ? { reach: { signature: reach.keyedSignature(reachKey) } } : {});
+      const signed = () => (reach ? { reach: reach.listed(reachKey) } : {});
       const authorizeRead = () => {
         const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;
         reach = isWorkspaceSelector(selector) ? selector.reach : undefined;

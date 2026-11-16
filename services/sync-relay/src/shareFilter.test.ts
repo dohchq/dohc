@@ -35,7 +35,14 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
   const reach: MemberReach = {
     evaluated: { role: "member", level, rules: [] },
     signature: () => "test",
+    visibilitySignature: () => "test",
     keyedSignature: () => "test",
+    listed: () => ({
+      signature: "test",
+      visibilitySignature: "test",
+      rootLevel: level,
+      folders: [],
+    }),
     levelAt: () => level,
     folderLevel: () => level,
     hasLevel: (wanted) => wanted === level,
