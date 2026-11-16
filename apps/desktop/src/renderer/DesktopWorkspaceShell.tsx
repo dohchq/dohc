@@ -7469,6 +7469,8 @@ export function DesktopWorkspaceShell(props: {
           onImportFiles={importFromExplorer}
           shareView={shareView}
           {...(membershipView ? { creates: joinedWorkspaceCreates } : {})}
+          // Rename, delete, move and import, by the same rule as main's menu.
+          {...(joinedWorkspaceOffers ? { changes: joinedWorkspaceOffers.write } : {})}
           onRefreshShareMounts={onExplorerRefreshShareMounts}
           onUnmountShare={unmountShare}
           onShare={onSharePath}

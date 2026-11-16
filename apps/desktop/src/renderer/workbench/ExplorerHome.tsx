@@ -69,7 +69,8 @@ export interface ExplorerHomeProps {
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
   onShowInFiles: (paths: readonly string[] | null) => void;
-  drag: {
+  // Absent where nothing can move, so Pages' rows neither drag nor take a drop.
+  drag?: {
     start: (path: string, event: DragEvent) => void;
     over: (path: string, event: DragEvent) => void;
     drop: (path: string, event: DragEvent) => void;

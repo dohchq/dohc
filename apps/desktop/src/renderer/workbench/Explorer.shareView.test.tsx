@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { newPageTabPath } from "./workbenchState";
@@ -181,5 +181,75 @@ describe("creating in a joined workspace", () => {
     // Cancel: the page closes unwritten, and its folder goes with it.
     rerender(<Explorer {...props} />);
     expect(rows()).toEqual(["note.md", "other.md"]);
+  });
+});
+
+describe("changing files where this person can't", () => {
+  const joined = { granterEmail: GRANTER };
+  const rowOf = (path: string) =>
+    within(screen.getByTestId("file-tree")).getAllByTestId("tree-row").find((row) => row.dataset.path === path)!;
+  const homeRowOf = (key: string) => document.querySelector<HTMLElement>(`[data-home-key="${key}"]`)!;
+  const osFiles = () => ({ dropEffect: "copy", effectAllowed: "all", files: [new File(["x"], "a.txt")], types: ["Files"], setData: vi.fn() });
+
+  it("opens no rename, delete, move or import in Files at View, Comment, or as another account", () => {
+    const onImportFiles = vi.fn();
+    const deleteWorkspacePath = vi.fn();
+    const moveWorkspacePath = vi.fn();
+    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath, moveWorkspacePath, getDroppedFilePaths: () => ["C:/a.txt"] });
+    try {
+      render(<Explorer {...explorerProps({ shareView: joined, changes: false, onImportFiles, folders: ["Plans"], files: [{ path: "note.md", kind: "file" }, { path: "Plans/a.md", kind: "file" }] })} />);
+      fireEvent.click(rowOf("note.md"));
+      fireEvent.keyDown(rowOf("note.md"), { key: "F2" });
+      expect(screen.queryByTestId("tree-edit-input")).toBeNull();
+      fireEvent.keyDown(rowOf("note.md"), { key: "Delete" });
+      expect(screen.queryByTestId("delete-confirm")).toBeNull();
+
+      expect(rowOf("note.md").getAttribute("draggable")).toBe("false");
+      const move = { effectAllowed: "move", dropEffect: "move", files: [], types: [], setData: vi.fn() };
+      fireEvent.dragStart(rowOf("note.md"), { dataTransfer: move });
+      // A drop target that takes nothing leaves the drag over it unprevented.
+      expect(fireEvent.dragOver(rowOf("Plans"), { dataTransfer: move })).toBe(true);
+      fireEvent.drop(rowOf("Plans"), { dataTransfer: move });
+      expect(moveWorkspacePath).not.toHaveBeenCalled();
+
+      const tree = screen.getByTestId("file-tree");
+      expect(fireEvent.dragOver(tree, { dataTransfer: osFiles() })).toBe(true);
+      fireEvent.drop(tree, { dataTransfer: osFiles() });
+      expect(fireEvent.dragOver(rowOf("Plans"), { dataTransfer: osFiles() })).toBe(true);
+      fireEvent.drop(rowOf("Plans"), { dataTransfer: osFiles() });
+      expect(onImportFiles).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens no rename, delete or drag from Home's rows either", () => {
+    render(<Explorer {...explorerProps({ mode: "home", shareView: joined, changes: false })} />);
+    act(() => homeRowOf("pages:note.md").focus());
+    fireEvent.keyDown(homeRowOf("pages:note.md"), { key: "F2" });
+    expect(screen.queryByTestId("tree-edit-input")).toBeNull();
+    fireEvent.keyDown(homeRowOf("pages:note.md"), { key: "Delete" });
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    expect(homeRowOf("pages:note.md").getAttribute("draggable")).toBeNull();
+  });
+
+  it("keeps rename, delete and drag at Edit", async () => {
+    const onImportFiles = vi.fn();
+    vi.stubGlobal("dohcDesktop", { getDroppedFilePaths: () => ["C:/a.txt"] });
+    try {
+      render(<Explorer {...explorerProps({ shareView: joined, changes: true, onImportFiles })} />);
+      fireEvent.click(rowOf("note.md"));
+      fireEvent.keyDown(rowOf("note.md"), { key: "F2" });
+      fireEvent.keyDown(await screen.findByTestId("tree-edit-input"), { key: "Escape" });
+      fireEvent.keyDown(rowOf("note.md"), { key: "Delete" });
+      expect(screen.getByTestId("delete-confirm")).toBeTruthy();
+      expect(rowOf("other.md").getAttribute("draggable")).toBe("true");
+      const tree = screen.getByTestId("file-tree");
+      expect(fireEvent.dragOver(tree, { dataTransfer: osFiles() })).toBe(false);
+      fireEvent.drop(tree, { dataTransfer: osFiles() });
+      expect(onImportFiles).toHaveBeenCalledWith(["C:/a.txt"], "");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

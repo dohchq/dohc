@@ -83,6 +83,28 @@ describe("a joined workspace", () => {
     expect(screen.queryByTestId("level-mark")).toBeNull();
   });
 
+  // F2, Delete and drag follow the rule main's Files menu follows, so none starts a change main refuses.
+  it.each([
+    ["at View", "view", true, false],
+    ["at Comment", "comment", true, false],
+    ["at Edit while another account is signed in", "edit", false, false],
+    ["at Edit", "edit", true, true],
+  ] as const)("offers rename, delete and move in Files only where main takes them, %s", async (_state, access, joinedBySignedInAccount, changes) => {
+    const bridge = makeShareBridge();
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "plan.md", kind: "file" }], folders: [] });
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
+    if (!joinedBySignedInAccount) await waitFor(() => expect(screen.getByTestId("sync-status").textContent).toBe("Another account signed in"));
+    const row = () => screen.getAllByTestId("tree-row").find((candidate) => candidate.dataset.path === "plan.md")!;
+    await waitFor(() => expect(row()).toBeTruthy());
+    expect(row().getAttribute("draggable")).toBe(String(changes));
+    fireEvent.click(row());
+    fireEvent.keyDown(row(), { key: "F2" });
+    expect(screen.queryByTestId("tree-edit-input") !== null).toBe(changes);
+  });
+
   // The level belongs to the account that joined. While another one is signed in, a page reads
   // Read-only where its Edit toggle would be, and Files offers no New page or New folder.
   it("shows Read-only and offers no New page at Edit while another account is signed in", async () => {
