@@ -358,7 +358,10 @@ describe("a joined workspace", () => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, ...change } }));
-    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(note);
+    const shown = await screen.findByTestId("linked-chat-readonly-note");
+    expect(shown.textContent).toBe(note);
+    // The lock of the Read-only mark shows the reason before the words do.
+    expect(shown.querySelector("svg.lucide-lock")).not.toBeNull();
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
   });
 

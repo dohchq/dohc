@@ -1,6 +1,6 @@
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { ArrowLeft, Info, Plus } from "lucide-react";
+import { ArrowLeft, Info, Lock, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
@@ -32,14 +32,15 @@ import { AgentThreadLines } from "./AgentThreadLines";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
-// view's read-only notice uses.
+// view's read-only notice uses, with the lock the Read-only mark shows.
 function ReadOnlyNotice({ reason }: { reason: string }) {
   return (
     <p
       data-testid="linked-chat-readonly-note"
-      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+      className="m-0 flex shrink-0 items-start gap-1.5 border-t border-line px-3 py-2 text-[11px] text-subtle"
     >
-      {reason}
+      <Lock size={12} aria-hidden className="mt-px shrink-0" />
+      <span>{reason}</span>
     </p>
   );
 }
@@ -662,7 +663,7 @@ export function LinkedChatsPanel(props: {
                 </div>
               ) : null}
               {readOnlyReason !== undefined ? (
-                <AboutNote testId="linked-chat-readonly-note">{readOnlyReason}</AboutNote>
+                <AboutNote testId="linked-chat-readonly-note" icon={Lock}>{readOnlyReason}</AboutNote>
               ) : untracked ? (
                 <AboutNote testId="linked-chats-untracked">
                   dohc does not track this file, so it cannot have comments.
