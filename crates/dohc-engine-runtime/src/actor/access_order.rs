@@ -2531,6 +2531,91 @@ mod tests {
         );
     }
 
+    /// Rules order only once a workspace replicates. A widening captured
+    /// before then is committed history: enrolment journals it as it stands,
+    /// with no hold, so it reaches members at sharing without a Notice. A
+    /// widening on disk that nothing committed yet is judged when the backfill
+    /// reaches a file under it: enrolment journals nothing and waits for the
+    /// owner's decision.
+    #[test]
+    fn a_rule_widened_before_enrolment() {
+        use dohc_engine_domain::VersionedTextStore;
+        let (view, edit) = ("members: view\n", "members: edit\n");
+        let mut seen = Vec::new();
+        for captured in [true, false] {
+            let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+            let root = std::path::absolute(scratch.path()).unwrap();
+            let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+            let mut store = EngineStore::open(&db, 1).unwrap();
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .unwrap();
+            let mut history = vec![("team/access.yaml", view), ("team/a.md", "alpha")];
+            if captured {
+                history.push(("team/access.yaml", edit));
+            }
+            for (path, text) in history {
+                ingest(&mut store, path, text).unwrap();
+            }
+            put_settled(&root, "team/a.md", "alpha");
+            put_settled(&root, "team/access.yaml", edit);
+            let identity = EngineDbIdentity::of_existing(&db).unwrap();
+            install(&db, &identity, true, Arc::new(AccessRuleSignals::default())).unwrap();
+            begin_command();
+            dohc_engine_sync::adopt_join_identity(
+                &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,
+            )
+            .unwrap();
+            let enrolled = dohc_engine_sync::commit_relay_cursor(
+                &mut store,
+                "ws",
+                &dohc_engine_sync::RelayCursor {
+                    cursor: 1,
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    bootstrap_complete: true,
+                    settlement_report_id: None,
+                    ordinary_pull: None,
+                },
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+                30,
+            );
+            finish_command(&mut store);
+            let journal: Vec<String> = store
+                .read_with(|conn| {
+                    conn.prepare(
+                        "SELECT json_extract(payload_json,'$.path') FROM replication_log \
+                         WHERE workspace_id='ws' AND op_kind='moment.append' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()
+                })
+                .unwrap();
+            let holds = store
+                .read_with(|conn| access_rule_holds::list_in(conn, "ws"))
+                .unwrap()
+                .into_iter()
+                .map(|hold| (hold.folder, hold.reason))
+                .collect::<Vec<_>>();
+            seen.push((captured, enrolled.is_ok(), journal, holds));
+            ROOT.with(|cell| *cell.borrow_mut() = None);
+        }
+        let (rule, file) = ("team/access.yaml".to_owned(), "team/a.md".to_owned());
+        assert_eq!(
+            seen,
+            [
+                (true, true, vec![rule.clone(), rule, file], Vec::new()),
+                (
+                    false,
+                    false,
+                    Vec::new(),
+                    vec![("team".to_owned(), access_rule_holds::WIDENED.to_owned())]
+                ),
+            ]
+        );
+    }
+
     /// A replicating workspace store under its workspace folder, with the
     /// commit-point check installed.
     fn replicating_store(scratch: &dohc_engine_testkit::ScratchDir) -> EngineStore {
@@ -2565,12 +2650,17 @@ mod tests {
         filetime::set_file_mtime(absolute.parent().unwrap(), then).unwrap();
     }
 
-    /// Capture's ingest, without the ordering step capture runs before it.
+    /// Capture's ingest of the team folder's rule, without the ordering step
+    /// capture runs before it.
     fn ingest_rule(store: &mut EngineStore, text: &str) -> Result<(), RuntimeError> {
+        ingest(store, "team/access.yaml", text)
+    }
+
+    fn ingest(store: &mut EngineStore, path: &str, text: &str) -> Result<(), RuntimeError> {
         let input = CaptureIngest {
             workspace_id: "ws".to_owned(),
             version_id: "main".to_owned(),
-            path: "team/access.yaml".to_owned(),
+            path: path.to_owned(),
             text: text.to_owned(),
             metadata_origin: CAPTURE_ORIGIN.to_owned(),
             metadata_summary: None,
