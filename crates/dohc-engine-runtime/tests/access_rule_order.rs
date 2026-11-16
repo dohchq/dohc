@@ -1213,6 +1213,73 @@ fn a_failed_undo_leaves_no_placement_to_replay() {
     assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
 }
 
+/// A crash between an Undo's placement and its commit leaves the placement
+/// pending, with bytes nothing committed. Opening the workspace cancels it
+/// before replay, so neither replay nor capture takes those bytes for
+/// dohc's own.
+#[test]
+fn an_undo_a_crash_left_pending_is_cancelled_when_the_workspace_opens() {
+    struct CrashPlacement;
+    impl dohc_engine_storage::FaultInjector for CrashPlacement {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == dohc_engine_storage::FaultPoint::MaterializeAfterTempWrite {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+    let undo_jobs = |f: &Fixture, status: Option<&str>| -> Vec<String> {
+        let conn = rusqlite::Connection::open(&f.db).unwrap();
+        if let Some(status) = status {
+            conn.execute(
+                "UPDATE materialization_jobs SET status=?1 WHERE job_id LIKE 'access-rule-undo%'",
+                [status],
+            )
+            .unwrap();
+        }
+        conn.prepare("SELECT status FROM materialization_jobs WHERE job_id LIKE 'access-rule-undo%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    };
+    let mut f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let decided = f
+        .decided_on(
+            "team",
+            AccessRuleDecision::Restore,
+            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+            "widened",
+        )
+        .expect("restore");
+    let journal = f.journal();
+    let failed = f.undo_rule_with(
+        "team",
+        decided.undo.expect("an undo"),
+        Arc::new(CrashPlacement),
+    );
+    assert!(waits(&failed), "{failed:?}");
+    // The process died before Undo could cancel its placement.
+    assert_eq!(undo_jobs(&f, Some("pending")), ["pending"]);
+    f.restart();
+    assert_eq!(undo_jobs(&f, None), ["cancelled"]);
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
+        VIEW
+    );
+    assert_eq!(f.journal(), journal);
+    // The owner puts the outside rule back by hand, and it holds again.
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
+    assert_eq!(f.journal(), journal);
+}
+
 /// Restoring a folder whose new rule nothing committed removes that rule
 /// from disk and keeps it as a kept copy, so the restore can be undone.
 #[test]

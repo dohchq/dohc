@@ -2121,7 +2121,7 @@ fn undo_on_store(
             place(
                 store,
                 order,
-                "access-rule-undo",
+                UNDO_JOB,
                 &undo.path,
                 &dohc_engine_storage::hex_sha256(bytes),
                 Some(bytes),
@@ -2247,6 +2247,28 @@ fn place_rule(
         disk,
         self_writes,
     )
+}
+
+/// The job id prefix of an Undo's placement.
+const UNDO_JOB: &str = "access-rule-undo";
+
+/// Cancel the Undo placements a crash left pending in `workspace_id`. Undo
+/// places its rule and commits it in one command, so between commands a
+/// pending placement is one that never finished. Its bytes are nothing
+/// committed: replayed, or still pending when capture reads them, they
+/// would pass for dohc's own write and commit with no hold.
+pub(super) fn cancel_unfinished_undos(
+    store: &EngineStore,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    let prefix = format!("{UNDO_JOB}_");
+    for job in store.list_pending_materialization_jobs()? {
+        if job.workspace_id == workspace_id && job.job_id.starts_with(&prefix) {
+            store.mark_materialization_cancelled(&job.job_id, now_ms)?;
+        }
+    }
+    Ok(())
 }
 
 /// Place `content_sha256` at `path` over the judged bytes `disk`, adding
