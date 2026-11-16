@@ -112,6 +112,49 @@ See the [personal live route tests](../../services/sync-relay/src/personalLiveRo
 the [held open tests](../../services/sync-relay/src/personalLiveDocumentRoutes.test.ts),
 and the [share-web tool tests](../../services/share-web/src/personalLiveDocument.test.ts).
 
+## A phone edits a page only with its sign-in's ticket
+
+A phone sign-in reaches a page for editing in two steps. Each one checks the
+sign-in, its account fence, the workspace's owner, and Show on phone.
+
+1. **Open.** The phone sends `POST /sync/:workspaceId/ops/openPage` with
+   `{path}` and its Bearer. Only a phone sign-in can open, and it has its own
+   pace and its account's. A secret file's path and a path with no page answer
+   the same `missing`. The relay checks the path before it enrolls anything.
+   - **A page with no live history.** If no computer has opened the page live,
+     the relay holds no Y.Doc lineage for it on main. The open answers
+     `live-document-without-lineage` and enrolls nothing: its owner opens it on
+     a desktop first. The server makes no lineage of its own, for a phone or
+     for a personal agent.
+   - **A page with history.** The open enrolls it as the owner's open. It never
+     resumes a Pause or Stop. A page enrolled before at another path answers
+     `document-unavailable`. A phone's open creates no new enrollment once its
+     account has 16 enrolled for its owner's opens. Desktop opens, and pages
+     already enrolled through a share or an agent, don't count against this
+     limit. Until the live host activates the page, the open answers
+     `preparing`.
+   - **Checks.** The open checks access again after reading the body, and
+     before and after minting.
+2. **Ticket and connection.** Once the page is ready, the open reads the
+   sign-in from the session table without a cache. The sign-in must still be
+   a phone sign-in for the same account. That read and the mint each stop
+   waiting after 10 seconds. The ticket ends within 30 seconds, and never after
+   the sign-in. Only the response body carries it. The open reads the page
+   again after minting. A page moved to a secret path meanwhile answers
+   `missing`, and one whose binding changed answers `preparing`. The
+   phone presents the ticket once, as the `dohc-live-ticket.*` protocol beside
+   its Bearer, on the owner connection. Only that sign-in can redeem it, for
+   that page's current binding.
+
+The connection ends when the phone signs out or the sign-in is revoked, at
+once through the relay, or within 60 seconds when another process deletes it.
+It also ends when the sign-in expires, when Show on phone turns off, when the
+account is fenced, and when the binding changes. A reconnect needs a new open.
+An edit admitted before the end is kept and saved.
+See the [phone page tests](../../services/sync-relay/src/phonePages.test.ts),
+the [owner connection tests](../../services/sync-relay/src/namedLiveRoutes.test.ts),
+and the [native phone open proof](../../services/share-web/src/selfHostedLiveNative.integration.ts).
+
 ## Live documents have one canonical host
 
 The session host holds the canonical Y.Doc. It journals accepted updates durably

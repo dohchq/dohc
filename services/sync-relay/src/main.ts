@@ -94,6 +94,7 @@ import {
   createPersonalLiveRoutes,
 } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
+import { createPhonePages, type PhonePages } from "./phonePages";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
 import { normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
@@ -648,6 +649,7 @@ const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 let liveRooms: LiveRooms | undefined;
+let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
@@ -692,6 +694,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,
+  phonePages: () => phonePages,
   relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? { automationServer } : {}),
 });
@@ -1426,6 +1429,22 @@ if (namedLiveConfig) {
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close);
   process.once("SIGTERM", ownerLive.close);
+  // A phone opens its pages only through the self-hosted live host, with a ticket only its sign-in redeems.
+  if (selfHost && deployment && accountResolvers.sessions) {
+    const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    phonePages = createPhonePages({
+      storage,
+      history: deployment.history,
+      host: selfHost,
+      supported: () => {
+        const control = storage.getLiveHostControl();
+        return control?.configuredMode === "service" && control.configuredHostId === hostId;
+      },
+      tickets,
+      sessions: accountResolvers.sessions,
+      nowMs: () => Date.now(),
+    });
+  }
   server.on("upgrade", (request, socket, head) => {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))
       void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());

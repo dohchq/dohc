@@ -16,6 +16,7 @@ import { parseChatContext, readWakeChanges, runAccountChatContext } from "./acco
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
+import type { PhonePages } from "./phonePages";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
@@ -61,9 +62,10 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 }
 
 /**
- * A signed-in account's reads, chat writes, read marks, wake retries, and
- * conversation contexts in a workspace it owns, through this server's copy
- * of it, while it shows on the phone; its change feed, at
+ * A signed-in account's reads, chat writes, read marks, wake retries,
+ * conversation contexts, and a phone's page opens for live editing in a
+ * workspace it owns, through this server's copy of it, while it shows on the
+ * phone; its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -91,6 +93,8 @@ export function createAccountOperationRoute(options: {
   lookupUserDisplayName?: LookupUserDisplayName;
   /** This server's public origin, which issues its accounts' actor keys. Writes need it. */
   serverUrl?: string;
+  /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
+  phonePages?: () => PhonePages | undefined;
 }) {
   const { storage, limiter } = options;
   const session = (request: Request) =>
@@ -104,14 +108,19 @@ export function createAccountOperationRoute(options: {
     const wakeFeed = route.operation === "wakeChanges" && request.method === "GET";
     if (!feed && !wakeFeed && request.method !== "POST") throw relayError("method_not_allowed");
     const caller = await session(request);
-    if (!limiter.allow(caller.sessionId, options.nowMs())) {
+    const page = route.operation === "openPage";
+    if (
+      !limiter.allow(caller.sessionId, options.nowMs()) ||
+      // An open can enroll a page, so the account's sign-ins also share one pace for it.
+      (page && !limiter.allow(`account:${caller.userId}`, options.nowMs()))
+    ) {
       throw new RelayError(
         "server_busy",
         "This sign-in is asking faster than your server answers. Try again shortly.",
       );
     }
-    // The feeds read only the relay's own tables; every other operation needs a copy.
-    if (!feed && !wakeFeed && options.copies() === undefined) throw copiesUnavailable();
+    // The feeds and a page open read only the relay's own tables and its live host; every other operation needs a copy.
+    if (!feed && !wakeFeed && !page && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
@@ -128,6 +137,7 @@ export function createAccountOperationRoute(options: {
         mark ||
         retry ||
         context ||
+        page ||
         isAccountOperation(route.operation)
       ) ||
       !reaches(caller.userId)
@@ -185,6 +195,20 @@ export function createAccountOperationRoute(options: {
         : badRequest("request body must be valid JSON");
     }
     await authorize();
+    // A page open reads only the relay's own tables and the live host.
+    if (page) {
+      const pages = options.phonePages?.();
+      const result = pages
+        ? await pages.open({
+            caller,
+            workspaceId: route.workspaceId,
+            args,
+            authorize,
+            signal: request.signal,
+          })
+        : { status: "refused", reason: "live_hosting_unsupported" };
+      return jsonResponse({ ok: true, result });
+    }
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = {
       reason: "account",
