@@ -40,35 +40,40 @@ fn a_formula_in_a_container_reads_without_the_container_prefix() {
     }
 }
 
-/// A formula in a link, a mark or an image's alt stays text, so the link,
-/// the mark and the formula are all kept. The editor's reader drops the
-/// formula from an alt and a link from a formula on its own line.
+/// A formula in a link or a mark is sealed with what is around it, and one
+/// in a line of text is sealed alone, so the link, the mark and the formula
+/// are all written back as they were. An image's alt keeps it as text. The
+/// editor's reader drops the formula from an alt and a link from a formula
+/// on its own line.
 #[test]
-fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
+fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_source() {
     let mut failures = Vec::new();
     for (source, kept) in [
-        ("[$$x$$](u)\n", [r#""insert":"$$x$$""#, r#""href":"u""#]),
-        ("**$$x$$**\n", [r#""insert":"$$x$$""#, r#""bold""#]),
+        (
+            "[$$x$$](u)\n",
+            [r#""source":"[$$x$$](u)""#, r#""rawInline""#],
+        ),
+        ("**$$x$$**\n", [r#""source":"**$$x$$**""#, r#""rawInline""#]),
         ("![$$x$$](u)\n", [r#""alt":"$$x$$""#, r#""src":"u""#]),
-        ("==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
-        ("++$$x$$++\n", [r#""insert":"$$x$$""#, r#""underline""#]),
-        ("# ==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
+        ("==$$x$$==\n", [r#""source":"==$$x$$==""#, r#""rawInline""#]),
+        ("++$$x$$++\n", [r#""source":"++$$x$$++""#, r#""rawInline""#]),
+        ("# ==$$x$$==\n", [r#""source":"==$$x$$==""#, r#""heading""#]),
         // A formula over lines keeps none of its containers' markers.
         (
             "> ==$$a\n> b$$==\n",
-            [r#""insert":"$$a\nb$$""#, r#""highlight""#],
+            [r#""source":"==$$a\nb$$==""#, r#""tag":"blockquote""#],
         ),
         (
             "- **$$a\n  b$$**\n",
-            [r#""insert":"$$a\nb$$""#, r#""bold""#],
+            [r#""source":"**$$a\nb$$**""#, r#""tag":"listItem""#],
         ),
         (
             "> a $$x\n> y$$ b\n",
-            [r#""insert":"a $$x\ny$$ b""#, r#""tag":"blockquote""#],
+            [r#""source":"$$x\ny$$""#, r#""insert":" b""#],
         ),
         (
             "> a $$x\n> y$$\n> ---\n",
-            [r#""insert":"a $$x\ny$$""#, r#""heading""#],
+            [r#""source":"$$x\ny$$""#, r#""heading""#],
         ),
         (
             "> ![$$a\n> b$$](u)\n",
@@ -88,11 +93,11 @@ fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// A formula in a mark, in a quote, a list or a cell, holds none of its
-/// containers' markers and reads back as the same text however often it
-/// is written. The writer escapes `=` in a highlight.
+/// A formula in a mark, or tags over lines, in a quote, a list or a cell,
+/// hold none of their containers' markers and read back as the same text
+/// however often they are written. The writer escapes `=` in a highlight.
 #[test]
-fn a_formula_in_a_mark_reads_back_as_written() {
+fn text_in_marks_and_containers_reads_back_as_written() {
     let mut failures = Vec::new();
     for source in [
         "==$$x=y$$==\n",
@@ -111,9 +116,30 @@ fn a_formula_in_a_mark_reads_back_as_written() {
         "1. ==[$$a\n   x=y$$](u)==\n",
         "> - ==**$$a=b\n>   c$$**==\n",
         "- a\n\n  ==**$$x=y\n  z$$**==\n",
+        "- > ==**$$a=b\n  > c$$**==\n",
+        "- a\n  - ==**$$x=y\n    z$$**==\n",
+        "> **==$$a=b\nc$$==**\n",
         // Cells.
         "| a |\n|---|\n| ==**$$x=y$$**== |\n",
         "| a |\n|---|\n| ==$$x=y$$== |\n",
+        // Nothing inside a formula is read as syntax, in a mark or not.
+        "**$$https://example.test$$**\n",
+        "**$$https://example.test\nc$$**\n",
+        "> **$$https://example.test\n> c$$**\n",
+        "> **$$www.a.com\n> b$$**\n",
+        "**$$a@b.co$$**\n",
+        "**$$[[Note]] a\nb$$**\n",
+        "> **$$[[n]]\n> b$$**\n",
+        "**$${{atom:a}}$$**\n",
+        "**==$$a++b++=c$$==**\n",
+        "> **==$$a++b++=c\n> d$$==**\n",
+        "**$$a ==b== c$$**\n",
+        "> **$$a==b\n> c==d$$**\n",
+        "[$$https://example.test$$](u)\n",
+        // Tags whose text runs over lines.
+        "> <b>a\n> b</b>\n",
+        "- <b>a\n  b</b>\n",
+        "> a <x>b\n> c</x> d\n",
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
@@ -140,7 +166,8 @@ fn a_formula_in_a_mark_reads_back_as_written() {
 }
 
 /// A heading, a cell and a callout in a quote read as the editor reads
-/// them, and no text they hold is dropped.
+/// them, and no text they hold is dropped. A formula, which neither can
+/// hold as a block, is sealed as its source.
 #[test]
 fn headings_cells_and_nested_callouts_read_as_the_editor_reads_them() {
     let body = |source: &str| {
@@ -153,8 +180,9 @@ fn headings_cells_and_nested_callouts_read_as_the_editor_reads_them() {
         )
     };
     let failures: Vec<_> = [
-        ("# Formula $$x$$\n", r#""insert":"Formula $$x$$""#),
-        ("| a |\n|---|\n| $$x$$ |\n", r#""insert":"$$x$$""#),
+        ("# Formula $$x$$\n", r#""insert":"Formula ""#),
+        ("# Formula $$x$$\n", r#""source":"$$x$$""#),
+        ("| a |\n|---|\n| $$x$$ |\n", r#""source":"$$x$$""#),
         ("# ==important== and [[Note]]\n", r#""highlight""#),
         ("# ==important== and [[Note]]\n", r#""tag":"wikilink""#),
         ("==a\\é==\n", r#""highlight""#),

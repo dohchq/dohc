@@ -9239,3 +9239,7 @@ mod owner_source_public_limits {
 #[cfg(test)]
 #[path = "ydoc/nested_source_tests.rs"]
 mod nested_source_tests;
+
+#[cfg(test)]
+#[path = "ydoc/markdown_judge_tests.rs"]
+mod markdown_judge_tests;
