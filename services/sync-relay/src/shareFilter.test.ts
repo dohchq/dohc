@@ -44,7 +44,6 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
     nearestRule: () => "",
     objectVisible: () => true,
     objectPath: () => null,
-    refresh: () => reach,
   };
   return { kind: "workspace", role: "member", reach };
 }

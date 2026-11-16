@@ -118,7 +118,7 @@ export function createLinkReadRoutes(
       const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
       const freshness = newestFilteredOpFreshness(
         share.workspaceId,
-        capability.effectiveSelector,
+        () => requireFresh().effectiveSelector,
         epochLogFloor,
       );
       const fresh = requireFresh();
@@ -172,7 +172,7 @@ export function createLinkReadRoutes(
         if (snapshot.tooMany) throw notFound();
         const freshness = newestFilteredOpFreshness(
           share.workspaceId,
-          capability.effectiveSelector,
+          () => requireFresh().effectiveSelector,
           snapshot.epochLogFloor,
         );
         const fresh = requireFresh();
@@ -307,7 +307,7 @@ export function createLinkReadRoutes(
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
-        capability.effectiveSelector,
+        () => freshRead().effectiveSelector,
         since,
         limit,
         "accountless",
@@ -339,13 +339,12 @@ export function createLinkReadRoutes(
                 signal: request.signal,
                 shouldPark: () => {
                   try {
-                    const fresh = freshRead();
                     const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
                     if (currentEpochLogFloor !== epochLogFloor) return false;
                     const checked = filteredLogPage(
                       share.workspaceId,
                       share.shareId,
-                      fresh.effectiveSelector,
+                      () => freshRead().effectiveSelector,
                       scanSince,
                       limit,
                       "accountless",
@@ -372,12 +371,11 @@ export function createLinkReadRoutes(
             throw error;
           }
 
-          const fresh = freshRead();
           const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
           page = filteredLogPage(
             share.workspaceId,
             share.shareId,
-            fresh.effectiveSelector,
+            () => freshRead().effectiveSelector,
             Math.max(scanSince, currentEpochLogFloor),
             limit,
             "accountless",
@@ -408,12 +406,11 @@ export function createLinkReadRoutes(
             );
           }
         }
-        const fresh = freshRead();
         const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
         page = filteredLogPage(
           share.workspaceId,
           share.shareId,
-          fresh.effectiveSelector,
+          () => freshRead().effectiveSelector,
           Math.max(scanSince, currentEpochLogFloor),
           limit,
           "accountless",
@@ -458,7 +455,7 @@ export function createLinkReadRoutes(
             capability.credential.kind === "member" || capability.access === "edit"
               ? linkRevisionByteLength(
                   share.workspaceId,
-                  capability.effectiveSelector,
+                  () => requireFresh().effectiveSelector,
                   route.sha256,
                   epochLogFloor,
                 )

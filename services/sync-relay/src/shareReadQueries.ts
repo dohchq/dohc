@@ -7,6 +7,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { createHmac } from "node:crypto";
 import { asRecord } from "@dohc/workspace-core";
+import { readAuthorized } from "./shareAuthorization";
 import { COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
   boundaryMove,
@@ -15,7 +16,6 @@ import {
   hasValidShareMomentShape,
   fileSideOf,
   isGroupSelector,
-  isWorkspaceSelector,
   parseShareOpPayloadWithReferencedPaths,
   pathVisibleThroughShare,
   targetVersionId,
@@ -66,17 +66,11 @@ export function createShareReadQueries(
     | "isCurrentFileState"
     | "listCurrentFileLogRowsByBlob"
     | "indexReceivedWorkTargets"
-    | "readMemberReach"
     | "readShareTx"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
 ) {
-  const inRead = <T>(selector: AnyShareSelector, run: () => T): T =>
-    (isWorkspaceSelector(selector) || (!("kind" in selector) && "reach" in selector)) &&
-    storage.readShareTx
-      ? storage.readShareTx(run)
-      : run();
   // The thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -213,7 +207,7 @@ export function createShareReadQueries(
   const filteredLogPage = (
     workspaceId: string,
     shareId: string,
-    selector: AnyShareSelector,
+    authorize: () => AnyShareSelector,
     since: number,
     limit: number,
     audience: "authenticated" | "accountless",
@@ -230,8 +224,7 @@ export function createShareReadQueries(
       string,
       Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number]
     >();
-    const page = inRead(selector, () => {
-      selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
+    const page = readAuthorized(storage, authorize, (selector) => {
       const identity = createReceivedIdentity(
         linkKey,
         (recipient, workspaceId, objectId, objectToken) => {
@@ -416,7 +409,6 @@ export function createShareReadQueries(
     | { lastSettledAtMs: number; lastSettledKnown: true }
     | { lastSettledAtMs: null; lastSettledKnown: true }
     | { lastSettledAtMs: null; lastSettledKnown: false } => {
-    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
     const fileSelector = fileSideOf(selector);
@@ -472,11 +464,8 @@ export function createShareReadQueries(
     ) {
       return null;
     }
-    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
     const fileSelector = fileSideOf(selector);
     if (!fileSelector) return null;
-    // A member's reach also judges objects, so the filter keeps a workspace selector whole.
-    const filterSelector = isWorkspaceSelector(selector) ? selector : fileSelector;
     selector = fileSelector;
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
@@ -484,7 +473,7 @@ export function createShareReadQueries(
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
         const decision = filterOpForShare(
-          filterSelector,
+          selector,
           row.opKind,
           row.payloadJson,
           chatResolver,
@@ -524,7 +513,7 @@ export function createShareReadQueries(
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const reachable = candidates.some((row) => {
-      const decision = filterOpForShare(filterSelector, row.opKind, row.payloadJson, chatResolver);
+      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
       return decision.allowed && decision.blobSha256s.includes(sha256);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
@@ -542,8 +531,6 @@ export function createShareReadQueries(
     sha256: string,
     epochLogFloor: number,
   ): number | null => {
-    const refreshed = storage.readMemberReach?.(selector, workspaceId);
-    if (refreshed && !("kind" in refreshed)) selector = refreshed;
     if ("reach" in selector && selector.reach)
       return namedShareBlob(workspaceId, selector, sha256)?.byteLength ?? null;
     const versionId = targetVersionId(selector);
@@ -599,12 +586,31 @@ export function createShareReadQueries(
   return {
     chatResolverFor,
     filteredLogPage,
-    newestFilteredOpFreshness: (...args: Parameters<typeof newestFilteredOpFreshness>) =>
-      inRead(args[1], () => newestFilteredOpFreshness(...args)),
-    namedShareBlob: (...args: Parameters<typeof namedShareBlob>) =>
-      inRead(args[1], () => namedShareBlob(...args)),
-    linkRevisionByteLength: (...args: Parameters<typeof linkRevisionByteLength>) =>
-      inRead(args[1], () => linkRevisionByteLength(...args)),
+    newestFilteredOpFreshness: (
+      workspaceId: string,
+      authorize: () => AnyShareSelector,
+      epochLogFloor: number,
+    ) =>
+      readAuthorized(storage, authorize, (selector) =>
+        newestFilteredOpFreshness(workspaceId, selector, epochLogFloor),
+      ),
+    namedShareBlob: (
+      workspaceId: string,
+      authorize: () => AnyShareSelector,
+      sha256: string,
+    ) =>
+      readAuthorized(storage, authorize, (selector) =>
+        namedShareBlob(workspaceId, selector, sha256),
+      ),
+    linkRevisionByteLength: (
+      workspaceId: string,
+      authorize: () => ShareSelector,
+      sha256: string,
+      epochLogFloor: number,
+    ) =>
+      readAuthorized(storage, authorize, (selector) =>
+        linkRevisionByteLength(workspaceId, selector, sha256, epochLogFloor),
+      ),
   };
 }
 

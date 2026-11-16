@@ -208,7 +208,11 @@ export function createReplicaLinkReadService(
           }),
           nextCursor: s.authorized.grant.access === "edit" ? s.view.logCursor : state.head,
           epochLogFloor,
-          ...newestFilteredOpFreshness(s.workspace, s.authorized.effectiveSelector, epochLogFloor),
+          ...newestFilteredOpFreshness(
+            s.workspace,
+            () => s.authorized.effectiveSelector,
+            epochLogFloor,
+          ),
         };
       });
     },

@@ -12,7 +12,6 @@ import {
   type GroupShareSelector,
   type ShareSelector,
   type PathShareSelector,
-  pathLevel,
   type StoredAnyShareSelector,
   type WorkspaceShareSelector,
 } from "./shareFilter";
@@ -26,6 +25,19 @@ import {
   readCurrentShareGrant,
   type CurrentShareGrantPrincipal,
 } from "./storage/currentShareGrant";
+
+/**
+ * Authorizes and reads in one read transaction, so the read sees the grant
+ * and access rules it was authorized under. Inside a transaction already, it
+ * joins that one.
+ */
+export function readAuthorized<A, T>(
+  storage: Pick<SyncRelayStorage, "readShareTx">,
+  authorize: () => A,
+  read: (authorized: A) => T,
+): T {
+  return storage.readShareTx(() => read(authorize()));
+}
 
 export type ShareAction =
   | "read"

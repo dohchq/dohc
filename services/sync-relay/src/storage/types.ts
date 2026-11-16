@@ -1787,10 +1787,6 @@ export interface SyncRelayStorage {
     path: string;
     relaySeq: number;
   }): boolean;
-  readMemberReach(
-    selector: import("../shareFilter").AnyShareSelector,
-    workspaceId: string,
-  ): import("../shareFilter").AnyShareSelector;
   readShareTx<T>(read: () => T): T;
   memberInventory(
     shareId: string,

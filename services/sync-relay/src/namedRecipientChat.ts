@@ -31,7 +31,7 @@ import {
   type LogAuthorNameLookup,
 } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
-import type { AuthorizedShareAction } from "./shareAuthorization";
+import { readAuthorized, type AuthorizedShareAction } from "./shareAuthorization";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {
   chatSideOf,
@@ -651,15 +651,13 @@ export function createNamedRecipientChat(options: {
         return json(
           await readSharedChannelPage({
             storage,
-            read: workspace ? storage.readShareTx.bind(storage) : undefined,
             resolver: resolver ?? options.reads.chatResolverFor(share.workspaceId),
-            selector: authority.effectiveSelector,
             workspaceId: share.workspaceId,
             shareId,
             channelWireId,
             query: url.searchParams,
             comments: file && commentsOn(storage, share.workspaceId, file),
-            recheck,
+            authorize: () => recheck().effectiveSelector,
             activity: options.activity,
             waiter: `named:${actor.userId}`,
             signal: controller.signal,
@@ -721,8 +719,9 @@ function commentsOn(
 // first with `before`, or following with `since` and an optional hold. With
 // no channel, a follow of every Group a workspace share reaches, each message
 // naming its Group.
-// `recheck` throws once the reader's access has ended; it runs before every
-// read, including each wake of a hold, and before the page leaves.
+// `authorize` throws once the reader's access has ended, and otherwise
+// returns what they reach now. It runs inside every read, including each wake
+// of a hold, and again before the page leaves.
 // `project` is the reader's view of a message, and the byte budget counts it.
 // With `comments` instead of a channel, a page of one file's Comments.
 export async function readSharedChannelPage<Message extends { relaySeq: number }>(input: {
@@ -732,16 +731,15 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
     | "fetchChannelMessages"
     | "findThreadCreateLane"
     | "findThreadFirstMessageId"
+    | "readShareTx"
   >;
-  read?: <T>(run: () => T) => T;
   resolver: ChatShareThreadResolver;
-  selector: AnyShareSelector;
   workspaceId: string;
   shareId: string;
   channelWireId: string | null;
   comments?: FileComments | null;
   query: URLSearchParams;
-  recheck(): void;
+  authorize(): AnyShareSelector;
   activity: Pick<DiscussionActivityHub, "wait">;
   waiter: string;
   signal: AbortSignal;
@@ -749,7 +747,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
   project(message: PagedChatMessage): Message;
 }) {
-  const { query, recheck, project } = input;
+  const { query, authorize, project } = input;
   const following = query.has("since");
   const limit = Math.min(parseLimit(query.get("limit")), 100);
   const since = following ? cursor(query.get("since")) : null;
@@ -757,10 +755,8 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   if (!following && query.has("hold")) throw badRequest("hold requires since");
   const hold = following ? parseLinkLogHold(query.get("hold")) : 0;
   let position = following ? since : query.has("before") ? cursor(query.get("before")) : null;
-  const inRead = input.read ?? (<T>(run: () => T): T => run());
   const readPage = () =>
-    inRead(() => {
-      recheck();
+    readAuthorized(input.storage, authorize, (selector) => {
       const page = {
         workspaceId: input.workspaceId,
         cursor: position,
@@ -797,7 +793,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       for (const row of result.rows) {
         if (row.settlementAdmission?.status === "refused") continue;
         const decision = filterOpForShare(
-          input.selector,
+          selector,
           row.opKind,
           row.payloadJson,
           input.resolver,
@@ -866,7 +862,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       if (!caughtUp()) break;
     }
   }
-  recheck();
+  authorize();
   const envelope = {
     shareId: input.shareId,
     ...(input.comments

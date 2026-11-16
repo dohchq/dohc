@@ -1,5 +1,4 @@
 import type { MemberFolders } from "./shareFilter";
-import { isWorkspaceSelector, type AnyShareSelector } from "./shareFilter";
 import { memberReach } from "./storage/memberReach";
 import { currentAccessRuleSet } from "./storage/accessRules";
 import type { AccessRuleSet } from "@dohc/security-contract/access-rules";
@@ -2472,16 +2471,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const rules = currentAccessRuleSet(this.db, workspaceId);
     this.openRules.set(workspaceId, { changes, rules });
     return rules;
-  }
-
-  readMemberReach(selector: AnyShareSelector, _workspaceId: string): AnyShareSelector {
-    if (isWorkspaceSelector(selector) && selector.reach)
-      return { ...selector, reach: selector.reach.refresh() };
-    if (!("kind" in selector) && "reach" in selector && selector.reach) {
-      const reach = selector.reach.refresh();
-      return { ...selector, reach, levelAt: reach.levelAt };
-    }
-    return selector;
   }
 
   readShareTx<T>(read: () => T): T {

@@ -1,4 +1,4 @@
-import { isChatShareAccessValue, isShareAccessValue } from "@dohc/security-contract";
+import { isShareAccessValue } from "@dohc/security-contract";
 import {
   chatSideOf,
   groupChannelIsOrdinary,

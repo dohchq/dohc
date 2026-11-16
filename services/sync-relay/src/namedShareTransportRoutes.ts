@@ -222,10 +222,12 @@ export function createNamedShareTransportRoutes(
         : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
+      const authorizeRead = () =>
+        pullSelector(requireShareAction(route.shareId, actor.userId, "read").effectiveSelector);
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
-        readSelector,
+        authorizeRead,
         since,
         limit,
         "authenticated",
@@ -281,7 +283,7 @@ export function createNamedShareTransportRoutes(
           const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
-            pullSelector(fresh.effectiveSelector),
+            authorizeRead,
             scanSince,
             limit,
             "authenticated",
@@ -560,7 +562,11 @@ export function createNamedShareTransportRoutes(
       // ciphertext blob, a random hash — is the same generic 404 as a
       // nonexistent share.
       // Chat shares expose no blob because their filter decisions name none.
-      const blob = namedShareBlob(share.workspaceId, share.selector, route.sha256);
+      const blob = namedShareBlob(
+        share.workspaceId,
+        () => requireShareAction(route.shareId, actor.userId, "read").effectiveSelector,
+        route.sha256,
+      );
       if (!blob) throw notFound();
       // Re-check revocation immediately before returning the blob body: a
       // revoke that raced with this in-flight read must abort rather than

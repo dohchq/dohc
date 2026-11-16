@@ -22,8 +22,9 @@ function page(
 ) {
   const storage: Pick<
     Parameters<typeof createShareReadQueries>[0],
-    "fetchLogPage" | "hasRefusedSettlement" | "isCurrentFileState"
+    "fetchLogPage" | "hasRefusedSettlement" | "isCurrentFileState" | "readShareTx"
   > = {
+    readShareTx: (read) => read(),
     hasRefusedSettlement: () => false,
     isCurrentFileState: () => true,
     fetchLogPage: () => ({
@@ -48,7 +49,7 @@ function page(
     storage as unknown as Parameters<typeof createShareReadQueries>[0],
     500,
   );
-  return queries.filteredLogPage("workspace", shareId, selector, 0, 10, audience);
+  return queries.filteredLogPage("workspace", shareId, () => selector, 0, 10, audience);
 }
 
 describe("authenticated selected moment declarations", () => {
@@ -259,6 +260,7 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
   ];
   const storage = {
     isCurrentFileState: () => true,
+    readShareTx: <T>(read: () => T) => read(),
     fetchLogPage: ({ sinceRelaySeq }: { sinceRelaySeq: number }) => ({
       rows: rows.filter((row) => row.relaySeq > sinceRelaySeq),
       nextCursor: 3,
@@ -282,7 +284,14 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
     storage as unknown as Parameters<typeof createShareReadQueries>[0],
     500,
   );
-  const served = queries.filteredLogPage("workspace", "share", selector, 0, 10, "authenticated");
+  const served = queries.filteredLogPage(
+    "workspace",
+    "share",
+    () => selector,
+    0,
+    10,
+    "authenticated",
+  );
   expect(served.ops.map((op) => op.relaySeq)).toEqual([1, 3]);
   expect(served.nextCursor).toBe(3);
   expect(served.ops[0]!.payload).toMatchObject({ authors });
@@ -295,7 +304,14 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
   });
   expect(rows[0]!.payloadJson).toBe(payloadJson);
   expect(JSON.parse(payloadJson)).not.toHaveProperty("authors");
-  const accountless = queries.filteredLogPage("workspace", "share", selector, 0, 10, "accountless");
+  const accountless = queries.filteredLogPage(
+    "workspace",
+    "share",
+    () => selector,
+    0,
+    10,
+    "accountless",
+  );
   expect(accountless.ops.map((op) => op.relaySeq)).toEqual([1, 3]);
   expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
 });
@@ -330,6 +346,7 @@ it("converts admitted automation to the ordinary moment format only for authenti
     settlementAdmission: { status: "accepted", settlementId: "automation" },
   };
   const storage = {
+    readShareTx: <T>(read: () => T) => read(),
     fetchLogPage: () => ({ rows: [row], nextCursor: 1, hasMore: false }),
     isCurrentFileState: () => true,
   };
@@ -338,7 +355,8 @@ it("converts admitted automation to the ordinary moment format only for authenti
     500,
   );
   expect(
-    queries.filteredLogPage("workspace", "share", selector, 0, 10, "authenticated").ops[0]?.payload,
+    queries.filteredLogPage("workspace", "share", () => selector, 0, 10, "authenticated").ops[0]
+      ?.payload,
   ).toMatchObject({
     authors: [
       {
@@ -350,7 +368,8 @@ it("converts admitted automation to the ordinary moment format only for authenti
     ],
   });
   expect(
-    queries.filteredLogPage("workspace", "share", selector, 0, 10, "accountless").ops[0]?.payload,
+    queries.filteredLogPage("workspace", "share", () => selector, 0, 10, "accountless").ops[0]
+      ?.payload,
   ).not.toHaveProperty("authors");
   expect(row.admittedAuthorSnapshot).toEqual(authors);
 });
@@ -375,6 +394,7 @@ it.each([
     }),
   }));
   const storage = {
+    readShareTx: <T>(read: () => T) => read(),
     currentObjectFile,
     fetchLogPage: () => ({ rows, nextCursor: 2, hasMore: false }),
     indexReceivedWorkTargets: () => {},
@@ -388,7 +408,7 @@ it.each([
     queries.filteredLogPage(
       "workspace",
       "share",
-      selector,
+      () => selector,
       0,
       500,
       "accountless",

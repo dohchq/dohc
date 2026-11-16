@@ -16,7 +16,7 @@ import {
   pathLevel,
   type ChatShareThreadResolver,
 } from "./shareFilter";
-import type { AuthorizedShareAction } from "./shareAuthorization";
+import { readAuthorized, type AuthorizedShareAction } from "./shareAuthorization";
 import type { SyncRelayStorage } from "./storage";
 import { parseCursor, parseString, readJsonObject } from "./requestInputs";
 import { badRequest, notFound, relayError } from "./errors";
@@ -78,9 +78,8 @@ export function createPresenceRoutes(
   nowMs: () => number,
   storage: Pick<
     SyncRelayStorage,
-    "workspaceIsOwnedBy" | "currentObjectPath" | "captureReadRevisionMatches"
-  > &
-    Partial<Pick<SyncRelayStorage, "readShareTx">>,
+    "workspaceIsOwnedBy" | "currentObjectPath" | "captureReadRevisionMatches" | "readShareTx"
+  >,
   claimPendingShares: (userId: string) => Promise<void>,
   requireShareAction: (
     shareId: string,
@@ -91,7 +90,6 @@ export function createPresenceRoutes(
   lookupLabel?: (userId: string) => string | null | Promise<string | null>,
 ) {
   const project = createPresenceProjection(lookupLabel, nowMs);
-  const inRead = <T>(run: () => T): T => (storage.readShareTx ? storage.readShareTx(run) : run());
   const editsTopic = (authorized: AuthorizedShareAction, topic: string): boolean => {
     const files = fileSideOf(authorized.effectiveSelector);
     if (!files) return false;
@@ -129,26 +127,30 @@ export function createPresenceRoutes(
     return true;
   };
   const authorizeShare = (shareId: string, userId: string, topic: string) =>
-    inRead(() => {
-      const authorized = requireShareAction(shareId, userId, "presence");
-      const resolver = chatResolverFor(authorized.share.workspaceId);
-      const objectTopic = authorizeObject(authorized.share.workspaceId, topic, authorized);
-      if (!objectTopic) {
-        // A path spelled like an existing channel never grants that channel's attribution.
-        const thread = parseChatThreadTopic(topic);
-        const channelTopic =
-          thread !== null
-            ? resolver.threadChannelWireId(thread) != null
-            : resolver.channelKind(topic) != null;
-        // A workspace share answers for each Group itself.
-        const selector =
-          channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
-            ? chatSideOf(authorized.effectiveSelector)
-            : authorized.effectiveSelector;
-        if (!selector || !presenceTopicAllowedForShare(selector, topic, resolver)) throw notFound();
-      }
-      return authorized;
-    });
+    readAuthorized(
+      storage,
+      () => requireShareAction(shareId, userId, "presence"),
+      (authorized) => {
+        const resolver = chatResolverFor(authorized.share.workspaceId);
+        const objectTopic = authorizeObject(authorized.share.workspaceId, topic, authorized);
+        if (!objectTopic) {
+          // A path spelled like an existing channel never grants that channel's attribution.
+          const thread = parseChatThreadTopic(topic);
+          const channelTopic =
+            thread !== null
+              ? resolver.threadChannelWireId(thread) != null
+              : resolver.channelKind(topic) != null;
+          // A workspace share answers for each Group itself.
+          const selector =
+            channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
+              ? chatSideOf(authorized.effectiveSelector)
+              : authorized.effectiveSelector;
+          if (!selector || !presenceTopicAllowedForShare(selector, topic, resolver))
+            throw notFound();
+        }
+        return authorized;
+      },
+    );
 
   const preparedSnapshots = new WeakMap<
     PresenceSnapshot,
@@ -162,7 +164,7 @@ export function createPresenceRoutes(
     if (cached?.current()) return cached.value;
     for (let attempt = 0; attempt < 2; attempt++) {
       const current = storage.captureReadRevisionMatches();
-      const value = inRead(() => {
+      const value = storage.readShareTx(() => {
         const resolver = chatResolverFor(workspaceId);
         const thread = parseChatThreadTopic(topic);
         const chatAttribution =
@@ -211,11 +213,14 @@ export function createPresenceRoutes(
     const authorize = () => {
       // The edit check reads the object's path in the same cut as the grant.
       if (shareId)
-        return inRead(() => {
-          const authorized = authorizeShare(shareId, userId, topic);
-          if (authorized.share.workspaceId !== workspaceId) throw notFound();
-          return editsTopic(authorized, topic);
-        });
+        return readAuthorized(
+          storage,
+          () => authorizeShare(shareId, userId, topic),
+          (authorized) => {
+            if (authorized.share.workspaceId !== workspaceId) throw notFound();
+            return editsTopic(authorized, topic);
+          },
+        );
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
       return true;
     };

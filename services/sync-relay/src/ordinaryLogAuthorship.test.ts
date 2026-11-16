@@ -139,7 +139,7 @@ describe("ordinary admitted authorship", () => {
           const page = queries.filteredLogPage(
             "workspace",
             "share",
-            { paths: ["doc.md"], versionId: null, access: "view" },
+            () => ({ paths: ["doc.md"], versionId: null, access: "view" }),
             0,
             10,
             audience,
@@ -543,6 +543,7 @@ describe("ordinary admitted authorship", () => {
     const queries = createShareReadQueries(
       {
         ...storage,
+        readShareTx: (read) => storage.readShareTx(read),
         fetchLogPage: () => ({ rows: [row], nextCursor: 1, hasMore: false }),
         indexReceivedWorkTargets: () => {},
       },
@@ -552,7 +553,7 @@ describe("ordinary admitted authorship", () => {
       const page = queries.filteredLogPage(
         "workspace",
         "share",
-        { paths: ["doc.md"], versionId: null, access: "view" },
+        () => ({ paths: ["doc.md"], versionId: null, access: "view" }),
         0,
         10,
         audience,

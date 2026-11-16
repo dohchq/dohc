@@ -5,6 +5,7 @@ import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-mem
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { afterEach, describe, expect, it } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
+import { createShareReadQueries } from "./shareReadQueries";
 import {
   fenceAccount,
   initializeAccountDeletion,
@@ -29,6 +30,7 @@ import {
   sha256,
   testHandler,
   testStorage,
+  writeAfterTransaction,
 } from "./testing";
 
 afterEach(closeTestStorages);
@@ -465,6 +467,64 @@ describe("what a member reaches", () => {
         .run("members: comment\n", WORKSPACE);
       expect(level()).toBe("comment");
     });
+  });
+
+  // Authorization and the read share one transaction, so a rule change can
+  // land before or after both, never between them.
+  it("serves a member's read under the rules it was authorized with", async () => {
+    const { h, storage } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const hiding = await putBlob(h, OWNER, WORKSPACE, "");
+    const secret = await putBlob(h, OWNER, WORKSPACE, "SENTINEL written after hiding");
+    const hideDocsThenWrite = () =>
+      storage.appendLogBatch({
+        workspaceId: WORKSPACE,
+        originId: "origin-hide",
+        ops: [
+          ["docs/access.yaml", null, hiding],
+          ["docs/plan.md", ownerHeads.get("docs/plan.md")!, secret],
+        ].map(([path, before, after], originSeq) => {
+          const op = logOp("moment.append", {
+            momentId: `hide-${path}`,
+            versionId: "main",
+            objectId: `object-${path}`,
+            path,
+            recordedAtMs: 5_000,
+            operation: "write",
+            payloadBeforeBlobSha256: before,
+            payloadBeforePath: before ? path : null,
+            payloadAfterBlobSha256: after,
+            payloadAfterPath: path,
+            metadata: { origin: "user" },
+            beforePresent: "null",
+          });
+          return { ...op, originSeq, payloadJson: JSON.stringify(op.payload) };
+        }),
+      });
+    const page = createShareReadQueries(storage, 500).filteredLogPage(
+      WORKSPACE,
+      shareId,
+      () => {
+        const authorized = authorizeShareAction({
+          storage,
+          actorUserId: "ana",
+          shareId,
+          action: "read",
+        });
+        if (!authorized.ok) throw new Error(authorized.reason);
+        writeAfterTransaction(storage, hideDocsThenWrite);
+        return authorized.effectiveSelector;
+      },
+      0,
+      500,
+      "authenticated",
+    );
+    expect(JSON.stringify(page.ops)).toContain("docs/plan.md");
+    expect(JSON.stringify(page.ops)).not.toContain(secret);
+    const after = await pulledText(h, "ana", shareId);
+    expect(after).not.toContain("docs/plan.md");
+    expect(after).not.toContain(secret);
   });
 
   it("never serves a member a folder's access rule or a copy of one, and serves both to an admin", async () => {

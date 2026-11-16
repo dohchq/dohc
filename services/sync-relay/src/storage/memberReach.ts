@@ -30,7 +30,6 @@ export interface MemberReach {
   groupLevel(channelWireId: string): ShareAccess;
   /** Whether the member holds `level` in some Group. */
   hasGroupLevel(level: ShareAccess): boolean;
-  refresh(): MemberReach;
   revision: string;
   signature(): string;
   levelAt(path: string): ShareAccess | null;
@@ -162,7 +161,6 @@ export function memberReach(
     levelAt,
     folderLevel: atFolder,
     nearestRule: (path) => nearestRuleFolder(rules, path),
-    refresh: () => memberReach(db, workspaceId, userId, role, level),
     objectVisible: (id) => object(id).visible,
     objectPath: (id) => object(id).path,
   };
