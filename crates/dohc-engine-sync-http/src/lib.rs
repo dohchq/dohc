@@ -1520,7 +1520,6 @@ define_server_error_codes! {
     "host-start-failed" => |_| RelayError::Conflict,
     "host-not-loaded" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
-    "direct_alone" => |_| RelayError::Conflict,
     "direct_blocked" => |_| RelayError::Forbidden,
     "direct_limit_reached" => |_| RelayError::QuotaExceeded,
     "direct_message_id_taken" => |_| RelayError::Conflict,

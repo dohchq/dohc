@@ -68,7 +68,6 @@
   { "code": "member_removed", "status": 409 },
   { "code": "members_forbidden", "status": 403 },
   { "code": "direct_blocked", "status": 403 },
-  { "code": "direct_alone", "status": 409 },
   { "code": "direct_message_id_taken", "status": 409 },
   { "code": "direct_rate_limited", "status": 429 },
   { "code": "direct_limit_reached", "status": 413 },

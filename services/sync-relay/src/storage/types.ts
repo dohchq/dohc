@@ -1966,9 +1966,9 @@ export interface SyncRelayStorage {
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
   // Direct messages (storage/directMessages.ts).
-  resolveDirectPicks: DirectMessagesMethod<"resolveDirectPicks">;
+  resolveDirectPick: DirectMessagesMethod<"resolveDirectPick">;
   findDirectConversation: DirectMessagesMethod<"findDirectConversation">;
-  directPeople: DirectMessagesMethod<"directPeople">;
+  directPerson: DirectMessagesMethod<"directPerson">;
   sendDirectMessage: DirectMessagesMethod<"sendDirectMessage">;
   listDirectConversations: DirectMessagesMethod<"listDirectConversations">;
   readDirectMessages: DirectMessagesMethod<"readDirectMessages">;

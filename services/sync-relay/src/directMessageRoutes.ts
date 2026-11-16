@@ -4,9 +4,8 @@ import {
   DIRECT_MESSAGE_BODY_MAX_BYTES,
   DIRECT_PAGE_MAX,
   DIRECT_ROUTES,
-  MAX_DIRECT_PEOPLE,
   isDirectId,
-  isDirectPersonId,
+  isDirectMessageBody,
   type DirectConversationList,
   type DirectMemberPick,
   type DirectMessagePage,
@@ -70,19 +69,14 @@ export function directWaitGroup(userId: string): string {
 }
 
 type DirectRouteStorage = Pick<SyncRelayStorage,
-  | "resolveDirectPicks" | "findDirectConversation" | "directPeople" | "sendDirectMessage" | "listDirectConversations"
+  | "resolveDirectPick" | "findDirectConversation" | "directPerson" | "sendDirectMessage" | "listDirectConversations"
   | "readDirectMessages" | "markDirectRead" | "setDirectBlock" | "directRevision">;
 
-function parsePicks(value: unknown): DirectMemberPick[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length >= MAX_DIRECT_PEOPLE) {
-    throw badRequest(`people must list 1 to ${MAX_DIRECT_PEOPLE - 1} people`);
-  }
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw badRequest("each person is {workspaceId, memberId}");
-    const pick = entry as Record<string, unknown>;
-    if (typeof pick.workspaceId !== "string" || typeof pick.memberId !== "string") throw badRequest("each person is {workspaceId, memberId}");
-    return { workspaceId: parseWorkspaceId(pick.workspaceId), memberId: pick.memberId === "owner" ? "owner" : parseShareId(pick.memberId) };
-  });
+function parsePick(value: unknown): DirectMemberPick {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("person is {workspaceId, memberId}");
+  const pick = value as Record<string, unknown>;
+  if (typeof pick.workspaceId !== "string" || typeof pick.memberId !== "string") throw badRequest("person is {workspaceId, memberId}");
+  return { workspaceId: parseWorkspaceId(pick.workspaceId), memberId: pick.memberId === "owner" ? "owner" : parseShareId(pick.memberId) };
 }
 
 function parseCount(value: string | null, name: string): number | undefined {
@@ -117,9 +111,9 @@ export function createDirectMessageRoutes(options: {
   };
 
   const resolve = (userId: string, input: Record<string, unknown>) => {
-    const userIds = storage.resolveDirectPicks(userId, parsePicks(input.people));
-    if (!userIds) throw notFound();
-    return userIds;
+    const other = storage.resolveDirectPick(userId, parsePick(input.person));
+    if (!other) throw notFound();
+    return other;
   };
 
   return async function respondToDirectMessages(request: Request, route: DirectMessageRoute, actor: { userId: string }): Promise<Response> {
@@ -134,19 +128,19 @@ export function createDirectMessageRoutes(options: {
           revision: listed.revision,
           conversations: await Promise.all(listed.conversations.map(async (conversation) => ({
             ...conversation,
-            people: await Promise.all(conversation.people.map((person) => name(person.personId, person))),
-            last: conversation.last && await name(conversation.last.authorId, conversation.last),
+            person: await name(conversation.person.personId, conversation.person),
+            last: await name(conversation.last.authorId, conversation.last),
           }))),
         };
         return jsonResponse(body, 200, noStore);
       }
       case "direct-resolve": {
         if (request.method !== "POST") throw relayError("method_not_allowed");
-        const userIds = resolve(userId, await readJsonObject(request));
-        const name = namer();
+        const other = resolve(userId, await readJsonObject(request));
+        const person = storage.directPerson(userId, other);
         const body: DirectResolution = {
-          conversationId: storage.findDirectConversation(userId, userIds),
-          people: await Promise.all(storage.directPeople(userId, userIds).map((person) => name(person.personId, person))),
+          conversationId: storage.findDirectConversation(userId, other),
+          person: await namer()(person.personId, person),
         };
         return jsonResponse(body, 200, noStore);
       }
@@ -154,23 +148,20 @@ export function createDirectMessageRoutes(options: {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         const input = await readJsonObject(request);
         if (!isDirectId(input.messageId)) throw badRequest("messageId is invalid");
-        if (typeof input.body !== "string" || !input.body.trim() || Buffer.byteLength(input.body) > DIRECT_MESSAGE_BODY_MAX_BYTES) {
-          throw badRequest(`body must be 1 to ${DIRECT_MESSAGE_BODY_MAX_BYTES} bytes`);
-        }
-        if ((input.conversationId === undefined) === (input.people === undefined)) throw badRequest("send names a conversationId or people");
-        let target: { conversationId: string } | { userIds: string[] };
+        if (!isDirectMessageBody(input.body)) throw badRequest(`body must be 1 to ${DIRECT_MESSAGE_BODY_MAX_BYTES} bytes`);
+        if ((input.conversationId === undefined) === (input.person === undefined)) throw badRequest("send names a conversationId or a person");
+        let target: { conversationId: string } | { personId: string };
         if (input.conversationId !== undefined) {
           if (!isDirectId(input.conversationId)) throw badRequest("conversationId is invalid");
           target = { conversationId: input.conversationId };
         } else {
-          target = { userIds: resolve(userId, input) };
+          target = { personId: resolve(userId, input) };
         }
         const result = storage.sendDirectMessage({ callerUserId: userId, target, messageId: input.messageId, body: input.body, nowMs: options.nowMs(), newId: options.newId });
         if (!result.ok) {
           switch (result.reason) {
             case "not_found": throw notFound();
             case "blocked": throw relayError("direct_blocked");
-            case "alone": throw relayError("direct_alone");
             case "message_id_taken": throw relayError("direct_message_id_taken");
             case "rate_limited": throw relayError("direct_rate_limited");
             case "limit_reached": throw relayError("direct_limit_reached");
@@ -207,8 +198,8 @@ export function createDirectMessageRoutes(options: {
       case "direct-block": {
         if (request.method !== "POST") throw relayError("method_not_allowed");
         const input = await readJsonObject(request);
-        if (!isDirectPersonId(input.personId) || typeof input.blocked !== "boolean") throw badRequest("block takes {personId, blocked}");
-        if (!storage.setDirectBlock({ viewerUserId: userId, conversationId: route.conversationId, personId: input.personId, blocked: input.blocked, nowMs: options.nowMs() })) {
+        if (typeof input.blocked !== "boolean") throw badRequest("block takes {blocked}");
+        if (!storage.setDirectBlock({ viewerUserId: userId, conversationId: route.conversationId, blocked: input.blocked, nowMs: options.nowMs() })) {
           throw notFound();
         }
         wake([userId]);

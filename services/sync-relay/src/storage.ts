@@ -1958,14 +1958,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
     return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
   }
-  resolveDirectPicks(...args: Parameters<SyncRelayStorage["resolveDirectPicks"]>) {
-    return directMessagesStorage.resolveDirectPicks(this, ...args);
+  resolveDirectPick(...args: Parameters<SyncRelayStorage["resolveDirectPick"]>) {
+    return directMessagesStorage.resolveDirectPick(this, ...args);
   }
   findDirectConversation(...args: Parameters<SyncRelayStorage["findDirectConversation"]>) {
     return directMessagesStorage.findDirectConversation(this, ...args);
   }
-  directPeople(...args: Parameters<SyncRelayStorage["directPeople"]>) {
-    return directMessagesStorage.directPeople(this, ...args);
+  directPerson(...args: Parameters<SyncRelayStorage["directPerson"]>) {
+    return directMessagesStorage.directPerson(this, ...args);
   }
   sendDirectMessage(...args: Parameters<SyncRelayStorage["sendDirectMessage"]>) {
     return directMessagesStorage.sendDirectMessage(this, ...args);

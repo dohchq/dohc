@@ -1,14 +1,12 @@
 import { isRecord } from "@dohc/workspace-core/records";
 
 // Direct messages: the wire contract between the relay, the desktop app, and
-// the browser. A conversation belongs to a set of accounts on one relay, not
-// to a workspace. The relay is the only authority; a reader treats a response
-// these checks refuse as unreadable, never as a narrower answer.
+// the browser. A conversation is between two accounts on one relay and
+// belongs to no workspace. The relay is the only authority; a reader treats a
+// response these checks refuse as unreadable, never as a narrower answer.
 //
 // See docs/engineering/plans/workspace-members.md, "Chats".
 
-/** The most people in one conversation, the sender included. */
-export const MAX_DIRECT_PEOPLE = 8;
 /** The longest message body, in UTF-8 bytes. */
 export const DIRECT_MESSAGE_BODY_MAX_BYTES = 16_384;
 /** The longest preview of a conversation's last message, in code points. */
@@ -19,6 +17,7 @@ export const DIRECT_PAGE_MAX = 200;
 export const DIRECT_ACTIVITY_MAX_WAIT_MS = 25_000;
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/u;
+/** A conversation or message id. */
 export function isDirectId(value: unknown): value is string {
   return typeof value === "string" && ID.test(value);
 }
@@ -28,13 +27,18 @@ export function isDirectPersonId(value: unknown): value is string {
   return typeof value === "string" && /^[!-~]{1,256}$/u.test(value);
 }
 
+/** Words to send: not only spaces, and at most DIRECT_MESSAGE_BODY_MAX_BYTES. */
+export function isDirectMessageBody(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && new TextEncoder().encode(value).length <= DIRECT_MESSAGE_BODY_MAX_BYTES;
+}
+
 /** A person picked from a workspace's member list. `memberId` is `"owner"` for the owner. */
 export interface DirectMemberPick {
   workspaceId: string;
   memberId: string;
 }
 
-/** Another person in a conversation. `personId` is their account id on this relay. */
+/** The other person in a conversation. `personId` is their account id on this relay. */
 export interface DirectPerson {
   personId: string;
   /** The account's name. Null when the account has none, or no longer exists. */
@@ -54,14 +58,12 @@ export interface DirectMessage {
 
 export interface DirectConversation {
   conversationId: string;
-  /** Everyone in the conversation except the viewer. */
-  people: DirectPerson[];
-  /** The newest message the viewer can read, its body cut to a preview. Null when every message is hidden from them. */
-  last: DirectMessage | null;
-  /** Messages from other people after the viewer's read mark. */
+  /** The other person. */
+  person: DirectPerson;
+  /** The newest message, its body cut to a preview. A conversation starts with its first message. */
+  last: DirectMessage;
+  /** Messages from the other person after the viewer's read mark. */
   unread: number;
-  /** True when the viewer blocks the only other person. */
-  blocked: boolean;
 }
 
 export interface DirectConversationList {
@@ -76,10 +78,10 @@ export interface DirectMessagePage {
   more: boolean;
 }
 
-/** What `resolve` answers: the conversation the people already have, or null when none exists yet. */
+/** What `resolve` answers: the conversation the two already have, or null when none exists yet. */
 export interface DirectResolution {
   conversationId: string | null;
-  people: DirectPerson[];
+  person: DirectPerson;
 }
 
 export interface DirectSendResult {
@@ -91,15 +93,15 @@ export interface DirectSendResult {
 export const DIRECT_ROUTES = {
   /** GET → DirectConversationList. */
   conversations: "/sync/direct/conversations",
-  /** POST {people: DirectMemberPick[]} → DirectResolution. */
+  /** POST {person: DirectMemberPick} → DirectResolution. */
   resolve: "/sync/direct/resolve",
-  /** POST {conversationId} or {people}, plus {messageId, body} → DirectSendResult. Creates the conversation with its first message. */
+  /** POST {conversationId} or {person}, plus {messageId, body} → DirectSendResult. Creates the conversation with its first message. */
   send: "/sync/direct/send",
   /** GET ?after=&before=&limit= → DirectMessagePage. */
   messages: "/sync/direct/conversations/:conversationId/messages",
   /** POST {seq} → {ok}. */
   read: "/sync/direct/conversations/:conversationId/read",
-  /** POST {personId, blocked} → {ok}. The person must share the conversation. */
+  /** POST {blocked} → {ok}. Blocks or unblocks the other person. */
   block: "/sync/direct/conversations/:conversationId/block",
   /** GET ?since=&waitMs= → {revision}. Answers once the account's revision passes `since`, or when the wait ends. */
   activity: "/sync/direct/activity",
@@ -131,11 +133,11 @@ function parseAll<T>(value: unknown, parse: (entry: unknown) => T | null): T[] |
 }
 
 export function parseDirectConversation(value: unknown): DirectConversation | null {
-  if (!isRecord(value) || !isDirectId(value.conversationId) || !isCount(value.unread) || typeof value.blocked !== "boolean") return null;
-  const people = parseAll(value.people, parseDirectPerson);
-  const last = value.last === null ? null : parseDirectMessage(value.last);
-  if (!people || people.length === 0 || people.length >= MAX_DIRECT_PEOPLE || (value.last !== null && last === null)) return null;
-  return { conversationId: value.conversationId, people, last, unread: value.unread, blocked: value.blocked };
+  if (!isRecord(value) || !isDirectId(value.conversationId) || !isCount(value.unread)) return null;
+  const person = parseDirectPerson(value.person);
+  const last = parseDirectMessage(value.last);
+  if (!person || !last) return null;
+  return { conversationId: value.conversationId, person, last, unread: value.unread };
 }
 
 export function parseDirectConversationList(value: unknown): DirectConversationList | null {
@@ -152,8 +154,8 @@ export function parseDirectMessagePage(value: unknown): DirectMessagePage | null
 
 export function parseDirectResolution(value: unknown): DirectResolution | null {
   if (!isRecord(value) || !(value.conversationId === null || isDirectId(value.conversationId))) return null;
-  const people = parseAll(value.people, parseDirectPerson);
-  return people && people.length > 0 ? { conversationId: value.conversationId, people } : null;
+  const person = parseDirectPerson(value.person);
+  return person ? { conversationId: value.conversationId, person } : null;
 }
 
 export function parseDirectSendResult(value: unknown): DirectSendResult | null {

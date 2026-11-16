@@ -1,4 +1,4 @@
-import { DIRECT_PAGE_MAX, DIRECT_PREVIEW_MAX_CHARS, MAX_DIRECT_PEOPLE, type DirectMemberPick } from "@dohc/security-contract/direct-messages";
+import { DIRECT_PAGE_MAX, DIRECT_PREVIEW_MAX_CHARS, type DirectMemberPick } from "@dohc/security-contract/direct-messages";
 import { accountIsFenced } from "./accountDeletion";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
@@ -6,23 +6,18 @@ import { workspaceRoleOf } from "./workspaceMembers";
 
 // Direct messages (docs/engineering/plans/workspace-members.md, "Chats").
 //
-// A conversation belongs to a set of accounts on this relay, and to no
-// workspace. `people_key` is that set at creation, as a sorted JSON array,
-// so one set of people has one conversation. A person reaches a
-// conversation only through their `direct_people` row; a workspace
-// membership matters only when someone picks a person from its member list.
+// A conversation is between two accounts on this relay and belongs to no
+// workspace. `people_key` is the pair, as a sorted JSON array, so two people
+// have one conversation. A person reaches a conversation only through their
+// `direct_people` row; a workspace membership matters only when someone picks
+// a person from its member list.
 //
-// A block stops the blocked person's new messages reaching the blocker. In a
-// two-person conversation the relay refuses them. In a larger one it stores
-// them with a `direct_hidden` row for the blocker, and every read, preview,
-// count, and wake leaves them out for good. Unblocking shows nothing that was
-// hidden.
+// A block refuses the blocked person's sends to the blocker. Nothing is hidden.
 
 const MARKER = "direct-messages-v1";
 const CONVERSATIONS = "sync_relay_direct_conversations";
 const PEOPLE = "sync_relay_direct_people";
 const MESSAGES = "sync_relay_direct_messages";
-const HIDDEN = "sync_relay_direct_hidden";
 const BLOCKS = "sync_relay_direct_blocks";
 const REVISIONS = "sync_relay_direct_revisions";
 const USAGE = "sync_relay_direct_usage";
@@ -40,7 +35,7 @@ export const DIRECT_MESSAGE_ROW_BYTES = 256;
 const SCHEMA = {
   [CONVERSATIONS]: `CREATE TABLE ${CONVERSATIONS} (
   conversation_id TEXT PRIMARY KEY CHECK (length(conversation_id) BETWEEN 1 AND 128),
-  people_key TEXT NOT NULL UNIQUE CHECK (json_valid(people_key) AND json_type(people_key) = 'array'),
+  people_key TEXT NOT NULL UNIQUE CHECK (json_valid(people_key) AND json_type(people_key) = 'array' AND json_array_length(people_key) = 2),
   created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
   last_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_seq >= 0)
 ) STRICT`,
@@ -62,14 +57,9 @@ const SCHEMA = {
   UNIQUE (conversation_id, message_id)
 ) STRICT`,
   idx_sync_relay_direct_messages_author: `CREATE INDEX idx_sync_relay_direct_messages_author ON ${MESSAGES}(author_user_id, created_at_ms)`,
+  // The new-conversation count reads only first messages. Through the author
+  // index it would visit every message the account sent that day.
   idx_sync_relay_direct_messages_started: `CREATE INDEX idx_sync_relay_direct_messages_started ON ${MESSAGES}(author_user_id, created_at_ms) WHERE seq = 1`,
-  [HIDDEN]: `CREATE TABLE ${HIDDEN} (
-  conversation_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  user_id TEXT NOT NULL,
-  PRIMARY KEY (conversation_id, user_id, seq),
-  FOREIGN KEY (conversation_id, seq) REFERENCES ${MESSAGES}(conversation_id, seq) ON DELETE CASCADE
-) STRICT, WITHOUT ROWID`,
   [BLOCKS]: `CREATE TABLE ${BLOCKS} (
   blocker_user_id TEXT NOT NULL,
   blocked_user_id TEXT NOT NULL CHECK (blocked_user_id <> blocker_user_id),
@@ -110,13 +100,13 @@ export function initializeDirectMessageSchema(db: SqliteDb): void {
 
 export interface DirectPersonRow { personId: string; name: string | null; blocked: boolean }
 export interface DirectMessageRow { seq: number; messageId: string; authorId: string; authorName: string | null; body: string; createdAtMs: number }
-export interface DirectConversationRow { conversationId: string; people: DirectPersonRow[]; last: DirectMessageRow | null; unread: number; blocked: boolean }
+export interface DirectConversationRow { conversationId: string; person: DirectPersonRow; last: DirectMessageRow; unread: number }
 
 export type DirectSendOutcome =
   | { ok: true; conversationId: string; seq: number; wake: string[] }
-  | { ok: false; reason: "not_found" | "blocked" | "alone" | "message_id_taken" | "rate_limited" | "limit_reached" };
+  | { ok: false; reason: "not_found" | "blocked" | "message_id_taken" | "rate_limited" | "limit_reached" };
 
-const peopleKey = (userIds: readonly string[]) => JSON.stringify([...new Set(userIds)].sort());
+const peopleKey = (a: string, b: string) => JSON.stringify([a, b].sort());
 
 function nameOf(storage: StorageContext, userId: string): string | null {
   const row = storage.db.prepare("SELECT display_name FROM sync_relay_account_names WHERE user_id = ?").get(userId);
@@ -127,9 +117,15 @@ function isPerson(storage: StorageContext, conversationId: string, userId: strin
   return !!storage.db.prepare(`SELECT 1 FROM ${PEOPLE} WHERE conversation_id = ? AND user_id = ?`).get(conversationId, userId);
 }
 
-function peopleOf(storage: StorageContext, conversationId: string): string[] {
+/** The other person in the pair. The pair is fixed at creation, so a deleted account keeps its place. */
+function otherOf(peopleKeyJson: unknown, viewerUserId: string): string {
+  const pair = JSON.parse(String(peopleKeyJson)) as [string, string];
+  return pair[0] === viewerUserId ? pair[1] : pair[0];
+}
+
+function conversationOther(storage: StorageContext, conversationId: string, viewerUserId: string): string | null {
   const row = storage.db.prepare(`SELECT people_key FROM ${CONVERSATIONS} WHERE conversation_id = ?`).get(conversationId);
-  return row ? (JSON.parse(String(row.people_key)) as string[]) : [];
+  return row ? otherOf(row.people_key, viewerUserId) : null;
 }
 
 function blocks(storage: StorageContext, blocker: string, blocked: string): boolean {
@@ -148,50 +144,43 @@ export function directRevision(storage: StorageContext, userId: string): number 
 }
 
 /**
- * The accounts behind people picked from member lists, with the caller. Null
- * unless the caller is in every named workspace now and every pick is its
- * owner or a current member there, so a refusal never says which pick failed.
+ * The account behind a person picked from a member list. Null unless the
+ * caller is in that workspace now and the pick is its owner or a current
+ * member there other than the caller.
  */
-export function resolveDirectPicks(storage: StorageContext, callerUserId: string, picks: readonly DirectMemberPick[]): string[] | null {
+export function resolveDirectPick(storage: StorageContext, callerUserId: string, pick: DirectMemberPick): string | null {
   return storage.readTx(() => {
-    if (accountIsFenced(storage, callerUserId)) return null;
-    const userIds = new Set([callerUserId]);
-    for (const pick of picks) {
-      if (!workspaceRoleOf(storage, pick.workspaceId, callerUserId)) return null;
-      const userId = pick.memberId === "owner"
-        ? storage.db.prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?").get(pick.workspaceId)?.owner_user_id
-        : storage.db.prepare(`SELECT user_id FROM sync_relay_workspace_members WHERE workspace_id = ? AND member_id = ? AND state = 'active'`)
-          .get(pick.workspaceId, pick.memberId)?.user_id;
-      if (typeof userId !== "string") return null;
-      const role = workspaceRoleOf(storage, pick.workspaceId, userId);
-      if (!role || role.memberId !== pick.memberId) return null;
-      userIds.add(userId);
-    }
-    if (userIds.size < 2 || userIds.size > MAX_DIRECT_PEOPLE) return null;
-    return [...userIds].sort();
+    if (accountIsFenced(storage, callerUserId) || !workspaceRoleOf(storage, pick.workspaceId, callerUserId)) return null;
+    const userId = pick.memberId === "owner"
+      ? storage.db.prepare("SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?").get(pick.workspaceId)?.owner_user_id
+      : storage.db.prepare(`SELECT user_id FROM sync_relay_workspace_members WHERE workspace_id = ? AND member_id = ? AND state = 'active'`)
+        .get(pick.workspaceId, pick.memberId)?.user_id;
+    if (typeof userId !== "string" || userId === callerUserId) return null;
+    const role = workspaceRoleOf(storage, pick.workspaceId, userId);
+    return role && role.memberId === pick.memberId ? userId : null;
   });
 }
 
-/** The conversation this exact set of people already has, if the caller is still in it. */
-export function findDirectConversation(storage: StorageContext, callerUserId: string, userIds: readonly string[]): string | null {
-  const row = storage.db.prepare(`SELECT conversation_id FROM ${CONVERSATIONS} WHERE people_key = ?`).get(peopleKey(userIds));
+/** The conversation the caller already has with this person, if any. */
+export function findDirectConversation(storage: StorageContext, callerUserId: string, otherUserId: string): string | null {
+  const row = storage.db.prepare(`SELECT conversation_id FROM ${CONVERSATIONS} WHERE people_key = ?`).get(peopleKey(callerUserId, otherUserId));
   const conversationId = row ? String(row.conversation_id) : null;
   return conversationId && isPerson(storage, conversationId, callerUserId) ? conversationId : null;
 }
 
-export function directPeople(storage: StorageContext, viewerUserId: string, userIds: readonly string[]): DirectPersonRow[] {
-  return userIds.filter((userId) => userId !== viewerUserId)
-    .map((userId) => ({ personId: userId, name: nameOf(storage, userId), blocked: blocks(storage, viewerUserId, userId) }));
+export function directPerson(storage: StorageContext, viewerUserId: string, userId: string): DirectPersonRow {
+  return { personId: userId, name: nameOf(storage, userId), blocked: blocks(storage, viewerUserId, userId) };
 }
 
 /**
- * Stores one message. With `userIds` it finds or creates that set's
- * conversation; a new one is refused when anyone in it blocks the caller.
- * A retried `messageId` with the same author and body answers its first seq.
+ * Stores one message. With `personId` it finds or creates the pair's
+ * conversation. A send is refused when the other person blocks the caller,
+ * or no longer holds the conversation. A retried `messageId` with the same
+ * author and body answers its first seq.
  */
 export function sendDirectMessage(storage: StorageContext, input: {
   callerUserId: string;
-  target: { conversationId: string } | { userIds: readonly string[] };
+  target: { conversationId: string } | { personId: string };
   messageId: string;
   body: string;
   nowMs: number;
@@ -200,27 +189,21 @@ export function sendDirectMessage(storage: StorageContext, input: {
   return storage.tx((): DirectSendOutcome => {
     const caller = input.callerUserId;
     if (accountIsFenced(storage, caller)) return { ok: false, reason: "not_found" };
-    let conversationId: string | null = null;
-    let create: { key: string; userIds: string[] } | null = null;
+    let conversationId: string | null;
+    let other: string;
     if ("conversationId" in input.target) {
-      if (!isPerson(storage, input.target.conversationId, caller)) return { ok: false, reason: "not_found" };
       conversationId = input.target.conversationId;
+      const found = isPerson(storage, conversationId, caller) ? conversationOther(storage, conversationId, caller) : null;
+      if (found === null) return { ok: false, reason: "not_found" };
+      other = found;
     } else {
-      const userIds = [...new Set(input.target.userIds)].sort();
-      if (!userIds.includes(caller) || userIds.length < 2 || userIds.length > MAX_DIRECT_PEOPLE) return { ok: false, reason: "not_found" };
-      const key = peopleKey(userIds);
-      const existing = storage.db.prepare(`SELECT conversation_id FROM ${CONVERSATIONS} WHERE people_key = ?`).get(key);
-      if (existing) {
-        conversationId = String(existing.conversation_id);
-        if (!isPerson(storage, conversationId, caller)) return { ok: false, reason: "not_found" };
-      } else {
-        if (userIds.some((userId) => userId !== caller && (blocks(storage, userId, caller) || accountIsFenced(storage, userId)))) {
-          return { ok: false, reason: "blocked" };
-        }
-        create = { key, userIds };
-      }
+      other = input.target.personId;
+      if (other === caller) return { ok: false, reason: "not_found" };
+      const existing = storage.db.prepare(`SELECT conversation_id FROM ${CONVERSATIONS} WHERE people_key = ?`).get(peopleKey(caller, other));
+      conversationId = existing ? String(existing.conversation_id) : null;
+      if (conversationId !== null && !isPerson(storage, conversationId, caller)) return { ok: false, reason: "not_found" };
     }
-    if (conversationId) {
+    if (conversationId !== null) {
       const retried = storage.db.prepare(`SELECT seq, author_user_id, body FROM ${MESSAGES} WHERE conversation_id = ? AND message_id = ?`)
         .get(conversationId, input.messageId);
       if (retried) {
@@ -228,46 +211,43 @@ export function sendDirectMessage(storage: StorageContext, input: {
           ? { ok: true, conversationId, seq: Number(retried.seq), wake: [] }
           : { ok: false, reason: "message_id_taken" };
       }
+      // A deleted account leaves its conversations.
+      if (!isPerson(storage, conversationId, other)) return { ok: false, reason: "not_found" };
+    } else if (accountIsFenced(storage, other)) {
+      return { ok: false, reason: "not_found" };
     }
+    if (blocks(storage, other, caller)) return { ok: false, reason: "blocked" };
     // Every limit is checked before anything is written, so a refusal leaves no empty conversation.
     const sentSince = (windowMs: number, firstOnly: boolean) => Number(storage.db.prepare(
       `SELECT count(*) AS n FROM ${MESSAGES} WHERE author_user_id = ? AND created_at_ms > ?${firstOnly ? " AND seq = 1" : ""}`,
     ).get(caller, input.nowMs - windowMs)!.n);
     if (sentSince(DIRECT_SEND_RATE_WINDOW_MS, false) >= DIRECT_SEND_RATE_LIMIT) return { ok: false, reason: "rate_limited" };
-    if (create && sentSince(DIRECT_NEW_CONVERSATION_WINDOW_MS, true) >= DIRECT_NEW_CONVERSATION_LIMIT) return { ok: false, reason: "rate_limited" };
+    if (conversationId === null && sentSince(DIRECT_NEW_CONVERSATION_WINDOW_MS, true) >= DIRECT_NEW_CONVERSATION_LIMIT) return { ok: false, reason: "rate_limited" };
     const bytes = Buffer.byteLength(input.body) + DIRECT_MESSAGE_ROW_BYTES;
     const stored = Number(storage.db.prepare(`SELECT stored_bytes FROM ${USAGE} WHERE user_id = ?`).get(caller)?.stored_bytes ?? 0);
     if (stored + bytes > DIRECT_STORED_BYTES_LIMIT) return { ok: false, reason: "limit_reached" };
 
-    if (create) {
+    if (conversationId === null) {
       conversationId = input.newId();
-      storage.db.prepare(`INSERT INTO ${CONVERSATIONS} (conversation_id, people_key, created_at_ms) VALUES (?, ?, ?)`).run(conversationId, create.key, input.nowMs);
+      storage.db.prepare(`INSERT INTO ${CONVERSATIONS} (conversation_id, people_key, created_at_ms) VALUES (?, ?, ?)`)
+        .run(conversationId, peopleKey(caller, other), input.nowMs);
       const person = storage.db.prepare(`INSERT INTO ${PEOPLE} (conversation_id, user_id) VALUES (?, ?)`);
-      for (const userId of create.userIds) person.run(conversationId, userId);
+      person.run(conversationId, caller);
+      person.run(conversationId, other);
     }
-    const id = conversationId!;
-    const others = storage.db.prepare(`SELECT user_id FROM ${PEOPLE} WHERE conversation_id = ? AND user_id <> ?`)
-      .all(id, caller).map((row) => String(row.user_id));
-    if (others.length === 0) return { ok: false, reason: "alone" };
-    const blockers = others.filter((userId) => blocks(storage, userId, caller));
-    // Two people: a block refuses. The original set decides, so a deleted account's place still counts.
-    if (blockers.length > 0 && peopleOf(storage, id).length === 2) return { ok: false, reason: "blocked" };
+    const id = conversationId;
     const seq = Number(storage.db.prepare(`UPDATE ${CONVERSATIONS} SET last_seq = last_seq + 1 WHERE conversation_id = ? RETURNING last_seq`)
       .get(id)!.last_seq);
     storage.db.prepare(`INSERT INTO ${MESSAGES} (conversation_id, seq, message_id, author_user_id, body, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(id, seq, input.messageId, caller, input.body, input.nowMs);
     storage.db.prepare(`INSERT INTO ${USAGE} (user_id, stored_bytes) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET stored_bytes = stored_bytes + excluded.stored_bytes`)
       .run(caller, bytes);
-    const hide = storage.db.prepare(`INSERT INTO ${HIDDEN} (conversation_id, seq, user_id) VALUES (?, ?, ?)`);
-    for (const userId of blockers) hide.run(id, seq, userId);
     storage.db.prepare(`UPDATE ${PEOPLE} SET read_seq = ? WHERE conversation_id = ? AND user_id = ?`).run(seq, id, caller);
-    const wake = [caller, ...others.filter((userId) => !blockers.includes(userId))];
+    const wake = [caller, other];
     bump(storage, wake);
     return { ok: true, conversationId: id, seq, wake };
   });
 }
-
-const VISIBLE = (viewer: string) => `NOT EXISTS (SELECT 1 FROM ${HIDDEN} h WHERE h.conversation_id = m.conversation_id AND h.seq = m.seq AND h.user_id = ${viewer})`;
 
 function messageRow(storage: StorageContext, row: Record<string, unknown>, preview: boolean): DirectMessageRow {
   const body = String(row.body);
@@ -283,27 +263,21 @@ export function listDirectConversations(storage: StorageContext, viewerUserId: s
   return storage.readTx(() => {
     if (accountIsFenced(storage, viewerUserId)) return { revision: 0, conversations: [] };
     const rows = storage.db.prepare(
-      `SELECT c.conversation_id, c.people_key, p.read_seq,
-         (SELECT max(m.seq) FROM ${MESSAGES} m WHERE m.conversation_id = c.conversation_id AND ${VISIBLE("p.user_id")}) AS last_seq,
-         (SELECT count(*) FROM ${MESSAGES} m WHERE m.conversation_id = c.conversation_id AND m.seq > p.read_seq
-            AND m.author_user_id <> p.user_id AND ${VISIBLE("p.user_id")}) AS unread
-       FROM ${PEOPLE} p JOIN ${CONVERSATIONS} c ON c.conversation_id = p.conversation_id
-       WHERE p.user_id = ? ORDER BY c.last_seq DESC`,
+      `SELECT c.people_key, m.*,
+         (SELECT count(*) FROM ${MESSAGES} u WHERE u.conversation_id = c.conversation_id AND u.seq > p.read_seq
+            AND u.author_user_id <> p.user_id) AS unread
+       FROM ${PEOPLE} p
+       JOIN ${CONVERSATIONS} c ON c.conversation_id = p.conversation_id
+       JOIN ${MESSAGES} m ON m.conversation_id = c.conversation_id AND m.seq = c.last_seq
+       WHERE p.user_id = ? ORDER BY m.created_at_ms DESC, c.conversation_id`,
     ).all(viewerUserId);
-    const conversations = rows.map((row): DirectConversationRow & { at: number } => {
-      const conversationId = String(row.conversation_id);
-      const people = directPeople(storage, viewerUserId, JSON.parse(String(row.people_key)) as string[]);
-      const lastRow = row.last_seq === null ? undefined
-        : storage.db.prepare(`SELECT * FROM ${MESSAGES} WHERE conversation_id = ? AND seq = ?`).get(conversationId, Number(row.last_seq));
-      const last = lastRow ? messageRow(storage, lastRow, true) : null;
-      return {
-        conversationId, people, last, unread: Number(row.unread),
-        blocked: people.length === 1 && people[0]!.blocked,
-        at: last?.createdAtMs ?? 0,
-      };
-    });
-    conversations.sort((a, b) => b.at - a.at || a.conversationId.localeCompare(b.conversationId));
-    return { revision: directRevision(storage, viewerUserId), conversations: conversations.map(({ at: _at, ...rest }) => rest) };
+    const conversations = rows.map((row): DirectConversationRow => ({
+      conversationId: String(row.conversation_id),
+      person: directPerson(storage, viewerUserId, otherOf(row.people_key, viewerUserId)),
+      last: messageRow(storage, row, true),
+      unread: Number(row.unread),
+    }));
+    return { revision: directRevision(storage, viewerUserId), conversations };
   });
 }
 
@@ -314,14 +288,13 @@ export function readDirectMessages(storage: StorageContext, viewerUserId: string
   return storage.readTx(() => {
     if (accountIsFenced(storage, viewerUserId) || !isPerson(storage, conversationId, viewerUserId)) return null;
     const limit = Math.max(1, Math.min(DIRECT_PAGE_MAX, page.limit));
-    const viewer = "?";
     if (page.after !== undefined) {
-      const rows = storage.db.prepare(`SELECT * FROM ${MESSAGES} m WHERE m.conversation_id = ? AND m.seq > ? AND ${VISIBLE(viewer)}
-        ORDER BY m.seq LIMIT ?`).all(conversationId, page.after, viewerUserId, limit + 1);
+      const rows = storage.db.prepare(`SELECT * FROM ${MESSAGES} WHERE conversation_id = ? AND seq > ? ORDER BY seq LIMIT ?`)
+        .all(conversationId, page.after, limit + 1);
       return { messages: rows.slice(0, limit).map((row) => messageRow(storage, row, false)), more: rows.length > limit };
     }
-    const rows = storage.db.prepare(`SELECT * FROM ${MESSAGES} m WHERE m.conversation_id = ? AND m.seq < ? AND ${VISIBLE(viewer)}
-      ORDER BY m.seq DESC LIMIT ?`).all(conversationId, page.before ?? Number.MAX_SAFE_INTEGER, viewerUserId, limit + 1);
+    const rows = storage.db.prepare(`SELECT * FROM ${MESSAGES} WHERE conversation_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`)
+      .all(conversationId, page.before ?? Number.MAX_SAFE_INTEGER, limit + 1);
     return { messages: rows.slice(0, limit).reverse().map((row) => messageRow(storage, row, false)), more: rows.length > limit };
   });
 }
@@ -337,17 +310,17 @@ export function markDirectRead(storage: StorageContext, viewerUserId: string, co
   });
 }
 
-/** Blocks or unblocks a person the viewer shares this conversation with. False when either is not in it. */
-export function setDirectBlock(storage: StorageContext, input: { viewerUserId: string; conversationId: string; personId: string; blocked: boolean; nowMs: number }): boolean {
+/** Blocks or unblocks the other person in this conversation. False when the viewer is not in it. */
+export function setDirectBlock(storage: StorageContext, input: { viewerUserId: string; conversationId: string; blocked: boolean; nowMs: number }): boolean {
   return storage.tx(() => {
-    const { viewerUserId, conversationId, personId } = input;
-    if (personId === viewerUserId || accountIsFenced(storage, viewerUserId) || !isPerson(storage, conversationId, viewerUserId)
-      || !peopleOf(storage, conversationId).includes(personId)) return false;
+    const { viewerUserId, conversationId } = input;
+    if (accountIsFenced(storage, viewerUserId) || !isPerson(storage, conversationId, viewerUserId)) return false;
+    const other = conversationOther(storage, conversationId, viewerUserId)!;
     if (input.blocked) {
       storage.db.prepare(`INSERT INTO ${BLOCKS} (blocker_user_id, blocked_user_id, created_at_ms) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`)
-        .run(viewerUserId, personId, input.nowMs);
+        .run(viewerUserId, other, input.nowMs);
     } else {
-      storage.db.prepare(`DELETE FROM ${BLOCKS} WHERE blocker_user_id = ? AND blocked_user_id = ?`).run(viewerUserId, personId);
+      storage.db.prepare(`DELETE FROM ${BLOCKS} WHERE blocker_user_id = ? AND blocked_user_id = ?`).run(viewerUserId, other);
     }
     bump(storage, [viewerUserId]);
     return true;

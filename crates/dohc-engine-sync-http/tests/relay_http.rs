@@ -915,7 +915,6 @@ fn expected_relay_error(code: &str) -> RelayError {
         "blob_not_found" => RelayError::BlobMissing,
         "conflict"
         | "dependents_changed"
-        | "direct_alone"
         | "direct_message_id_taken"
         | "link_name_already_set"
         | "member_exists"
