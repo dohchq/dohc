@@ -276,6 +276,7 @@ import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/set
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
 import { membershipRefreshFailure, otherAccountWords } from "./shell/membershipRefreshWords";
+import { joinedByAnother } from "../ipc/joinedAccountWords";
 import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
 import { removalFacts } from "./workspaceRemoval";
 import { PathLine } from "./ui/PathLine";
@@ -2501,7 +2502,8 @@ export function DesktopWorkspaceShell(props: {
   // The view keeps the role the relay last named, and the access check
   // refreshes it. The relay decides every admin action.
   const membershipRole = shareView?.membership ? shareView.role : undefined;
-  const shareViewWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
+  // What the pinned level allows. Main's Collection sends follow it alone.
+  const shareLevelWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
   // When another account than the one that joined is signed in, Members says
@@ -2513,6 +2515,9 @@ export function DesktopWorkspaceShell(props: {
   // same cause file that row instead of their own.
   const otherAccountApplies =
     membershipView && !shareViewEnded && cloudStatus?.connected === true && otherAccount;
+  // The level belongs to the account that joined, so while another is signed
+  // in every editor and create is read-only, as main refuses the write.
+  const shareViewWritable = shareLevelWritable && !otherAccountApplies;
   // About's Access follows a level change at once, as the composer does, and says when the membership ended.
   // While another account is signed in, it says so in the band's words instead of reading Members.
   const otherAccountEmail = otherAccountApplies ? (cloudStatus?.email ?? null) : undefined;
@@ -2590,18 +2595,20 @@ export function DesktopWorkspaceShell(props: {
   const shareViewWritableRef = useRef(shareViewWritable);
   shareViewWritableRef.current = shareViewWritable;
   const shareHadEditRef = useRef(shareView?.access === "edit");
-  if (shareViewWritable) shareHadEditRef.current = true;
+  if (shareLevelWritable) shareHadEditRef.current = true;
   const shareReopenMessage =
     "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays.";
   const shareWriteRefusal = shareViewEnded
     ? shareEndedRefusal
-    : shareViewDamaged
-      ? !shareView?.recipientUserId || needsReopenFor === shareView
-        ? shareReopenMessage
-        : "dohc can't read what this share grants. Open the share again to restore it."
-      : shareHadEditRef.current
-        ? "Your access to this share changed. Ask for Edit access, then reopen the share."
-        : "This share does not have Edit access.";
+    : otherAccountApplies && shareLevelWritable
+      ? joinedByAnother(cloudStatus?.email ?? null)
+      : shareViewDamaged
+        ? !shareView?.recipientUserId || needsReopenFor === shareView
+          ? shareReopenMessage
+          : "dohc can't read what this share grants. Open the share again to restore it."
+        : shareHadEditRef.current
+          ? "Your access to this share changed. Ask for Edit access, then reopen the share."
+          : "This share does not have Edit access.";
   const shareWriteRefusalRef = useRef(shareWriteRefusal);
   shareWriteRefusalRef.current = shareWriteRefusal;
   useEffect(() => {
@@ -7042,7 +7049,7 @@ export function DesktopWorkspaceShell(props: {
     sharedView: !!shareView,
     membership: membershipView,
     workspaceName: workspaceName(props.workspace),
-    enabled: shareViewWritable,
+    enabled: shareLevelWritable,
     otherAccount,
     ready: workspaceIsReady,
     ownerName: shareGranterName,

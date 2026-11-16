@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { chatTabPath } from "./workbench/workbenchState";
 import { editorTabTestId } from "../testPins";
+import userEvent from "@testing-library/user-event";
+import { AUTOSAVE_DEBOUNCE_MS } from "./useAutosavedTextDraft";
 import { DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
 const JOINED: Workspace = {
@@ -123,6 +125,63 @@ describe("a joined workspace", () => {
     expect(screen.getByRole("button", { name: "Refresh explorer" })).toBeTruthy();
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe("Only the account that joined posts here.");
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+  });
+
+  // Main refuses a joined workspace's save under another account, so a text,
+  // code, JSON or CSV file is read-only too: an edit changes nothing, and
+  // neither autosave nor Save sends a write. That holds when the file opens
+  // that way and when another account signs in with it open. The second case
+  // first edits as the joined account, so the edit path is known to write.
+  it.each([
+    ["opened while another account is signed in", "notes.txt", false],
+    ["open when another account signs in", "notes.txt", true],
+    ["opened while another account is signed in", "data.json", false],
+    ["open when another account signs in", "data.json", true],
+    ["opened while another account is signed in", "table.csv", false],
+    ["open when another account signs in", "table.csv", true],
+  ] as const)("writes nothing from an editor %s (%s)", async (_state, path, switches) => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs([path])));
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path, kind: "file" }], folders: [] });
+    const csv = path.endsWith(".csv");
+    bridge.readWorkspaceText.mockResolvedValue({ text: csv ? "a,b\n1,2\n" : "base", truncated: false, contentHash: "a".repeat(64) });
+    const status = (joinedBySignedInAccount: boolean) => ({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: true, joinedBySignedInAccount });
+    bridge.cloudStatus.mockResolvedValue(status(switches));
+    const sessionListeners: Array<(event: { sessionKey: string | null; phase: "changing" | "ready" }) => void> = [];
+    bridge.onCloudSessionChanged.mockImplementation((listener) => { sessionListeners.push(listener); return () => {}; });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "edit" } }));
+    const saveState = () => screen.getByTestId(csv ? "csv-save-state" : path.endsWith(".json") ? "view-json-save-state" : "view-text-save-state");
+    const edit = async (typed: string) => {
+      if (csv) {
+        await user.type(screen.getAllByTestId("csv-cell")[0]!, typed);
+      } else {
+        const content = (await screen.findByTestId(path.endsWith(".json") ? "view-json-editor" : "view-text-editor")).querySelector(".cm-content") as HTMLElement;
+        await user.click(content);
+        await user.keyboard(`{End}${typed}`);
+      }
+    };
+    const shown = async () => csv ? (screen.getAllByTestId("csv-cell")[0] as HTMLInputElement).value
+      : (await screen.findByTestId(path.endsWith(".json") ? "view-json-editor" : "view-text-editor")).querySelector(".cm-content")!.textContent;
+    await waitFor(() => expect(saveState()).toBeTruthy());
+    if (switches) {
+      await waitFor(() => expect(saveState().textContent).not.toBe("Read-only"));
+      await edit(csv ? "joined" : " joined");
+      await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+      bridge.cloudStatus.mockResolvedValue(status(false));
+      act(() => { for (const listener of sessionListeners) listener({ sessionKey: "lee", phase: "ready" }); });
+    }
+    await waitFor(() => expect(screen.getByTestId("sync-status").textContent).toBe("Another account signed in"));
+    await waitFor(() => expect(saveState().textContent).toBe("Read-only"));
+    const before = await shown();
+    const writes = bridge.writeWorkspaceText.mock.calls.length;
+    await edit(csv ? "other" : " other");
+    await user.keyboard("{Control>}s{/Control}");
+    // Past the autosave delay, so a save the edit scheduled would have gone.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, AUTOSAVE_DEBOUNCE_MS + 200)); });
+    expect(await shown()).toBe(before);
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(writes);
   });
 
   it("says in About's Access that another account is signed in, with no Try again", async () => {
