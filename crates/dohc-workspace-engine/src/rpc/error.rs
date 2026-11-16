@@ -505,13 +505,65 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
 /// writes this line to the server's log, and an error's text can name a file.
 fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
     (code == ErrorCode::Internal).then(|| {
-        format!(
-            "engine: internal refusal: {} {}",
-            code.as_str(),
-            error.code()
-        )
+        let word = match error {
+            RuntimeError::Relay(relay) => relay_refusal_word(relay),
+            other => other.code().into(),
+        };
+        format!("engine: internal refusal: {} {word}", code.as_str())
     })
 }
+
+/// The code word of a relay failure that leaves as an internal error, so a log
+/// tells a retry that is expected from a fault. It holds no text from a
+/// workspace or from the relay's answer.
+fn relay_refusal_word(error: &RelayError) -> std::borrow::Cow<'static, str> {
+    match error {
+        RelayError::ServerInternal => "relay-server-internal".into(),
+        // The relay's own code is its text, which is not logged.
+        RelayError::UnknownServerCode(_) => "relay-unknown-server-code".into(),
+        RelayError::HttpStatus(status) => format!("relay-http-status-{status}").into(),
+        RelayError::ValidationPending(_) => "relay-validation-pending".into(),
+        RelayError::RepairPending => "relay-repair-pending".into(),
+        RelayError::PathOccupied { .. } => "sync-path-occupied".into(),
+        RelayError::ClaimRefused(reason) => relay_refusal_word(reason),
+        RelayError::Local(detail) => {
+            let head = detail.split(": ").next().unwrap_or_default();
+            LOCAL_FAILURE_WORDS
+                .iter()
+                .find(|word| **word == head)
+                .map_or("relay-local-state", |word| *word)
+                .into()
+        }
+        _ => "relay-failed".into(),
+    }
+}
+
+/// The engine's own words that the text of a local relay failure begins with,
+/// before its first `": "`. Only these are logged: the text is free, and a
+/// word that only looks like a code word could be a file's name. A word that
+/// is missing here is logged as `relay-local-state`.
+const LOCAL_FAILURE_WORDS: &[&str] = &[
+    // The same work is tried again.
+    "retryable-state",
+    "relay-io-pending",
+    "relay-io-aborted",
+    "relay-io-cancelled",
+    "owner-admission-pending",
+    "conflict-wait-limit",
+    "markdown-write-held",
+    "markdown-witness-check-pending",
+    "cancelled",
+    // Faults.
+    "state-corrupt",
+    "persist-failed",
+    "invalid-input",
+    "projection-too-large",
+    "document-too-dense",
+    "released-tails-unvalidated",
+    "released-tails-uncommitted",
+    "direct-write-plan-corrupt",
+    "relay-unix-socket-unavailable",
+];
 
 /// The error followed by each of its sources, for migration wire messages.
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
@@ -835,22 +887,76 @@ mod tests {
         use dohc_engine_storage::StorageError;
 
         for (error, message, line) in [
+            // A relay failure is named by its own word: a retry that is
+            // expected reads differently from a fault.
             (
                 RuntimeError::Relay(RelayError::Local(
                     "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object apollo, origin peer seq 7)".into(),
                 )),
                 "workspace operation failed",
-                "engine: internal refusal: INTERNAL relay-failed",
+                "engine: internal refusal: INTERNAL retryable-state",
+            ),
+            (
+                RuntimeError::Relay(RelayError::Local("state-corrupt".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL state-corrupt",
+            ),
+            (
+                RuntimeError::Relay(RelayError::ServerInternal),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-server-internal",
+            ),
+            (
+                RuntimeError::Relay(RelayError::HttpStatus(502)),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-http-status-502",
+            ),
+            (
+                RuntimeError::Relay(RelayError::RepairPending),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-repair-pending",
+            ),
+            // Only the engine's own words are logged. A file's name can have
+            // the same form as one.
+            (
+                RuntimeError::Relay(RelayError::Local("private-plan: could not be read".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
+            ),
+            (
+                RuntimeError::Relay(RelayError::Local("todo".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
+            ),
+            (
+                RuntimeError::Relay(RelayError::Local("notes/private plan.md: could not be read".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
             ),
             (
                 RuntimeError::Relay(RelayError::Local("object apollo\nforged\r\t\u{0}\u{1b}\u{85}".into())),
                 "workspace operation failed",
-                "engine: internal refusal: INTERNAL relay-failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
+            ),
+            (
+                RuntimeError::Relay(RelayError::Local("retryable-state\nforged".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
+            ),
+            (
+                RuntimeError::Relay(RelayError::Local(String::new())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-local-state",
             ),
             (
                 RuntimeError::Relay(RelayError::UnknownServerCode("unknown\nforged".into())),
                 "workspace operation failed",
-                "engine: internal refusal: INTERNAL relay-failed",
+                "engine: internal refusal: INTERNAL relay-unknown-server-code",
+            ),
+            (
+                RuntimeError::Relay(RelayError::UnknownServerCode("private-plan".into())),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL relay-unknown-server-code",
             ),
             (
                 RuntimeError::Identity {
