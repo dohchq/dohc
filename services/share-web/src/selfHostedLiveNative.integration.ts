@@ -25,7 +25,10 @@ import { createEngineClient } from "../../../packages/workspace-engine-client/sr
 import { YdocLiveAdapter } from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver } from "@dohc/workspace-auth/session";
+import {
+  createPhoneCapableAccountSessionResolver,
+  createSessionActorResolver,
+} from "@dohc/workspace-auth/session";
 import {
   initializeRelayDeployment,
   openRelayDeployment,
@@ -753,7 +756,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       limits: profile.namedLive.transport,
       bounds: profile.namedLive.host,
       validate,
-      resolveActor,
+      resolveAccountSession: createPhoneCapableAccountSessionResolver(relayAuth),
       captureNative,
     });
     closes.push(async () => ownerRoutes.close());

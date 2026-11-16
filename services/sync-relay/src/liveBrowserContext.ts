@@ -47,8 +47,20 @@ export interface PersonalLiveContext {
   readonly fenceEpoch: number;
 }
 
+/**
+ * Server-only context for one of a workspace owner's phone sign-ins. Its
+ * ticket ends no later than the sign-in, and only that sign-in redeems it.
+ */
+export interface OwnerPhoneLiveContext {
+  readonly kind: "owner";
+  readonly workspaceId: string;
+  readonly userId: string;
+  readonly sessionId: string;
+  readonly sessionExpiresAtMs: number;
+}
+
 /** Whoever a live ticket is minted for and redeemed by. */
-export type LiveTicketScope = LiveBrowserContext | PersonalLiveContext;
+export type LiveTicketScope = LiveBrowserContext | PersonalLiveContext | OwnerPhoneLiveContext;
 
 export function liveBrowserActor(
   scope: LinkLiveBrowserContext | AgentLiveContext,
@@ -59,8 +71,12 @@ export function liveBrowserActor(
 export function liveBrowserActor(
   scope: PersonalLiveContext,
 ): Extract<CurrentLiveBindingRequest["actor"], { kind: "personal" }>;
+export function liveBrowserActor(
+  scope: OwnerPhoneLiveContext,
+): Extract<CurrentLiveBindingRequest["actor"], { kind: "owner" }>;
 export function liveBrowserActor(scope: LiveTicketScope): CurrentLiveBindingRequest["actor"];
 export function liveBrowserActor(scope: LiveTicketScope): CurrentLiveBindingRequest["actor"] {
+  if (scope.kind === "owner") return { kind: "owner", userId: scope.userId };
   if (scope.kind === "named")
     return { kind: "named", userId: scope.userId, grantId: scope.grantId };
   if (scope.kind === "personal")

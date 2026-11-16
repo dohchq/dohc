@@ -10,7 +10,14 @@ import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver, UnauthorizedError } from "@dohc/workspace-auth/session";
+import {
+  createPhoneCapableAccountSessionResolver,
+  UnauthorizedError,
+  type AccountSession,
+  type StoredAccountSession,
+} from "@dohc/workspace-auth/session";
+import type { LiveRooms } from "./liveRoom.js";
+import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import {
   LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   createLiveFrameSession,
@@ -23,6 +30,7 @@ import { createSyncRelayHandler } from "./server.js";
 import {
   createOwnerLiveRoutes,
   createNamedLiveRoutes,
+  OWNER_SESSION_CHECK_MS,
   type NamedLiveRouteLimits,
 } from "./namedLiveRoutes.js";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth.js";
@@ -48,15 +56,29 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import type { SessionHostBlock } from "./linkRefusal";
 
-// The production resolver over the owner's own phone sign-in.
-const ownerPhone = createSessionActorResolver({
+// The production resolver over the owner's own phone sign-in, which a test may end sooner.
+let phoneExpiresAt = 8e12;
+const ownerPhone = createPhoneCapableAccountSessionResolver({
   api: {
     getSession: async () => ({
       user: { id: "owner-1" },
-      session: { id: "phone-session", userId: "owner-1", expiresAt: 8e12, clientKind: "phone" },
+      session: {
+        id: "phone-session",
+        userId: "owner-1",
+        expiresAt: phoneExpiresAt,
+        clientKind: "phone",
+      },
     }),
   },
 } as unknown as WorkspaceAuth);
+const phoneScope = {
+  kind: "owner" as const,
+  workspaceId: scope.workspaceId,
+  userId: "owner-1",
+  sessionId: "phone-session",
+  sessionExpiresAtMs: 8e12,
+};
+const phoneHeaders = { authorization: "Bearer owner-phone-token" };
 
 const exchangeKey = "test-exchange-key-".repeat(3),
   relayHost = "relay.example.test";
@@ -253,6 +275,7 @@ async function fixture(
   workspaceId = defaultScope.workspaceId,
   shareId = defaultScope.shareId,
   population?: { people: number; documents: number },
+  ownerRooms?: LiveRooms,
 ) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames,
@@ -367,7 +390,6 @@ async function fixture(
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
       if (!bearer) throw new UnauthorizedError();
-      if (bearer === "Bearer owner-phone-token") return await ownerPhone(request, workspaceId);
       return {
         userId:
           bearer === "Bearer owner-token"
@@ -390,6 +412,24 @@ async function fixture(
       workspaceId,
     };
   });
+  // The owner route's sign-ins: a phone's through the production resolver, any other as a desktop's.
+  const accountSession = vi.fn(async (request: Request): Promise<AccountSession> => {
+    if (request.headers.get("authorization") === phoneHeaders.authorization)
+      return await ownerPhone(request);
+    const { userId } = await actor(request, "");
+    return { userId, sessionId: `session-${userId}`, expiresAtMs: 8e12, clientKind: "desktop" };
+  });
+  const sessionRows = new Map<string, StoredAccountSession>([
+    ["phone-session", { userId: "owner-1", expiresAtMs: 8e12, clientKind: "phone" }],
+  ]);
+  const readSessions = vi.fn(
+    async (ids: readonly string[]) =>
+      new Map(
+        ids.flatMap((id): [string, StoredAccountSession][] =>
+          sessionRows.has(id) ? [[id, sessionRows.get(id)!]] : [],
+        ),
+      ),
+  );
   const application = createSyncRelayHandler({
     storage: state.storage,
     resolveActor: actor,
@@ -447,7 +487,10 @@ async function fixture(
   const routes = owner
     ? createOwnerLiveRoutes({
         storage: state.storage,
-        resolveActor: actor,
+        resolveAccountSession: accountSession,
+        accountSessions: { read: readSessions },
+        tickets,
+        ...(ownerRooms ? { rooms: ownerRooms } : {}),
         hosts: new Set([relayHost]),
         publicOrigin: audience,
         exchangeKey,
@@ -624,7 +667,7 @@ async function fixture(
       : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(
       `ws://127.0.0.1:${port}${target}`,
-      owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`],
+      owner && !token ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`],
       {
         headers: desktop
           ? { host: relayHost, authorization: "Bearer reader-token", ...extra }
@@ -770,6 +813,10 @@ async function fixture(
     changes,
     invalidated,
     actor,
+    accountSession,
+    sessionRows,
+    readSessions,
+    port,
     application,
     routes,
     desktopAdmission,
@@ -1353,7 +1400,7 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
   expect(await client.status).toBe(101);
   await client.until(() => client.received.some((frame) => frame.kind === "welcome"));
   expect(client.received[0]).toMatchObject({ kind: "welcome", hostEpoch: host.hostEpoch });
-  expect(f.actor.mock.calls[0]![0].headers.get("cookie")).toBeNull();
+  expect(f.accountSession.mock.calls[0]![0].headers.get("cookie")).toBeNull();
   expect(
     f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets").get(),
   ).toEqual({ count: 0 });
@@ -1398,6 +1445,234 @@ it("refuses a native capture for a different owner document", async () => {
   }));
   expect(await f.connect("").status).toBe(404);
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});
+
+describe("an owner's phone", () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+  const phoneFixture = (rooms?: LiveRooms, production = false) => {
+    phoneExpiresAt = 8e12;
+    return fixture(
+      production ? selfHostLiveProfile().namedLive.transport : limits,
+      false,
+      undefined,
+      true,
+      false,
+      production ? createLiveConnectionAdmission() : undefined,
+      production ? 1 : 0,
+      production ? 1 : 0,
+      production,
+      undefined,
+      undefined,
+      undefined,
+      rooms,
+    );
+  };
+  const mintPhone = async (f: Fixture, changed: Partial<typeof phoneScope> = {}) =>
+    (await f.tickets.mint({ objectId: f.binding.objectId }, { ...phoneScope, ...changed }))!;
+  // An upgrade with exactly these protocols, which a WebSocket client would refuse to send.
+  const upgradeStatus = (f: Fixture, protocols: string) =>
+    new Promise<number>((resolve, reject) => {
+      const request = httpRequest({
+        host: "127.0.0.1",
+        port: f.port,
+        path: `/sync/workspaces/${f.binding.workspaceId}/live/owner?objectId=${f.binding.objectId}&lineageClaimId=${f.binding.lineageClaimId}`,
+        headers: {
+          ...phoneHeaders,
+          host: relayHost,
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": Buffer.alloc(16, 7).toString("base64"),
+          "sec-websocket-protocol": protocols,
+        },
+      });
+      request.once("upgrade", (_response, socket) => {
+        socket.destroy();
+        resolve(101);
+      });
+      request.once("response", (response) => {
+        response.resume();
+        resolve(response.statusCode!);
+      });
+      request.once("error", reject);
+      request.end();
+    });
+  const openPhone = async (f: Fixture) => {
+    const phone = f.connect((await mintPhone(f)).token, "", phoneHeaders);
+    const desktop = f.connect("");
+    expect([await phone.status, await desktop.status]).toEqual([101, 101]);
+    return { phone, desktop };
+  };
+  // Pings the server until the phone's socket closes, then reports the close.
+  const closesWhileSending = async (phone: { ws: WebSocket }, invalidate: () => void) => {
+    const closed = once(phone.ws, "close");
+    const traffic = setInterval(() => {
+      if (phone.ws.readyState === WebSocket.OPEN) phone.ws.ping();
+    }, 5);
+    try {
+      invalidate();
+      await closed;
+    } finally {
+      clearInterval(traffic);
+    }
+  };
+
+  it("opens once per ticket, selects only the live protocol, and keeps its own capture with owner rooms on", async () => {
+    const join = vi.fn((captured: NamedFrameRoomHost) => captured);
+    const f = await phoneFixture({ join } as unknown as LiveRooms);
+    const { token } = await mintPhone(f);
+    const phone = f.connect(token, "", phoneHeaders);
+    expect(await phone.status).toBe(101);
+    expect(phone.ws.protocol).toBe("dohc-live-v1");
+    await phone.until(() => phone.received.some((frame) => frame.kind === "welcome"));
+    expect(f.readSessions).toHaveBeenCalledWith(["phone-session"]);
+    expect(join).not.toHaveBeenCalled();
+    expect(await f.connect(token, "", phoneHeaders).status).toBe(404);
+    expect(await f.connect("").status).toBe(101);
+    expect(join).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["a ticket for another sign-in", { sessionId: "other-session" }, phoneHeaders],
+    ["an expired ticket", {}, phoneHeaders],
+    ["a desktop that sends a ticket", {}, {}],
+  ] as const)("refuses %s", async (name, changed, headers) => {
+    const f = await phoneFixture();
+    const { token } = await mintPhone(f, changed);
+    if (name === "an expired ticket") f.setTime(31_000);
+    expect(await f.connect(token, "", headers).status).toBe(404);
+    expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+  });
+
+  it("refuses every other protocol offer without spending its ticket, and never logs one", async () => {
+    const f = await phoneFixture();
+    const { token } = await mintPhone(f);
+    const ticket = `dohc-live-ticket.${token}`;
+    const logs = (["log", "info", "warn", "error", "debug"] as const).map((level) =>
+      vi.spyOn(console, level),
+    );
+    for (const offer of [
+      "dohc-live-v1",
+      `dohc-live-v1, dohc-live-v1, ${ticket}`,
+      `dohc-live-v1, ${ticket}, ${ticket}`,
+      `dohc-live-v1, ${ticket}, chat`,
+      `dohc-live-v1, ${ticket},`,
+      ticket,
+      `dohc-live-v1, dohc-live-ticket.${token.toUpperCase()}`,
+    ])
+      expect(await upgradeStatus(f, offer), offer).toBe(404);
+    expect(await upgradeStatus(f, `${ticket}, dohc-live-v1`)).toBe(101);
+    expect(JSON.stringify(logs.flatMap((log) => log.mock.calls))).not.toContain(token);
+  });
+
+  it.each(["a revoke", "Show on phone turned off", "Show on phone off at a check", "a fence"])(
+    "closes at %s while frames flow, and leaves the host",
+    async (invalidation) => {
+      const f = await phoneFixture();
+      const { phone, desktop } = await openPhone(f);
+      await closesWhileSending(phone, () => {
+        if (invalidation === "a revoke") f.routes.stopSession("owner-1", "phone-session");
+        else if (invalidation === "a fence") f.routes.deleteAccount("owner-1", []);
+        else if (invalidation === "Show on phone turned off")
+          f.routes.stopPhoneWorkspace("owner-1", f.binding.workspaceId);
+        else {
+          f.storage.setShowOnPhone({
+            ownerUserId: "owner-1",
+            workspaceId: f.binding.workspaceId,
+            showOnPhone: false,
+          });
+          f.changes.notify();
+        }
+      });
+      expect(f.native.invalidated.aborted).toBe(false);
+      if (invalidation !== "a fence") expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+    },
+  );
+
+  it("closes when its sign-in expires, and not before", async () => {
+    const f = await phoneFixture();
+    // The clock stands still while both sockets open, so admission never races the expiry.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      phoneExpiresAt = Date.now() + 5_000;
+      const { phone, desktop } = await openPhone(f);
+      const closed = new Promise<void>((resolve) => phone.ws.once("close", () => resolve()));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(phone.ws.readyState).toBe(WebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(1);
+      await closed;
+      expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["deleted", "unreadable", "standing"])(
+    "reads its sign-in again each minute and closes when it is %s",
+    async (state) => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        const f = await phoneFixture();
+        const { phone, desktop } = await openPhone(f);
+        f.readSessions.mockClear();
+        if (state === "deleted") f.sessionRows.delete("phone-session");
+        if (state === "unreadable") f.readSessions.mockRejectedValueOnce(new Error("unreadable"));
+        const closed = new Promise<void>((resolve) => phone.ws.once("close", () => resolve()));
+        await vi.advanceTimersByTimeAsync(OWNER_SESSION_CHECK_MS);
+        expect(f.readSessions).toHaveBeenCalledOnce();
+        expect(f.readSessions).toHaveBeenCalledWith(["phone-session"]);
+        if (state === "standing") expect(phone.ws.readyState).toBe(WebSocket.OPEN);
+        else await closed;
+        expect(desktop.ws.readyState).toBe(WebSocket.OPEN);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "commits an edit past its last check before a revoke without answering it; past=%s",
+    async (past) => {
+      const f = await phoneFixture(undefined, true);
+      const phone = f.connect((await mintPhone(f)).token, "", phoneHeaders);
+      expect(await phone.status).toBe(101);
+      await openProductionSync(f, phone);
+      const updateBytes = Uint8Array.of(0, 0),
+        draining = deferred<void>(),
+        drained = deferred<void>();
+      const revoke = () => f.routes.stopSession("owner-1", "phone-session");
+      vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockImplementation(() => {
+        if (!past) revoke();
+        const cut = { checkpoint: { bytes: Uint8Array.of(0, 0) }, suffix: [] };
+        return { kind: "cut", cut: cut as unknown as LiveUpdateJournalCut };
+      });
+      const commit = vi.spyOn(f.storage, "commitLiveUpdateJournal").mockReturnValue({
+        result: {
+          kind: "accepted",
+          receipt: {
+            deliveryId: "edit",
+            updateDigest: createHash("sha256").update(updateBytes).digest("hex"),
+            journalCursor: 1,
+            acceptingHostEpoch: host.hostEpoch,
+          },
+        },
+      } as never);
+      vi.mocked(f.native.drain).mockImplementation(async () => {
+        draining.resolve();
+        await drained.promise;
+      });
+      const closed = once(phone.ws, "close");
+      submitUpdate(f, phone, "edit", 2);
+      if (past) {
+        await draining.promise;
+        revoke();
+      }
+      drained.resolve();
+      await closed;
+      expect(commit).toHaveBeenCalledTimes(past ? 1 : 0);
+      expect(phone.received.filter((frame) => frame.kind === "result")).toEqual([]);
+    },
+  );
 });
 
 it.each([

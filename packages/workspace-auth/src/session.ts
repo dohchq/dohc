@@ -121,6 +121,19 @@ export interface AccountSessions {
    * still current. False when either is missing, expired, or another account's.
    */
   revoke(input: { userId: string; callerSessionId: string; sessionId: string }): Promise<boolean>;
+  /**
+   * The sessions among these IDs that still exist, read from the table with no
+   * cache, expired ones included. A session missing from the map was deleted.
+   */
+  read(sessionIds: readonly string[]): Promise<Map<string, StoredAccountSession>>;
+}
+
+/** A session as the table holds it now. */
+export interface StoredAccountSession {
+  userId: string;
+  expiresAtMs: number;
+  /** Null when the row's kind is not one the server issues. */
+  clientKind: SessionKind | null;
 }
 
 // Reads Better Auth's session table directly, because its own list returns every session's token.
@@ -144,6 +157,33 @@ export function createPostgresAccountSessions(pool: Pool): AccountSessions {
         [sessionId, userId, callerSessionId],
       );
       return result.rowCount === 1;
+    },
+    async read(sessionIds) {
+      if (sessionIds.length === 0) return new Map();
+      const result = await pool.query<{
+        id: string;
+        userId: string;
+        expiresAt: Date;
+        clientKind: string;
+      }>(
+        'select "id", "userId", "expiresAt", "clientKind" from "session" where "id" = any($1::text[])',
+        [sessionIds],
+      );
+      return new Map(
+        result.rows.map((row) => [
+          row.id,
+          {
+            userId: row.userId,
+            expiresAtMs: row.expiresAt.getTime(),
+            clientKind:
+              row.clientKind === "phone" ||
+              row.clientKind === "desktop" ||
+              row.clientKind === "browser"
+                ? row.clientKind
+                : null,
+          },
+        ]),
+      );
     },
   };
 }

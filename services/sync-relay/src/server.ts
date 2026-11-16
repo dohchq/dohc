@@ -78,6 +78,7 @@ import {
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
 import { bearerAccountSession, createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -174,6 +175,8 @@ export interface CreateSyncRelayHandlerOptions {
   resolvePhoneCapableAccountSession?: ResolveAccountSession;
   // The accounts' sign-ins in Better Auth's session table, which the account routes list and revoke.
   accountSessions?: AccountSessions;
+  // The owner's live connections, which a revoke or Show on phone turned off ends before it answers.
+  ownerLiveSockets?: () => OwnerLiveSockets | undefined;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
   credentialFence?: CredentialFence;
   // This server's VAPID public key. Absent means alerts are unavailable here.
@@ -266,6 +269,7 @@ export function createSyncRelayHandler({
   resolveAccountSession,
   resolvePhoneCapableAccountSession,
   accountSessions,
+  ownerLiveSockets = () => undefined,
   credentialFence,
   pushVapidPublicKey,
   pushHosts,
@@ -607,10 +611,16 @@ export function createSyncRelayHandler({
     nowMs,
     automationHostRateLimiter,
   );
+  const ownerSockets: OwnerLiveSockets = {
+    stopSession: (userId, sessionId) => ownerLiveSockets()?.stopSession(userId, sessionId),
+    stopPhoneWorkspace: (userId, workspaceId) =>
+      ownerLiveSockets()?.stopPhoneWorkspace(userId, workspaceId),
+  };
   const respondToAccountWorkspaces = resolvePhoneCapableAccountSession
     ? createAccountWorkspaceRoutes({
         storage,
         resolveAccountSession: resolvePhoneCapableAccountSession,
+        sockets: ownerSockets,
       })
     : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
@@ -628,6 +638,7 @@ export function createSyncRelayHandler({
           resolveAccountSession: resolvePhoneCapableAccountSession,
           sessions: accountSessions,
           feedWaits: { wakeAccount: wakeAccountWaits },
+          sockets: ownerSockets,
         })
       : undefined;
   const respondToAccountOperation = resolvePhoneCapableAccountSession

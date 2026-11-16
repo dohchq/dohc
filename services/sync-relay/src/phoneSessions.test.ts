@@ -63,6 +63,7 @@ const sessions: AccountSessions = {
       userAgent: null,
     })),
   revoke: async () => true,
+  read: async () => new Map(),
 };
 
 async function relay() {

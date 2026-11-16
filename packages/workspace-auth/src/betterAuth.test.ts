@@ -627,6 +627,29 @@ describeWithPostgres("an account's sessions", () => {
     ).toBe(false);
     expect(await exists(currentId)).toBe(true);
   });
+
+  it("reads sessions by ID without a cache, expired ones included", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const sessions = createPostgresAccountSessions(pool);
+    const signedIn = await signIn(email, "phone");
+    const { id } = (
+      await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [
+        signedIn.token,
+      ])
+    ).rows[0]!;
+    await pool.query(
+      `update "session" set "expiresAt" = now() - interval '1 minute' where "id" = $1`,
+      [id],
+    );
+    const read = await sessions.read([id, "missing-session"]);
+    expect([...read.keys()]).toEqual([id]);
+    expect(read.get(id)).toMatchObject({ userId: user.id, clientKind: "browser" });
+    expect(read.get(id)!.expiresAtMs).toBeLessThan(Date.now());
+    await pool.query('delete from "session" where "id" = $1', [id]);
+    expect((await sessions.read([id])).size).toBe(0);
+    expect((await sessions.read([])).size).toBe(0);
+  });
 });
 
 describeWithPostgres("browser cookie sessions (web client)", () => {

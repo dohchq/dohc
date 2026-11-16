@@ -17,7 +17,10 @@ import {
 } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver } from "@dohc/workspace-auth/session";
+import {
+  createPhoneCapableAccountSessionResolver,
+  createSessionActorResolver,
+} from "@dohc/workspace-auth/session";
 import {
   initializeRelayDeployment,
   openRelayDeployment,
@@ -437,7 +440,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
           maxAdmissionBytes: 4000000,
         },
         validate,
-        resolveActor: createSessionActorResolver(relayAuth),
+        resolveAccountSession: createPhoneCapableAccountSessionResolver(relayAuth),
         captureNative,
       });
       closes.push(async () => routes.close());
