@@ -21,6 +21,7 @@ import {
 } from "@dohc/security-contract/chat-wire-ids";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
+import { logUnlessClosedCopy } from "./shareViewRebuild";
 import { recordedShareSelector } from "./shareViewRecords";
 import { shareViewLevels } from "./shareViewReach";
 import { joinedByAccount } from "./shareWriteGate";
@@ -598,24 +599,24 @@ export function createChatWrites(dependencies: {
       // A message can mark a live bookmark projection pending, and a person's
       // message can call an agent.
       projectChatBookmarks(workspaceId);
-      void scanChatDispatch(workspaceId).catch((error) => {
-        console.error("[desktop] chat dispatch scan:", error);
-      });
+      void scanChatDispatch(workspaceId).catch(
+        logUnlessClosedCopy("[desktop] chat dispatch scan:"),
+      );
     }
     if (shareViewIsPresent(findWorkspace(workspaceId)?.shareView)) {
       // A failed send stays queued in the view's store, and the next pull of
       // the view sends it again.
-      void pushShareViewChat(workspaceId).catch((error) => {
-        console.error("[desktop] joined workspace chat push:", error);
-      });
+      void pushShareViewChat(workspaceId).catch(
+        logUnlessClosedCopy("[desktop] joined workspace chat push:"),
+      );
       return;
     }
     queueCloudSync(workspaceId);
     // Naming the target puts its joined channel in this pass instead of
     // leaving it to the rotation.
-    void syncSharedChannelsForChatTarget(workspaceId, target).catch((error) => {
-      console.error("[desktop] shared channel sync:", error);
-    });
+    void syncSharedChannelsForChatTarget(workspaceId, target).catch(
+      logUnlessClosedCopy("[desktop] shared channel sync:"),
+    );
   }
 
   // A file chat has no author and belongs to no channel, so only the shared

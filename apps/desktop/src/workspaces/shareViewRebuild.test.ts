@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { deferred } from "../testing/deferred";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import {
+  EngineRequestError,
+  EngineWorkspaceRebuildingError,
+} from "@dohc/workspace-engine-client/daemon";
 import { RelayUnreachableError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import type { EngineYDocSessionReleaseOutcome } from "./engineYDocSessionOwner";
 import {
   classifyShareViewRebuildError,
+  closeLivePages,
   createShareViewRebuilds,
+  isClosedCopyRefusal,
+  LivePageUnkeptError,
+  shareViewRebuildStop,
   type ShareViewRebuildAnswer,
   type ShareViewRebuildNotice,
   type ShareViewRebuildSteps,
@@ -235,6 +243,93 @@ describe("rebuilding a joined copy", () => {
     });
     await expect(failing.run("w", "rebuild-1")).resolves.toEqual({ kind: "failed", error: held });
     expect(state.notices).toEqual([{ kind: "failed", error: held }]);
+  });
+
+  // Main closes every joined live page of the copy and waits for each. A page
+  // whose unsent edits could not be kept stops the close: nothing is rebuilt,
+  // and Try again closes the pages again.
+  it("stops the close with Try again when a live page can't keep its draft", async () => {
+    const { state } = copy([rebuilt({ revision: "r2", visibilityRevision: "v2" })]);
+    const unwritable = new Error("EACCES: the draft folder refused the write");
+    let pages: EngineYDocSessionReleaseOutcome[] = [
+      { kind: "released" },
+      { kind: "failed", error: unwritable },
+    ];
+    let rebuiltCalls = 0;
+    const rebuilds = createShareViewRebuilds<Reach>({
+      hold: async () => {
+        state.held = true;
+        try {
+          await closeLivePages(async () => pages);
+        } catch (error) {
+          state.held = false;
+          throw error;
+        }
+        return { reopen: true };
+      },
+      release: async () => {
+        state.held = false;
+      },
+      readReach: async () => state.view.reach,
+      rebuild: async (_id, _rebuildId, reach) => {
+        rebuiltCalls += 1;
+        return rebuilt(reach);
+      },
+      finish: async () => undefined,
+      install: async () => undefined,
+      notice: (_id, notice) => {
+        state.notices.push(notice);
+      },
+      classify: () => "other",
+      sleep: async () => undefined,
+    });
+    const stopped = await rebuilds.run("w", "rebuild-1");
+    expect(stopped).toMatchObject({ kind: "failed", error: expect.any(LivePageUnkeptError) });
+    expect(rebuiltCalls).toBe(0);
+    expect(state.held).toBe(false);
+    const [notice] = state.notices;
+    expect(shareViewRebuildStop(notice!)).toEqual({
+      reason: "failed",
+      detail:
+        "dohc could not keep the unsent edits of a page you had open, so access is not updated yet. Your edits are still open in dohc.",
+    });
+
+    pages = [{ kind: "released" }];
+    await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
+    expect(rebuiltCalls).toBe(1);
+  });
+});
+
+describe("a closed copy's background reads", () => {
+  it("knows the refusals a closed copy answers with", () => {
+    expect(isClosedCopyRefusal(new EngineWorkspaceRebuildingError("w"))).toBe(true);
+    expect(
+      isClosedCopyRefusal(
+        new EngineRequestError(
+          1,
+          {
+            code: "FORBIDDEN",
+            message: "share-view-updating-access",
+            retry: "no",
+          } as ConstructorParameters<typeof EngineRequestError>[1],
+          "chat.list",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isClosedCopyRefusal(
+        new EngineRequestError(
+          1,
+          {
+            code: "FORBIDDEN",
+            message: "share-view-not-member",
+            retry: "no",
+          } as ConstructorParameters<typeof EngineRequestError>[1],
+          "chat.list",
+        ),
+      ),
+    ).toBe(false);
+    expect(isClosedCopyRefusal(new Error("share-view-updating-access"))).toBe(false);
   });
 });
 

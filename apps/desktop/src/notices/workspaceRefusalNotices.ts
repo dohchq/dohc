@@ -6,6 +6,7 @@ import type {
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { RefusalNotices } from "./noticeStore";
+import { isClosedCopyRefusal } from "../workspaces/shareViewRebuild";
 import type { RefusalCoordinate } from "../ipc/bridgeContract";
 
 export function createWorkspaceRefusalNotices(deps: {
@@ -45,7 +46,8 @@ export function createWorkspaceRefusalNotices(deps: {
       );
       return results.map((result, index) => {
         const { workspaceId } = workspaces[index]!;
-        if (result.status === "rejected") {
+        // A copy closed for its access answers nothing until it is rebuilt.
+        if (result.status === "rejected" && !isClosedCopyRefusal(result.reason)) {
           console.warn(
             "[notices] could not read workspace sync refusals",
             workspaceId,

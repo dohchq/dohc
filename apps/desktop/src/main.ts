@@ -231,7 +231,9 @@ import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import {
   classifyShareViewRebuildError,
+  closeLivePages,
   createShareViewRebuilds,
+  logUnlessClosedCopy,
   parseShareViewRebuildAnswer,
   shareViewRebuildStop,
 } from "./workspaces/shareViewRebuild";
@@ -991,9 +993,9 @@ function agentTrustChanged(workspaceId: string, trusted: boolean): void {
   chatDispatchNotices.clear(workspaceId, "restricted");
   if (!trusted) return;
   chatWakes.resume();
-  void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
-    console.error("[desktop] chat dispatch scan after trust:", error);
-  });
+  void chatDispatchService
+    .scanWorkspace(workspaceId)
+    .catch(logUnlessClosedCopy("[desktop] chat dispatch scan after trust:"));
 }
 
 // The windows showing a workspace follow its trust at once.
@@ -4365,7 +4367,7 @@ async function openChatWakeWorkspace(
     dispatch: () => {
       void chatDispatchService
         .scanWorkspace(workspaceId, workspace.attachmentId)
-        .catch((error: unknown) => console.error("[desktop] chat dispatch scan:", error));
+        .catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
     },
     release,
   };
@@ -4852,14 +4854,10 @@ const chatDispatchService = createChatDispatchService({
       activity.queueCloudSync(workspace.workspaceId);
       void withWorkspaceAttachmentAsync(workspace, () =>
         syncSharedChannelsForChatTarget(workspace.workspaceId, { threadId }),
-      ).catch((error) => {
-        console.error("[desktop] shared channel sync:", error);
-      });
+      ).catch(logUnlessClosedCopy("[desktop] shared channel sync:"));
       void chatDispatchService
         .scanWorkspace(workspace.workspaceId, workspace.attachmentId)
-        .catch((error) => {
-          console.error("[desktop] chat dispatch scan:", error);
-        });
+        .catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
     });
   },
   // The tray and every window show the pause, wherever it changed.
@@ -4927,9 +4925,7 @@ const chatDispatchService = createChatDispatchService({
         )
       : [];
   },
-  onError: (error) => {
-    console.error("[desktop] chat dispatch:", error);
-  },
+  onError: logUnlessClosedCopy("[desktop] chat dispatch:"),
 });
 
 function assertChatRunnerIdle(workspaceId: string): void {
@@ -4958,9 +4954,7 @@ async function openWorkspaceActivityForOperation(
   operation.assertCurrent();
   void chatDispatchService
     .scanWorkspace(canonicalWorkspace.workspaceId, canonicalWorkspace.attachmentId)
-    .catch((error) => {
-      console.error("[desktop] chat dispatch workspace-open scan:", error);
-    });
+    .catch(logUnlessClosedCopy("[desktop] chat dispatch workspace-open scan:"));
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
   // Automations run where changes are captured: never in a shared view.
@@ -5358,9 +5352,7 @@ async function wakeAutomationAgent(
           signal.throwIfAborted();
           const scan = chatDispatchService.scanWorkspace(workspaceId, lease.binding.attachmentId);
           if (waitForDispatch) return scan;
-          void scan.catch((error: unknown) =>
-            console.error("[desktop] chat dispatch scan:", error),
-          );
+          void scan.catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
         },
       },
       message,
@@ -10739,6 +10731,17 @@ function registerIpcHandlers(): void {
       try {
         await closeDispatchRunActivity(requireWorkspace(workspaceId), { notifyRenderer: false });
         await holding;
+        // Each joined live page keeps its unsent edits as a draft before it
+        // closes, and the rebuild saves those drafts. A copy with no window
+        // attached has no pages open.
+        let attachment: symbol | undefined;
+        try {
+          attachment = workspaceAuthorities.currentBinding(workspaceId).attachmentId;
+        } catch {
+          /* Not attached. */
+        }
+        if (attachment)
+          await closeLivePages(() => engineYDocSessionIpc.retireAuthority(attachment));
       } catch (error) {
         sessions.releaseRebuildHold(workspaceId);
         throw error;

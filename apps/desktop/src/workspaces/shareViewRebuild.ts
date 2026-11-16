@@ -5,7 +5,10 @@
 // a restart, so a later run resumes the same rebuild.
 
 import { RelayUnreachableError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import {
+  EngineRequestError,
+  EngineWorkspaceRebuildingError,
+} from "@dohc/workspace-engine-client/daemon";
 import { parseListedReach, type ListedReach } from "@dohc/security-contract/listed-reach";
 import { isRecord } from "@dohc/workspace-core/records";
 import type { ShareViewRebuildStop } from "./registryStore";
@@ -142,6 +145,53 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
   };
 }
 
+/** A joined live page whose unsent edits could not be kept when its copy closed. */
+export class LivePageUnkeptError extends Error {
+  constructor(readonly causes: unknown[]) {
+    super(
+      "dohc could not keep the unsent edits of a page you had open, so access is not updated yet. Your edits are still open in dohc.",
+    );
+    this.name = "LivePageUnkeptError";
+  }
+}
+
+/**
+ * Close every joined live page of the copy and wait for each. A page with
+ * edits the server hasn't confirmed keeps them as a draft first. A page that
+ * could not keep its draft stops the close; it stays open with its edits, and
+ * the next try closes it again.
+ */
+export async function closeLivePages(
+  retire: () => Promise<readonly ({ kind: "released" } | { kind: "failed"; error: unknown })[]>,
+): Promise<void> {
+  const causes = (await retire()).flatMap((outcome) =>
+    outcome.kind === "failed" ? [outcome.error] : [],
+  );
+  if (causes.length > 0) throw new LivePageUnkeptError(causes);
+}
+
+/**
+ * Whether a background read failed only because the engine closed the copy
+ * for its access, or main holds its sessions for the rebuild. Such a read
+ * waits for the rebuild and logs nothing.
+ */
+export function isClosedCopyRefusal(error: unknown): boolean {
+  // The daemon requester keeps the engine's refusal as its error's cause.
+  for (let at = error, depth = 0; at instanceof Error && depth < 4; at = at.cause, depth += 1) {
+    if (at instanceof EngineWorkspaceRebuildingError) return true;
+    if (at instanceof EngineRequestError && at.wireError?.message === "share-view-updating-access")
+      return true;
+  }
+  return false;
+}
+
+/** Log a background failure, except a closed copy's refusal: that work runs again once the copy reopens. */
+export function logUnlessClosedCopy(label: string): (error: unknown) => void {
+  return (error) => {
+    if (!isClosedCopyRefusal(error)) console.error(label, error);
+  };
+}
+
 /**
  * What a failed step means for the rebuild: wait for the relay, end the
  * membership, take the engine's finished rebuild, or stop with Try again.
@@ -210,6 +260,8 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
         detail: `This copy holds work of your own (${notice.kinds.join(", ")}), so dohc can't update access yet. Nothing in it changed.`,
       };
     case "failed": {
+      if (notice.error instanceof LivePageUnkeptError)
+        return { reason: "failed", detail: notice.error.message };
       const cause = notice.error instanceof Error ? notice.error.message : String(notice.error);
       return {
         reason: "failed",
