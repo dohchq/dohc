@@ -57,6 +57,49 @@ pub struct RebuildRemoval {
     pub moved_to: Option<String>,
 }
 
+/// The member's own chat state that only their store holds: read markers,
+/// bookmarks, follows and feed read state. A rebuild carries it from the old
+/// store into the new one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RebuildCarried {
+    /// Each table's rows for the workspace, in `CARRIED` order, every column
+    /// in the table's own order.
+    rows: Vec<Vec<Vec<rusqlite::types::Value>>>,
+}
+
+/// Each carried table, with which of its old rows the new store takes: a
+/// row whose thread, message, channel or bookmark the new store holds. The
+/// rest name what the new reach hides. A follow of a person or an agent and
+/// the feed's read position name nothing a reach hides.
+const CARRIED: [(&str, &str); 6] = [
+    ("chat_thread_read_state", HELD_THREAD),
+    ("chat_agent_read_state", HELD_THREAD),
+    (
+        "chat_bookmarks",
+        "EXISTS (SELECT 1 FROM main.chat_threads t WHERE t.workspace_id = c.workspace_id \
+         AND t.thread_id = c.thread_id) \
+         AND (c.message_id IS NULL OR EXISTS (SELECT 1 FROM main.chat_messages m \
+         WHERE m.workspace_id = c.workspace_id AND m.message_id = c.message_id))",
+    ),
+    (
+        "chat_bookmark_outbox",
+        "EXISTS (SELECT 1 FROM main.chat_bookmarks b WHERE b.workspace_id = c.workspace_id \
+         AND b.bookmark_id = c.bookmark_id)",
+    ),
+    (
+        "chat_follows",
+        "c.target_kind IN ('person', 'agent') \
+         OR (c.target_kind = 'channel' AND EXISTS (SELECT 1 FROM main.chat_channels h \
+         WHERE h.workspace_id = c.workspace_id AND h.channel_id = c.target_id)) \
+         OR (c.target_kind = 'thread' AND EXISTS (SELECT 1 FROM main.chat_threads t \
+         WHERE t.workspace_id = c.workspace_id AND t.thread_id = c.target_id))",
+    ),
+    ("chat_feed_read_state", "1"),
+];
+
+const HELD_THREAD: &str = "EXISTS (SELECT 1 FROM main.chat_threads t \
+         WHERE t.workspace_id = c.workspace_id AND t.thread_id = c.thread_id)";
+
 const OWN_CHAT: &str = "SELECT r.op_kind, r.payload_json FROM replication_log r \
      WHERE r.workspace_id = ?1 AND r.imported = 0 \
      AND r.op_kind IN ('chat.thread.create', 'chat.message.append', 'chat.decision.set', \
@@ -189,6 +232,72 @@ impl ActorHandle {
                 }
                 Ok::<_, RuntimeError>(unsent)
             })
+        })
+        .await
+    }
+
+    /// The member's read markers, bookmarks, follows and feed read state.
+    pub async fn rebuild_carried(
+        &self,
+        workspace_id: String,
+    ) -> Result<RebuildCarried, RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                let corrupt = StorageError::corrupt_public;
+                let mut carried = RebuildCarried::default();
+                for (table, _) in CARRIED {
+                    let mut statement = conn
+                        .prepare(&format!("SELECT * FROM {table} WHERE workspace_id = ?1"))
+                        .map_err(corrupt)?;
+                    let width = statement.column_count();
+                    let rows = statement
+                        .query_map([&workspace_id], |row| {
+                            (0..width).map(|index| row.get(index)).collect()
+                        })
+                        .map_err(corrupt)?;
+                    carried
+                        .rows
+                        .push(rows.collect::<Result<_, _>>().map_err(corrupt)?);
+                }
+                Ok::<_, RuntimeError>(carried)
+            })
+        })
+        .await
+    }
+
+    /// Write the carried rows the new store takes, in one transaction. A row
+    /// the new store already holds keeps its own.
+    pub async fn rebuild_carry(&self, carried: RebuildCarried) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            let outcome = store.write_with(&NoFaults, |tx| {
+                let corrupt = StorageError::corrupt_public;
+                for ((table, held), rows) in CARRIED.iter().zip(&carried.rows) {
+                    tx.execute_batch(&format!(
+                        "CREATE TEMP TABLE carried AS SELECT * FROM main.{table} WHERE 0"
+                    ))
+                    .map_err(corrupt)?;
+                    for row in rows {
+                        let marks = vec!["?"; row.len()].join(", ");
+                        tx.execute(
+                            &format!("INSERT INTO temp.carried VALUES ({marks})"),
+                            rusqlite::params_from_iter(row),
+                        )
+                        .map_err(corrupt)?;
+                    }
+                    tx.execute_batch(&format!(
+                        "INSERT OR IGNORE INTO main.{table} SELECT * FROM temp.carried c WHERE {held}; \
+                         DROP TABLE temp.carried;"
+                    ))
+                    .map_err(corrupt)?;
+                }
+                Ok::<_, StorageError>(())
+            })?;
+            match outcome {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::Storage(
+                    StorageError::corrupt_public(std::io::Error::other("rebuild state not carried")),
+                )),
+            }
         })
         .await
     }

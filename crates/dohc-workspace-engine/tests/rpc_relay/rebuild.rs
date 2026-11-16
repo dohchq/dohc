@@ -901,3 +901,187 @@ async fn a_pull_that_marks_a_move_across_the_reach_closes_the_copy_and_its_rebui
         B_BYTES
     );
 }
+
+/// Two file threads the relay serves with the files: one on `open/a.md`, and
+/// one on `hidden/b.md` when the member reaches it.
+fn serve_threads(relay: &FakeRelay, with_hidden: bool) {
+    let mut state = relay.state.lock().expect("relay state");
+    let ops = state.share_ops.get_mut(SHARE).expect("ops");
+    let threads: &[(&str, &str)] = if with_hidden {
+        &[
+            ("thread-open", "open/a.md"),
+            ("thread-hidden", "hidden/b.md"),
+        ]
+    } else {
+        &[("thread-open", "open/a.md")]
+    };
+    let mut seq = 10;
+    for (thread, path) in threads {
+        ops.push(share_row(
+            seq,
+            "granter",
+            seq,
+            "chat.thread.create",
+            json!({ "threadId": thread, "title": "About it", "createdAtMs": 5, "linkedAtMs": 5, "linkedPath": path }),
+        ));
+        ops.push(share_row(
+            seq + 1,
+            "granter",
+            seq + 1,
+            "chat.message.append",
+            json!({
+                "messageId": format!("{thread}-message"), "threadId": thread, "authorKind": "human",
+                "authorDisplayName": "Owner", "authorUserId": "owner", "body": "Look here", "createdAtMs": 6,
+            }),
+        ));
+        seq += 2;
+    }
+}
+
+/// The member's own rows in each carried table, as `table: key`.
+fn carried_rows(db: &Connection, workspace_id: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    for (table, key) in [
+        ("chat_thread_read_state", "thread_id"),
+        ("chat_agent_read_state", "thread_id"),
+        ("chat_bookmarks", "target_id"),
+        ("chat_bookmark_outbox", "bookmark_id"),
+        ("chat_follows", "target_id"),
+        ("chat_feed_read_state", "last_seen_message_id"),
+    ] {
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT {key} FROM {table} WHERE workspace_id = ?1 ORDER BY 1"
+            ))
+            .expect("prepare");
+        for key in statement
+            .query_map([workspace_id], |row| row.get::<_, String>(0))
+            .expect("query")
+        {
+            rows.push(format!("{table}: {}", key.expect("row")));
+        }
+    }
+    rows
+}
+
+/// Read markers, bookmarks, follows and feed read state for both threads, as
+/// the member's own chat writes leave them.
+fn mark_threads(db: &Connection, workspace_id: &str) {
+    for thread in ["thread-open", "thread-hidden"] {
+        for statement in [
+            "INSERT INTO chat_thread_read_state (workspace_id, thread_id, last_read_sequence, revision, \
+               updated_at_ms) VALUES (?1, ?2, 1, 1, 7)",
+            "INSERT INTO chat_agent_read_state (workspace_id, agent_id, thread_id, last_read_created_at_ms, \
+               last_read_message_id, revision, updated_at_ms) VALUES (?1, 'default', ?2, 6, ?2 || '-message', 1, 7)",
+            "INSERT INTO chat_bookmarks (workspace_id, bookmark_id, owner_user_id, target_kind, target_id, \
+               thread_id, message_id, mode, destination_path, state, created_at_ms, updated_at_ms) \
+             VALUES (?1, 'bookmark-' || ?2, 'member', 'thread', ?2, ?2, NULL, 'live', \
+               'Bookmarks/' || ?2 || '.md', 'active', 7, 7)",
+            "INSERT INTO chat_bookmark_outbox (workspace_id, bookmark_id, generation, projected_generation, \
+               projection_state, updated_at_ms) VALUES (?1, 'bookmark-' || ?2, 1, 1, 'ready', 7)",
+            "INSERT INTO chat_follows (workspace_id, owner_user_id, target_kind, target_id, state, \
+               updated_at_ms, origin_id, origin_seq) VALUES (?1, 'member', 'thread', ?2, 'following', 7, 'here', 1)",
+        ] {
+            db.execute(statement, [workspace_id, thread])
+                .expect(statement);
+        }
+    }
+    for statement in [
+        "INSERT INTO chat_follows (workspace_id, owner_user_id, target_kind, target_id, state, \
+           updated_at_ms, origin_id, origin_seq) VALUES (?1, 'member', 'person', 'owner', 'following', 7, 'here', 2)",
+        "INSERT INTO chat_feed_read_state (workspace_id, owner_user_id, last_seen_created_at_ms, \
+           last_seen_message_id, updated_at_ms, origin_id, origin_seq) \
+         VALUES (?1, 'member', 6, 'thread-open-message', 7, 'here', 3)",
+    ] {
+        db.execute(statement, [workspace_id]).expect(statement);
+    }
+}
+
+/// The member's read markers, bookmarks, follows and feed read state carry
+/// into the rebuilt store, except where they name a thread the new reach
+/// hides. So a rebuild doesn't mark every thread unread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_markers_bookmarks_follows_and_feed_state_carry_across_a_rebuild() {
+    let workspace_id = "rpc-rebuild-carried";
+    let relay = FakeRelay::start(RelayState::default());
+    serve(&relay, "r1", "v1", true);
+    serve_threads(&relay, true);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r1", "v1") });
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": pulled["pendingCursor"] }),
+    )
+    .await;
+    close(&transport, &handle, &mut id).await;
+    for (path, bytes) in [
+        ("open/a.md", A_BYTES),
+        ("open/c.md", C_BYTES),
+        ("open/d.md", D_BYTES),
+        ("hidden/b.md", B_BYTES),
+    ] {
+        let target = scratch.path().join(path);
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("folder");
+        std::fs::write(target, bytes).expect("file");
+    }
+    {
+        let db = Connection::open(engine_db_path(&scratch).expect("db path")).expect("db");
+        let threads: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM chat_threads WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .expect("threads");
+        assert_eq!(threads, 2, "the pull applied both threads");
+        mark_threads(&db, workspace_id);
+    }
+
+    // The narrowing hides `hidden/b.md` and its thread.
+    serve(&relay, "r2", "v2", false);
+    serve_threads(&relay, false);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 2, workspace_id).await;
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    let rebuild_id = closed["rebuildId"].as_str().expect("closed").to_owned();
+    close(&transport, &handle, &mut id).await;
+    let copy = ClosedCopy {
+        relay,
+        scratch,
+        workspace_id: workspace_id.to_owned(),
+        rebuild_id,
+        live_drafts: json!([]),
+    };
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    finish(&copy).await;
+
+    let db = Connection::open(engine_db_path(&copy.scratch).expect("db path")).expect("db");
+    assert_eq!(
+        carried_rows(&db, workspace_id),
+        [
+            "chat_thread_read_state: thread-open",
+            "chat_agent_read_state: thread-open",
+            "chat_bookmarks: thread-open",
+            "chat_bookmark_outbox: bookmark-thread-open",
+            "chat_follows: owner",
+            "chat_follows: thread-open",
+            "chat_feed_read_state: thread-open-message",
+        ]
+    );
+}

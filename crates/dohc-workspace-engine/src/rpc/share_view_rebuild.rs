@@ -33,7 +33,8 @@ use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::{
-    ActorHandle, RebuildHead, RebuildJob, RebuildUnsent, RelayOperation, RelayOperationOutcome,
+    ActorHandle, RebuildCarried, RebuildHead, RebuildJob, RebuildUnsent, RelayOperation,
+    RelayOperationOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -111,6 +112,8 @@ struct OldRead {
     unsent: RebuildUnsent,
     /// The bytes of each unsent version the disk doesn't hold, by hash.
     version_bytes: BTreeMap<String, Vec<u8>>,
+    /// Read markers, bookmarks, follows and feed read state.
+    carried: RebuildCarried,
 }
 
 /// What `closed` read from the new store and the disk.
@@ -358,9 +361,7 @@ impl EngineService {
                 Some(&params.relay),
             )
             .await?;
-        let built = self
-            .rebuild_build(ctx, &staging, root, params, &old.heads)
-            .await;
+        let built = self.rebuild_build(ctx, &staging, root, params, &old).await;
         self.workspace_close(Some(staging)).await?;
         let new = match built? {
             Ok(built) => built,
@@ -421,24 +422,30 @@ impl EngineService {
                 version_bytes.insert(version.sha256.clone(), bytes);
             }
         }
+        let carried = actor
+            .rebuild_carried(params.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
         Ok(OldRead {
             heads,
             unsent,
             version_bytes,
+            carried,
         })
     }
 
-    /// Pull the share from the start into the staging store. Answers its
-    /// current files, the disk's hash at each path either store holds and
-    /// which of those the new store holds, or the signatures the relay served
-    /// when they differ from the grant's.
+    /// Pull the share from the start into the staging store, then carry the
+    /// old store's read markers, bookmarks, follows and feed read state into
+    /// it. Answers its current files, the disk's hash at each path either
+    /// store holds and which of those the new store holds, or the signatures
+    /// the relay served when they differ from the grant's.
     async fn rebuild_build(
         &self,
         ctx: &RequestContext,
         handle: &WorkspaceHandle,
         root: &Path,
         params: &RebuildParams,
-        old_heads: &[RebuildHead],
+        old: &OldRead,
     ) -> Result<Result<NewRead, Value>, WireError> {
         let open = self.open(Some(handle))?;
         Box::pin(self.versions_ensure_main(
@@ -495,12 +502,18 @@ impl EngineService {
                 break;
             }
         }
+        // A thread, message or channel the new reach hides takes none of it.
+        open.actor
+            .rebuild_carry(old.carried.clone())
+            .await
+            .map_err(map_runtime)?;
         let heads = open
             .actor
             .rebuild_main_heads(params.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
-        let disk: BTreeMap<String, String> = old_heads
+        let disk: BTreeMap<String, String> = old
+            .heads
             .iter()
             .chain(&heads)
             .map(|head| head.path.as_str())
