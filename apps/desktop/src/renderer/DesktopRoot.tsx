@@ -98,6 +98,14 @@ function UpdatingAccess(props: { workspace: Workspace }) {
         }),
       );
   };
+  const stopped = props.workspace.shareView?.updatingAccessStopped;
+  const tryAgain = (): void => {
+    // The refresh starts the update and answers that access is updating;
+    // how the update ends arrives as this view's state.
+    void bridge()
+      .refreshSharedView({ workspaceId: props.workspace.workspaceId, trigger: "manual" })
+      .catch(() => undefined);
+  };
   return (
     <div
       data-testid="workspace-updating-access"
@@ -113,7 +121,16 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
         The owner changed what you can see here. This copy stays closed until it matches.
       </p>
-      <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
+      {stopped ? (
+        <div className="flex max-w-md items-start gap-2 text-left">
+          <p className="m-0 select-text text-[13px] leading-relaxed text-ink">{stopped.detail}</p>
+          <CopyButton label="Copy" pinName iconOnly getText={() => stopped.detail} />
+        </div>
+      ) : null}
+      <div className="flex flex-wrap justify-center gap-2">
+        {stopped ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
+        <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
+      </div>
     </div>
   );
 }

@@ -178,6 +178,47 @@ describe("workspace summary changes", () => {
 
   // The engine closed the copy: the shell would read it, so it is not
   // mounted until the summary says the access is current again.
+  // A rebuild that stopped says why beside its text, which copies, and Try
+  // again asks main to start it again.
+  it("says why an update of access stopped and starts it again", async () => {
+    const h = setup();
+    const refreshSharedView = vi.fn(async () => {
+      throw new Error("dohc could not refresh this workspace while its access is being updated.");
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      refreshSharedView,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail =
+      "This copy holds work of your own (moments), so dohc can't update access yet. Nothing in it changed.";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "ownWork" as const, detail },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: "Copy" })).toBeTruthy();
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(refreshSharedView).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "a",
+        trigger: "manual",
+      }),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("shows Updating access instead of the shell while a joined copy is closed", async () => {
     const h = setup();
     const openWorkspaceManager = vi.fn(async () => undefined);
