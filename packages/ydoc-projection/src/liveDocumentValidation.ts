@@ -1057,6 +1057,20 @@ function bodyFingerprint(
       )
     )
       continue;
+    // A reading joins neighbouring texts, as two editors typing into one new line leave them.
+    const previous = children.at(-1);
+    if (fingerprint.kind === "text" && previous?.kind === "text") {
+      const [first, ...rest] = fingerprint.delta,
+        last = previous.delta.at(-1);
+      if (first && last && semanticEqual(first.attributes, last.attributes))
+        previous.delta[previous.delta.length - 1] = {
+          insert: last.insert + first.insert,
+          attributes: last.attributes,
+        };
+      else if (first) previous.delta.push(first);
+      previous.delta.push(...rest);
+      continue;
+    }
     children.push(fingerprint);
   }
   return children;
