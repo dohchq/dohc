@@ -34,8 +34,6 @@ import type { LocalDatasetInvocation } from "./localDatasetHost";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { credentialScopedOperation } from "./credentialScopedOperation";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
-import type { CollectionsRefusalError } from "./collectionsHolder";
-import { ipcWireError } from "../ipc/errorWords";
 import type { DatasetTransferReceipt, DatasetTransferTarget } from "./localDatasetTransfer";
 import type { createDatasetHost } from "@dohc/app-backend-runtime/dataset-host";
 import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
@@ -582,23 +580,36 @@ export function createRemoteDatasetData(input: {
         );
     },
     async invoke(invocation) {
-      const { datasetId, revision, revisionSha256, operationId, idempotencyKey, after } =
+      const { datasetId, revision, revisionSha256, operationId, idempotencyKey, after, agent } =
         invocation;
       const signal = invocation.signal
         ? AbortSignal.any([input.signal, invocation.signal])
         : input.signal;
-      const { catchUp, ...result } = z
-        .record(z.string(), z.unknown())
-        .parse(
-          await request(
-            `${path(datasetId)}/invoke`,
-            { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey },
-            signal,
-            after === undefined || input.shareId !== undefined
-              ? {}
-              : { [APP_BACKEND_CATCH_UP_HEADER]: JSON.stringify(after) },
-          ),
-        );
+      const { catchUp, ...result } = z.record(z.string(), z.unknown()).parse(
+        await request(
+          `${path(datasetId)}/invoke`,
+          {
+            revision,
+            revisionSha256,
+            operationId,
+            input: invocation.input,
+            idempotencyKey,
+            // The owner's agent, which the server records. A share's recipient sends none.
+            ...(agent && input.shareId === undefined
+              ? {
+                  agent:
+                    agent.agentId === undefined
+                      ? { depth: agent.depth }
+                      : { depth: agent.depth, agentId: agent.agentId },
+                }
+              : {}),
+          },
+          signal,
+          after === undefined || input.shareId !== undefined
+            ? {}
+            : { [APP_BACKEND_CATCH_UP_HEADER]: JSON.stringify(after) },
+        ),
+      );
       // The change is committed whatever the journal holds; the copy catches up later without it.
       const journal = DatasetCatchUp.safeParse(catchUp);
       return {
@@ -662,67 +673,6 @@ export function createRemoteDatasetData(input: {
       )
         throw new Error("The server returned a different Collection file.");
       return { file: result.file, bytesBase64: result.bytesBase64 };
-    },
-  };
-}
-
-/**
- * The server didn't give the list of a workspace's Collections, on a
- * computer that doesn't keep the workspace's own. `elsewhere` says where
- * those are. `failure` is the server's error as it would cross IPC alone, so
- * a window reports it as it would that error.
- */
-export class ServerCollectionsUnavailableError extends Error {
-  override name = "ServerCollectionsUnavailableError";
-  readonly elsewhere: CollectionsRefusalError;
-  readonly failure: string;
-  constructor(elsewhere: CollectionsRefusalError, cause: unknown) {
-    const wire = ipcWireError(cause);
-    const failure = wire instanceof Error && wire.name === "Error" ? wire.message : String(wire);
-    super(`${elsewhere.message}\n${failure}`, { cause });
-    this.elsewhere = elsewhere;
-    this.failure = failure;
-  }
-}
-
-/**
- * A workspace's Collections on this computer's signed-in server, for a
- * computer that doesn't keep the workspace's own. Every request goes to the
- * server that issued `credentials` and follows no redirect. A workspace or
- * Collection that server doesn't have may be one the other computer keeps,
- * so it refuses with `elsewhere`, as those Collections do here.
- */
-export function createServerCollectionsData(
-  input: Omit<Parameters<typeof createRemoteDatasetData>[0], "shareId" | "relayJson"> & {
-    /** "missing" when the server answers that it has no such workspace or Collection for this account. */
-    relayJson(
-      credentials: CloudCredentials,
-      path: string,
-      init: RequestInit,
-    ): Promise<{ kind: "success"; body: unknown } | { kind: "missing" }>;
-    elsewhere: CollectionsRefusalError;
-  },
-): RemoteDatasetData {
-  const { elsewhere, relayJson, ...remote } = input;
-  if (!remote.credentials.relayUrl) throw elsewhere;
-  const data = createRemoteDatasetData({
-    ...remote,
-    async relayJson(credentials, path, init) {
-      const answer = await relayJson(credentials, path, { ...init, redirect: "error" });
-      if (answer.kind === "missing") throw elsewhere;
-      return answer.body;
-    },
-  });
-  return {
-    ...data,
-    async list(page) {
-      try {
-        return await data.list(page);
-      } catch (error) {
-        throw error === elsewhere || remote.signal.aborted
-          ? error
-          : new ServerCollectionsUnavailableError(elsewhere, error);
-      }
     },
   };
 }
@@ -923,54 +873,60 @@ export function createDatasetAuthorityRouter(
       );
     return route.remote(marker.targetOrigin, datasetId);
   };
-  return {
-    async list(page) {
-      const limit = page.limit ?? 50,
-        datasets: DatasetDescription[] = [];
-      let after = page.after;
-      // Local rows index transferred identities, including ones archived before transfer.
-      // Fetch authority metadata before deciding whether an identity belongs in this view.
-      for (let scannedPages = 0; ; scannedPages++) {
-        const localPage = await local.list({ after, limit, includeArchived: true });
-        for (let index = 0; index < localPage.datasets.length; index++) {
-          // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
-          // Listing never waits for an unfinished move or resumes a stopped one, so a stop can't fail the whole list.
-          // A finished move's dataset can still wait briefly while the move removes its archive.
-          const row = localPage.datasets[index]!,
-            authority =
-              route.marker(row.datasetId)?.state === "imported"
-                ? await target(row.datasetId)
-                : local;
-          after = row.datasetId;
-          if (
-            authority !== local &&
-            authority.deletionStatus &&
-            (await authority.deletionStatus({ datasetId: row.datasetId })).deleted
-          )
-            continue;
-          const current =
-            authority === local
-              ? row
-              : await authority.describe(row.datasetId, { includeArchived: true });
-          if (!page.includeArchived && current.archived) continue;
-          datasets.push(current);
-          if (datasets.length === limit)
-            return {
-              datasets,
-              nextCursor:
-                index + 1 < localPage.datasets.length || localPage.nextCursor ? after : null,
-            };
-        }
-        if (!localPage.nextCursor) return { datasets, nextCursor: null };
+  return routeEachDataset(target, async (page) => {
+    const limit = page.limit ?? 50,
+      datasets: DatasetDescription[] = [];
+    let after = page.after;
+    // Local rows index transferred identities, including ones archived before transfer.
+    // Fetch authority metadata before deciding whether an identity belongs in this view.
+    for (let scannedPages = 0; ; scannedPages++) {
+      const localPage = await local.list({ after, limit, includeArchived: true });
+      for (let index = 0; index < localPage.datasets.length; index++) {
+        // A dataset whose move hasn't finished lists from this computer, which still keeps its records.
+        // Listing never waits for an unfinished move or resumes a stopped one, so a stop can't fail the whole list.
+        // A finished move's dataset can still wait briefly while the move removes its archive.
+        const row = localPage.datasets[index]!,
+          authority =
+            route.marker(row.datasetId)?.state === "imported" ? await target(row.datasetId) : local;
+        after = row.datasetId;
         if (
-          localPage.nextCursor <= (page.after ?? "") ||
-          localPage.nextCursor !== localPage.datasets.at(-1)?.datasetId
+          authority !== local &&
+          authority.deletionStatus &&
+          (await authority.deletionStatus({ datasetId: row.datasetId })).deleted
         )
-          throw new Error("The Collection list changed. Reload it.");
-        if (scannedPages === 3) return { datasets, nextCursor: localPage.nextCursor };
-        after = localPage.nextCursor;
+          continue;
+        const current =
+          authority === local
+            ? row
+            : await authority.describe(row.datasetId, { includeArchived: true });
+        if (!page.includeArchived && current.archived) continue;
+        datasets.push(current);
+        if (datasets.length === limit)
+          return {
+            datasets,
+            nextCursor:
+              index + 1 < localPage.datasets.length || localPage.nextCursor ? after : null,
+          };
       }
-    },
+      if (!localPage.nextCursor) return { datasets, nextCursor: null };
+      if (
+        localPage.nextCursor <= (page.after ?? "") ||
+        localPage.nextCursor !== localPage.datasets.at(-1)?.datasetId
+      )
+        throw new Error("The Collection list changed. Reload it.");
+      if (scannedPages === 3) return { datasets, nextCursor: localPage.nextCursor };
+      after = localPage.nextCursor;
+    }
+  });
+}
+
+/** Sends each Collection's work to the data `target` gives for it, and the list to `list`. */
+export function routeEachDataset(
+  target: (datasetId: string) => Promise<Parameters<typeof createDatasetAuthorityRouter>[0]>,
+  list: OwnerDatasetData["list"],
+): OwnerDatasetData {
+  return {
+    list,
     describe: async (datasetId, options) => (await target(datasetId)).describe(datasetId, options),
     deletionStatus: async (value) => {
       const authority = await target(value.datasetId);

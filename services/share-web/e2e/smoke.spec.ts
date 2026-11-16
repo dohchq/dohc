@@ -67,7 +67,10 @@ test("opens a real accountless share without exposing its bearer secret", async 
   expect(await exchangeResponse.json()).toEqual({ ok: true, session });
   const setCookie = await exchangeResponse.headerValue("set-cookie");
   expect(setCookie).not.toBeNull();
-  expect(setCookie).toMatch(new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+;`, "u"));
+  // The session's token, then its sealed copy for a share-web that restarts.
+  expect(setCookie).toMatch(
+    new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+;`, "u"),
+  );
   expect(setCookie).toMatch(/;\s*Path=\/(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*Secure(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*HttpOnly(?:;|$)/iu);

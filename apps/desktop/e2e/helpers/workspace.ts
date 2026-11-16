@@ -283,18 +283,6 @@ export async function trustOpenWorkspace(desktop: {
   await expect(indicator).toHaveCount(0);
 }
 
-// A manifest seeded on disk names no computer for the workspace's
-// Collections, as a workspace from before dohc kept that record does. The
-// test keeps them on this desktop, as its person would, before using them.
-export async function keepCollectionsHere(page: Page, workspaceId: string): Promise<void> {
-  expect(
-    await page.evaluate(
-      (id) => window.dohcDesktop!.keepCollectionsHere({ workspaceId: id }),
-      workspaceId,
-    ),
-  ).toEqual({ kept: true });
-}
-
 export async function openWorkspaceFromFirstRun(
   page: Page,
   workspace: Pick<TempWorkspace, "rootPath">,

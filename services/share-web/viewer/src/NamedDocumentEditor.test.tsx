@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { markdownToYDoc, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
 import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
+import type { RemovedText } from "@dohc/ydoc-projection/removed-text";
 import { NamedDocumentEditor } from "./NamedDocumentEditor";
 
 let container: HTMLDivElement, root: Root;
@@ -23,11 +24,20 @@ function session(markdown: string) {
     typingAhead: false,
     typingStopped: false,
   };
+  const removed = new Set<(removed: RemovedText) => void>();
   return {
     doc,
     body: getDohcYDocBodyFragment(doc),
     state: () => state,
     subscribe: () => () => {},
+    onRemovedText(listener: (value: RemovedText) => void) {
+      removed.add(listener);
+      return () => void removed.delete(listener);
+    },
+    unsentText: () => null,
+    remove(text: string) {
+      for (const listener of removed) listener({ text, clients: new Set([doc.clientID]) });
+    },
     close: vi.fn(),
     reconnect: vi.fn(async () => {}),
     disconnect: vi.fn(),
@@ -50,6 +60,33 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+});
+
+it("shows text someone else's change removed, copies all of it, and lets the person dismiss it", async () => {
+  const live = session("Body");
+  const writeText = vi.fn(async (_text: string) => {});
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  await act(async () =>
+    root.render(<NamedDocumentEditor session={live} path="docs/a.md" link onState={() => {}} />),
+  );
+  expect(container.querySelector('[data-testid="removed-text-notice"]')).toBeNull();
+
+  const long = `${"word ".repeat(100)}end`;
+  await act(async () => live.remove(long));
+  const notice = container.querySelector('[data-testid="removed-text-notice"]')!;
+  expect(notice.getAttribute("role")).toBe("alert");
+  expect(notice.querySelector("blockquote")!.textContent).toBe(`${long.slice(0, 280)}…`);
+  expect(notice.textContent).toContain(`And ${long.length - 280} more characters.`);
+  expect(notice.textContent).toContain("The file's owner keeps a copy in History.");
+
+  const button = (name: string) =>
+    [...notice.querySelectorAll("button")].find((element) => element.textContent === name)!;
+  await act(async () => button("Copy text").click());
+  expect(writeText).toHaveBeenCalledWith(long);
+  expect(button("Copied")).toBeDefined();
+
+  await act(async () => button("Dismiss").click());
+  expect(container.querySelector('[data-testid="removed-text-notice"]')).toBeNull();
 });
 
 it("shows the live file's frontmatter as written above the body it edits, until the file's new text is recorded", async () => {

@@ -106,13 +106,63 @@ it("pins the owner and bounds pages and binary reads", async () => {
 });
 it("reports definitive loss and only classifies network failures as offline", async () => {
   const f = fixture();
-  f.relayResponse.mockResolvedValueOnce(new Response(null, { status: 404 }));
+  f.relayResponse.mockResolvedValueOnce(
+    Response.json({ ok: false, error: "not found", code: "not_found" }, { status: 404 }),
+  );
   await expect(f.source.capture()).rejects.toThrow(/no longer available/);
   expect(f.onAccessLost).toHaveBeenCalledOnce();
   f.relayResponse.mockRejectedValueOnce(new TypeError("fetch failed"));
   await expect(f.source.capture()).rejects.toBeInstanceOf(DatasetCopyOfflineError);
   f.relayResponse.mockRejectedValueOnce(Error("authorization failed"));
   await expect(f.source.capture()).rejects.not.toBeInstanceOf(DatasetCopyOfflineError);
+});
+it("ends access only on the relay's own refusal, not on a session to renew or a front's answer", async () => {
+  const f = fixture();
+  const relay = (status: number, code: string) =>
+    Response.json({ ok: false, error: code, code }, { status });
+  for (const answer of [
+    // An expired session: the person signs in again and keeps the copy.
+    relay(401, "unauthorized"),
+    relay(403, "sign_in_again"),
+    // Tailscale Serve with no route, a proxy, a captive portal.
+    new Response("404 page not found", { status: 404, headers: { "content-type": "text/plain" } }),
+    new Response("<html>Sign in to this network</html>", {
+      status: 403,
+      headers: { "content-type": "text/html" },
+    }),
+    new Response(null, { status: 401 }),
+    Response.json({ message: "Forbidden" }, { status: 403 }),
+    Response.json({ ok: false, code: "Forbidden" }, { status: 403 }),
+  ]) {
+    f.relayResponse.mockResolvedValueOnce(answer);
+    await expect(f.source.capture()).rejects.not.toThrow(/no longer available/);
+  }
+  expect(f.onAccessLost).not.toHaveBeenCalled();
+  f.relayResponse.mockResolvedValueOnce(relay(403, "share_op_rejected"));
+  await expect(f.source.capture()).rejects.toThrow(/no longer available/);
+  expect(f.onAccessLost).toHaveBeenCalledOnce();
+});
+it("keeps the copy when the person signs in as someone else while the relay's refusal arrives", async () => {
+  const f = fixture();
+  const refusal = { ok: false, error: "not found", code: "not_found" };
+  f.relayResponse.mockResolvedValueOnce(
+    new Response(
+      new ReadableStream(
+        {
+          pull(controller) {
+            f.switchOwner();
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(refusal)));
+            controller.close();
+          },
+          // Nothing reads the body before the response arrives.
+        },
+        { highWaterMark: 0 },
+      ),
+      { status: 404, headers: { "content-type": "application/json" } },
+    ),
+  );
+  await expect(f.source.capture()).rejects.toThrow();
+  expect(f.onAccessLost).not.toHaveBeenCalled();
 });
 it("rejects cursor substitution and oversized bodies", async () => {
   const f = fixture();

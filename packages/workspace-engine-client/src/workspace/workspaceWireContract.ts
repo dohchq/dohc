@@ -1448,6 +1448,22 @@ const WorkspaceResultSchemas = {
         }),
       ),
     ),
+    // Text a merged change from elsewhere removed unseen, kept on this
+    // computer until its notice is dismissed. Each carries the text's start and its
+    // whole length; the History change holds all of it.
+    mergeRemovals: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          momentId: Schema.NonEmptyString,
+          versionId: Schema.NonEmptyString,
+          objectId: Schema.NonEmptyString,
+          path: Schema.NonEmptyString,
+          quote: Schema.NonEmptyString,
+          length: Schema.Int,
+          authorKnown: Schema.Boolean,
+        }),
+      ),
+    ),
   }),
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
   [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({

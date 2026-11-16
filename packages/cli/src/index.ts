@@ -713,10 +713,7 @@ function buildCliRequest(
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
-    const { refusal } = result;
-    return refusal.kind === "server-unavailable"
-      ? `${refusal.words} ${refusal.failure}`
-      : refusal.words;
+    return result.refusal.words;
   }
   if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice

@@ -1633,7 +1633,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       // Text the cell shows already is no change to keep.
       if (
         row &&
-        draft.text === display(shown ? (shown.value as AppBackendJson) : row.values[draft.field])
+        draft.text ===
+          display(
+            shown && !(shown.state === "refused" && shown.stored)
+              ? (shown.value as AppBackendJson)
+              : row.values[draft.field],
+          )
       )
         return;
       queue.hold(
@@ -1762,9 +1767,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               // A record that does not exist yet has no file to download, and takes a value in each field its create does.
               const unmade = record.id === NEW_RECORD;
               const status = view.statuses.get(record.id, field.fieldId);
-              const value = status
-                ? (status.value as AppBackendJson)
-                : now.rows.get(record.id)?.values[field.fieldId];
+              const value =
+                status && !(status.state === "refused" && status.stored)
+                  ? (status.value as AppBackendJson)
+                  : now.rows.get(record.id)?.values[field.fieldId];
               const readFile = now.resources.readFile;
               return (
                 <ResourceCell
@@ -2061,7 +2067,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       ? undefined
       : nameField
         ? display(
-            nameStatus ? (nameStatus.value as AppBackendJson) : details.values[nameField.fieldId],
+            nameStatus && !(nameStatus.state === "refused" && nameStatus.stored)
+              ? (nameStatus.value as AppBackendJson)
+              : details.values[nameField.fieldId],
           )
         : "";
     // An offline copy lists no action, as it takes no change.

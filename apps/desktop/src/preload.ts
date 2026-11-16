@@ -62,6 +62,7 @@ import {
   CrashReportChangedEvent,
   CollectionCopiesLeftChangedEvent,
   CollectionRulesChangedEvent,
+  CollectionCopyChangedEvent,
   NoticesChangedEvent,
   LiveDraftRecoveryChangedEvent,
   SearchResultsEvent,
@@ -336,6 +337,8 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.collectionAutomationsChanged, WorkspaceIdPayload, listener),
   onCollectionRulesChanged: (listener) =>
     onEvent(CHANNELS.collectionRulesChanged, CollectionRulesChangedEvent, listener),
+  onCollectionCopyChanged: (listener) =>
+    onEvent(CHANNELS.collectionCopyChanged, CollectionCopyChangedEvent, listener),
   onAutomationRunsChanged: (listener: (event: { workspaceId: string }) => void) => {
     // Validate at the boundary like every main-sent event: the listener
     // only ever sees a workspace id string; anything else is dropped.

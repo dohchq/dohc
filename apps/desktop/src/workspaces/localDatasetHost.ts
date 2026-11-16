@@ -44,6 +44,7 @@ import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runt
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
+import { createServerDatasetApps, type ServerCollectionsTransport } from "./serverDatasetApps";
 import {
   createLocalDatasetApps,
   localDatasetAppStorage,
@@ -179,6 +180,11 @@ export interface LocalDatasetHostOptions {
   onAutomationClaims?(failed: boolean): void;
   /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
   onDatasetsChanged?(): void;
+  /**
+   * The workspace's server while it holds the workspace's Collections, which
+   * runs the apps approved here over them. Null while this computer keeps them.
+   */
+  collectionsServer?(): ServerCollectionsTransport | null;
   /** This attachment's workspace engine for document Collection apps. Throws while it is unavailable. */
   collectionEngine?(): LocalCollectionEngine;
   /** Who a local Collection app's response is made by. See localCollectionAuthor. */
@@ -348,6 +354,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       db.exec(nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK");
       throw error;
     }
+  }
+  // A restore writes to this computer, where a syncing workspace's Collections no longer live.
+  function assertRestoresHere() {
+    if (options.collectionsServer?.())
+      throw new Error("Restore this Collection in a workspace that does not sync.");
   }
   async function tracked<T>(work: () => Promise<T>): Promise<T> {
     assertCurrent();
@@ -960,15 +971,22 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
             captured.preparation.revision.revisionSha256 !== input.revisionSha256
           )
             throw new Error("This Collection approval expired or changed. Prepare it again.");
-          const approved = await host.activate(owner, {
-            workspaceId,
+          const artifacts = {
             revision: captured.preparation.revision,
             schemaSql: captured.schemaSql,
             operationSource: captured.operationSource,
             approvalAgent: input.approvalAgent,
-            capacityBytes: options.capacityBytes,
-            signal: signal(input.signal),
-          });
+          };
+          // A syncing workspace's Collection is created on its server, and lives there.
+          const server = options.collectionsServer?.();
+          const approved = server
+            ? await server.activate(artifacts, signal(input.signal))
+            : await host.activate(owner, {
+                workspaceId,
+                ...artifacts,
+                capacityBytes: options.capacityBytes,
+                signal: signal(input.signal),
+              });
           pending.delete(input.preparationId);
           return changed(approved);
         });
@@ -1068,10 +1086,16 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         return host.approvedArtifacts(owner, { workspaceId, datasetId });
       },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) {
-        return tracked(() => recovery.prepare(input));
+        return tracked(async () => {
+          assertRestoresHere();
+          return recovery.prepare(input);
+        });
       },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) {
-        return tracked(() => recovery.claim(input)).then(changed);
+        return tracked(async () => {
+          assertRestoresHere();
+          return recovery.claim(input);
+        }).then(changed);
       },
       discardRecovery(transferId: string) {
         return tracked(() => recovery.discard(transferId));
@@ -1560,9 +1584,37 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         );
       },
     });
+    const onServer = createServerDatasetApps({
+      store: appStore,
+      workspaceId,
+      assertCurrent,
+      agentRun: () => options.agentRun?.() ?? null,
+      server: {
+        approve: (candidate, signal) => serverApps().approve(candidate, signal),
+        withdraw: (datasetId, publicationId) => serverApps().withdraw(datasetId, publicationId),
+        request: (publicationId, action, body, signal) =>
+          serverApps().request(publicationId, action, body, signal),
+      },
+    });
+    const serverApps = () => {
+      const server = options.collectionsServer?.();
+      if (!server) throw new Error("This workspace's Collections are on this computer.");
+      return server;
+    };
+    // A syncing workspace's apps reach its Collections on the server; asked each time, as sync can start or stop.
+    const pick = () => (options.collectionsServer?.() ? onServer : apps);
+    const datasetApps: typeof apps = {
+      current: (...args) => pick().current(...args),
+      resolveAuthority: apps.resolveAuthority,
+      activate: (...args) => pick().activate(...args),
+      withdrawBinding: (...args) => pick().withdrawBinding(...args),
+      describe: (...args) => pick().describe(...args),
+      request: (...args) => pick().request(...args),
+      readBrowserFile: (...args) => pick().readBrowserFile(...args),
+    };
     localApps = createLocalApps(
       appStore,
-      apps,
+      datasetApps,
       collections,
       createLocalUnconnectedApps({ store: appStore, workspaceId, assertCurrent }),
     );

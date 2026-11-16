@@ -678,6 +678,10 @@ export interface WorkspaceEngineCapture {
     // this session closes. `unsaved` is whether the document has edits no
     // save carried. Called once per session.
     onChangedOutside?: (unsaved: boolean) => void;
+    // Someone else's change removed text this device typed, without having
+    // seen it. Only a shared session reports it; the engine keeps the
+    // owner's copy.
+    onTextRemoved?: (text: string) => void;
     contentKind?: YdocContentKind;
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.

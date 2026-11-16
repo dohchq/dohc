@@ -594,6 +594,52 @@ describe("named live browser provider", () => {
     expect(value.body.toString()).toContain("peer");
     expect(value.state().pendingUpdates).toBe(0);
   });
+  it("tells the page when someone deletes the paragraph it was typing in", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    edit(value, " mine");
+    await host.ack(await host.submitted(), 1, 4);
+    const before = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
+
+    expect(value.body.length).toBe(0);
+    expect(removed).toEqual([" mine"]);
+  });
+  it("tells a desktop whose editor typed through the page that its text was removed", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    const editor = new Y.Doc();
+    cleanup.push(() => editor.destroy());
+    Y.applyUpdate(editor, Y.encodeStateAsUpdate(value.doc));
+    const before = Y.encodeStateVector(editor);
+    const line = (getDohcYDocBodyFragment(editor).get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    line.insert(line.length, " from the editor");
+    value.doc.transact(() => Y.applyUpdate(value.doc, Y.encodeStateAsUpdate(editor, before)));
+    await host.ack(await host.submitted(), 1, 4);
+    const hostBefore = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, hostBefore), 5);
+
+    expect(removed).toEqual([" from the editor"]);
+  });
+  it("says nothing when someone deletes a paragraph after seeing what the page typed", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    edit(value, " mine");
+    const submitted = await host.submitted();
+    Y.applyUpdate(doc, submitted.bytes);
+    await host.ack(submitted, 1, 4);
+    const before = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
+
+    expect(value.body.length).toBe(0);
+    expect(removed).toEqual([]);
+  });
   it("refuses an ACK from an unattempted host epoch", async () => {
     const { value, host } = await live();
     edit(value, " draft");
@@ -616,6 +662,19 @@ describe("named live browser provider", () => {
       pendingUpdates: 1,
     });
     expect(value.body.toString()).toContain("second");
+    // The review shows the refused edit beside the one still waiting.
+    expect(value.unsentText()).toEqual({ text: " first second", deletes: false });
+  });
+  it("tells deleted words from removed formatting in a stopped draft", async () => {
+    const { value, host } = await live(provider({ ...limits(), maxPendingUpdates: 1 }));
+    const content = () => (value.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    content().format(0, 4, { bold: true });
+    await host.ack(await host.submitted(), 1, 1);
+    content().format(0, 4, { bold: null });
+    expect(value.unsentText()).toEqual({ text: "", deletes: false });
+    content().delete(0, 2);
+    expect(value.state()).toMatchObject({ status: "quarantined", reason: "pending-update-limit" });
+    expect(value.unsentText()).toEqual({ text: "", deletes: true });
   });
   it("rejects a tampered initial sync without mutating the draft", async () => {
     const value = provider(),
@@ -1195,6 +1254,7 @@ describe("named live browser provider", () => {
       });
       expect(value.body.toString()).toContain("larger than one byte");
       expect(host.submissions()).toHaveLength(0);
+      expect(value.unsentText()).toEqual({ text: " larger than one byte", deletes: false });
     } else {
       const { value, host } = await live();
       const before = value.body.toString();

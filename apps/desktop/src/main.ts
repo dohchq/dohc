@@ -88,9 +88,10 @@ import {
 } from "./workspaces/desktopWorkspaceCallbacks";
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
 import { readOwnerRestoreResponse } from "./ipc/readOwnerRestoreResponse";
-import { readDatasetResponse } from "./ipc/readDatasetResponse";
+import { datasetResponseAction, readDatasetResponse } from "./ipc/readDatasetResponse";
 import {
   CollectionMoveUnfinishedError,
+  CollectionServerUnreachableError,
   ipcWireError,
   T3_CODE_CANNOT_ALLOW_HERE,
   markDatasetServerNotFound,
@@ -115,13 +116,14 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc, watchReleaseOutsideFile } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
-import { readServerDataset, serverRunsOfAnswer } from "./automations/serverDataset";
+import { readServerDataset } from "./automations/serverDataset";
 import {
   collectionPlace,
   createBackgroundDatasetRouter,
+  createCollectionsSendUp,
+  sendCollectionsUp,
   finishedTransfer,
   movedTransfer,
-  moveCollectionToServer,
 } from "./workspaces/collectionMove";
 import {
   createPressWindows,
@@ -154,7 +156,6 @@ import {
 import { localCollectionAuthor } from "./workspaces/localCollectionApps";
 import {
   collectionsHolderRequired,
-  collectionsKeptElsewhere,
   CollectionsRefusalError,
   keepCollectionsHere,
   keepQuestionWords,
@@ -166,7 +167,6 @@ import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCom
 import {
   createDatasetAuthorityRouter,
   createRemoteDatasetData,
-  createServerCollectionsData,
   resolveRemoteDatasetRevision,
   type OwnerDatasetData,
   type RemoteDatasetData,
@@ -180,9 +180,18 @@ import {
   createOwnerDatasetCopyRegistry,
   datasetCopyOwnerKey,
 } from "./workspaces/ownerDatasetCopyRegistry";
+import {
+  collectionsServer,
+  createServerHomeData,
+  type SavedCollectionsList,
+} from "./workspaces/collectionsHome";
+import {
+  createServerCollectionsTransport,
+  type ServerCollectionsTransport,
+} from "./workspaces/serverDatasetApps";
 import { localStateOpened, LocalStateUnavailableError } from "./workspaces/workspaceLocalState";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
-import { createDatasetHandler, type ServerCollections } from "./ipc/datasetIpc";
+import { createDatasetHandler } from "./ipc/datasetIpc";
 import { datasetOperations } from "./ipc/datasetOperations";
 import { type DatasetPlace, type DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
@@ -656,7 +665,6 @@ import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
-import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import {
   fetchShareViewInfo,
   fetchShareViewAccess,
@@ -1163,6 +1171,17 @@ function notifyCollectionAutomationsChanged(workspaceId: string): void {
 // workspace read that Collection again where they show it.
 function notifyCollectionRulesChanged(workspaceId: string, datasetId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.collectionRulesChanged, { datasetId });
+}
+
+// This computer's copy of a syncing workspace's Collection, or its saved
+// Collections list without a Collection, changed from the server: the windows
+// on that workspace read it again where they show it.
+function notifyCollectionCopyChanged(workspaceId: string, datasetId?: string): void {
+  notifyWorkspaceWindows(
+    workspaceId,
+    CHANNELS.collectionCopyChanged,
+    datasetId === undefined ? {} : { datasetId },
+  );
 }
 
 function notifyWorkspaceWindows(
@@ -1912,6 +1931,17 @@ async function remoteForWorkspace(workspace: RegistryEntry, options?: { allowPau
   return { credentials, credentialGeneration };
 }
 
+// The session that reaches a Collection which went to a server. With no server
+// for the workspace, as when starting to sync stopped after some went, it is the
+// signed-in session. Each caller checks that it reaches that Collection's server.
+async function sessionForMoved(workspace: RegistryEntry) {
+  if (workspace.remote ?? workspace.pausedRemote)
+    return remoteForWorkspace(workspace, { allowPaused: true });
+  await warmCredentialCache();
+  const credentialGeneration = credentialCacheGeneration;
+  return { credentials: requireCredentials(cachedCredentials), credentialGeneration };
+}
+
 // The registry can know a workspace synced before its own folder does, as
 // for one synced before the folder kept a record. Mark it in the folder,
 // once per run, for a folder that is there.
@@ -2092,13 +2122,12 @@ async function relayShareJsonWithCredentials<T>(
       sessionWasCurrent,
     });
   }
-  const datasetRoute =
-    /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+  const datasetRoute = datasetResponseAction(path);
   const data = (
     datasetRoute
       ? await readDatasetResponse(
           response,
-          datasetRoute[2] ?? (datasetRoute[1] ? "describe" : "list"),
+          datasetRoute,
           init?.signal ?? new AbortController().signal,
         )
       : options && "retainRestoreConflict" in options
@@ -2563,7 +2592,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
       status: (id) => finishedTransferOf(workspace, local, id, signal),
       marker: (id) => local.transferStatus(id),
       remote: async (targetOrigin) => {
-        const remote = await remoteForWorkspace(workspace);
+        const remote = await sessionForMoved(workspace);
         operation.assertCurrent();
         if (
           !remote.credentials.relayUrl ||
@@ -2625,6 +2654,8 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   collectionAutomations: CollectionAutomations;
   /** This attachment's local dataset host, opened on first use and closed after the executor at disposal. */
   datasetHost: DatasetHostSlot;
+  /** The Collections this computer kept before the workspace synced, as they go to its server. */
+  collectionsSendUp: ReturnType<typeof createCollectionsSendUp>;
   // Takes Button presses from shared views while this computer runs the
   // workspace's schedules.
   relayedPresses: RelayedPressHost;
@@ -2700,6 +2731,7 @@ function createDesktopWorkspaceAuthorityState(
     activityClosing: null,
     pendingCliRunMessageLinks: new Set(),
     lastEngineStoreRebuildResult: null,
+    collectionsSendUp: collectionsSendUpFor(binding),
   };
 }
 
@@ -4886,6 +4918,7 @@ async function openWorkspaceActivityForOperation(
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
     reconcileLocalCollectionApps(canonicalWorkspace);
+    sendCollectionsUpFor(canonicalWorkspace);
     resumeLinkRewrites(canonicalWorkspace, operation.signal);
   }
   return result;
@@ -4900,6 +4933,47 @@ function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath
     if (!(error instanceof CollectionsRefusalError))
       console.warn("[desktop] local Collection app reconciliation:", error);
   });
+}
+
+// A workspace that syncs keeps its Collections on its server. Starting to sync
+// sends the ones this computer kept first. One a workspace that already synced
+// still keeps goes in the background when the workspace opens. Only an existing
+// store opens. A Collection that didn't arrive says why when it is opened, and
+// opening it tries again.
+function collectionsSendUpFor(binding: WorkspaceAuthorityBinding<RegistryEntry>) {
+  const workspace = () => {
+    const entry = findWorkspace(binding.workspaceId);
+    if (!entry) throw new Error("This workspace is no longer available.");
+    return entry;
+  };
+  return createCollectionsSendUp({
+    open: async () =>
+      (await localDatasetStoreExists(workspace().rootPath))
+        ? localDatasetHostFor(workspace(), new AbortController().signal)
+        : null,
+    session: () => ({
+      ...transferSession(workspace(), new AbortController().signal),
+      server: () => remoteForWorkspace(workspace(), { allowPaused: true }),
+    }),
+    reported: (unsent) => {
+      for (const [datasetId, error] of unsent)
+        console.warn(
+          `[desktop] Collection ${datasetId} didn't reach the workspace's server:`,
+          error,
+        );
+      // The window's Collections list reads again, now with the ones that arrived.
+      notifyRenderer({ workspaceId: binding.workspaceId });
+    },
+  });
+}
+function sendCollectionsUpFor(workspace: RegistryEntry & { attachmentId?: symbol }): void {
+  if (!collectionsServer(workspace)) return;
+  void withWorkspaceAttachment(workspace, (lease) =>
+    lease.state.collectionsSendUp.start().catch((error: unknown) => {
+      if (!(error instanceof CollectionsRefusalError))
+        console.warn("[desktop] sending Collections to the workspace's server:", error);
+    }),
+  );
 }
 
 function resumeLinkRewrites(
@@ -5575,8 +5649,7 @@ const serverRuns = createServerRuns(async (workspaceId, request) => {
   let credentials: CloudSessionCredentials;
   let credentialGeneration: number;
   if (!workspace.remote) {
-    // A computer that doesn't sync the workspace or keep its Collections asks
-    // the server its Collections moved to, with that server's session.
+    // A workspace whose sync is paused asks the server that holds its Collections.
     const server = await serverCollectionsFor(
       workspace,
       AbortSignal.timeout(AUTOMATION_HOST_REQUEST_TIMEOUT_MS),
@@ -6290,71 +6363,29 @@ async function stillHeld(
   }
   return host;
 }
-// What a computer that doesn't keep a workspace's Collections can use of
-// them: the ones moved to its signed-in server, through that session alone.
+// A workspace's Collections on its server while it syncs or is paused,
+// through this computer's session with it.
 interface ServerCollectionsSession {
   credentials: CloudSessionCredentials;
   credentialGeneration: number;
-  elsewhere: ServerCollections["elsewhere"];
+  origin: string;
   /** The server's Collections, for work under `signal` while `assertCurrent` passes. */
   data(signal: AbortSignal, assertCurrent: () => void): RemoteDatasetData;
+  /** The same, through this computer's kept copies, which read offline. */
+  home(signal: AbortSignal, assertCurrent: () => void): OwnerDatasetData;
 }
 // The workspace does not start syncing, and its server and account stay as
-// they are. Null where this computer keeps the Collections, or where it has
-// no session for the workspace's server and account. The local store then
-// refuses.
+// they are. Null for a workspace with no server, whose Collections the local
+// store keeps, or refuses where another computer keeps them.
 async function serverCollectionsFor(
   workspace: RegistryEntry & { attachmentId?: symbol },
   signal: AbortSignal,
 ): Promise<ServerCollectionsSession | null> {
-  // A store open here that this computer still keeps answers without reading the record.
-  const slot = withWorkspaceAttachment(workspace, (lease) => lease.state.datasetHost);
-  if (
-    slot?.pending &&
-    (await stillHeld(slot, slot.pending).then(
-      () => true,
-      () => false,
-    ))
-  )
-    return null;
-  const elsewhere = await collectionsKeptElsewhere(
-    workspace.rootPath,
-    workspace.workspaceId,
-    collectionsHolderCheck(workspace.workspaceId),
-  );
-  if (elsewhere === null) return null;
-  await warmCredentialCache().catch(() => undefined);
-  signal.throwIfAborted();
-  const credentials = cachedCredentials,
-    credentialGeneration = credentialCacheGeneration;
-  const remote = workspace.remote ?? workspace.pausedRemote;
-  if (!credentials?.relayUrl || (remote && !workspaceRemoteMatchesCredentials(remote, credentials)))
-    return null;
-  const refusal = new CollectionsRefusalError(elsewhere);
-  return {
-    credentials,
-    credentialGeneration,
-    elsewhere: {
-      server: new URL(credentials.relayUrl).origin,
-      computer: { label: elsewhere.computer.label, sameName: elsewhere.sameName },
-    },
-    data: (signal, assertCurrent) =>
-      createServerCollectionsData({
-        workspaceId: workspace.workspaceId,
-        credentials,
-        credentialGeneration,
-        signal,
-        currentCredentialGeneration: () => credentialCacheGeneration,
-        assertCurrent,
-        relayJson: (credentials, path, init) =>
-          relayShareJsonWithCredentials(credentials, path, init, { retainNotFound: true }),
-        elsewhere: refusal,
-      }),
-  };
+  return collectionsServer(workspace) ? serverHomeFor(workspace, signal) : null;
 }
 // Who answers for a workspace's Collections, chosen as a Collection action
-// chooses: the server, without opening a store, on a computer that doesn't
-// keep them; otherwise the local store, which refuses there as before.
+// chooses: the server, without opening a store, for a workspace that has
+// one; otherwise the local store.
 type CollectionsAuthority =
   | { kind: "server"; server: ServerCollectionsSession }
   | { kind: "local"; local: LocalDatasetHost };
@@ -6389,7 +6420,7 @@ function finishedTransferOf(
 function transferSession(workspace: RegistryEntry, signal: AbortSignal) {
   return {
     workspaceId: workspace.workspaceId,
-    server: () => remoteForWorkspace(workspace),
+    server: () => sessionForMoved(workspace),
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayStream: relayShareJsonWithCredentials,
     signal,
@@ -6423,7 +6454,7 @@ async function serverCollectionOf(
           }
         : null;
     }
-    ({ credentials, credentialGeneration } = await remoteForWorkspace(workspace));
+    ({ credentials, credentialGeneration } = await sessionForMoved(workspace));
     signal.throwIfAborted();
     if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin)
       throw new Error("Sign in to the server that hosts this Collection.");
@@ -6468,20 +6499,180 @@ async function readAutomationHost(
     throw new Error("Your server session changed. Try again.");
   return { status: response.status, body: await response.json().catch(() => undefined) };
 }
-/** A Collection's automations, and how many of them a schedule or Group message starts. */
-async function automationCounts(workspaceId: string, collectionPath: string) {
-  const file = await collectionAutomationsOf(workspaceId)?.automationsIn(collectionPath);
-  const automations =
-    file?.status === "read"
-      ? file.automations.flatMap((summary) => (summary.valid ? [summary.automation] : []))
-      : [];
-  return {
-    automations: automations.length,
-    scheduledAutomations: automations.filter(
-      (automation) =>
-        automation.when.kind === "schedule" || automation.when.kind === "group-message",
-    ).length,
+// Runs `work` with the workspace as its open attachment sees it, for this
+// computer's files in `.dohc/local`. Right after launch the engine's open may
+// still be preparing that folder, so it waits once for an open already under way.
+async function withCopyWorkspace<T>(
+  workspace: { workspaceId: string; rootPath: string },
+  signal: AbortSignal,
+  work: (copyWorkspace: EngineWorkspace, lifetime: AbortSignal) => Promise<T>,
+): Promise<T> {
+  let copyWorkspace: EngineWorkspace | undefined;
+  const attempt = () =>
+    workspaceAuthorities.withOperation(workspace.workspaceId, async (operation) => {
+      signal.throwIfAborted();
+      operation.assertCurrent();
+      const rootPath = workspaceRootForOperation(operation.workspace.rootPath, workspace.rootPath);
+      copyWorkspace = { ...operation.workspace, rootPath };
+      return work(copyWorkspace, operation.signal);
+    });
+  return attempt().catch(async (error: unknown) => {
+    if (
+      !(error instanceof LocalStateUnavailableError) ||
+      error.refusal !== "not-opened" ||
+      !copyWorkspace
+    )
+      throw error;
+    await localStateOpened(copyWorkspace);
+    return attempt();
+  });
+}
+// A Collection on a server as its owner uses it here: through this
+// computer's kept copy, which reads offline. If `.dohc/local` isn't ready,
+// the server holds the Collection, so it works online without the copy.
+async function ownerCopyData(
+  workspace: { workspaceId: string; rootPath: string },
+  remote: { credentials: CloudSessionCredentials; credentialGeneration: number },
+  origin: string,
+  datasetId: string,
+  data: OwnerDatasetData,
+  signal: AbortSignal,
+): Promise<OwnerDatasetData> {
+  const ownerKey = datasetCopyOwnerKey(remote.credentials);
+  const copy = await withCopyWorkspace(workspace, signal, (copyWorkspace, lifetime) =>
+    ownerDatasetCopies.get({
+      ...copyWorkspace,
+      datasetId,
+      origin,
+      ownerKey,
+      lifetime,
+      assertOwner: () => {
+        if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey)
+          throw new Error("Sign in as this Collection's owner.");
+      },
+      runtime: {
+        launch: createDesktopAppRuntimeLauncher(utilityProcess, false),
+        entryPath: join(datasetRuntimePath(), "persistent-child.mjs"),
+      },
+      onChanged: () => notifyCollectionCopyChanged(workspace.workspaceId, datasetId),
+    }),
+  ).catch((error: unknown) => {
+    if (error instanceof LocalStateUnavailableError) return null;
+    throw error;
+  });
+  if (copy === null) return data;
+  const source = createRemoteDatasetReplicaSource({
+    workspaceId: workspace.workspaceId,
+    datasetId,
+    origin,
+    ...remote,
+    signal,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    assertCurrent: () => signal.throwIfAborted(),
+    relayResponse: relayShareResponseWithCredentials,
+    onAccessLost: () => copy.accessLost(),
+  });
+  return copy.data(data, source, signal);
+}
+// A syncing workspace's Collections, on its server, as this computer's
+// signed-in owner uses them. Paused sync keeps them there.
+async function serverHomeFor(
+  workspace: RegistryEntry,
+  signal: AbortSignal,
+): Promise<ServerCollectionsSession> {
+  const { credentials, credentialGeneration } = await remoteForWorkspace(workspace, {
+    allowPaused: true,
+  });
+  signal.throwIfAborted();
+  if (!credentials.relayUrl) throw new Error("Sign in to the cloud server this workspace uses.");
+  const origin = new URL(credentials.relayUrl).origin,
+    session = { credentials, credentialGeneration };
+  const data = (signal: AbortSignal, assertCurrent: () => void) =>
+    createRemoteDatasetData({
+      workspaceId: workspace.workspaceId,
+      ...session,
+      signal,
+      currentCredentialGeneration: () => credentialCacheGeneration,
+      assertCurrent,
+      relayJson: (credentials, path, init) =>
+        relayShareJsonWithCredentials(credentials, path, { ...init, redirect: "error" }),
+    });
+  const saved = (signal: AbortSignal) => {
+    const list = () =>
+      withCopyWorkspace(workspace, signal, async (copyWorkspace) =>
+        ownerDatasetCopies.savedList({
+          ...copyWorkspace,
+          origin,
+          ownerKey: datasetCopyOwnerKey(credentials),
+        }),
+      );
+    return {
+      read: async () => (await list()).read(),
+      write: async (value: Parameters<SavedCollectionsList["write"]>[0]) =>
+        (await list()).write(value),
+    };
   };
+  return {
+    ...session,
+    origin,
+    data,
+    home: (signal, assertCurrent) => {
+      const server = data(signal, assertCurrent);
+      return createServerHomeData({
+        host: new URL(origin).host,
+        list: (page) => server.list(page),
+        copy: async (datasetId) => {
+          await withWorkspaceAttachment(workspace, (lease) =>
+            lease.state.collectionsSendUp.sent(datasetId, signal),
+          );
+          return ownerCopyData(workspace, session, origin, datasetId, server, signal);
+        },
+        saved: saved(signal),
+        changed: () => notifyCollectionCopyChanged(workspace.workspaceId),
+      });
+    },
+  };
+}
+// The apps approved on this computer over a syncing workspace's Collections
+// run on its server, as themselves, with the owner's session there.
+function serverCollectionsTransport(workspaceId: string): ServerCollectionsTransport | null {
+  const entry = findWorkspace(workspaceId);
+  if (!entry || !collectionsServer(entry)) return null;
+  const post = async (path: string, body: unknown, signal?: AbortSignal) => {
+    const { credentials, credentialGeneration } = await remoteForWorkspace(entry, {
+      allowPaused: true,
+    });
+    if (!credentials.relayUrl) throw new Error("Sign in to the cloud server this workspace uses.");
+    const host = new URL(credentials.relayUrl).host;
+    const value = await relayShareJsonWithCredentials<unknown>(credentials, path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      redirect: "error",
+      ...(signal ? { signal } : {}),
+    }).catch((error: unknown) => {
+      if (error instanceof TypeError)
+        throw new CollectionServerUnreachableError(
+          `This Collection needs ${host}, which dohc can't reach.`,
+          { cause: error },
+        );
+      throw error;
+    });
+    if (credentialCacheGeneration !== credentialGeneration)
+      throw new Error("Your server session changed. Try again.");
+    return value;
+  };
+  return createServerCollectionsTransport(workspaceId, post);
+}
+// Every Collection the server holds for the workspace, archived ones too.
+async function serverDatasetIds(data: OwnerDatasetData): Promise<string[]> {
+  const ids: string[] = [];
+  for (let after: string | undefined; ;) {
+    const page = await data.list({ after, includeArchived: true });
+    ids.push(...page.datasets.map((dataset) => dataset.datasetId));
+    if (page.nextCursor === null) return ids;
+    after = page.nextCursor;
+  }
 }
 let installedDatasetCompiler: ReturnType<typeof createInstalledDatasetCompiler> | undefined;
 const datasetRuntimePath = () =>
@@ -6514,6 +6705,7 @@ const localDatasetHostFor = async (
         attachmentId: attachment.attachmentId,
         localPersonId: localUserId,
         holder: collectionsHolderCheck(workspace.workspaceId),
+        collectionsServer: () => serverCollectionsTransport(workspace.workspaceId),
         trashItem: (path) => shell.trashItem(path),
         runtime: {
           launch: createDesktopAppRuntimeLauncher(utilityProcess, true),
@@ -7183,6 +7375,7 @@ const desktopEngine = createDesktopEngine({
     if (workspace && activity.engineCaptureFor(workspaceId))
       withWorkspaceAttachment({ workspaceId }, (lease) => {
         reconcileLocalCollectionApps(canonicalWorkspaceFor(lease));
+        sendCollectionsUpFor(canonicalWorkspaceFor(lease));
         automationHosts.open(workspaceId);
         void lease.state.collectionAutomations.workspaceOpened();
       });
@@ -8718,9 +8911,8 @@ function registerIpcHandlers(): void {
             ),
           kept: async () => {
             const authority = await collectionsAuthorityFor(workspace, signal);
-            if (authority.kind === "server")
-              throw new Error("Another computer keeps this workspace's Collections.");
-            return authority.local.keptDatasetIds();
+            if (authority.kind === "local") return authority.local.keptDatasetIds();
+            return serverDatasetIds(authority.server.data(signal, () => signal.throwIfAborted()));
           },
         }),
       );
@@ -8765,7 +8957,7 @@ function registerIpcHandlers(): void {
             local,
             transferSession(workspace, signal),
             async (targetOrigin) => {
-              const remote = await (remoteReady ??= remoteForWorkspace(workspace));
+              const remote = await (remoteReady ??= sessionForMoved(workspace));
               current();
               if (
                 !remote.credentials.relayUrl ||
@@ -8924,6 +9116,34 @@ function registerIpcHandlers(): void {
     relayClientForWorkspace,
     enrollWorkspaceKeyEnvelope,
     installWorkspaceDataKey,
+    async sendCollectionsUp(workspace, credentials) {
+      if (!(await localDatasetStoreExists(workspace.rootPath))) return;
+      const signal = new AbortController().signal;
+      const credentialGeneration = credentialCacheGeneration;
+      const local = await localDatasetHostFor(workspace, signal);
+      const unsent = await sendCollectionsUp({
+        local,
+        ...transferSession(workspace, signal),
+        // The workspace has no remote until its Collections are there.
+        server: async () => ({ credentials, credentialGeneration }),
+      });
+      for (const [datasetId, error] of unsent) {
+        let name = datasetId;
+        try {
+          name = local.describe(datasetId, { includeArchived: true }).name;
+        } catch {}
+        const host = new URL(credentials.relayUrl ?? credentials.serverUrl).host;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `This workspace didn't start syncing, because the Collection "${name}" couldn't go to ${host}. ${reason}`,
+          { cause: error },
+        );
+      }
+    },
+    sendCollectionsUpLater: (workspace) => {
+      const entry = findWorkspace(workspace.workspaceId);
+      if (entry) sendCollectionsUpFor(entry);
+    },
     setWorkspaceRemote: async (workspaceId, remote) => {
       await setWorkspaceRemote(workspaceId, remote);
       retryStopAndRestoreReleases?.();
@@ -9179,27 +9399,8 @@ function registerIpcHandlers(): void {
       DesktopRendererWorkspaceOperation
     >
   >[0];
-  const datasetForWorkspace = localDatasetHostFor;
-  const moveToServer = async (
-    workspace: DesktopRendererWorkspaceOperation["workspace"],
-    datasetId: string,
-    signal: AbortSignal,
-  ) => {
-    const remote = await remoteForWorkspace(workspace);
-    signal.throwIfAborted();
-    await moveCollectionToServer({
-      local: await datasetForWorkspace(workspace, signal),
-      workspaceId: workspace.workspaceId,
-      datasetId,
-      ...remote,
-      currentCredentialGeneration: () => credentialCacheGeneration,
-      relayStream: relayShareJsonWithCredentials,
-      signal,
-    });
-  };
   const datasetDependencies = {
-    hostForWorkspace: datasetForWorkspace,
-    moveToServer,
+    hostForWorkspace: localDatasetHostFor,
     collectionRulesChanged: notifyCollectionRulesChanged,
     collectionPlace: async (
       workspace: DesktopRendererWorkspaceOperation["workspace"],
@@ -9214,38 +9415,8 @@ function registerIpcHandlers(): void {
             authority.server.credentials.relayUrl ?? authority.server.credentials.serverUrl,
           ).host,
         };
-      const { local } = authority,
-        remote = workspace.remote ? await remoteForWorkspace(workspace) : null;
-      signal.throwIfAborted();
-      return collectionPlace({
-        transfer: await finishedTransferOf(workspace, local, datasetId, signal),
-        relayUrl: remote?.credentials.relayUrl ?? null,
-        automations: async () =>
-          automationCounts(
-            workspace.workspaceId,
-            // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
-            datasetBaseFolder((await local.approvedArtifacts(datasetId)).revision.definition),
-          ),
-        runs: async () =>
-          remote &&
-          (await readAutomationHost(
-            workspace.workspaceId,
-            remote.credentials,
-            remote.credentialGeneration,
-            signal,
-          ).then(serverRunsOfAnswer, () => null)),
-      });
-    },
-    serverCollectionsFor: async (
-      workspace: DesktopRendererWorkspaceOperation["workspace"],
-      signal: AbortSignal,
-    ) => {
-      const server = await serverCollectionsFor(workspace, signal);
-      return (
-        server && {
-          data: server.data(signal, () => signal.throwIfAborted()),
-          elsewhere: server.elsewhere,
-        }
+      return collectionPlace(
+        await finishedTransferOf(workspace, authority.local, datasetId, signal),
       );
     },
     automationName: async (
@@ -9305,8 +9476,11 @@ function registerIpcHandlers(): void {
     ): Promise<OwnerDatasetData> => {
       // On a computer that doesn't keep the Collections, the server's, as every Collection action chooses.
       const authority = await collectionsAuthorityFor(workspace, signal);
-      if (authority.kind === "server")
-        return authority.server.data(signal, () => signal.throwIfAborted());
+      if (authority.kind === "server") {
+        const { server } = authority,
+          assertCurrent = () => signal.throwIfAborted();
+        return server.home(signal, assertCurrent);
+      }
       const { local } = authority;
       return createDatasetAuthorityRouter(local, {
         status: (datasetId) => {
@@ -9315,7 +9489,7 @@ function registerIpcHandlers(): void {
         },
         marker: (datasetId) => local.transferStatus(datasetId),
         remote: async (targetOrigin, datasetId) => {
-          const remote = await remoteForWorkspace(workspace);
+          const remote = await sessionForMoved(workspace);
           signal.throwIfAborted();
           if (
             !remote.credentials.relayUrl ||
@@ -9331,65 +9505,7 @@ function registerIpcHandlers(): void {
             assertCurrent: () => signal.throwIfAborted(),
             relayJson: relayShareJsonWithCredentials,
           });
-          const ownerKey = datasetCopyOwnerKey(remote.credentials);
-          let copyWorkspace: EngineWorkspace | undefined;
-          const openCopy = () =>
-            workspaceAuthorities.withOperation(workspace.workspaceId, async (operation) => {
-              signal.throwIfAborted();
-              operation.assertCurrent();
-              const rootPath = workspaceRootForOperation(
-                operation.workspace.rootPath,
-                workspace.rootPath,
-              );
-              copyWorkspace = { ...operation.workspace, rootPath };
-              return ownerDatasetCopies.get({
-                ...copyWorkspace,
-                datasetId,
-                origin: targetOrigin,
-                ownerKey,
-                lifetime: operation.signal,
-                assertOwner: () => {
-                  if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey)
-                    throw new Error("Sign in as this Collection's owner.");
-                },
-                runtime: {
-                  launch: createDesktopAppRuntimeLauncher(utilityProcess, false),
-                  entryPath: join(datasetRuntimePath(), "persistent-child.mjs"),
-                },
-              });
-            });
-          // Right after launch the engine's open may still be preparing
-          // `.dohc/local`, so a copy waits once for an open already under
-          // way. If the folder still isn't ready, the server holds the
-          // Collection, so it works online without an offline copy.
-          const copy = await openCopy()
-            .catch(async (error: unknown) => {
-              if (
-                !(error instanceof LocalStateUnavailableError) ||
-                error.refusal !== "not-opened" ||
-                !copyWorkspace
-              )
-                throw error;
-              await localStateOpened(copyWorkspace);
-              return openCopy();
-            })
-            .catch((error: unknown) => {
-              if (error instanceof LocalStateUnavailableError) return null;
-              throw error;
-            });
-          if (copy === null) return data;
-          const source = createRemoteDatasetReplicaSource({
-            workspaceId: workspace.workspaceId,
-            datasetId,
-            origin: targetOrigin,
-            ...remote,
-            signal,
-            currentCredentialGeneration: () => credentialCacheGeneration,
-            assertCurrent: () => signal.throwIfAborted(),
-            relayResponse: relayShareResponseWithCredentials,
-            onAccessLost: () => copy.accessLost(),
-          });
-          return copy.data(data, source, signal);
+          return ownerCopyData(workspace, remote, targetOrigin, datasetId, data, signal);
         },
       });
     },
@@ -9509,14 +9625,14 @@ function registerIpcHandlers(): void {
       const { server } = authority;
       // The server describes only a Collection whose move finished, as the computer that keeps them exports only those.
       await server.data(signal, authorize).describe(datasetId, { includeArchived: true });
-      return fromServer(server.elsewhere.server, {
+      return fromServer(server.origin, {
         credentials: server.credentials,
         credentialGeneration: server.credentialGeneration,
       });
     }
     const { local } = authority;
     const transfer = await finishedTransferOf(workspace, local, datasetId, signal);
-    if (transfer) return fromServer(transfer.targetOrigin, await remoteForWorkspace(workspace));
+    if (transfer) return fromServer(transfer.targetOrigin, await sessionForMoved(workspace));
     const archive = await local.prepareExport(datasetId, { signal });
     try {
       return (
@@ -9696,6 +9812,8 @@ function registerIpcHandlers(): void {
     keepCollectionsHere: async (_input, { event, operation }) => {
       const { workspace } = operation;
       const holder = collectionsHolderCheck(workspace.workspaceId);
+      if (collectionsServer(workspace))
+        throw new Error("This workspace's Collections are on its server.");
       if (!holder.required())
         throw new Error("A received share's Collections stay with the person who shared it.");
       const kept = await keepCollectionsHere(
@@ -9758,7 +9876,7 @@ function registerIpcHandlers(): void {
     workspaceAuthorities.withOperation(workspace.workspaceId, async (operation) => {
       signal.throwIfAborted();
       operation.assertCurrent();
-      const host = await datasetForWorkspace(workspace, signal);
+      const host = await localDatasetHostFor(workspace, signal);
       let pending = localDatasetLaunches.get(host);
       if (!pending) {
         pending = createLocalAppLaunchHost({ backend: host.apps, lifetime: operation.signal });
@@ -9780,7 +9898,9 @@ function registerIpcHandlers(): void {
     }
   >({
     ...ownerPublicationDependencies,
-    datasetForWorkspace,
+    datasetForWorkspace: localDatasetHostFor,
+    approvedArtifacts: async (workspace, datasetId, signal) =>
+      (await datasetDependencies.dataForWorkspace(workspace, signal)).approvedArtifacts(datasetId),
     launchLocalDataset: async (workspace, publicationId, signal) =>
       (await localAppLauncher(workspace, signal)).launch(publicationId, signal),
   });
@@ -9804,14 +9924,6 @@ function registerIpcHandlers(): void {
       ),
   });
   registerOperations(operationBoundary, appViewOperations, { appView: appViews.appView });
-  const beforeSharedPublish = async (
-    workspace: DesktopRendererWorkspaceOperation["workspace"],
-    candidate: import("@dohc/security-contract/app-publication").AppPublicationCandidate,
-    signal: AbortSignal,
-  ) => {
-    const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
-    if (dataset) await moveToServer(workspace, dataset.datasetId, signal);
-  };
   const resolveDatasetRevision = async (
     workspace: DesktopRendererWorkspaceOperation["workspace"],
     binding: import("@dohc/security-contract/dataset").AppDatasetBinding,
@@ -9828,7 +9940,6 @@ function registerIpcHandlers(): void {
   >({
     ...ownerPublicationDependencies,
     localPublication,
-    beforeSharedPublish,
     resolveDatasetRevision,
   });
   const cliOwnerPublication = createOwnerAppPublicationHandler<
@@ -9838,7 +9949,6 @@ function registerIpcHandlers(): void {
   >({
     ...ownerPublicationDependencies,
     localPublication,
-    beforeSharedPublish,
     resolveDatasetRevision,
     callerKey: (workspaceId) => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) =>

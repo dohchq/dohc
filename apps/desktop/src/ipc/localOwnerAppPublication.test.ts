@@ -73,7 +73,6 @@ function harness() {
     }> => ({ kind: "withdrawn", publicationId, authorityRevision: expected + 1 }),
   );
   const local = {
-    approvedArtifacts: vi.fn(),
     apps: {
       activate,
       has,
@@ -90,12 +89,13 @@ function harness() {
         },
       ]),
     },
-  } as unknown as Pick<LocalDatasetHost, "approvedArtifacts" | "apps">;
+  } as unknown as Pick<LocalDatasetHost, "apps">;
   const datasetForWorkspace = vi.fn(async () => local);
   const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
   const flushCapture = vi.fn(async () => ({ deferredWrites: ["app/draft.ts"] }));
   const handler = createLocalOwnerAppPublicationHandler({
     datasetForWorkspace,
+    approvedArtifacts: vi.fn(),
     launchLocalDataset,
     flushCapture,
     withAdapter: async (_workspace, work) => work({} as never),

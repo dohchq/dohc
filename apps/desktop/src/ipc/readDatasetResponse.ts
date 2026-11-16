@@ -6,6 +6,18 @@ import {
   APP_BACKEND_UPLOAD_BYTES,
 } from "@dohc/security-contract/app-backend";
 
+/** The answer readDatasetResponse reads for a request to the server's Collection routes or an app's change routes, or null for another route. */
+export function datasetResponseAction(path: string): string | null {
+  const dataset =
+    /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:\/([0-9a-f-]{36})(?:\/([a-z]+))?)?(?:\?|$)/.exec(path);
+  if (dataset) return dataset[2] ?? (dataset[1] ? "describe" : "list");
+  return (
+    /^\/sync\/[^/]+\/app-publications\/[0-9a-f]{64}\/backend\/(invoke|attempt|upload|file)$/.exec(
+      path,
+    )?.[1] ?? null
+  );
+}
+
 /** Bounds owner responses and retains an operation's correction message. */
 export async function readDatasetResponse(
   response: Response,

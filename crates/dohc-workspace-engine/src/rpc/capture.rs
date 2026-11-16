@@ -541,7 +541,7 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let (capture_recoveries, holds, outside_changes) = open
+        let (capture_recoveries, holds, outside_changes, merge_removals) = open
             .actor
             .capture_notices(open.workspace_id.clone())
             .await
@@ -567,6 +567,7 @@ impl EngineService {
                     "noAtomicPlacement": no_atomic_placement,
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
+                    "mergeRemovals": merge_removals,
                     "heldFiles": held_files,
                     "outsideChanges": outside_changes,
                     "deferredWrites": driver.status().deferred_writes(),
@@ -589,6 +590,7 @@ impl EngineService {
                 "noAtomicPlacement": no_atomic_placement,
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
+                "mergeRemovals": merge_removals,
                 "heldFiles": held_files,
                 "outsideChanges": outside_changes,
                 "deferredWrites": [],

@@ -1003,7 +1003,7 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
-    if (disposed || event.sessionId !== sessionId) return;
+    if (disposed || event.sessionId !== sessionId || event.textRemoved) return;
     refusedDoc = event.editRefusal !== undefined ? (binding?.doc ?? null) : null;
     if (event.typingUnresolved !== undefined) typingUnresolved = event.typingUnresolved;
     if (event.access === "deleted" || event.access === "object-changed") {

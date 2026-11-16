@@ -1299,6 +1299,7 @@ impl ActorHandle {
             Vec<dohc_engine_domain::CaptureRecovery>,
             Vec<CaptureFileHold>,
             Vec<HeldOutsideChange>,
+            Vec<dohc_engine_domain::MergeRemoval>,
         ),
         RuntimeError,
     > {
@@ -1308,6 +1309,7 @@ impl ActorHandle {
                     dohc_engine_domain::capture_recoveries_in(conn, &workspace_id)?,
                     capture_file_holds::list_in(conn, &workspace_id)?,
                     held_outside_changes::list_in(conn, &workspace_id)?,
+                    dohc_engine_domain::merge_removals_in(conn, &workspace_id)?,
                 ))
             })
         })

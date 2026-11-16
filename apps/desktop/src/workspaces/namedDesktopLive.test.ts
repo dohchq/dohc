@@ -41,12 +41,17 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
     for (const listener of listeners) listener(state());
   }
   const closed = vi.fn();
+  const removedListeners = new Set<(removed: { text: string }) => void>();
   const session = {
     doc,
     state,
     subscribe(fn: (value: ReturnType<typeof state>) => void) {
       listeners.add(fn);
       return () => listeners.delete(fn);
+    },
+    onRemovedText(fn: (removed: { text: string }) => void) {
+      removedListeners.add(fn);
+      return () => removedListeners.delete(fn);
     },
     async reconnect() {
       status = "live";
@@ -152,6 +157,9 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
       status = "quarantined";
       notify();
       return false;
+    },
+    removeText(text: string) {
+      for (const listener of removedListeners) listener({ text });
     },
     retry() {
       status = "live";
@@ -508,6 +516,23 @@ it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(
     await provider.close();
   },
 );
+
+it("tells the desktop what someone else's change removed of its text, until the session closes", async () => {
+  const f = fixture(),
+    onTextRemoved = vi.fn();
+  const provider = await f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+    onTextRemoved,
+  });
+  f.removeText("Mine");
+  expect(onTextRemoved).toHaveBeenCalledExactlyOnceWith("Mine");
+
+  await provider.close();
+  f.removeText("After");
+  expect(onTextRemoved).toHaveBeenCalledOnce();
+});
 
 it("keeps editing on retryable admission and stops on a terminal refusal", async () => {
   const f = fixture(),

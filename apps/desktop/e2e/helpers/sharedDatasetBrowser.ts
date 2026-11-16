@@ -1,5 +1,5 @@
 import https from "node:https";
-import { createHash, X509Certificate } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -69,11 +69,14 @@ export async function startSharedDatasetBrowser(input: {
     .update(cert.publicKey.export({ type: "spki", format: "der" }))
     .digest("base64");
   const failures: string[] = [];
+  // One key for every application this starts, as a deployment keeps its key through a restart.
+  const sessionSealKey = randomBytes(32).toString("base64url");
   const createApplication = () =>
     createShareWebApplication({
       relayUrl: input.relayUrl,
       publicRelayUrl: input.relayUrl,
       relayExchangeKey: input.exchangeKey,
+      sessionSealKey,
       publicHosts: new Set(["viewer.example.com"]),
       viewerAssetsDir,
       appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
@@ -171,7 +174,7 @@ export async function startSharedDatasetBrowser(input: {
 }
 
 /** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
-function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
+export function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
   if (process.platform !== "win32") {
     // Files, not /dev/stdin and /dev/stdout: on Linux a child's stdio is a socket, which those can't open.
     const dir = mkdtempSync(join(tmpdir(), "dohc-dataset-cert-"));

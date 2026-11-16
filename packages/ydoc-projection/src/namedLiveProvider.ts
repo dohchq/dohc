@@ -16,6 +16,13 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
+import {
+  applyUpdateFindingRemovedText,
+  DeletedText,
+  findUnsentText,
+  type RemovedText,
+  type UnsentText,
+} from "@dohc/ydoc-projection/removed-text";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -123,6 +130,26 @@ export function createNamedLiveProvider(
   const body = getDohcYDocBodyFragment(doc);
   const pending: PendingUpdate[] = [];
   const listeners = new Set<(state: NamedLiveProviderState) => void>();
+  const removedListeners = new Set<(removed: RemovedText) => void>();
+  // Every client whose changes this page sent. A desktop editor applies its own doc's
+  // updates here, so its typing carries that doc's client, not this one's.
+  const ownClients = new Set([doc.clientID]);
+  doc.on("afterTransaction", (transaction: Y.Transaction) => {
+    if (transaction.origin === REMOTE) return;
+    transaction.afterState.forEach((clock, client) => {
+      if ((transaction.beforeState.get(client) ?? 0) < clock) ownClients.add(client);
+    });
+  });
+  const ownText = (item: Y.Item) => ownClients.has(item.id.client);
+  function tellRemoved(removed: RemovedText) {
+    for (const listener of removedListeners) {
+      try {
+        listener(removed);
+      } catch {
+        /* A view listener cannot change delivery ownership. */
+      }
+    }
+  }
   let route: Route | undefined;
   let status: NamedLiveProviderState["status"] = "disconnected",
     reason: string | null = null;
@@ -381,6 +408,7 @@ export function createNamedLiveProvider(
               }
               pending.shift();
               pendingBytes -= update.bytes.length;
+              if (pending.length === 0 && refused.length === 0) deletedText.clear();
               held.awaitingAck = false;
               held.retryDelayMs = 250;
               reason = null;
@@ -434,12 +462,19 @@ export function createNamedLiveProvider(
                 return;
               }
               const hostVector = Y.decodeStateVector(sync.hostVector);
-              Y.decodeUpdate(sync.missingStateUpdate);
+              const { ds } = Y.decodeUpdate(sync.missingStateUpdate);
               // Yjs observers run synchronously; record attribution before they can retire the route.
               binding = parseLiveObjectBinding(sync.binding);
               held.receivedCursor = begin.appliedThroughJournalCursor;
               highestObservedCursor = begin.appliedThroughJournalCursor;
-              Y.applyUpdate(doc, sync.missingStateUpdate, REMOTE);
+              const removed = applyUpdateFindingRemovedText(
+                doc,
+                sync.missingStateUpdate,
+                REMOTE,
+                () => ds,
+                ownText,
+              );
+              if (removed) tellRemoved(removed);
               if (!current(held)) return;
               const appliedVector = Y.decodeStateVector(Y.encodeStateVector(doc));
               if (
@@ -460,10 +495,17 @@ export function createNamedLiveProvider(
                 quarantine("stale-update-cursor");
                 return;
               }
-              Y.decodeUpdate(content);
+              const { ds } = Y.decodeUpdate(content);
               held.receivedCursor = begin.journalCursor;
               highestObservedCursor = Math.max(highestObservedCursor, begin.journalCursor);
-              Y.applyUpdate(doc, content, REMOTE);
+              const removed = applyUpdateFindingRemovedText(
+                doc,
+                content,
+                REMOTE,
+                () => ds,
+                ownText,
+              );
+              if (removed) tellRemoved(removed);
               if (!current(held)) return;
             } else quarantine("unexpected-transfer");
           }
@@ -487,14 +529,25 @@ export function createNamedLiveProvider(
     await work;
   }
 
+  // Edits the page refused and never queued, so its review still shows them.
+  const refused: Uint8Array[] = [];
+  // Which of this page's deletes removed text, so formatting it removed doesn't count.
+  const deletedText = new DeletedText();
+  function noteDeletes(transaction: Y.Transaction) {
+    if (transaction.origin !== REMOTE) deletedText.note(transaction);
+  }
+  function refuse(why: string, bytes: Uint8Array) {
+    refused.push(bytes.slice());
+    quarantine(why);
+  }
   function localUpdate(bytes: Uint8Array, origin: unknown) {
     if (origin === REMOTE || status === "closed" || status === "quarantined") return;
     if (status !== "live" && !typingAhead()) {
-      quarantine("edit-while-unavailable");
+      refuse("edit-while-unavailable", bytes);
       return;
     }
     if (bytes.length > limits.frames.receive.maxUpdateBytes) {
-      quarantine("pending-update-limit");
+      refuse("pending-update-limit", bytes);
       return;
     }
     let authorContext: LiveAuthorContext | undefined;
@@ -504,7 +557,7 @@ export function createNamedLiveProvider(
       } catch {
         // A link page learns its identity with its first ticket, which can come after the edits it took ahead.
         if (status === "live") {
-          quarantine("invalid-recording-context");
+          refuse("invalid-recording-context", bytes);
           return;
         }
       }
@@ -532,7 +585,7 @@ export function createNamedLiveProvider(
         bytes.length > limits.maxPendingUpdateBytes - pendingBytes ||
         pending.length >= limits.maxPendingUpdates
       ) {
-        quarantine("pending-update-limit");
+        refuse("pending-update-limit", bytes);
         return;
       }
       pending.push({
@@ -546,6 +599,7 @@ export function createNamedLiveProvider(
     notify();
     if (route) void pump(route);
   }
+  doc.on("afterTransaction", noteDeletes);
   doc.on("update", localUpdate);
 
   return {
@@ -597,6 +651,18 @@ export function createNamedLiveProvider(
       notify();
       return true;
     },
+    /** What this page's unsaved changes typed that the note still shows; null with none. */
+    unsentText(): UnsentText | null {
+      const unsent = [...pending.map(({ bytes }) => bytes), ...refused];
+      return unsent.length ? findUnsentText(doc, Y.mergeUpdates(unsent), deletedText) : null;
+    },
+    /** This page's own text that someone else's change removed without having seen it. */
+    onRemovedText(listener: (removed: RemovedText) => void) {
+      removedListeners.add(listener);
+      return () => {
+        removedListeners.delete(listener);
+      };
+    },
     connect(transport: NamedLiveTransport) {
       if (status === "closed" || status === "quarantined")
         throw new Error("The provider cannot reconnect.");
@@ -635,8 +701,10 @@ export function createNamedLiveProvider(
     },
     close() {
       retire("closed", null);
+      doc.off("afterTransaction", noteDeletes);
       doc.off("update", localUpdate);
       listeners.clear();
+      removedListeners.clear();
     },
   };
 }

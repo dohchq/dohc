@@ -67,6 +67,33 @@ function calloutStart(source: string): number {
   return -1;
 }
 
+// Finds the first unescaped `[[` closed by `]]` on its line, with a non-empty
+// inner run that allows escaped characters (`\]`, `\|`, `\\`) so a label holding
+// an escaped delimiter is still found mid-line. A search from each `[[` would
+// rescan the rest of a long run of `[`. Every later `[[` inside a run that fails
+// stops at the same character, so the search resumes after it.
+function wikilinkStart(src: string): number {
+  let open = src.indexOf("[[");
+  while (open >= 0) {
+    if (open > 0 && src[open - 1] === "\\") {
+      open = src.indexOf("[[", open + 1);
+      continue;
+    }
+    let index = open + 2;
+    while (index < src.length && src[index] !== "]" && src[index] !== "\n") {
+      if (src[index] === "\\") {
+        // A backslash escapes any one character except a line end, as `.` matches.
+        if (!/./.test(src[index + 1] ?? "")) break;
+        index += 1;
+      }
+      index += 1;
+    }
+    if (index > open + 2 && src[index] === "]" && src[index + 1] === "]") return open;
+    open = src.indexOf("[[", index);
+  }
+  return -1;
+}
+
 function findClosingWikilink(src: string): number {
   for (let index = 2; index < src.length - 1; index += 1) {
     if (src[index] === "\\") {
@@ -303,10 +330,8 @@ const DohcWikilink = Node.create({
     name: "wikilink",
     level: "inline",
     start(src) {
-      // Inner run allows escaped chars (`\]`, `\|`, `\\`) so a wikilink whose
-      // label contains an escaped delimiter is still detected mid-line; the
-      // authoritative bounds come from findClosingWikilink in tokenize.
-      return firstUnescapedIndex(src, /(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/);
+      // The authoritative bounds come from findClosingWikilink in tokenize.
+      return wikilinkStart(src);
     },
     tokenize(src) {
       if (!src.startsWith("[[")) return undefined;

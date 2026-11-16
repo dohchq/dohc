@@ -28,6 +28,7 @@ const READY_WATCHER_STATUS = {
   deferredWrites: [],
   keptFiles: [],
   captureRecoveries: [],
+  mergeRemovals: [],
   heldFiles: [],
   outsideChanges: [],
   retainedCopies: { count: 0, bytes: 0 },

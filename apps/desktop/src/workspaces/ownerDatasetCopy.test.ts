@@ -90,7 +90,14 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     ownerKey: "owner",
     origin: "https://relay",
     assertOwner() {},
+    onChanged: () => heard?.(),
   };
+  // Settles when the copy next says what it shows changed.
+  let heard: (() => void) | undefined;
+  const changed = () =>
+    new Promise<void>((resolve) => {
+      heard = resolve;
+    });
   await mkdir(options.directory);
   let copy = await createOwnerDatasetCopy(options),
     offline = false,
@@ -106,6 +113,8 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
         throw Error("revoked");
       }
       if (offline) throw new DatasetCopyOfflineError("offline");
+      // As the host refuses a copy of an archived Collection.
+      if (archived) throw Error("archived");
       return host.replicaCapture(actor, scope);
     },
     async page(input) {
@@ -168,6 +177,12 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await copy.close();
     copy = await createOwnerDatasetCopy(options);
     offline = true;
+    // The copy shows what it kept at once, then finds the server out of reach.
+    let found = changed();
+    expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
+      dataset: { archived: true },
+    });
+    await found;
     expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
       dataset: { archived: true },
       copy: { offline: true, host: "relay" },
@@ -179,6 +194,9 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     ).rejects.toThrow(/archived/);
     offline = false;
     archived = false;
+    found = changed();
+    await copy.data(remote, source, signal).inspect!(id(1));
+    await found;
     const inspect = await copy.data(remote, source, signal).inspect!(id(1));
     expect(inspect.copy?.offline).toBe(false);
     expect(() => parseDatasetDescription(inspect.dataset)).not.toThrow();
@@ -189,7 +207,10 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     await copy.close();
     copy = await createOwnerDatasetCopy(options);
     offline = true;
+    // A description read from the kept copy also goes to bring it up to date.
+    found = changed();
     expect((await copy.data(remote, source, signal).describe(id(1))).name).toBe("Entries");
+    await found;
     const offlineDescription = await copy.data(remote, source, signal).inspect!(id(1));
     expect(parseDatasetDescription(offlineDescription.dataset)).toEqual(inspect.dataset);
     expect(offlineDescription.copy).toMatchObject({ offline: true, host: "relay" });
@@ -219,6 +240,12 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       input: { name: "Friend" },
       idempotencyKey: "second",
     });
+    // The copy shows what it kept until the server answers again.
+    found = changed();
+    expect(await copy.data(remote, source, signal).invoke(read)).toMatchObject({
+      copy: { offline: true },
+    });
+    await found;
     expect(await copy.data(remote, source, signal).invoke(read)).toMatchObject({
       result: [
         { id: 1, name: "Mom" },
@@ -226,8 +253,16 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
       ],
       copy: { offline: false },
     });
+    // Access ends: the next update finds out, and the copy goes.
     denied = true;
-    await expect(copy.data(remote, source, signal).invoke(read)).rejects.toThrow("revoked");
+    found = changed();
+    // This read shows the copy, or is refused if the update already found out.
+    await copy
+      .data(remote, source, signal)
+      .invoke(read)
+      .catch(() => undefined);
+    await found;
+    await expect(copy.data(remote, source, signal).invoke(read)).rejects.toThrow(/unavailable/);
     offline = true;
     await expect(copy.data(remote, source, signal).invoke(read)).rejects.toThrow(/unavailable/);
   } finally {

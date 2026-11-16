@@ -133,19 +133,23 @@ export class CollectionsRefusalError extends Error {
 /** Whether a workspace's Collections need a holder, and who this installation is. */
 export interface CollectionsHolderCheck {
   here(): Computer;
-  /** False for a workspace that opened as a share. */
+  /** False for a workspace that opened as a share, or that has a server. */
   required(): boolean;
 }
 
 /**
- * Whether a workspace's Collections need a holder: every workspace of the
- * person's own does, whether or not it syncs through a server. A received
- * share does not.
+ * Whether a workspace's Collections need a holder: a workspace of the
+ * person's own with no server does. The server keeps a syncing or paused
+ * workspace's Collections, and a received share's are its owner's.
  */
 export function collectionsHolderRequired(
-  entry: { shareView?: unknown } | null | undefined,
+  entry: { shareView?: unknown; remote?: unknown; pausedRemote?: unknown } | null | undefined,
 ): boolean {
-  return entry?.shareView === undefined;
+  return (
+    entry?.shareView === undefined &&
+    entry?.remote === undefined &&
+    entry?.pausedRemote === undefined
+  );
 }
 
 type RecordRead = { kind: "absent" } | { kind: "holder"; holder: CollectionsHolder; text: string };
@@ -296,27 +300,6 @@ function heldBy(read: RecordRead, here: Computer): CollectionsHolder {
   const { computer } = read.holder;
   if (computer.installId !== here.installId) throw refused(elsewhereOf(computer, here));
   return read.holder;
-}
-
-/**
- * Whether the record names another installation, which keeps the
- * Collections, read from the record alone. Null for anything else: this
- * installation keeps them, no computer does yet, the workspace needs no
- * holder, or dohc cannot read the record. Those still take the store's own
- * admission, which refuses as before.
- */
-export async function collectionsKeptElsewhere(
-  rootPath: string,
-  workspaceId: string,
-  check: CollectionsHolderCheck,
-): Promise<Elsewhere | null> {
-  if (!check.required()) return null;
-  const read = await readRecord(rootPath, workspaceId).catch(() => null);
-  if (read?.kind !== "holder") return null;
-  const here = check.here();
-  return read.holder.computer.installId === here.installId
-    ? null
-    : elsewhereOf(read.holder.computer, here);
 }
 
 /**

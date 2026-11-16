@@ -764,6 +764,118 @@ pub(crate) fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    /// Times a store open on a store of a chosen size, one step per run so a
+    /// caller can empty the operating system's file cache between steps.
+    /// `DOHC_MEASURE_STORE` names the store file and `DOHC_MEASURE_STEP` the step:
+    /// `build` writes a store of `DOHC_MEASURE_MB` megabytes as the build before
+    /// the last `DOHC_MEASURE_PENDING` migrations left it, `fill` adds that many
+    /// megabytes to a store an engine made, `check` times one `quick_check`, and
+    /// `open` times the open an engine does.
+    #[test]
+    #[ignore = "manual store-open cost measurement"]
+    fn store_open_cost_on_a_sized_store() {
+        use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run with --release"
+        );
+        let setting = |name: &str| std::env::var(name).ok();
+        let path = std::path::PathBuf::from(setting("DOHC_MEASURE_STORE").expect("a store path"));
+        let pages = |conn: &rusqlite::Connection| -> i64 {
+            conn.pragma_query_value(None, "page_count", |row| row.get(0))
+                .unwrap()
+        };
+        let applied = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row("SELECT count(*) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        // A third each of note text, live update blobs and sync log rows, which hold most of a real store.
+        // The log rows are the size of a small edit, so the store has many index pages to check.
+        let fill = |conn: &rusqlite::Connection| {
+            let megabytes: i64 = setting("DOHC_MEASURE_MB").map_or(256, |v| v.parse().unwrap());
+            let third = megabytes * 1024 * 1024 / 3;
+            conn.execute_batch(&format!(
+                "BEGIN;
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{texts})
+                 INSERT INTO blobs SELECT 'text-'||x, 4096, hex(randomblob(2048)) FROM n;
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{updates})
+                 INSERT INTO binary_blobs SELECT 'update-'||x, 256, randomblob(256) FROM n;
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{rows})
+                 INSERT INTO replication_log
+                   (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported)
+                 SELECT 'workspace', 'origin-'||(x % 7), x, 'measure', hex(randomblob(128)), x, 0 FROM n;
+                 COMMIT;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+                texts = third / 4200,
+                updates = third / 300,
+                rows = third / 420,
+            ))
+            .unwrap();
+        };
+        match setting("DOHC_MEASURE_STEP").as_deref() {
+            Some("build") => {
+                let pending: usize =
+                    setting("DOHC_MEASURE_PENDING").map_or(2, |v| v.parse().unwrap());
+                let mut conn = rusqlite::Connection::open(&path).unwrap();
+                conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+                run_migrations(
+                    &mut conn,
+                    &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - pending],
+                    &MigrationContext::current(1),
+                    &crate::faults::NoFaults,
+                )
+                .unwrap();
+                fill(&conn);
+                println!(
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"build\",\"bytes\":{},\"pages\":{},\"migrationsApplied\":{},\"migrationsPending\":{pending}}}",
+                    std::fs::metadata(&path).unwrap().len(),
+                    pages(&conn),
+                    applied(&conn),
+                );
+            }
+            Some("fill") => {
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                fill(&conn);
+                println!(
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"fill\",\"bytes\":{},\"pages\":{}}}",
+                    std::fs::metadata(&path).unwrap().len(),
+                    pages(&conn),
+                );
+            }
+            Some("check") => {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let start = std::time::Instant::now();
+                let result: String = conn
+                    .pragma_query_value(None, "quick_check", |row| row.get(0))
+                    .unwrap();
+                let check_ms = start.elapsed().as_millis();
+                assert_eq!(result, "ok");
+                println!(
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"check\",\"checkMs\":{check_ms},\"pages\":{}}}",
+                    pages(&conn)
+                );
+            }
+            Some("open") => {
+                let before = applied(&rusqlite::Connection::open(&path).unwrap());
+                let start = std::time::Instant::now();
+                let opened = super::open_engine_db(&path, 2, None).unwrap();
+                let open_ms = start.elapsed().as_millis();
+                println!(
+                    "STORE_OPEN_MEASUREMENT {{\"step\":\"open\",\"openMs\":{open_ms},\"migrationsRun\":{},\"pages\":{}}}",
+                    applied(&opened.conn) - before,
+                    pages(&opened.conn)
+                );
+            }
+            other => panic!("DOHC_MEASURE_STEP is build, fill, check or open, not {other:?}"),
+        }
+    }
+
     #[test]
     fn passive_role_overrides_background_checkpoint_opt_in() {
         let scratch =

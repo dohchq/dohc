@@ -61,6 +61,7 @@ function harness(initial: Recovery[]) {
     getCaptureRecoveryStatus: vi.fn(
       async (_input: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({
         captureRecoveries: listed,
+        mergeRemovals: [],
       }),
     ),
     clearCaptureRecovery: vi.fn(
@@ -111,7 +112,7 @@ describe("useCaptureRecoveryNotices", () => {
     h.list([RECOVERY]);
     await act(async () => {
       await h.result.current.notices.refresh();
-      stale.resolve({ captureRecoveries: [] });
+      stale.resolve({ captureRecoveries: [], mergeRemovals: [] });
     });
     // If the superseded read still starts metadata reads, let them finish.
     await act(async () => {
@@ -402,7 +403,7 @@ describe("useCaptureRecoveryNotices", () => {
       }),
     );
     await act(async () => {
-      late.resolve({ captureRecoveries: [RECOVERY] });
+      late.resolve({ captureRecoveries: [RECOVERY], mergeRemovals: [] });
       await reading;
     });
     expect(recoveryRows(h)).toEqual([]);
@@ -547,12 +548,15 @@ describe("useCaptureRecoveryNotices", () => {
     h.rendered.rerender({ workspaceId: "ws-b" });
     await waitFor(() => expect(answers).toHaveLength(2));
     expect(h.bridge.getCaptureRecoveryStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-b" });
-    await act(async () => answers[0]!.resolve({ captureRecoveries: [RECOVERY] }));
+    await act(async () =>
+      answers[0]!.resolve({ captureRecoveries: [RECOVERY], mergeRemovals: [] }),
+    );
     expect(h.result.current.shellErrors).toEqual([]);
 
     await act(async () =>
       answers[1]!.resolve({
         captureRecoveries: [{ ...RECOVERY, momentId: "moment-capture-recovery-b" }],
+        mergeRemovals: [],
       }),
     );
     expect(recoveryRows(h).map((row) => row.identity)).toEqual([

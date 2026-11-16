@@ -18,8 +18,7 @@ import {
   type PressCaller,
 } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
-import { createServerCollectionsData } from "../workspaces/remoteDataset";
-import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
+import { createRemoteDatasetData } from "../workspaces/remoteDataset";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRESS_ID = "4f2d3c1a-9b8e-4c7d-a6f5-0e1d2c3b4a59";
@@ -31,11 +30,6 @@ const SERVER_SESSION = {
   token: "test-only",
   email: "main@example.test",
 };
-const KEPT_ELSEWHERE = new CollectionsRefusalError({
-  kind: "elsewhere",
-  computer: { installId: "install-studio", label: "Studio Mac" },
-  sameName: false,
-});
 const ownerButtonId = (target: RelayButtonTarget) =>
   `collection:${target.collectionPath.replaceAll("/", "-")}#${target.automationId}`;
 
@@ -186,10 +180,9 @@ function fixture(
   const serverRelay =
     options.server === undefined
       ? null
-      : vi.fn(async (_credentials: unknown, path: string, init: RequestInit) => ({
-          kind: "success" as const,
-          body: options.server!(path, JSON.parse(String(init.body))),
-        }));
+      : vi.fn(async (_credentials: unknown, path: string, init: RequestInit) =>
+          options.server!(path, JSON.parse(String(init.body))),
+        );
   const buttonFields = vi.fn(async () => options.fields ?? ["Mark paid"]);
   const relayPress = vi.fn(
     async (
@@ -314,15 +307,15 @@ function fixture(
       serverRelay === null
         ? null
         : {
-            data: createServerCollectionsData({
+            data: createRemoteDatasetData({
               workspaceId: WORKSPACE_ID,
               credentials: SERVER_SESSION,
               credentialGeneration: 1,
               signal: new AbortController().signal,
               currentCredentialGeneration: () => 1,
               assertCurrent() {},
-              relayJson: serverRelay,
-              elsewhere: KEPT_ELSEWHERE,
+              relayJson: (credentials, path, init) =>
+                serverRelay(credentials, path, { ...init, redirect: "error" }),
             }),
           },
     recordAt,

@@ -45,6 +45,7 @@
     "test": "node scripts/verification/js-tests.mjs",
     "test:desktop:e2e": "node scripts/verification/verify.mjs e2e",
     "test:apps:e2e": "pnpm --filter @dohc/desktop run test:apps:e2e",
+    "test:together": "pnpm --filter @dohc/desktop run test:together",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",
     "check:self-host": "node scripts/check-self-host.mjs",
     "check:brand": "node scripts/check-brand.mjs",

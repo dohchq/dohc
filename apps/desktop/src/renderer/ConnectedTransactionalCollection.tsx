@@ -12,6 +12,8 @@ import type {
 } from "@dohc/cli/dataset";
 import { useCollectionTableViews } from "./useCollectionTableViews";
 import { bridge } from "./bridge";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 import { dirnameOf } from "./path";
 import {
   TransactionalCollectionPage,
@@ -83,6 +85,9 @@ export interface ConnectedTransactionalCollectionProps {
   /** A resize of the record panel ended. */
   onRecordPanelWidthChange?(width: number): void;
 }
+// How often an open page that shows this computer's copy of a Collection on a
+// server reads it again.
+const COPY_READ_MS = 10_000;
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return (
     <ScopedCollection
@@ -176,6 +181,8 @@ function ScopedCollection({
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
   const request = useRef(0);
+  // Rises each time a quiet read shows its answer.
+  const quietShown = useRef(0);
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
   useEffect(() => {
@@ -186,7 +193,8 @@ function ScopedCollection({
   }, []);
   // Says whether this read showed the Collection, failed, or gave way to a newer read.
   const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
-    const sequence = ++request.current;
+    const sequence = ++request.current,
+      shown = quietShown.current;
     setLoading(true);
     try {
       const result = await bridge().dataset({
@@ -203,15 +211,21 @@ function ScopedCollection({
       onSettled?.(openIdentity);
       setRefusal(null);
       setUnreachable(null);
-      setDataset(result.dataset);
-      setCopy(result.copy);
+      // A quiet read that started after this one and already showed its answer is the newer one.
+      if (shown === quietShown.current) {
+        setDataset(result.dataset);
+        setCopy(result.copy);
+      }
       setRecordsVersion((value) => value + 1);
       return "read";
     } catch (error) {
       if (sequence !== request.current) return "superseded";
+      const refused = readCollectionsRefusal(error);
+      // A quiet read that started after this one showed the Collection meanwhile;
+      // a refusal still wins, as access may have ended after that read's check.
+      if (!refused && shown !== quietShown.current) return "superseded";
       setRecordsVersion((value) => value + 1);
-      const refused = readCollectionsRefusal(error),
-        away = refused ? null : readCollectionServerUnreachable(error);
+      const away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
       setUnreachable(away);
       if (refused || away) setDataset(null);
@@ -344,6 +358,81 @@ function ScopedCollection({
       }),
     [workspaceId, refresh],
   );
+  // Reads the Collection again without the loading line, and says nothing when
+  // the read fails. A read the page started meanwhile wins.
+  const quietRecords = useRef(false);
+  const quiet = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${datasetPath}\0${owner ? "owner" : "reader"}`,
+    manual: true,
+    load: async () => ({
+      sequence: request.current,
+      result: await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: describedId.current,
+        action: "describe",
+        ...(owner ? { includeArchived: true } : {}),
+      }),
+    }),
+  });
+  useEffect(() => {
+    const answer = quiet.value;
+    if (!answer || answer.sequence !== request.current || answer.result.kind !== "description")
+      return;
+    quietShown.current++;
+    describedId.current = answer.result.dataset.datasetId;
+    onSettled?.(openIdentity);
+    setRefusal(null);
+    setUnreachable(null);
+    setDataset(answer.result.dataset);
+    setCopy(answer.result.copy);
+    if (quietRecords.current) {
+      quietRecords.current = false;
+      setRecordsChanged((value) => value + 1);
+    }
+  }, [quiet.value]);
+  // One quiet read at a time, so a slow one is not replaced before it answers;
+  // whatever asked during it gets one read after it.
+  const retryQuietly = quiet.retry,
+    quietBusy = useRef(false),
+    quietAgain = useRef(false);
+  const readQuietly = useCallback(
+    function read(records: boolean) {
+      if (records) quietRecords.current = true;
+      if (quietBusy.current) {
+        quietAgain.current = true;
+        return;
+      }
+      quietBusy.current = true;
+      void retryQuietly().finally(() => {
+        quietBusy.current = false;
+        if (!quietAgain.current) return;
+        quietAgain.current = false;
+        read(false);
+      });
+    },
+    [retryQuietly],
+  );
+  // This computer's copy came up to date from the server, as with another
+  // computer's change or the server coming back: the page and its records show it.
+  useEffect(
+    () =>
+      bridge().onCollectionCopyChanged((event) => {
+        if (event.workspaceId === workspaceId && event.datasetId === describedId.current)
+          readQuietly(true);
+      }),
+    [workspaceId, readQuietly],
+  );
+  // Each read brings this computer's copy up to date from the server
+  // afterwards, so an open page that shows a copy reads again now and then.
+  const showsCopy = owner && copy !== undefined;
+  useEffect(() => {
+    if (!showsCopy) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "hidden") readQuietly(false);
+    }, COPY_READ_MS);
+    return () => clearInterval(timer);
+  }, [showsCopy, readQuietly]);
   const buttonColumns = useMemo(
     (): TransactionalButtons | undefined =>
       buttons === null || buttonFields.length === 0
@@ -897,7 +986,6 @@ function ScopedCollection({
           onClose={() => setManagingAccess(false)}
           onError={onError}
           onSettled={onSettled}
-          onMoved={() => void refresh()}
         />
       )}
       {exportingRecovery && owner && !copy?.offline && (

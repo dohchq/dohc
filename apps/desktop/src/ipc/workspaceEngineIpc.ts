@@ -913,9 +913,10 @@ export function createWorkspaceEngineIpc<
             input.workspaceId,
             "This workspace is no longer active.",
             async (operation) => {
-              const result = await withEngineAdapter(operation.workspace, async (adapter) => ({
-                captureRecoveries: (await adapter.watcherStatus()).captureRecoveries,
-              }));
+              const result = await withEngineAdapter(operation.workspace, async (adapter) => {
+                const { captureRecoveries, mergeRemovals } = await adapter.watcherStatus();
+                return { captureRecoveries, mergeRemovals };
+              });
               if (result === null) throw new Error("The workspace engine is not running.");
               return CaptureRecoveryStatusResult.parse(result);
             },

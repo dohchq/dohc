@@ -148,7 +148,9 @@ export interface WriteQueuePage {
 export const NOT_CONFIRMED = "dohc could not confirm this change.";
 const REFUSED = "The Collection refused this change.";
 const WAITING_BEHIND = "Waiting for an earlier change to this record";
-const WAITING_OFFLINE = "Waiting for the Collection to come back online";
+/** What an offline copy says of a change it did not send. dohc keeps no change to send later. */
+const OFFLINE =
+  "dohc didn't save this change. This Collection is read-only until it is back online.";
 const WAITING_READ = "Waiting for dohc to read this record again";
 export const RULES_DISALLOW =
   "The Collection's rules no longer allow this change, so dohc did not save it.";
@@ -160,6 +162,13 @@ const RULES_CHANGED =
 const RECORD_GONE = "This record is no longer in the Collection, so dohc did not save this change.";
 const DISCARDED =
   "dohc could not confirm this change, and you discarded it. Check the record before you make the change again.";
+
+const isOfflineRefusal = (cause: object) =>
+  "refusal" in cause &&
+  typeof cause.refusal === "object" &&
+  cause.refusal !== null &&
+  "code" in cause.refusal &&
+  cause.refusal.code === "offline";
 
 /** What a table's row in Notices says of the changes that need the person: how many dohc could not confirm, did not save and did not delete, and how many wait. */
 function reminderWords(tableName: string, items: readonly WriteAttention[]): string {
@@ -210,6 +219,8 @@ type Held = {
   value: AppBackendJson;
   reason: string;
   uncertain?: true;
+  /** The Collection refused the change, so its cell shows the stored value. */
+  refused?: true;
 };
 type Deletion = {
   id: number;
@@ -742,8 +753,8 @@ export class WriteQueue {
   private pump(): void {
     const rules = this.rules;
     // Until main has admitted this workspace's session, it refuses the workspace's changes, so they wait unsent.
-    if (!rules || this.flight || rules.offline || !collectionChangesAdmitted(rules.workspaceId))
-      return;
+    if (rules?.offline) return this.refuseUnsent(OFFLINE);
+    if (!rules || this.flight || !collectionChangesAdmitted(rules.workspaceId)) return;
     let waitsForRead = false,
       stuck = false;
     const blocked = new Set<string>();
@@ -1043,7 +1054,15 @@ export class WriteQueue {
       typeof cause === "object" &&
       "code" in cause &&
       cause.code === "operation_refused";
-    if (refused) {
+    const offline = refused && isOfflineRefusal(cause);
+    if (offline && !write.doubted) {
+      // This computer refused the change, as the Collection's server is out of reach: nothing ran, and the changes after it would meet the same.
+      this.outcome();
+      const reason = cause instanceof Error && cause.message ? cause.message : OFFLINE;
+      this.drop(write, reason, true);
+      this.refuseUnsent(reason, false);
+      reports?.onError(open ? reason : `${rules.tableName}: ${reason}`, cause, null);
+    } else if (refused && !offline) {
       this.outcome();
       this.drop(
         write,
@@ -1074,14 +1093,19 @@ export class WriteQueue {
     } else {
       write.state = "unconfirmed";
       write.doubted = true;
+      // A try of this change before the refused one may have run, so it keeps its Try again; the changes after it are refused.
+      if (offline)
+        this.refuseUnsent(cause instanceof Error && cause.message ? cause.message : OFFLINE, false);
       if (reports) this.ownRows.add(write);
       for (const page of this.pages) page.host?.unconfirmed(write);
+      const words = open
+        ? NOT_CONFIRMED
+        : `dohc could not confirm the change to ${rules.tableName}. Open it to check its records.`;
       // Try again sends the change only while it still waits, so a row left in Notices can't send it twice.
+      // The refused connection's words say the change didn't save, which only this try proves.
       reports?.onError(
-        open
-          ? NOT_CONFIRMED
-          : `dohc could not confirm the change to ${rules.tableName}. Open it to check its records.`,
-        cause,
+        words,
+        offline ? new Error(words) : cause,
         () => this.retry(write.id),
         this.identity(write),
       );
@@ -1098,6 +1122,25 @@ export class WriteQueue {
   private read(recordKey: string, version: number, seq: number): Known {
     for (const write of this.writes) if (write.record?.key === recordKey) write.read = version;
     return { version, seq, steps: new Map() };
+  }
+
+  /**
+   * Drops every change not yet sent, as an offline copy sends nothing and dohc keeps nothing to send later.
+   * A change sent before, waiting to go again, may have run, so it keeps its Try again.
+   */
+  private refuseUnsent(reason: string, report = true): void {
+    const unsent = this.writes.filter((write) => write.state === "queued");
+    if (unsent.length === 0) return;
+    for (const write of unsent)
+      if (write.request) write.state = "unconfirmed";
+      else this.drop(write, reason, true);
+    if (report && this.rules)
+      this.reports()?.onError(
+        this.pages.size > 0 ? reason : `${this.rules.tableName}: ${reason}`,
+        new Error(reason),
+        null,
+      );
+    this.changed();
   }
 
   /** Drops a change that was never sent, and says so when no page is open to show why. */
@@ -1179,6 +1222,7 @@ export class WriteQueue {
         value: typed.value,
         reason,
         ...doubt,
+        ...(refused ? { refused: true as const } : {}),
       });
     }
   }
@@ -1207,10 +1251,11 @@ export class WriteQueue {
     };
     for (const [record, fields] of this.held)
       for (const [field, held] of fields) {
-        show(record, field, ["refused", held.id, held.value, held.reason], () => ({
+        show(record, field, ["refused", held.id, held.value, held.reason, held.refused], () => ({
           state: "refused",
           value: held.value as CollectionValue,
           reason: held.reason,
+          ...(held.refused ? { stored: true as const } : {}),
           dismiss: () => this.dismiss(record, field),
         }));
       }
@@ -1228,9 +1273,7 @@ export class WriteQueue {
             ? WAITING_BEHIND
             : record !== undefined && this.unknown.get(record)?.stuck
               ? WAITING_READ
-              : this.rules?.offline && write.state === "queued"
-                ? WAITING_OFFLINE
-                : undefined;
+              : undefined;
       if (typeof reason === "string") waits.set(write.id, reason);
       if (record === undefined) continue;
       for (const [field, typed] of Object.entries(write.values)) {

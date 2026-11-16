@@ -126,93 +126,7 @@ it("keeps a list main refused because no computer keeps the Collections as the l
   expect(result.current.datasets).toEqual(page.datasets);
 });
 
-it("keeps where the other Collections are with the server's list, only for its own workspace", async () => {
-  const { result, dataset, rerender } = setup();
-  const elsewhere = {
-    server: "https://relay.example",
-    computer: { label: "Laptop", sameName: false },
-  };
-  const others =
-    "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-  dataset.mockResolvedValueOnce({ ...page, elsewhere });
-  await act(async () => result.current.refreshDatasets());
-  expect(result.current.datasets).toEqual(page.datasets);
-  expect(result.current.collectionsElsewhere).toEqual({
-    computer: "Laptop",
-    others: true,
-    words: others,
-  });
-  dataset.mockResolvedValueOnce({ ...page, datasets: [], nextCursor: null, elsewhere });
-  await act(async () => result.current.loadMoreDatasets());
-  expect(result.current.collectionsElsewhere).toEqual({
-    computer: "Laptop",
-    others: true,
-    words: others,
-  });
-  rerender({ ended: true });
-  expect(result.current.collectionsElsewhere).toBeNull();
-  rerender({ ended: false });
-  dataset.mockResolvedValueOnce({
-    ...page,
-    datasets: [],
-    nextCursor: null,
-    elsewhere: { ...elsewhere, computer: { label: "Studio", sameName: true } },
-  });
-  await act(async () => result.current.refreshDatasets());
-  expect(result.current.collectionsElsewhere).toEqual({
-    computer: "Studio",
-    others: false,
-    words:
-      "These Collections are on Studio, another installation of dohc with this computer's name. Open this workspace there to use them, or to move them to a server.",
-  });
-  await act(async () => result.current.refreshDatasets());
-  expect(result.current.collectionsElsewhere).toBeNull();
-});
-
-it("says where the Collections are when the server didn't answer, and still reports why", async () => {
-  const { result, dataset } = setup();
-  const words =
-    "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-  const unavailable: DatasetResult = {
-    kind: "collections-refused",
-    refusal: {
-      kind: "server-unavailable",
-      words,
-      computer: "Laptop",
-      failure: "TypeError: fetch failed",
-    },
-  };
-  const refresh = async () => {
-    let failure: unknown = null;
-    await act(async () => {
-      await result.current.refreshDatasets().catch((error: unknown) => {
-        failure = error;
-      });
-    });
-    return failure;
-  };
-  dataset.mockResolvedValueOnce(unavailable);
-  expect(await refresh()).toEqual(new Error("TypeError: fetch failed"));
-  expect(result.current.collectionsElsewhere).toEqual({ computer: "Laptop", others: false, words });
-  expect(result.current.datasets).toEqual([]);
-  expect(result.current.collectionsRefusal).toBeNull();
-  dataset.mockResolvedValueOnce({
-    ...page,
-    elsewhere: { server: "https://relay.example", computer: { label: "Laptop", sameName: false } },
-  });
-  await act(async () => result.current.refreshDatasets());
-  dataset.mockResolvedValueOnce(unavailable);
-  expect(await refresh()).toEqual(new Error("TypeError: fetch failed"));
-  expect(result.current.datasets).toEqual(page.datasets);
-  expect(result.current.collectionsElsewhere).toEqual({
-    computer: "Laptop",
-    others: true,
-    words:
-      "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.",
-  });
-});
-
-it("drops a server's list that answers after the window changed workspaces", async () => {
+it("drops a list that answers after the window changed workspaces", async () => {
   const dataset = vi.fn(async (): Promise<DatasetResult> => page);
   vi.stubGlobal("dohcDesktop", {
     dataset,
@@ -230,15 +144,29 @@ it("drops a server's list that answers after the window changed workspaces", asy
   });
   rerender({ workspaceId: "second" });
   await act(async () => {
-    read.resolve({
-      ...page,
-      elsewhere: {
-        server: "https://relay.example",
-        computer: { label: "Laptop", sameName: false },
-      },
-    });
+    read.resolve(page);
     await pending;
   });
-  expect(result.current.collectionsElsewhere).toBeNull();
   expect(result.current.datasets).toEqual([]);
+});
+
+it("reports no failure for a list read a newer one replaced, so the newer list stays shown", async () => {
+  const dataset = vi.fn(async (): Promise<DatasetResult> => page);
+  vi.stubGlobal("dohcDesktop", {
+    dataset,
+    listCollections: vi.fn(async () => ({ collections: [] })),
+  });
+  const { result } = renderHook(() => useCollectionFolders("first", true, false));
+  const older = deferred<DatasetResult>();
+  dataset.mockReturnValueOnce(older.promise);
+  let first!: Promise<void>;
+  act(() => {
+    first = result.current.refreshDatasets();
+  });
+  await act(() => result.current.refreshDatasets());
+  await act(async () => {
+    older.reject(Error("timed out"));
+    await expect(first).resolves.toBeUndefined();
+  });
+  expect(result.current.datasets).toEqual(page.datasets);
 });

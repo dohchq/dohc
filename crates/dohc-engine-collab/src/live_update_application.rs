@@ -2120,7 +2120,28 @@ pub fn apply_committed_with_settlement_limit(
                 result => result?,
             }
             mutation_attempted = true;
-            let append = durable::record_authorized_update_in_tx(
+            // Every accepted frame but this computer's own draft is a change
+            // from elsewhere: a collaborator's, or its owner's on another
+            // computer. The application row below makes a replay return
+            // before this point.
+            let own_draft = crate::owner_outbox::is_own_draft_in(
+                tx,
+                &key,
+                &event.metadata.accepted.receipt.update_digest,
+                crate::owner_outbox::AcceptedAs::Delivery(
+                    &event.metadata.accepted.receipt.delivery_id,
+                ),
+            )?;
+            // Text this change removes unseen names whoever the relay
+            // accepted it from. The record is a notice, so an author it
+            // cannot read leaves it unnamed rather than refusing the change.
+            let sender = (!own_draft).then(|| {
+                let mut sender = crate::author_coverage::Authors::default();
+                let read = authors.iter().all(|author| sender.union_json(author).is_ok());
+                sender.remove_unattributed();
+                read.then(|| sender.moment_json()).flatten()
+            });
+            let append = durable::record_merged_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,
@@ -2128,6 +2149,9 @@ pub fn apply_committed_with_settlement_limit(
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 true,
+                sender.as_ref().map(|author_json| durable::FromElsewhere {
+                    author_json: author_json.as_deref(),
+                }),
                 event.metadata.accepted.received_at_ms,
             )?;
             // This update's own row no longer holds an author its admitted
@@ -2178,18 +2202,7 @@ pub fn apply_committed_with_settlement_limit(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
-            // Every accepted frame but this computer's own draft is a change
-            // from elsewhere: a collaborator's, or its owner's on another
-            // computer. The application row above makes a replay return
-            // before this point.
-            if !crate::owner_outbox::is_own_draft_in(
-                tx,
-                &key,
-                &event.metadata.accepted.receipt.update_digest,
-                crate::owner_outbox::AcceptedAs::Delivery(
-                    &event.metadata.accepted.receipt.delivery_id,
-                ),
-            )? {
+            if !own_draft {
                 dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
             }
             // The session host commits every accepted frame of a live-shared
@@ -4908,6 +4921,90 @@ mod tests {
             label: "Self claimed".into(),
         }]);
         update
+    }
+
+    /// Ana adds "Hello" and types " world" at its end; Ben, who never saw the
+    /// typing, deletes the line. Returns the kept text, its author_json, and
+    /// whether the record names the author, for each merge-removal record.
+    fn removals_after(order: &[&str]) -> Vec<(String, Option<String>, bool)> {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let ana = Ydoc::with_client_id(2);
+        let ben = Ydoc::with_client_id(3);
+        let line = ana.richdoc_append_paragraph("Hello");
+        ben.apply(&line).unwrap();
+        let typed = ana.richdoc_insert_text(0, 5, " world").unwrap();
+        let own = ana.richdoc_remove_block(0);
+        let deleted = ben.richdoc_remove_block(0);
+        let relay = Ydoc::with_client_id(9);
+        let mut frames = vec![("line", line)];
+        for name in order {
+            let bytes = match *name {
+                "typed" => typed.clone(),
+                "own" => own.clone(),
+                "deleted" => deleted.clone(),
+                other => panic!("no frame {other}"),
+            };
+            frames.push((name, bytes));
+        }
+        for (cursor, (name, bytes)) in frames.into_iter().enumerate() {
+            let mut frame = account_frame(name, cursor as i64 + 1, bytes.clone(), false);
+            if name == "deleted" {
+                frame.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "guest-2".into(),
+                    grant_id: "grant-2".into(),
+                    grant_generation: 1,
+                };
+                frame.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+                    human_id: "guest-2".into(),
+                    human_name: "Ben".into(),
+                }]);
+            }
+            sees(&mut frame, &relay);
+            relay.apply(&bytes).unwrap();
+            ack(apply(&mut store, &mut cache, &handle, frame));
+        }
+        let removals = store
+            .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "workspace-1"))
+            .unwrap();
+        removals
+            .into_iter()
+            .map(|removal| {
+                let author: Option<String> = store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT author_json FROM moments WHERE moment_id=?1",
+                            [&removal.moment_id],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(removal.object_id, "object-1");
+                assert_eq!(removal.author_known, author.is_some());
+                (removal.quote, author, removal.author_known)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keeps_typing_a_collaborators_delete_removed_and_names_the_deleter() {
+        let removals = removals_after(&["typed", "deleted"]);
+        assert_eq!(removals.len(), 1, "{removals:?}");
+        let (text, author, _) = &removals[0];
+        assert_eq!(text, " world");
+        let author = author.as_deref().expect("the deleter is named");
+        assert!(author.contains("guest-2"), "{author}");
+        assert!(!author.contains("guest-1"), "{author}");
+    }
+
+    #[test]
+    fn keeps_typing_that_arrives_inside_a_deleted_line_without_naming_anyone() {
+        let removals = removals_after(&["deleted", "typed"]);
+        assert_eq!(removals, vec![(" world".to_owned(), None, false)]);
+    }
+
+    #[test]
+    fn a_persons_own_delete_keeps_nothing() {
+        assert_eq!(removals_after(&["typed", "own"]), vec![]);
     }
 
     #[test]
