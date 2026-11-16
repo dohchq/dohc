@@ -65,6 +65,7 @@ import {
 } from "./personalAgents";
 import { initializeLiveRoomSchema } from "./liveRoomEdits";
 import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
+import { initializePhoneAppSchema } from "./phoneApps";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1685,6 +1686,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializePersonalAgentActivity(db);
   initializeLiveRoomSchema(db);
   initializeLiveRoomPauseSchema(db);
+  initializePhoneAppSchema(db);
   db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -1908,9 +1910,12 @@ function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
 
 export const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
 
-const LIVE_TICKET_MIGRATION = "live-session-tickets-v3";
-const LIVE_TICKET_V2_MIGRATION = "live-session-tickets-v2";
-const LIVE_TICKET_V1_MIGRATION = "live-session-tickets-v1";
+const LIVE_TICKET_MIGRATION = "live-session-tickets-v4";
+const LIVE_TICKET_EARLIER_MIGRATIONS = [
+  "live-session-tickets-v1",
+  "live-session-tickets-v2",
+  "live-session-tickets-v3",
+];
 
 const LIVE_TICKET_SCHEMA = {
   sync_relay_live_session_tickets: `
@@ -1939,7 +1944,7 @@ CREATE TABLE sync_relay_live_session_tickets (
   ),
   restore_fence_generation INTEGER NOT NULL
     CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
-  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('personal', 'named', 'link')),
+  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('personal', 'named', 'link', 'owner')),
   principal_id TEXT NOT NULL
     CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
   grant_id TEXT CHECK (
@@ -1954,7 +1959,8 @@ CREATE TABLE sync_relay_live_session_tickets (
     CHECK (minted_at_ms BETWEEN 0 AND 9007199254710991),
   expires_at_ms INTEGER NOT NULL CHECK (
     expires_at_ms BETWEEN 0 AND 9007199254740991
-    AND expires_at_ms = minted_at_ms + 30000
+    AND (expires_at_ms = minted_at_ms + 30000 OR (principal_kind = 'owner'
+      AND expires_at_ms > minted_at_ms AND expires_at_ms < minted_at_ms + 30000))
   ),
   redeemed_at_ms INTEGER CHECK (
     redeemed_at_ms IS NULL OR (
@@ -1971,14 +1977,20 @@ CREATE TABLE sync_relay_live_session_tickets (
   personal_connection_id TEXT CHECK (
     personal_connection_id IS NULL OR length(CAST(personal_connection_id AS BLOB)) BETWEEN 1 AND 512
   ),
+  owner_session_id TEXT CHECK (
+    owner_session_id IS NULL OR length(CAST(owner_session_id AS BLOB)) BETWEEN 1 AND 512
+  ),
   CHECK (
     (principal_kind = 'personal' AND substr(principal_id, 1, 2) = 'p-'
-      AND grant_id IS NULL AND grant_generation IS NULL
-      AND link_session_id IS NULL AND agent_connection_id IS NULL AND personal_connection_id IS NOT NULL) OR
-    (principal_kind = 'named' AND grant_id IS NOT NULL AND grant_generation IS NOT NULL
-      AND link_session_id IS NULL AND agent_connection_id IS NULL AND personal_connection_id IS NULL) OR
+      AND grant_id IS NULL AND grant_generation IS NULL AND link_session_id IS NULL
+      AND agent_connection_id IS NULL AND personal_connection_id IS NOT NULL AND owner_session_id IS NULL) OR
+    (principal_kind = 'named' AND grant_id IS NOT NULL AND grant_generation IS NOT NULL AND link_session_id IS NULL
+      AND agent_connection_id IS NULL AND personal_connection_id IS NULL AND owner_session_id IS NULL) OR
     (principal_kind = 'link' AND grant_id IS NOT NULL AND grant_generation IS NOT NULL
-      AND (link_session_id IS NULL) <> (agent_connection_id IS NULL) AND personal_connection_id IS NULL)
+      AND (link_session_id IS NULL) <> (agent_connection_id IS NULL)
+      AND personal_connection_id IS NULL AND owner_session_id IS NULL) OR
+    (principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL AND link_session_id IS NULL
+      AND agent_connection_id IS NULL AND personal_connection_id IS NULL AND owner_session_id IS NOT NULL)
   ),
   PRIMARY KEY (ticket_id),
   FOREIGN KEY (workspace_id)
@@ -2023,6 +2035,7 @@ export const LIVE_TICKET_COLUMNS = [
   "link_session_id",
   "agent_connection_id",
   "personal_connection_id",
+  "owner_session_id",
 ] as const;
 export const LIVE_TICKET_NULLABLE_COLUMNS = new Set<string>([
   "grant_id",
@@ -2031,6 +2044,7 @@ export const LIVE_TICKET_NULLABLE_COLUMNS = new Set<string>([
   "link_session_id",
   "agent_connection_id",
   "personal_connection_id",
+  "owner_session_id",
 ]);
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
@@ -2152,34 +2166,22 @@ function initializeLiveTicketSchema(db: SqliteDb): void {
   const isMarked = (migration: string) =>
     db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(migration) !==
     undefined;
-  const unmark = (migration: string) =>
-    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(migration);
   if (isMarked(LIVE_TICKET_MIGRATION)) {
     assertLiveTicketSchema(db);
     return;
   }
-  // A v1 table cannot name an agent's connection. Its tickets expire within 30 seconds, so it is replaced, not copied.
-  if (isMarked(LIVE_TICKET_V1_MIGRATION)) {
+  // An earlier table cannot hold every kind of ticket. Its tickets expire within 30 seconds, so it is replaced, not copied.
+  const earlier = LIVE_TICKET_EARLIER_MIGRATIONS.filter(isMarked);
+  if (earlier.length) {
     db.exec(`DROP TABLE IF EXISTS ${LIVE_TICKET_TABLE}`);
-    unmark(LIVE_TICKET_V1_MIGRATION);
+    for (const migration of earlier)
+      db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(migration);
   }
-  if (isMarked(LIVE_TICKET_V2_MIGRATION)) {
-    // A v2 table cannot hold a personal agent's ticket. Its rows return with no personal connection.
-    const columns = db
-      .prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid")
-      .all(LIVE_TICKET_TABLE)
-      .map((row) => String(row.name));
-    if (columns.join(",") !== LIVE_TICKET_COLUMNS.slice(0, -1).join(","))
-      throw new Error("live-ticket schema is missing or damaged");
-    rebuildTables(db, [LIVE_TICKET_TABLE], () => LIVE_TICKET_SCHEMA[LIVE_TICKET_TABLE]);
-    unmark(LIVE_TICKET_V2_MIGRATION);
-  } else {
-    const existing = db
-      .prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
-      .all(...Object.keys(LIVE_TICKET_SCHEMA));
-    if (existing.length) throw new Error("unmarked live-ticket schema already exists");
-    for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
-  }
+  const existing = db
+    .prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
+    .all(...Object.keys(LIVE_TICKET_SCHEMA));
+  if (existing.length) throw new Error("unmarked live-ticket schema already exists");
+  for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
   assertLiveTicketSchema(db);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
     LIVE_TICKET_MIGRATION,

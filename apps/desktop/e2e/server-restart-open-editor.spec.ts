@@ -102,6 +102,27 @@ test("@server-restart an open Edit link loses nothing typed through a share serv
           6_000,
         ),
       );
+    // A real restart takes the share service away for some seconds, and the page tries less often the longer
+    // it is away. The page must be editing again soon after the service is back, not one long wait later.
+    let editingAfterMs = 0;
+    said.push(
+      await phase(
+        "share service, 9 s away",
+        async () => {
+          const returned = server.restartShareServiceAfter(9_000);
+          // While the service is away the page takes no typing, so the wait below measures a real return.
+          await expect(editor).not.toHaveAttribute("contenteditable", "true", { timeout: 8_000 });
+          await returned;
+          const returnedAt = Date.now();
+          await expect(editor).toHaveAttribute("contenteditable", "true", { timeout: 60_000 });
+          editingAfterMs = Date.now() - returnedAt;
+        },
+        3_000,
+      ),
+    );
+    console.log(
+      `share service, 9 s away: editing again ${String(editingAfterMs)} ms after the service returned`,
+    );
     said.push(await phase("relay", () => server.restartRelay(), 20_000));
     // A deploy stops both, and the relay is back some seconds after the share service.
     said.push(
@@ -157,6 +178,9 @@ test("@server-restart an open Edit link loses nothing typed through a share serv
       inOrder: true,
       editable: "true",
     });
+    // The page waits at most 2 s between failed attempts in its first minute away, and an open takes about a
+    // second here.
+    expect(editingAfterMs).toBeLessThan(5_000);
   } finally {
     await server.close();
   }

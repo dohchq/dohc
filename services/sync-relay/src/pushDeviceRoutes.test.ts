@@ -87,6 +87,22 @@ async function relay(environments: string | null = "sandbox,production") {
       await held?.gate.open;
       return revoked ? target[1].expiresAtMs : null;
     },
+    phoneSessionIsCurrent: async ({ userId, sessionId }) =>
+      [...sessions.values()].some(
+        (session) =>
+          session.userId === userId &&
+          session.sessionId === sessionId &&
+          session.clientKind === "phone",
+      ),
+    read: async (sessionIds) =>
+      new Map(
+        [...sessions.values()]
+          .filter((session) => sessionIds.includes(session.sessionId))
+          .map(({ sessionId, userId, expiresAtMs, clientKind }) => [
+            sessionId,
+            { userId, expiresAtMs, clientKind },
+          ]),
+      ),
   };
   const hold = (credential: string) => {
     const held = gate();

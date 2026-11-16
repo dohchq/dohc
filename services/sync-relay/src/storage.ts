@@ -540,6 +540,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
   }
+  mainLiveLineageExists(document: { workspaceId: string; objectId: string }) {
+    return serviceHostFeedStorage.mainLiveLineageExists(this, document);
+  }
   hasServiceHostConflictEffect(
     input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1],
   ) {

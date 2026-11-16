@@ -105,6 +105,8 @@ async function relay(options: { seedFull?: boolean } = {}) {
       revoked.add(sessionId);
       return Number.MAX_SAFE_INTEGER;
     },
+    phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
+    read: async () => new Map(),
   };
   const hub = new DiscussionActivityHub();
   const h = testHandler(storage, {

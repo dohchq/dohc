@@ -41,6 +41,12 @@ import {
   accountDeletionKey,
   accountDeletionFenceKey,
 } from "@dohc/workspace-auth/accountDeletion";
+import {
+  APP_LAUNCH_PURGE_BATCH,
+  APP_LAUNCH_PURGE_KEY_HEADER,
+  APP_LAUNCH_PURGE_PATH,
+  appLaunchPurgeKey,
+} from "@dohc/security-contract/account-deletion";
 import { createAccountDeletionRoute, fencePendingAccountDeletions } from "./accountDeletionRoute";
 import type { StorageContext } from "./storage/context";
 import { startLiveJournalCheck } from "./storage/liveJournalCheck";
@@ -94,6 +100,7 @@ import {
   createPersonalLiveRoutes,
 } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
+import { createPhonePages, type PhonePages } from "./phonePages";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
 import { normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
@@ -655,6 +662,7 @@ const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 let liveRooms: LiveRooms | undefined;
+let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
@@ -666,6 +674,7 @@ const relayApplication = createSyncRelayHandler({
   ...(resolveAccountSession ? { resolveAccountSession } : {}),
   ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
+  ownerLiveSockets: () => ownerLive,
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
   ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
@@ -687,6 +696,32 @@ const relayApplication = createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  // The relay has already ended these launches, so every later call share-web makes for them is refused.
+  // This ends share-web's own state without waiting for that call.
+  // Share-web ends only these launches, so a purge that arrives late can't end a newer one.
+  endShareWebAppLaunches: (launchHashes) => {
+    const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
+    if (!shareWebOrigin || !origin || !relayExchangeKey) return;
+    for (let start = 0; start < launchHashes.length; start += APP_LAUNCH_PURGE_BATCH)
+      fetch(new URL(APP_LAUNCH_PURGE_PATH, origin), {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          "content-type": "application/json",
+          [APP_LAUNCH_PURGE_KEY_HEADER]: appLaunchPurgeKey(relayExchangeKey),
+        },
+        body: JSON.stringify({
+          launchHashes: launchHashes.slice(start, start + APP_LAUNCH_PURGE_BATCH),
+        }),
+      })
+        .then(async (response) => {
+          await response.body?.cancel();
+          if (!response.ok)
+            console.error(`Share-web refused the end of phone app sessions: ${response.status}.`);
+        })
+        .catch(() => console.error("Share-web did not confirm the end of phone app sessions."));
+  },
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
@@ -699,6 +734,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,
+  phonePages: () => phonePages,
   relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? { automationServer } : {}),
 });
@@ -1421,7 +1457,9 @@ if (namedLiveConfig) {
     // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
     ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
     storage,
-    resolveActor,
+    // The Bearer sign-in, a phone's included. A phone also needs a ticket, which only an uncached sign-in read admits.
+    resolveAccountSession: resolvePhoneCapableAccountSession!,
+    ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions, tickets } : {}),
     lookupUserDisplayName,
     hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!,
@@ -1436,6 +1474,22 @@ if (namedLiveConfig) {
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close);
   process.once("SIGTERM", ownerLive.close);
+  // A phone opens its pages only through the self-hosted live host, with a ticket only its sign-in redeems.
+  if (selfHost && deployment && accountResolvers.sessions) {
+    const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    phonePages = createPhonePages({
+      storage,
+      history: deployment.history,
+      host: selfHost,
+      supported: () => {
+        const control = storage.getLiveHostControl();
+        return control?.configuredMode === "service" && control.configuredHostId === hostId;
+      },
+      tickets,
+      sessions: accountResolvers.sessions,
+      nowMs: () => Date.now(),
+    });
+  }
   server.on("upgrade", (request, socket, head) => {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))
       void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
@@ -1463,6 +1517,8 @@ const publicationOperator = await startPublicationOperator(
   storage,
   operatorSocketPath(),
   operatorSecretPath(),
+  ({ ownerUserId, workspaceId, publicationId }) =>
+    relayApplication.endPhoneAppLaunches({ userId: ownerUserId, workspaceId, publicationId }),
 );
 
 // A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.

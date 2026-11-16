@@ -3,9 +3,13 @@ import {
   presentsAccountDeletionKey,
   ACCOUNT_DELETION_KEY_HEADER,
   ACCOUNT_DELETION_PATH,
+  APP_LAUNCH_PURGE_BATCH,
+  APP_LAUNCH_PURGE_KEY_HEADER,
+  APP_LAUNCH_PURGE_PATH,
+  appLaunchPurgeKey,
 } from "@dohc/security-contract/account-deletion";
 import { createAppLaunchHandler } from "./appLaunch";
-import { createNamedAppMaterialResolver } from "./namedAppMaterial";
+import { createNamedAppMaterialResolver, createPhoneAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-contract";
@@ -1703,6 +1707,17 @@ export function createShareWebApplication({
         nowMs,
         resolveMaterial: resolveLinkBrowserMaterial,
         resolveNamedMaterial: resolveNamedAppMaterial,
+        // A phone's launch needs no account sign-in here: the relay checks its grant.
+        ...(relayExchangeKey
+          ? {
+              redeemPhoneGrant: createPhoneAppMaterialResolver({
+                relayUrl,
+                publicOrigin: appLaunchConfig.viewerOrigin,
+                exchangeKey: relayExchangeKey,
+                fetchRelay,
+              }),
+            }
+          : {}),
       })
     : undefined;
   const discoverApps = createAppDiscovery({
@@ -1754,20 +1769,53 @@ export function createShareWebApplication({
       deleteAccountGateways?.(body.userId, workspaceIds);
       return Response.json({ finished: true });
     }
+    if (new URL(request.url).pathname === APP_LAUNCH_PURGE_PATH) {
+      mark(APP_LAUNCH_PURGE_PATH);
+      if (
+        !internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) ||
+        request.method !== "POST" ||
+        !relayExchangeKey ||
+        relayExchangeKey.length < 32 ||
+        !presentsAccountDeletionKey(
+          request.headers.get(APP_LAUNCH_PURGE_KEY_HEADER),
+          appLaunchPurgeKey(relayExchangeKey),
+        )
+      )
+        return refused();
+      const body: unknown = await request.json().catch(() => null);
+      const launchHashes =
+        body && typeof body === "object" && Object.keys(body).join() === "launchHashes"
+          ? (body as { launchHashes: unknown }).launchHashes
+          : null;
+      if (
+        !Array.isArray(launchHashes) ||
+        launchHashes.length > APP_LAUNCH_PURGE_BATCH ||
+        !launchHashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash))
+      )
+        return refused();
+      appLaunch?.endPhoneLaunches(launchHashes as string[]);
+      return Response.json({ finished: true });
+    }
     const { pathname, search } = new URL(request.url);
     const host = (request.headers.get("host") ?? "").toLowerCase();
     const appRequest = appLaunch?.matches(request) ?? false;
     if (!appRequest && !publicHosts.has(host)) return refused();
-    const viewerAppRoute = pathname === "/api/apps/launch" || pathname === "/api/apps/summary";
+    const viewerAppRoute =
+      pathname === "/api/apps/launch" ||
+      pathname === "/api/apps/summary" ||
+      pathname === "/api/apps/phone-launch";
     const onViewer = viewerHost === undefined || request.headers.get("host") === viewerHost;
     if (viewerAppRoute ? onViewer : !appRequest) {
       const refusal = shareWebApiVersionRefusal(request, apiVersions);
       if (refusal) return refusal;
     }
     if (appRequest) {
-      // A published app chooses its own paths, the viewer's two app routes included.
+      // A published app chooses its own paths, the viewer's app routes included.
       mark(
-        onViewer && (pathname === "/api/apps/launch" || pathname === "/api/apps/summary")
+        onViewer &&
+          (pathname === "/api/apps/launch" ||
+            pathname === "/api/apps/summary" ||
+            pathname === "/api/apps/phone-launch")
           ? pathname
           : "app",
       );

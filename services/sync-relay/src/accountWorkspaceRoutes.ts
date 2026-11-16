@@ -4,6 +4,7 @@ import { badRequest, notFound, relayError } from "./errors";
 import { parseWorkspaceId, readJsonObject, relayPathSegments } from "./requestInputs";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { SyncRelayStorage } from "./storage";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
 
 export type AccountWorkspaceRoute =
   | { route: "account-workspaces" }
@@ -66,6 +67,9 @@ export async function bearerAccountSession(
 export function createAccountWorkspaceRoutes(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
+  sockets: Pick<OwnerLiveSockets, "stopPhoneWorkspace">;
+  /** Runs once a workspace stops showing on the phone. */
+  hidden?(userId: string, workspaceId: string): void;
 }) {
   const { storage } = options;
   const account = async (request: Request) =>
@@ -98,6 +102,11 @@ export function createAccountWorkspaceRoutes(options: {
       })
     ) {
       throw notFound();
+    }
+    // Turning it off ends the phone's open pages and apps in the workspace before the answer.
+    if (!body.showOnPhone) {
+      options.sockets.stopPhoneWorkspace(userId, route.workspaceId);
+      options.hidden?.(userId, route.workspaceId);
     }
     return jsonResponse({
       ok: true,

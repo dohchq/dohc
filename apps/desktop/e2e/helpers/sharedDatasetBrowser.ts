@@ -83,7 +83,13 @@ export async function startSharedDatasetBrowser(input: {
       ...(input.editLinks ? editLinkOptions : {}),
     });
   let application = createApplication();
+  // Set while the share service is away: its address answers nothing.
+  let away = false;
   const server = https.createServer(tls, async (request, response) => {
+    if (away) {
+      request.socket.destroy();
+      return;
+    }
     try {
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -127,7 +133,7 @@ export async function startSharedDatasetBrowser(input: {
   let linkGateway = createLinkGateway();
   if (linkGateway)
     server.on("upgrade", (request, socket, head) => {
-      if (request.url?.startsWith("/api/live/link?") && linkGateway)
+      if (!away && request.url?.startsWith("/api/live/link?") && linkGateway)
         void linkGateway.handleUpgrade(request, socket, head);
       else socket.destroy();
     });
@@ -158,6 +164,17 @@ export async function startSharedDatasetBrowser(input: {
         linkGateway?.close();
         application = createApplication();
         linkGateway = createLinkGateway();
+      },
+      // A restart as a server has it: the service is gone for `ms`, and its address answers nothing until the
+      // new process is up.
+      async restartAfter(ms: number) {
+        linkGateway?.close();
+        away = true;
+        server.closeAllConnections();
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        application = createApplication();
+        linkGateway = createLinkGateway();
+        away = false;
       },
       async close() {
         try {

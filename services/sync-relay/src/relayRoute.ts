@@ -450,7 +450,8 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         parts[5] === "file" ||
         parts[5] === "attempt" ||
         parts[5] === "descriptor" ||
-        parts[5] === "summary")
+        parts[5] === "summary" ||
+        parts[5] === "redeem")
     ) {
       return { route: "app-backend", workspaceId, publicationId, action: parts[5] };
     }

@@ -232,6 +232,11 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
     session,
     doc,
     access,
+    /** Ends this editor's access as a write that changes it does: its capture closes at once. */
+    end() {
+      access.ended = true;
+      lifetime.abort(new Error("Access ended."));
+    },
     async open() {
       sync = await session.openSync(Y.encodeStateVector(doc), signal);
       Y.applyUpdate(doc, sync.missingStateUpdate);
@@ -1129,6 +1134,47 @@ it("saves every taken edit before a step that closes the note, taking none until
   finish();
   expect(await done).toBe("stopped");
   await expect(a.next()).rejects.toThrow();
+});
+
+it("keeps the room open after one person's access ends while the note is still hosted", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben),
+    c = editor(f, room, olu);
+  await a.open();
+  await b.open();
+  await c.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  await c.next();
+  const signal = new AbortController().signal;
+  const whileHosted = { whileHosted: true };
+  const endAna = () => {
+    a.end();
+    return "ended";
+  };
+  expect(await room.saveFirst(f.input.evidence.document, endAna, signal, whileHosted)).toBe(
+    "ended",
+  );
+  expect(savedAuthors(f)).toEqual([ana]);
+  // Ana is cut off: her edits are refused and she is handed nothing more.
+  const late = await a.submit(a.change("note", "late")).then(
+    (taken) => taken.result,
+    () => "refused",
+  );
+  expect(late).toBe("refused");
+  await expect(a.next()).rejects.toThrow("Access ended.");
+  // The others stay connected and keep editing together.
+  expect((await b.submit(b.change("place", "Porto"))).result).toBe("success");
+  await c.next();
+  expect(c.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+  // Once the note's hosting ends with the access, the room ends.
+  vi.spyOn(f.storage, "serviceHostDocumentEnabled").mockReturnValue(false);
+  expect(await room.saveFirst(f.input.evidence.document, () => "ended", signal, whileHosted)).toBe(
+    "ended",
+  );
+  await expect(c.next()).rejects.toThrow();
 });
 
 it("runs a step at once when the note's taken edits are on a lineage that ended", async () => {

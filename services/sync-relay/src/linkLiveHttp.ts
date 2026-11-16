@@ -171,16 +171,17 @@ export function createLinkLiveHttp(options: {
           )
             return null;
           const current = options.storage.resolveLiveObjectHostBinding(context, objectId);
-          if (
-            current.kind === "refused" &&
-            (current.reason === "host-unavailable" || current.reason === "stale-document")
-          )
-            return linkRefusal("link_live_unavailable");
-          if (current.kind !== "current" || current.binding.currentPath !== path) return null;
           const block = options.sessionHostBlocked?.({
             workspaceId: context.workspaceId,
             objectId,
           });
+          // A note paused after its file moved has no binding, and only its owner can start it again.
+          if (
+            current.kind === "refused" &&
+            (current.reason === "host-unavailable" || current.reason === "stale-document")
+          )
+            return sessionHostRefusal(block ?? "stopped");
+          if (current.kind !== "current" || current.binding.currentPath !== path) return null;
           if (block) return sessionHostRefusal(block);
           // The state comes only where a ticket would: a link that takes no more browsers refuses this one.
           if (state && options.storage.liveLinkFull(context)) return linkRefusal("link_full");

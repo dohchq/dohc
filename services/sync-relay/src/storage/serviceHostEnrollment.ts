@@ -164,9 +164,10 @@ export interface ServiceHostEnrollment {
 }
 /**
  * Why hosting is asked for. `personal-open` is an agent's open of a document,
- * `owner-open` the owner's desktop asking for a document it holds owner edits
- * for, `owner-resume` the owner's Resume, and `share` an owner Edit share that
- * covers the path. Only Resume clears the owner's Pause or Stop.
+ * `owner-open` the owner's open from a desktop or phone, which may enroll a
+ * document for the first time, `owner-resume` the owner's Resume, and `share`
+ * an owner Edit share that covers the path. Only Resume clears the owner's
+ * Pause or Stop.
  */
 export type LiveHostingIntent = "personal-open" | "owner-open" | "owner-resume" | "share";
 interface EnsureOwnedLiveDocumentCommon {
@@ -871,17 +872,14 @@ function ensureInsideTransaction(
     storage.db
       .prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
       .get(workspaceId, objectId) !== undefined;
-  // Owner intents act only on a document hosted before, whose owner binding the desktop holds.
-  if (!current && owner) {
+  // Resume acts only on a document hosted before. An owner's open may enroll one for the first time.
+  if (!current && input.intent === "owner-resume") {
     if (moved(storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path })))
       throw relayError("conflict", MOVED);
     throw notFound();
   }
-  const objectId = currentMainDocument(
-    storage,
-    { workspaceId, path },
-    input.intent === "personal-open",
-  );
+  const opening = input.intent === "personal-open" || input.intent === "owner-open";
+  const objectId = currentMainDocument(storage, { workspaceId, path }, opening);
   if (current) {
     assertCurrent(storage, current, ownerUserId);
     if (current.objectId !== objectId)
@@ -917,7 +915,11 @@ function ensureInsideTransaction(
     input.changed?.(enabling);
     return read(storage, workspaceId, path)!;
   }
-  if (moved(objectId)) throw relayError("conflict", MOVED);
+  // A document retained at its old path is never rebound here. An owner's open hears that as an answer.
+  if (moved(objectId))
+    throw input.intent === "owner-open"
+      ? new LiveHostingRefusal("document-unavailable")
+      : relayError("conflict", MOVED);
   assertCapacity(
     storage,
     workspaceId,
@@ -942,7 +944,7 @@ function ensureInsideTransaction(
   assertWorkspaceQuota(storage, workspaceId, charge);
   storage.db
     .prepare(
-      `INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)`,
+      `INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,owner_demand,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)`,
     )
     .run(
       workspaceId,
@@ -954,6 +956,8 @@ function ensureInsideTransaction(
       identity.streamIdentity,
       nowMs,
       nowMs,
+      // The owner's demand keeps the document out of the agent-only caps, as it does for a retained row.
+      Number(owner),
       input.intent === "share" ? null : nowMs,
       charge,
     );

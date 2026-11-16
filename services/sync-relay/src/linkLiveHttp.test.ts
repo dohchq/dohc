@@ -279,6 +279,27 @@ it.each([
   },
 );
 
+// Moving a note's file ends its binding, and the room pauses the note. Only the owner can start it again.
+it("tells a holder a held note whose file moved stopped, not to try again", async () => {
+  let blocked: SessionHostBlock | undefined;
+  const f = await fixture(() => blocked, { readAwakeState: async () => undefined });
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+      VALUES (?, ?, 99, 'moved', 'main', 'docs/moved.md', ?, 'text', 1, 2)`,
+    )
+    .run(scope.workspaceId, binding.objectId, "b".repeat(64));
+  const ask = async (route?: string) => {
+    const response = await f.handle(request({ discriminator, path: "docs/moved.md" }, route));
+    return [response.status, await response.json()];
+  };
+  // Before the pause, the holder may try again: the owner's desktop can host the note at its new path.
+  expect(await ask()).toEqual([503, linkRefusalBody("link_live_unavailable")]);
+  blocked = "held";
+  for (const route of ["/sync/live/link-document", "/sync/live/link-document-state"])
+    expect(await ask(route)).toEqual([503, linkRefusalBody("link_live_stopped")]);
+});
+
 // A link reader's page asks for a note's state before it opens a socket, so it can show the note at once.
 const stateRequest = (body?: unknown, headers?: Record<string, string>) =>
   request(body, "/sync/live/link-document-state", headers);

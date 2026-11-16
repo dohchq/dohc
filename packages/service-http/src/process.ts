@@ -18,13 +18,23 @@ export function parseGracePeriodMs(value: string | undefined, fallback: number):
  * Stops accepting connections and resolves once every open one has ended.
  * Connections still open after `gracePeriodMs` are closed by force so a
  * stalled response cannot hold the process up.
+ *
+ * A connection that is kept alive outlives its response, and a proxy in front
+ * sends its next request on it. So idle connections are closed every 100 ms,
+ * and a request that has ended does not hold the server open. A response is
+ * never told to close its connection: a client may already have sent its next
+ * request on it. Requests that keep arriving on open connections can still use
+ * the whole grace period.
  */
 export function closeServer(server: Server, gracePeriodMs: number): Promise<void> {
   return new Promise((resolve) => {
+    const closeIdle = setInterval(() => server.closeIdleConnections(), 100);
+    closeIdle.unref();
     const forceClose = setTimeout(() => server.closeAllConnections(), gracePeriodMs);
     forceClose.unref();
     server.close(() => {
       clearTimeout(forceClose);
+      clearInterval(closeIdle);
       resolve();
     });
   });

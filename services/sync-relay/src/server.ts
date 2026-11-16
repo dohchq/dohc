@@ -19,6 +19,8 @@ import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
+import { createPhoneApps } from "./phoneApps";
+import type { PhoneAppLaunchScope } from "./storage/phoneApps";
 import { readOwnerAppResponses } from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
@@ -80,7 +82,9 @@ import {
 } from "./accountOperationRoutes";
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
+import type { PhonePages } from "./phonePages";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
 import { bearerAccountSession, createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
@@ -177,6 +181,8 @@ export interface CreateSyncRelayHandlerOptions {
   resolvePhoneCapableAccountSession?: ResolveAccountSession;
   // The accounts' sign-ins in Better Auth's session table, which the account routes list and revoke.
   accountSessions?: AccountSessions;
+  // The owner's live connections, which a revoke or Show on phone turned off ends before it answers.
+  ownerLiveSockets?: () => OwnerLiveSockets | undefined;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
   credentialFence?: CredentialFence;
   // This server's VAPID public key. Absent means alerts are unavailable here.
@@ -219,6 +225,8 @@ export interface CreateSyncRelayHandlerOptions {
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
+  // Ends share-web's phone app sessions for these launch IDs' hashes once the relay has deleted them.
+  endShareWebAppLaunches?: (launchHashes: readonly string[]) => void;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
   // Rate limit for direct writes to a Collection's own files under Edit.
@@ -244,6 +252,8 @@ export interface CreateSyncRelayHandlerOptions {
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
   serverCopies?: () => ServerCopies | undefined;
+  // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
+  phonePages?: () => PhonePages | undefined;
   // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;
   // This server's public HTTPS origin, which issues its accounts' actor keys. The phone's chat writes need it.
@@ -271,6 +281,7 @@ export function createSyncRelayHandler({
   resolveAccountSession,
   resolvePhoneCapableAccountSession,
   accountSessions,
+  ownerLiveSockets = () => undefined,
   credentialFence,
   pushVapidPublicKey,
   pushHosts,
@@ -292,6 +303,7 @@ export function createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  endShareWebAppLaunches,
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
@@ -356,6 +368,7 @@ export function createSyncRelayHandler({
   pressDataset,
   serverRuns = () => undefined,
   serverCopies = () => undefined,
+  phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
   relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
@@ -368,6 +381,8 @@ export function createSyncRelayHandler({
   personalLimiter: TokenBucketLimiter;
   /** Stops the fence listener. The Postgres pool can end once it settles. */
   dispose(): Promise<void>;
+  /** Ends phone app launches in `scope`, on the relay and then in share-web. */
+  endPhoneAppLaunches(scope: PhoneAppLaunchScope): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
@@ -461,6 +476,30 @@ export function createSyncRelayHandler({
     const presented = request.headers.get("x-dohc-relay-exchange-key");
     return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
   };
+  const phoneApps = createPhoneApps({
+    storage,
+    limits: appPublicationLimits,
+    sessions: accountSessions,
+    launchable: !!shareWebOrigin && !!relayExchangeKeyHash && !!respondToDatasetApp,
+    nowMs,
+    endShareWebLaunches: endShareWebAppLaunches,
+    // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
+    servable(userId, workspaceId, publicationId) {
+      const published = datasetHost?.publication(
+        { kind: "named", workspaceId, userId },
+        publicationId,
+      );
+      if (!published || published.local) throw notFound();
+    },
+  });
+  // Share-web, with the exchange key and no person's credential, redeeming a grant or acting under a launch ID.
+  const fromShareWeb = (request: Request) =>
+    !request.headers.has("cookie") &&
+    !request.headers.has("authorization") &&
+    !!shareWebOrigin &&
+    !!relayExchangeKeyHash &&
+    request.headers.get("origin") === shareWebOrigin &&
+    hasValidRelayExchangeKey(request);
 
   const {
     admitLinkBlobBytes,
@@ -613,10 +652,17 @@ export function createSyncRelayHandler({
     nowMs,
     automationHostRateLimiter,
   );
+  const ownerSockets: OwnerLiveSockets = {
+    stopSession: (userId, sessionId) => ownerLiveSockets()?.stopSession(userId, sessionId),
+    stopPhoneWorkspace: (userId, workspaceId) =>
+      ownerLiveSockets()?.stopPhoneWorkspace(userId, workspaceId),
+  };
   const respondToAccountWorkspaces = resolvePhoneCapableAccountSession
     ? createAccountWorkspaceRoutes({
         storage,
         resolveAccountSession: resolvePhoneCapableAccountSession,
+        sockets: ownerSockets,
+        hidden: (userId, workspaceId) => phoneApps.end({ userId, workspaceId }),
       })
     : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
@@ -635,6 +681,8 @@ export function createSyncRelayHandler({
           sessions: accountSessions,
           feedWaits: { wakeAccount: wakeAccountWaits },
           nowMs,
+          sockets: ownerSockets,
+          revoked: (userId, sessionId) => phoneApps.end({ userId, sessionId }),
         })
       : undefined;
   const respondToAccountOperation = resolvePhoneCapableAccountSession
@@ -648,6 +696,8 @@ export function createSyncRelayHandler({
         wakeWaits: chatWakeWaits,
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
+        phoneApps,
+        ...(phonePages ? { phonePages } : {}),
       })
     : undefined;
   // The owner's computers claim wakes here; the phone reads wakes through its operations route.
@@ -1347,7 +1397,15 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         if (route.route === "owner-app-responses")
           return readOwnerAppResponses(request, route, actor.userId, storage);
-        return await respondToOwnerAppPublication(request, route, actor.userId);
+        const answer = await respondToOwnerAppPublication(request, route, actor.userId);
+        // Withdrawing, reactivating, and changing Collection approval each move the authority revision.
+        if (answer.ok && "publicationId" in route && route.action !== "read")
+          phoneApps.end({
+            userId: actor.userId,
+            workspaceId: route.workspaceId,
+            publicationId: route.publicationId,
+          });
+        return answer;
       }
       if (route.route === "app-backend") {
         if (!respondToDatasetApp) throw notFound();
@@ -1362,6 +1420,33 @@ export function createSyncRelayHandler({
             profileTokenHash: hashLinkProfileSecret(secret, linkKey),
           };
           return await respondToDatasetApp(request, route, auth);
+        }
+        const launchId = request.headers.get("x-dohc-app-launch");
+        if (route.action === "redeem" || launchId !== null) {
+          if (!fromShareWeb(request)) throw notFound();
+          const scope = { workspaceId: route.workspaceId, publicationId: route.publicationId };
+          if (route.action === "redeem") {
+            if (launchId !== null) throw notFound();
+            return await phoneApps.redeem(request, scope);
+          }
+          // A phone launch reaches its own app's bundle and backend, never activation or the share summary.
+          if (route.action === "activate" || route.action === "summary") throw notFound();
+          const { userId, guard } = await phoneApps.authorizeLaunch(launchId!, scope);
+          // The guard goes with the request: rechecked after its body, and inside each commit.
+          const answer = await respondToDatasetApp(
+            request,
+            route,
+            { kind: "named", workspaceId: route.workspaceId, userId, launch: guard },
+            true,
+          );
+          // The backend's work may have waited, so its answer goes back only while the launch still holds.
+          try {
+            await guard.recheck();
+          } catch (error) {
+            await answer.body?.cancel().catch(() => {});
+            throw error;
+          }
+          return answer;
         }
         const authorization = request.headers.get("authorization");
         let actorRequest: Request;
@@ -1678,6 +1763,7 @@ export function createSyncRelayHandler({
       noticeWaits.close();
       return personalAgents.dispose();
     },
+    endPhoneAppLaunches: (scope: PhoneAppLaunchScope) => phoneApps.end(scope),
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       // Held reads check the fenced account now.
       wakeAccountWaits(userId);

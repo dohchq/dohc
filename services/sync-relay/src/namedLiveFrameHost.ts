@@ -312,7 +312,11 @@ export function captureNamedLiveFrameHost(options: {
   };
 }
 
-/** The owner route supplies the authenticated account, never an identity from a frame. */
+/**
+ * The owner route supplies the authenticated account, never an identity from a
+ * frame. A phone's connection also supplies `guard`, which throws once its
+ * sign-in or the phone's access ends; every check of the capture runs it.
+ */
 export function captureOwnerLiveFrameHost(options: {
   authenticatedUserId: string;
   trustedAccount?: TrustedLiveAccount;
@@ -322,6 +326,7 @@ export function captureOwnerLiveFrameHost(options: {
   validate: CapacityLiveAdmissionValidator;
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
+  guard?: () => void;
 }): NamedFrameRoomHost {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {
@@ -358,7 +363,9 @@ function captureLiveFrameHost(options: {
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
   fresh?: PersonalFreshRead;
+  guard?: () => void;
 }): NamedFrameRoomHost {
+  const guard = options.guard;
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths);
   Object.freeze(binding);
@@ -438,6 +445,7 @@ function captureLiveFrameHost(options: {
     lifetime.signal.throwIfAborted();
     try {
       standing();
+      guard?.();
       // A recipient's share stands while it covers the document under the same
       // grant generation. The session also ends when what that share shows
       // changes, so reopening shows the new view.

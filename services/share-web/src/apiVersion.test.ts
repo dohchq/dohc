@@ -62,6 +62,8 @@ const routes = [
   ["GET", "/api/apps"],
   ["POST", "/api/apps/launch"],
   ["POST", "/api/apps/summary"],
+  // Refused before share-web redeems the phone's one-use grant: no upstream call.
+  ["POST", "/api/apps/phone-launch"],
   ["GET", mcpPath],
   ["POST", mcpPath],
   ["DELETE", mcpPath],
@@ -212,6 +214,7 @@ it("keeps wrong hosts, unknown paths, unsupported methods and excluded routes op
     "/backend",
     "/api/apps/launch",
     "/api/apps/summary",
+    "/api/apps/phone-launch",
   ]) {
     const result = await f.app.handle(
       new Request("https://" + "a".repeat(48) + ".example.net" + path, {
@@ -225,7 +228,7 @@ it("keeps wrong hosts, unknown paths, unsupported methods and excluded routes op
 });
 
 it("gates viewer app routes the same way with or without app launch configured", async () => {
-  for (const path of ["/api/apps/launch", "/api/apps/summary"]) {
+  for (const path of ["/api/apps/launch", "/api/apps/summary", "/api/apps/phone-launch"]) {
     const results = [];
     for (const appLaunch of [undefined, { viewerOrigin: origin, appDomain: "example.net" }]) {
       const f = fixture({ appLaunch });

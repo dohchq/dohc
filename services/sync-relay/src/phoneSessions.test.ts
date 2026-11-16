@@ -63,6 +63,8 @@ const sessions: AccountSessions = {
       userAgent: null,
     })),
   revoke: async () => 8_000_000_000_000,
+  phoneSessionIsCurrent: async () => true,
+  read: async () => new Map(),
 };
 
 async function relay() {

@@ -32,6 +32,12 @@ export async function startPublicationOperator(
   storage: Pick<SyncRelayStorage, "disableAppPublication" | "liftAppPublishingHold">,
   path: string,
   secretPath: string,
+  /** Runs once a takedown commits, to end the publication's open phone launches. */
+  disabled?: (publication: {
+    ownerUserId: string;
+    workspaceId: string;
+    publicationId: string;
+  }) => void,
 ) {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   const unix = uid !== undefined,
@@ -160,6 +166,19 @@ export async function startPublicationOperator(
           return;
         }
         const result = storage.disableAppPublication({ ...request, nowMs: Date.now() });
+        // The takedown has committed, and every later call refuses the publication, so a failed purge doesn't undo it.
+        try {
+          disabled?.({
+            ownerUserId: result.owner.ownerUserId,
+            workspaceId: result.owner.workspaceId,
+            publicationId: result.publicationId,
+          });
+        } catch (error) {
+          console.error(
+            "[sync-relay] ending phone app sessions after a takedown failed",
+            serverLogLine(error),
+          );
+        }
         reply({
           code: 0,
           message: `Disabled publication ${result.publicationId}. Its owner cannot publish apps on this server until you lift the hold.${copiesMessage(result.otherActiveCopies)}`,

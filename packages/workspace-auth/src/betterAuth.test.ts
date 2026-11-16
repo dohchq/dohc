@@ -635,6 +635,29 @@ describeWithPostgres("an account's sessions", () => {
     ).toBeNull();
     expect(await exists(currentId)).toBe(true);
   });
+
+  it("reads sessions by ID without a cache, expired ones included", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const sessions = createPostgresAccountSessions(pool);
+    const signedIn = await signIn(email, "phone");
+    const { id } = (
+      await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [
+        signedIn.token,
+      ])
+    ).rows[0]!;
+    await pool.query(
+      `update "session" set "expiresAt" = now() - interval '1 minute' where "id" = $1`,
+      [id],
+    );
+    const read = await sessions.read([id, "missing-session"]);
+    expect([...read.keys()]).toEqual([id]);
+    expect(read.get(id)).toMatchObject({ userId: user.id, clientKind: "browser" });
+    expect(read.get(id)!.expiresAtMs).toBeLessThan(Date.now());
+    await pool.query('delete from "session" where "id" = $1', [id]);
+    expect((await sessions.read([id])).size).toBe(0);
+    expect((await sessions.read([])).size).toBe(0);
+  });
 });
 
 describeWithPostgres("browser cookie sessions (web client)", () => {
@@ -849,5 +872,31 @@ describeWithPostgres("session kinds", () => {
     await expect(createAccountSessionResolver(auth)(request(desktop))).resolves.toMatchObject({
       clientKind: "desktop",
     });
+  });
+
+  it("finds a phone sign-in current only while its row exists, is unexpired and is a phone's", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const { user: other } = await signUp(`${unique()}@dohc.test`);
+    const sessionIdOf = async (token: string) =>
+      (await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [token]))
+        .rows[0]!.id;
+    const sessions = createPostgresAccountSessions(pool);
+    const current = (userId: string, sessionId: string) =>
+      sessions.phoneSessionIsCurrent({ userId, sessionId });
+    const phone = await sessionIdOf(await deviceSignIn("dohc-phone", email));
+    const desktop = await sessionIdOf(await deviceSignIn("dohc-desktop", email));
+    expect(await current(user.id, phone)).toBe(true);
+    expect(await current(other.id, phone)).toBe(false);
+    expect(await current(user.id, desktop)).toBe(false);
+    await pool.query(
+      `update "session" set "expiresAt" = now() - interval '1 second' where "id" = $1`,
+      [phone],
+    );
+    expect(await current(user.id, phone)).toBe(false);
+    const deleted = await sessionIdOf(await deviceSignIn("dohc-phone", email));
+    expect(await current(user.id, deleted)).toBe(true);
+    await pool.query('delete from "session" where "id" = $1', [deleted]);
+    expect(await current(user.id, deleted)).toBe(false);
   });
 });
