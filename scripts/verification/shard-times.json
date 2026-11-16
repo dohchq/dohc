@@ -1037,6 +1037,7 @@
   "apps/site/src/worker.test.ts": 0.094,
   "desktop:@live-owner-open": 55.701,
   "desktop:@new-page-edit-link": 74.005,
+  "desktop:@collections-two-instance": 84.6,
   "desktop:@restart-durability-capture-before-reopen": 25.829,
   "desktop:@restart-durability-idle-external": 28.067,
   "desktop:@restart-durability-overlapping-typing": 26.578,
