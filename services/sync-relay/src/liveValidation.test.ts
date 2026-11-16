@@ -229,7 +229,7 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   expect((await validate(input)).kind).toBe("accepted");
 });
 
-it("tries a note's check again after it runs out of time, and refuses it the second time", async () => {
+it("tries a check again after it runs out of time, and refuses it the second time", async () => {
   const { pool, input, validate } = fixture(1_000),
     { checkpoint } = nestedEmphasis(3000);
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -238,7 +238,9 @@ it("tries a note's check again after it runs out of time, and refuses it the sec
   try {
     await expect(validate(slow)).rejects.toBeInstanceOf(LiveValidatorFailure);
     expect(log.mock.calls.flat().join(" ")).toMatch(/LiveCheckOverrun .*tried again/);
+    // Another edit to the note that completes in between leaves the overrun counted.
     await validate.waitForCapacity!();
+    expect((await validate(input)).kind).toBe("accepted");
     expect(await validate(slow)).toEqual({
       kind: "refused",
       reason: "capacity-refused",
