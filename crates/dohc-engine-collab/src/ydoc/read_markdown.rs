@@ -749,13 +749,25 @@ impl<'a> Reader<'a> {
             }
             Event::DisplayMath(_) => {
                 self.text_block(range.start)?;
-                let text = self.math_text(&range);
-                // A block can't keep a link or a mark around it.
+                // A block can't keep a link or a mark around it. Each line
+                // past its containers is source, and keeps its offset so
+                // later passes read it as source.
                 if self.marks != Marks::default() {
-                    let at = (text == self.src[range.clone()]).then_some(range.start);
-                    self.push_text(&text, at, &range);
+                    let src = self.src;
+                    let mut at = range.start;
+                    for (index, line) in src[range.clone()].split('\n').enumerate() {
+                        let kept = if index == 0 {
+                            line
+                        } else {
+                            self.push_text("\n", Some(at - 1), &range);
+                            self.strip_containers(line)
+                        };
+                        self.push_text(kept, Some(at + line.len() - kept.len()), &range);
+                        at += line.len() + 1;
+                    }
                     return Ok(());
                 }
+                let text = self.math_text(&range);
                 self.push_piece(
                     Piece::DisplayMath {
                         tex: text[2..text.len() - 2].to_owned(),

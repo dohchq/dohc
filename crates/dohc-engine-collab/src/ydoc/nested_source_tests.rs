@@ -88,26 +88,55 @@ fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// The writer escapes `=` in a highlight, so a formula there reads back
-/// as the same text however often it is written.
+/// A formula in a mark, in a quote, a list or a cell, holds none of its
+/// containers' markers and reads back as the same text however often it
+/// is written. The writer escapes `=` in a highlight.
 #[test]
-fn a_formula_in_a_highlight_reads_back_as_written() {
-    for source in ["==$$x=y$$==\n", "# ==$$a==b$$==\n"] {
+fn a_formula_in_a_mark_reads_back_as_written() {
+    let mut failures = Vec::new();
+    for source in [
+        "==$$x=y$$==\n",
+        "# ==$$a==b$$==\n",
+        "> ==$$a=b\n> c$$==\n",
+        "> **==$$a=b\n> c$$==**\n",
+        "> ==**$$a\n> x=y$$**==\n",
+        "> ==[$$a\n> x=y$$](u)==\n",
+        // Other escapes and marks inside a formula in a quote.
+        "> **$$a\\*b\n> c\\_d \\= e$$**\n",
+        "> ==*$$a\\=b\n> c\\*d$$*==\n",
+        "> ++**$$a=b\n> c$$**++\n",
+        "> > ==**$$a=b\n> > c$$**==\n",
+        // Lists, and a list in a quote.
+        "- ==**$$a=b\n  c$$**==\n",
+        "1. ==[$$a\n   x=y$$](u)==\n",
+        "> - ==**$$a=b\n>   c$$**==\n",
+        "- a\n\n  ==**$$x=y\n  z$$**==\n",
+        // Cells.
+        "| a |\n|---|\n| ==**$$x=y$$**== |\n",
+        "| a |\n|---|\n| ==$$x=y$$== |\n",
+    ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
         let first = doc.canonical_content()["body"].to_string();
+        if first.contains("\\n>") || first.contains("\\n ") {
+            failures.push(format!("{source:?} reads as {first}"));
+            continue;
+        }
         for _ in 0..2 {
             let written = doc.project_richdoc().unwrap();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &written)
                 .unwrap();
-            assert_eq!(
-                doc.canonical_content()["body"].to_string(),
-                first,
-                "{source:?} written as {written:?}"
-            );
+            let again = doc.canonical_content()["body"].to_string();
+            if again != first {
+                failures.push(format!(
+                    "{source:?} written as {written:?}: {first} then {again}"
+                ));
+                break;
+            }
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// A heading, a cell and a callout in a quote read as the editor reads
