@@ -183,36 +183,6 @@ function lower(a: ShareAccess | null, b: ShareAccess | null): ShareAccess | null
   return shareAccessRank(a) <= shareAccessRank(b) ? a : b;
 }
 
-function levelForEmail(rule: AccessRule, email: string): ShareAccess | null {
-  return rule.people.get(email) ?? rule.members;
-}
-
-/**
- * The rule that gives everyone the lower of what `a` and `b` give them. Used
- * when an admin's change meets an owner's unsent one, so neither widens.
- */
-export function lowerRule(a: AccessRule, b: AccessRule): AccessRule {
-  const members = lower(a.members, b.members);
-  const people = new Map<string, ShareAccess>();
-  for (const email of new Set([...a.people.keys(), ...b.people.keys()])) {
-    const level = lower(levelForEmail(a, email), levelForEmail(b, email));
-    // A person whose lower level is null is left out: `members` is then null too.
-    if (level !== null && level !== members) people.set(email, level);
-  }
-  return { members, people };
-}
-
-/** Whether `next` gives nobody more than `previous` does. */
-export function ruleOnlyNarrows(previous: AccessRule, next: AccessRule): boolean {
-  if (lower(previous.members, next.members) !== next.members) return false;
-  for (const email of new Set([...previous.people.keys(), ...next.people.keys()])) {
-    const before = levelForEmail(previous, email);
-    const after = levelForEmail(next, email);
-    if (lower(before, after) !== after) return false;
-  }
-  return true;
-}
-
 /**
  * Who is asking. Owners and admins always have Edit. A member carries their
  * member level and, when their account has one, its verified email; an

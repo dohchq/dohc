@@ -9,9 +9,7 @@ import {
   formatAccessRule,
   isAccessRulePath,
   isAccessRuleRelatedPath,
-  lowerRule,
   parseAccessRule,
-  ruleOnlyNarrows,
 } from "./accessRules";
 import vectors from "./accessRules.vectors.json";
 
@@ -29,10 +27,6 @@ const plain = (parsed: AccessRule | null): VectorRule =>
 describe("shared vectors", () => {
   it.each(vectors.parsed)("parses $name", ({ text, rule: expected }) => {
     expect(plain(parseAccessRule(text))).toEqual(expected);
-  });
-  it.each(vectors.narrowing)("narrows or widens: $name", ({ before, after, narrows, lower }) => {
-    expect(ruleOnlyNarrows(rule(before), rule(after))).toBe(narrows);
-    expect(plain(lowerRule(rule(before), rule(after)))).toEqual(lower);
   });
 });
 
@@ -195,42 +189,5 @@ describe("rule file names", () => {
     expect(isAccessRulePath("a/access.yaml~")).toBe(false);
     expect(isAccessRuleRelatedPath("a/#access.yaml#")).toBe(true);
     expect(isAccessRuleRelatedPath("a/access.yml")).toBe(false);
-  });
-});
-
-describe("lowerRule and ruleOnlyNarrows", () => {
-  const admin = rule("members: edit\npeople:\n  sam@example.com: view\n");
-  const owner = rule("members: view\npeople:\n  ana@example.com: edit\n");
-
-  it("gives everyone the lower of the two", () => {
-    const merged = lowerRule(admin, owner);
-    const viewer = (email: string) => member("comment", email);
-    const set = (r: AccessRule) => accessRuleSet([["", r]]);
-    for (const email of ["sam@example.com", "ana@example.com", "bea@example.com"]) {
-      const a = folderLevel(set(admin), viewer(email), "");
-      const b = folderLevel(set(owner), viewer(email), "");
-      const m = folderLevel(set(merged), viewer(email), "");
-      expect(m).toBe(a === "view" || b === "view" ? "view" : a);
-    }
-  });
-
-  it("leaves out anyone either rule leaves out", () => {
-    const merged = lowerRule(rule("members: view\n"), rule("people:\n  sam@example.com: edit\n"));
-    expect(merged.members).toBeNull();
-    expect([...merged.people]).toEqual([["sam@example.com", "view"]]);
-  });
-
-  it("tells a narrowing change from a widening one", () => {
-    expect(ruleOnlyNarrows(rule("members: edit\n"), rule("members: view\n"))).toBe(true);
-    expect(ruleOnlyNarrows(rule("members: view\n"), rule("members: edit\n"))).toBe(false);
-    expect(ruleOnlyNarrows(rule(""), rule("people:\n  sam@example.com: view\n"))).toBe(false);
-    expect(ruleOnlyNarrows(rule("people:\n  sam@example.com: view\n"), rule(""))).toBe(true);
-    // A half-written rule that drops Sam's lower entry raises Sam.
-    expect(
-      ruleOnlyNarrows(
-        rule("members: edit\npeople:\n  sam@example.com: view\n"),
-        rule("members: edit\n"),
-      ),
-    ).toBe(false);
   });
 });
