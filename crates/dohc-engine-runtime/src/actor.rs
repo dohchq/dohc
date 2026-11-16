@@ -1755,9 +1755,10 @@ mod held_reader_tests {
         assert!(read.await.unwrap().unwrap(), "the reader could not read");
     }
 
-    /// The writer's open checked the pages, so a reader opened while it holds
-    /// the store does not read every page again. Damage made since is found
-    /// by a query that reads it, or by the next open once the writer closes.
+    /// The writer's page check covers the store, so a reader opened while the
+    /// writer holds it does not read every page again. Damage made after that
+    /// check is found by a query that reads it, or by the next open once the
+    /// writer closes.
     #[test]
     fn a_reader_skips_the_page_check_while_the_actor_holds_the_store() {
         let scratch = ScratchDir::new().unwrap();
@@ -1788,6 +1789,14 @@ mod held_reader_tests {
         };
         let actor = supervisor.open(&db, 2).unwrap().actor;
         let location = actor.location();
+        // The open left the store's pages to its check. A check still running
+        // would read the damage below, mark the store and stop the actor.
+        actor
+            .run_blocking(|store, _| {
+                store.wait_for_page_check_for_test();
+                Ok(())
+            })
+            .unwrap();
         {
             use std::io::{Seek, SeekFrom, Write};
             let mut file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();

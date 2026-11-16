@@ -450,6 +450,27 @@ impl EngineStore {
             .map_or((0, 0), |c| c.startup_work_for_test())
     }
 
+    /// Returns once the check of the pages this store's open left unchecked
+    /// has ended, which it must within a minute. A test that changes the
+    /// store's file under its writer waits here first, or the check reads the
+    /// change.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn wait_for_page_check_for_test(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while self
+            .page_check
+            .as_ref()
+            .is_some_and(|check| !check.has_ended())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store's page check did not end"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// How many checkpoint requests the background worker has finished.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
