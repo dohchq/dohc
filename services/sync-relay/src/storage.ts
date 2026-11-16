@@ -1,6 +1,8 @@
 import type { MemberFolders } from "./shareFilter";
 import { isWorkspaceSelector, type AnyShareSelector } from "./shareFilter";
 import { memberReach } from "./storage/memberReach";
+import { currentAccessRuleSet } from "./storage/accessRules";
+import type { AccessRuleSet } from "@dohc/security-contract/access-rules";
 import { memberInventory } from "./storage/memberInventory";
 import { watchMemberReachWrites, settleMemberRevisions } from "./storage/memberRevisions";
 import { accountEmail, refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
@@ -2282,11 +2284,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
    */
   tx<T>(run: () => T, scope?: RelayWriteScope): T {
     const operation = run;
-    run = () => {
-      const value = operation();
-      settleMemberRevisions(this.db);
-      return value;
-    };
+    run = () =>
+      this.withTransactionRules(() => {
+        const value = operation();
+        settleMemberRevisions(this.db);
+        return value;
+      });
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db
       .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
@@ -2322,7 +2325,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.captureStanding();
     this.db.exec("BEGIN");
     try {
-      const result = run();
+      const result = this.withTransactionRules(run);
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
@@ -2446,7 +2449,29 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     role: "admin" | "member",
     level: import("@dohc/security-contract/share-selector").ShareAccess,
   ) {
-    return this.readShareTx(() => memberReach(this.db, workspaceId, userId, role, level));
+    return this.readShareTx(() =>
+      memberReach(this.db, workspaceId, userId, role, level, this.transactionRules(workspaceId)),
+    );
+  }
+
+  // Each workspace's rules, read once per transaction until a write lands.
+  private openRules: Map<string, { changes: number; rules: AccessRuleSet }> | null = null;
+  private withTransactionRules<T>(run: () => T): T {
+    this.openRules = new Map();
+    try {
+      return run();
+    } finally {
+      this.openRules = null;
+    }
+  }
+  private transactionRules(workspaceId: string): AccessRuleSet | undefined {
+    if (!this.openRules) return undefined;
+    const changes = Number(this.db.prepare("SELECT total_changes() AS changes").get()!.changes);
+    const held = this.openRules.get(workspaceId);
+    if (held?.changes === changes) return held.rules;
+    const rules = currentAccessRuleSet(this.db, workspaceId);
+    this.openRules.set(workspaceId, { changes, rules });
+    return rules;
   }
 
   readMemberReach(selector: AnyShareSelector, _workspaceId: string): AnyShareSelector {

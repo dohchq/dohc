@@ -5,7 +5,7 @@ import { rowToLogRow } from "./rows";
 import {
   currentServiceHostEnrollments,
   serviceHostOwnerRetains,
-  coversEnrolledPath,
+  enrolledPathCoverage,
 } from "./serviceHostEnrollment";
 import {
   listServiceActivationRetirements,
@@ -60,11 +60,14 @@ export interface ServiceHostFeedScope {
   readonly token: string;
 }
 
-/** Statement-level snapshots; safe both on the request path and inside a write guard. */
+/** One read; safe both on the request path and inside a write guard. */
 export function readServiceHostFeedScope(
   storage: StorageContext,
   workspaceId: string,
 ): ServiceHostFeedScope | null {
+  return storage.readShareTx(() => readFeedScope(storage, workspaceId));
+}
+function readFeedScope(storage: StorageContext, workspaceId: string): ServiceHostFeedScope | null {
   const all = currentServiceHostEnrollments(storage, workspaceId);
   let ownerUserId: string, replicationEpoch: string, streamIdentity: string;
   if (all.length) {
@@ -106,6 +109,12 @@ export function readServiceHostFeedScope(
     FROM sync_relay_shares s INDEXED BY idx_sync_relay_shares_service_candidates WHERE s.workspace_id=? AND s.granter_user_id=?
       AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active')`)
     .all(workspaceId, ownerUserId);
+  // Each share's grants are read once, by the first document that needs them.
+  let coverage: ((path: string) => boolean)[] | undefined;
+  const covered = (path: string) =>
+    (coverage ??= shares.map((share) => enrolledPathCoverage(storage, share))).some((covers) =>
+      covers(path),
+    );
   const hosted = new Map<string, string>(),
     departed = new Set<string>(),
     shared = new Map<string, string>();
@@ -121,9 +130,7 @@ export function readServiceHostFeedScope(
     // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
     else if (
       row.ownerStop === null &&
-      (row.demandAtMs !== null ||
-        shares.some((share) => coversEnrolledPath(storage, share, row.path)) ||
-        serviceHostOwnerRetains(storage, row))
+      (row.demandAtMs !== null || covered(row.path) || serviceHostOwnerRetains(storage, row))
     ) {
       shared.set(row.objectId, row.path);
     }

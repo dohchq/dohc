@@ -448,6 +448,25 @@ describe("what a member reaches", () => {
     ).toMatchObject({ email: "another@dohc.test", verified: 1 });
   });
 
+  // A transaction reads each workspace's rules once, until it writes.
+  it("reads a rule written earlier in the same transaction", async () => {
+    const { h, storage } = await seed();
+    await invited(h, "ana");
+    await ownerWrite(h, "docs/access.yaml", "members: view\n");
+    const context = storage as StorageContext;
+    const level = () =>
+      storage.memberReach(WORKSPACE, "ana", "member", "edit").levelAt("docs/plan.md");
+    context.tx(() => {
+      expect(level()).toBe("view");
+      context.db
+        .prepare(
+          "UPDATE sync_relay_access_rules SET rule_text = ? WHERE workspace_id = ? AND folder = 'docs' AND to_seq IS NULL",
+        )
+        .run("members: comment\n", WORKSPACE);
+      expect(level()).toBe("comment");
+    });
+  });
+
   it("never serves a member a folder's access rule or a copy of one, and serves both to an admin", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");

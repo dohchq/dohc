@@ -1435,15 +1435,16 @@ export function setServiceHostEnrollmentEnabled(
 const EDIT_SHARE_COLUMNS = `s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms`;
 const ACTIVE_EDIT_GRANT = `EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND (g.access='edit' OR json_extract(s.selector_json,'$.kind')='workspace'))`;
 /**
- * Whether an active Edit grant on the share covers the path. On a workspace
- * share that grant must be a current member's, at Edit on this path. Without `members`, a workspace share covers nothing.
+ * Which paths an active Edit grant on the share covers. On a workspace share
+ * that grant must be a current member's, at Edit on the path. Without
+ * `members`, a workspace share covers nothing. Each grant is read at most
+ * once, so many paths share one answer.
  */
-export function coversEnrolledPath(
+export function enrolledPathCoverage(
   storage: StorageContext,
   value: Record<string, unknown>,
-  path: string,
   members = true,
-): boolean {
+): (path: string) => boolean {
   const share: SyncRelayShareRow = {
     shareId: String(value.share_id),
     workspaceId: String(value.workspace_id),
@@ -1453,36 +1454,45 @@ export function coversEnrolledPath(
   };
   const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (parsed && "kind" in parsed && parsed.kind === "workspace") {
-    return (
-      members &&
-      storage.db
-        .prepare(`SELECT grant_id,principal_user_id FROM sync_relay_share_grants
+    if (!members) return () => false;
+    const grants = storage.db
+      .prepare(`SELECT grant_id,principal_user_id FROM sync_relay_share_grants
       WHERE share_id=? AND status='active'`)
-        .all(share.shareId)
-        .some((grant) => {
-          if (typeof grant.principal_user_id !== "string") return false;
+      .all(share.shareId)
+      .map((grant) => {
+        let selector: AnyShareSelector | null | undefined;
+        return () => {
+          if (selector !== undefined) return selector;
+          if (typeof grant.principal_user_id !== "string") return (selector = null);
           const result = authorizeShareGrantAction({
             storage,
             grantId: String(grant.grant_id),
             principal: { kind: "user", userId: grant.principal_user_id },
             action: "live-edit",
           });
-          return result.ok && memberEditsPath(result.effectiveSelector, path);
-        })
-    );
+          return (selector = result.ok ? result.effectiveSelector : null);
+        };
+      });
+    return (path) =>
+      grants.some((grant) => {
+        const selector = grant();
+        return selector !== null && memberEditsPath(selector, path);
+      });
   }
   const selector = parsed && effectiveShareSelector(parsed, "edit");
-  if (!selector || !isLiveEditShareSelector(selector)) return false;
-  return (
-    canonicalLiveSelector(share, selector) &&
+  if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector))
+    return () => false;
+  let granted: boolean | undefined;
+  return (path) =>
     visibleSharePath(selector, path) === path &&
-    storage.db
+    (granted ??= storage.db
       .prepare(
         `SELECT grant_id FROM sync_relay_share_grants WHERE share_id=? AND status='active' AND access='edit'`,
       )
       .all(share.shareId)
-      .some((grant) => readCurrentShareGrant(storage, { grantId: String(grant.grant_id) }) !== null)
-  );
+      .some(
+        (grant) => readCurrentShareGrant(storage, { grantId: String(grant.grant_id) }) !== null,
+      ));
 }
 function coveredByEditGrant(
   storage: StorageContext,
@@ -1498,7 +1508,7 @@ function coveredByEditGrant(
       .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s
       WHERE s.share_id=? AND s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
       .get(enrollment.shareId, enrollment.workspaceId, enrollment.ownerUserId);
-    if (own && coversEnrolledPath(storage, own, enrollment.path, members)) return true;
+    if (own && enrolledPathCoverage(storage, own, members)(enrollment.path)) return true;
   }
   const shares = storage.db
     .prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
@@ -1507,7 +1517,7 @@ function coveredByEditGrant(
   for (const value of shares)
     if (
       value.share_id !== enrollment.shareId &&
-      coversEnrolledPath(storage, value, enrollment.path, members)
+      enrolledPathCoverage(storage, value, members)(enrollment.path)
     )
       return true;
   return false;
@@ -1526,6 +1536,7 @@ export function serviceHostEnrollmentsCoveredByShare(
     )
     .get(shareId);
   if (!share) return [];
+  const covers = enrolledPathCoverage(storage, share);
   // Capacity bounds the active rows.
   return storage.db
     .prepare(
@@ -1533,7 +1544,7 @@ export function serviceHostEnrollmentsCoveredByShare(
     )
     .all(String(share.workspace_id), String(share.granter_user_id))
     .map(row)
-    .filter((enrollment) => coversEnrolledPath(storage, share, enrollment.path));
+    .filter((enrollment) => covers(enrollment.path));
 }
 /**
  * The owner's restore that keeps the document's live session through its own

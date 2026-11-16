@@ -179,7 +179,6 @@ describe("the relay's access rule index", () => {
       r.append("moment.append", move);
       const selector = () => ({
         kind: "workspace" as const,
-        access: "edit" as const,
         role: "member" as const,
         reach: memberReach(r.storageDb, "ws", "sam", "member", "edit"),
       });
