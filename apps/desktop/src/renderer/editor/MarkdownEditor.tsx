@@ -118,6 +118,7 @@ import {
   makeEmptyListItemFocusPlugin,
 } from "./codeBlockChrome";
 import { makeBlockExitPlugin } from "./blockExit";
+import { makeOffscreenBlocksPlugin } from "./offscreenBlocks";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import {
@@ -634,6 +635,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 onInsertRef: blockInsertRef,
                 onOpenMenuRef: blockMenuOpenRef,
               }),
+              makeOffscreenBlocksPlugin(),
               makeWikilinkPlugin(
                 () => knownFilesRef.current,
                 (state) => setAcState(state),

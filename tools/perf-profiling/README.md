@@ -476,6 +476,52 @@ scenario produced an artifact.
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
 
 
+## Time typing in a large note
+
+`apps/desktop/e2e/profiling/large-note-typing-profile.spec.ts` opens three notes in a prepared desktop and types in each:
+
+- `small`: 1.5 KB.
+- `plain`: 190 KB of headings and paragraphs.
+- `rich`: 153 KB in 400 sections, each with a code block, a callout and a table, and a Mermaid diagram in every fifth.
+
+The spec sends key events at a fixed interval, whether or not the last key has painted.
+It times each key from its event timestamp to the second animation frame after the text changed.
+The second frame starts after the first one painted, so the time is an upper bound on key-to-paint, within one frame.
+A key that waits behind earlier work counts that wait, and `queued` reports it alone.
+The spec also records the time to an editable note, the time from the last key to the saved state, CPU by process, and the Chromium accessibility features that are on.
+
+Run `pnpm qa:prepare`. Then run this from `apps/desktop`:
+
+```powershell
+$env:DOHC_PROFILE_OUTPUT = '<new directory>'
+node scripts/run-playwright.mjs --config e2e/profiling/playwright.config.ts e2e/profiling/large-note-typing-profile.spec.ts --workers=1 --output <new directory>/playwright
+```
+
+Read `large-note-typing.json` in the output directory.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DOHC_LARGE_NOTE_ORDER` | `small,plain,rich,rich,plain,small` | The notes to open, in order. |
+| `DOHC_LARGE_NOTE_SAMPLES` | `60` | Measured keys in each round, after five warm-up keys. |
+| `DOHC_LARGE_NOTE_KEY_INTERVAL_MS` | `100` | Time between keys. |
+| `DOHC_LARGE_NOTE_QUIET_MS` | `3000` | How long the note must go without a long task before its keys are timed. `0` times the keys a person types as soon as the note opens. |
+| `DOHC_LARGE_NOTE_TRACE` | off | `1` keeps a CPU profile of the renderer and of the main process. `timeline` keeps a Chromium trace of the measured keys. `open` keeps a trace of every process from the click that opens a note until its caret is placed. |
+| `DOHC_LARGE_NOTE_SPELLCHECK` | on | `0` turns the spellchecker off. |
+| `DOHC_LARGE_NOTE_SWITCHES` | none | Extra Chromium switches, separated by spaces. |
+| `DOHC_LARGE_NOTE_DISABLE_FEATURES` | none | Chromium features to turn off, separated by commas. |
+| `DOHC_LARGE_NOTE_CSS` | none | CSS added to the page, to try a change before building it. |
+
+- If you edit the spec, run `pnpm qa:prepare` again. The desktop's prepared build covers the `e2e` folder.
+- The engine is a debug build. Its save times are not product numbers.
+- A traced or profiled run is slower. Compare timings only between runs with the same settings.
+- An `open` trace of the `rich` note is about 800 MB.
+
+On Windows, a program that reads other apps' windows can walk the note's whole accessibility tree through UI Automation.
+The walk holds the main process's UI thread, so keys and saves arrive late, for seconds to minutes in the `rich` note.
+The spec logs the accessibility features at each step. A list that grows past `nativeAPIs` shows that a program asked.
+To time the editor alone, set `DOHC_LARGE_NOTE_SWITCHES` to `--disable-renderer-accessibility`.
+Run both arms and report which one each number came from.
+
 ## Measure engine History queries
 
 The ignored Rust test `history_page_benchmark` measures first pages, later pages, and a three-edit object in a 100,000-moment version.

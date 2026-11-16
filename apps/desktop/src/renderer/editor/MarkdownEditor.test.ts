@@ -577,8 +577,12 @@ describe("MarkdownEditor table gutter", () => {
       );
       const surface = await screen.findByTestId("markdown-editor");
       const editor = editorBehind(surface);
-      const handle = surface.querySelectorAll<HTMLElement>(".dohc-block-handle")[1];
-      expect(handle).toBeDefined();
+      // The pointer over the table shows its controls.
+      fireEvent.mouseMove(surface.querySelector("table")!);
+      const handle = surface.querySelector<HTMLElement>(
+        ".dohc-block-affordance.is-visible .dohc-block-handle",
+      );
+      expect(handle).not.toBeNull();
 
       fireEvent.click(handle!);
       const { selection } = editor.state;
