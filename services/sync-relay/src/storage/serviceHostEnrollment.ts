@@ -6,9 +6,12 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   effectiveShareSelector,
+  fileSideOf,
   isLiveEditShareSelector,
   isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
+  pathLevel,
+  type AnyShareSelector,
 } from "../shareFilter";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { readCurrentShareGrant } from "./currentShareGrant";
@@ -893,15 +896,18 @@ function authorizeMemberOpen(
           grantId,
           principal: { kind: "user", userId },
           action: "live-edit",
-          target: path,
         });
   if (
     !current?.ok ||
     current.share.workspaceId !== workspaceId ||
-    !isWorkspaceSelector(current.effectiveSelector)
+    !memberEditsPath(current.effectiveSelector, path)
   )
     throw notFound();
   return current.share.granterUserId;
+}
+/** Whether a member's workspace reach edits the path. */
+function memberEditsPath(selector: AnyShareSelector, path: string): boolean {
+  return isWorkspaceSelector(selector) && pathLevel(fileSideOf(selector)!, path) === "edit";
 }
 function ensureInsideTransaction(
   storage: StorageContext,
@@ -1445,10 +1451,8 @@ export function coversEnrolledPath(
     selectorJson: String(value.selector_json),
     createdAtMs: Number(value.created_at_ms),
   };
-  const parsed = parseStoredAnyShareSelectorJson(share.selectorJson),
-    selector = parsed && effectiveShareSelector(parsed, "edit");
-  if (!selector || !isLiveEditShareSelector(selector)) return false;
-  if (isWorkspaceSelector(selector)) {
+  const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
+  if (parsed && "kind" in parsed && parsed.kind === "workspace") {
     return (
       members &&
       storage.db
@@ -1462,12 +1466,13 @@ export function coversEnrolledPath(
             grantId: String(grant.grant_id),
             principal: { kind: "user", userId: grant.principal_user_id },
             action: "live-edit",
-            target: path,
           });
-          return result.ok;
+          return result.ok && memberEditsPath(result.effectiveSelector, path);
         })
     );
   }
+  const selector = parsed && effectiveShareSelector(parsed, "edit");
+  if (!selector || !isLiveEditShareSelector(selector)) return false;
   return (
     canonicalLiveSelector(share, selector) &&
     visibleSharePath(selector, path) === path &&
@@ -1667,9 +1672,8 @@ function memberOpened(
   const share = storage.db
     .prepare(`SELECT selector_json FROM sync_relay_shares WHERE share_id=? AND workspace_id=?`)
     .get(enrollment.shareId, enrollment.workspaceId);
-  const stored = share && parseStoredAnyShareSelectorJson(String(share.selector_json)),
-    selector = stored && effectiveShareSelector(stored, "edit");
-  return !!selector && isWorkspaceSelector(selector);
+  const stored = share && parseStoredAnyShareSelectorJson(String(share.selector_json));
+  return !!stored && "kind" in stored && stored.kind === "workspace";
 }
 const recentMemberDemand = (demandAtMs: number | null, nowMs: number) =>
   demandAtMs !== null && nowMs - demandAtMs < MEMBER_OPEN_DEMAND_MS;

@@ -50,7 +50,7 @@ export function insertShareProposal(
       if (
         isWorkspaceSelector(authorized.effectiveSelector) &&
         op.basedOnObjectId !== null &&
-        !authorized.effectiveSelector.reach?.objectVisible(op.basedOnObjectId)
+        !authorized.effectiveSelector.reach.objectVisible(op.basedOnObjectId)
       )
         throw relayError("share_op_rejected");
     }

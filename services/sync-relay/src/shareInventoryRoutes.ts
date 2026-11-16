@@ -16,10 +16,10 @@ import {
   type AuthorizedShareAction,
 } from "./shareAuthorization";
 import {
-  effectiveShareSelector,
   fileSideOf,
   isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
+  storedSelectorReadable,
   type AnyShareSelector,
 } from "./shareFilter";
 import { showsGranterEmail, type createShareSummaries } from "./shareSummaries";
@@ -41,7 +41,7 @@ export type ShareInventoryRoute =
 // The file level a share's access answer names. A Group's chat level becomes
 // its file level; a membership names its members' level.
 function fileAccessOf(selector: AnyShareSelector) {
-  if (isWorkspaceSelector(selector)) return selector.access;
+  if (isWorkspaceSelector(selector)) return selector.reach.evaluated.level;
   const files = fileSideOf(selector);
   return files && "access" in files ? files.access : "view";
 }
@@ -182,7 +182,7 @@ export function createShareInventoryRoutes(
       };
       const ended = readCurrentShareGrant(storage, { grantId: grant.grantId }) === null;
       const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
-      if (!ended && (!selector || !effectiveShareSelector(selector, grant.access)))
+      if (!ended && (!selector || !storedSelectorReadable(selector, grant.access)))
         throw notFound();
       const result = ended
         ? { ...coordinates, status: "ended" as const }

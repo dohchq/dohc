@@ -1,4 +1,4 @@
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { visibleSharePath, type ShareAccess } from "@dohc/security-contract/share-selector";
 import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import { describe, expect, it } from "vitest";
 import {
@@ -28,6 +28,26 @@ import {
   type ShareSelector,
   type WorkspaceShareSelector,
 } from "./shareFilter";
+import type { MemberReach } from "./storage/memberReach";
+
+// A member whose rules give `level` everywhere.
+function memberAt(level: ShareAccess): WorkspaceShareSelector {
+  const reach: MemberReach = {
+    evaluated: { revision: "test", role: "member", level, rules: [] },
+    revision: "test",
+    signature: () => "test",
+    levelAt: () => level,
+    folderLevel: () => level,
+    hasLevel: (wanted) => wanted === level,
+    groupLevel: () => level,
+    hasGroupLevel: (wanted) => wanted === level,
+    nearestRule: () => "",
+    objectVisible: () => true,
+    objectPath: () => null,
+    refresh: () => reach,
+  };
+  return { kind: "workspace", role: "member", reach };
+}
 
 // A resolver that knows no file-linked thread and no object. Channel-share
 // cases carry it so their fixtures state the file half explicitly instead of
@@ -145,17 +165,15 @@ describe("share selector validation", () => {
 
   it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
-    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit", role: "member" })).toBe(
-      true,
-    );
+    expect(isLiveEditShareSelector(memberAt("edit"))).toBe(true);
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
-      { kind: "workspace" as const, access: "view" as const, role: "member" as const },
-      { kind: "workspace" as const, access: "comment" as const, role: "member" as const },
+      memberAt("view"),
+      memberAt("comment"),
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -1969,23 +1987,7 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = {
-    kind: "workspace",
-    access: "edit",
-    role: "member",
-    reach: {
-      evaluated: { revision: "test", role: "member", level: "edit", rules: [] },
-      revision: "test",
-      signature: () => "test",
-      levelAt: () => "edit",
-      folderLevel: () => "edit",
-      hasLevel: (level) => level === "edit",
-      nearestRule: () => "",
-      objectVisible: () => true,
-      objectPath: () => null,
-      refresh: () => member.reach!,
-    },
-  };
+  const member = memberAt("edit");
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
@@ -2017,10 +2019,7 @@ describe("a new page under Edit", () => {
 
   it("refuses View and Comment", () => {
     for (const access of ["view", "comment"] as const) {
-      expect(
-        decide({ kind: "workspace", access, role: "member" }, [page("docs/idea.md")]),
-        access,
-      ).toEqual(REFUSED);
+      expect(decide(memberAt(access), [page("docs/idea.md")]), access).toEqual(REFUSED);
     }
   });
 
@@ -2055,13 +2054,7 @@ describe("a new page under Edit", () => {
       const decision = decide(member, [page(path)], true);
       expect(decision.allowed && decision.write.kind, path).toBe("new-page");
     }
-    expect(
-      decide(
-        { kind: "workspace", access: "comment", role: "member" },
-        [page("drafts/idea.md")],
-        true,
-      ),
-    ).toEqual(REFUSED);
+    expect(decide(memberAt("comment"), [page("drafts/idea.md")], true)).toEqual(REFUSED);
   });
 
   it("refuses a member's change to a rule file or a copy of one, and serves the rule only to an admin", () => {

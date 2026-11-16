@@ -273,7 +273,7 @@ export function createLinkAuthorityResolver(input: {
       shareId: authorized.share.shareId,
       grantId,
       generation: authorized.grant.generation,
-      access: authorized.effectiveSelector.access,
+      access: authorized.effectiveSelector.reach.evaluated.level,
       effectiveSelector: files,
       callerKey: `member:${userId}`,
       credential: { kind: "member", userId },

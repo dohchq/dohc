@@ -7,6 +7,7 @@ import {
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
   type ShareLabelReader,
+  storedSelectorReadable,
   type StoredAnyShareSelector,
 } from "./shareFilter";
 import type {
@@ -47,12 +48,6 @@ export function showsGranterEmail(selectorJson: string): boolean {
 }
 
 // A workspace share's grants carry a file level; chat and Group grants carry a chat level.
-function readableAccess(selector: StoredAnyShareSelector, access: string): boolean {
-  return "kind" in selector && selector.kind !== "workspace"
-    ? isChatShareAccessValue(access)
-    : isShareAccessValue(access);
-}
-
 export function createShareSummaries(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf"> &
     Partial<Pick<SyncRelayStorage, "memberReach">>,
@@ -113,7 +108,9 @@ export function createShareSummaries(
     // stored selector and grant access form a readable row. Every listing
     // caller gets the same damage classification.
     const selector =
-      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
+      storedSelector && storedSelectorReadable(storedSelector, grant.access)
+        ? storedSelector
+        : null;
     return {
       shareId: share.shareId,
       ...labels(share.shareId, reader),
@@ -334,7 +331,9 @@ export function createShareSummaries(
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector =
-      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
+      storedSelector && storedSelectorReadable(storedSelector, grant.access)
+        ? storedSelector
+        : null;
     return {
       shareId: share.shareId,
       grantId: grant.grantId,

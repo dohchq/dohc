@@ -392,7 +392,7 @@ export function createNamedRecipientChat(options: {
           if (
             file &&
             (!isWorkspaceSelector(fresh.effectiveSelector) ||
-              !fresh.effectiveSelector.reach?.objectVisible(file.objectId) ||
+              !fresh.effectiveSelector.reach.objectVisible(file.objectId) ||
               visibleSharePath(workspaceFileReach(fresh.effectiveSelector), file.filePath) !==
                 file.filePath)
           )
@@ -420,7 +420,7 @@ export function createNamedRecipientChat(options: {
                 name: group.name,
                 kind: "channel",
                 type: group.type,
-                access: workspaceChatAccess(fresh),
+                access: workspaceChatAccess(fresh, group.channelWireId),
               })),
             });
           }

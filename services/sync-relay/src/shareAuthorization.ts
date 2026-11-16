@@ -1,4 +1,4 @@
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
+import { isShareAccessValue, shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   chatSideOf,
@@ -73,7 +73,6 @@ type ShareAuthorizationInput = {
   actorUserId: string;
   shareId: string;
   action: ShareAction;
-  target?: string;
 };
 
 type ShareGrantAuthorizationInput = {
@@ -82,7 +81,6 @@ type ShareGrantAuthorizationInput = {
   action: ShareAction;
   principal: CurrentShareGrantPrincipal;
   generation?: number;
-  target?: string;
 };
 
 export type NamedLiveEditShareGrantResult =
@@ -156,7 +154,6 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
       storage: input.storage,
       grantId: grant.grantId,
       action: input.action,
-      target: input.target,
       principal: { kind: "user", userId: input.actorUserId },
     });
     if (!result.ok) {
@@ -165,8 +162,8 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
     }
     if (
       authorized === null ||
-      effectiveAccessRank(result.effectiveSelector, input.target) >
-        effectiveAccessRank(authorized.effectiveSelector, input.target)
+      effectiveAccessRank(result.effectiveSelector) >
+        effectiveAccessRank(authorized.effectiveSelector)
     ) {
       authorized = result;
     }
@@ -238,9 +235,7 @@ export function authorizeShareGrantAction(
 ): ShareAuthorizationResult {
   const validated = validateShareGrant(input);
   if (!validated.ok) return validated;
-  return actionAllowed(validated, input.action, input.target)
-    ? validated
-    : { ok: false, reason: "denied" };
+  return actionAllowed(validated, input.action) ? validated : { ok: false, reason: "denied" };
 }
 
 function validateShareGrant(
@@ -277,42 +272,45 @@ function validateCurrentShareGrant(
   if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector, use)) {
     return { ok: false, reason: "gauntlet" };
   }
-  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access, workspaceRole);
-  if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
-  if (isWorkspaceSelector(effectiveSelector)) {
+  if (workspaceRole !== undefined) {
+    if (!isShareAccessValue(grant.access)) return { ok: false, reason: "gauntlet" };
     const reach = storage.memberReach?.(
       share.workspaceId,
       grant.principalUserId!,
-      effectiveSelector.role,
-      effectiveSelector.access,
+      workspaceRole,
+      grant.access,
     );
     if (!reach) return { ok: false, reason: "gauntlet" };
-    effectiveSelector.reach = reach;
+    return {
+      ok: true,
+      share,
+      grant,
+      effectiveSelector: { kind: "workspace", role: workspaceRole, reach },
+    };
   }
+  const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
+  if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
 
   return { ok: true, share, grant, effectiveSelector };
 }
 
-function actionAllowed(
-  authorized: AuthorizedShareAction,
-  action: ShareAction,
-  target?: string,
-): boolean {
+// A workspace member has no one level. Their pushes and proposals pass here
+// when they hold the level on some folder or Group; the filter then judges
+// each op's path or Group. Every other member check names its path or Group,
+// because a workspace selector carries levels only per path (`pathLevel`) and
+// per Group (`workspaceChatAccess`).
+function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): boolean {
   const selector = authorized.effectiveSelector;
   const files = fileSideOf(selector);
-  const level = files
-    ? target !== undefined
-      ? pathLevel(files, target)
-      : "access" in files
-        ? files.access
-        : null
-    : null;
-  const deferredMemberTarget = isWorkspaceSelector(selector) && target === undefined;
-  const memberEdit = isWorkspaceSelector(selector) && !!selector.reach?.hasLevel("edit");
+  const level = files && "access" in files ? files.access : null;
+  const member = isWorkspaceSelector(selector) ? selector.reach : null;
+  const memberEdit = !!member && member.hasLevel("edit");
   const memberComment =
     memberEdit ||
-    (isWorkspaceSelector(selector) &&
-      (!!selector.reach?.hasLevel("comment") || selector.access !== "view"));
+    (!!member &&
+      (member.hasLevel("comment") ||
+        member.hasGroupLevel("comment") ||
+        member.hasGroupLevel("edit")));
   switch (action) {
     case "read":
     case "presence":
@@ -328,15 +326,11 @@ function actionAllowed(
       return (
         files !== null &&
         namesFiles(files) &&
-        (deferredMemberTarget ? memberComment : level === "comment" || level === "edit")
+        (member ? memberComment : level === "comment" || level === "edit")
       );
     }
     case "propose": {
-      return (
-        files !== null &&
-        namesFiles(files) &&
-        (deferredMemberTarget ? memberEdit : level === "edit")
-      );
+      return files !== null && namesFiles(files) && (member ? memberEdit : level === "edit");
     }
     // Writing a Collection's own files straight into the owner's workspace
     // (ADR 0013), for an Edit share link. A named recipient keeps the
@@ -353,24 +347,15 @@ function actionAllowed(
       return (
         (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link") &&
         isLiveEditShareSelector(authorized.effectiveSelector) &&
-        (deferredMemberTarget ? memberEdit : level === "edit")
+        (member ? memberEdit : level === "edit")
       );
   }
 }
 
-function effectiveAccessRank(selector: AnyShareSelector, target?: string): number {
-  if (isWorkspaceSelector(selector)) {
-    const level = target === undefined ? selector.access : selector.reach?.levelAt(target);
-    return level ? shareAccessRank(level) : -1;
-  }
+function effectiveAccessRank(selector: AnyShareSelector): number {
+  if (isWorkspaceSelector(selector)) return shareAccessRank(selector.reach.evaluated.level);
   if ("kind" in selector) {
     return selector.access === "read-write" ? 1 : 0;
   }
-  const level =
-    target === undefined
-      ? "access" in selector
-        ? selector.access
-        : null
-      : pathLevel(selector, target);
-  return level ? shareAccessRank(level) : -1;
+  return "access" in selector ? shareAccessRank(selector.access) : -1;
 }

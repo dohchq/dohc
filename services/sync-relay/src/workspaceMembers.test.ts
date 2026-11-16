@@ -707,7 +707,6 @@ describe("what a member reaches", () => {
       actorUserId: "ana",
       shareId,
       action: "propose",
-      target: "other/file.md",
     });
     expect(authorization.ok).toBe(true);
     if (!authorization.ok) throw new Error("missing member authorization");

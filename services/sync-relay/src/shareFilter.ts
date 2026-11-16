@@ -83,6 +83,8 @@ export interface PathShareSelector extends StoredShareSelector {
 }
 
 export interface WorkspaceFileSelector extends StoredShareSelector {
+  // The member's reach, for the object checks only. The filter drops it once
+  // it has judged an op's object, so the rest of the filter judges paths alone.
   reach?: import("./storage/memberReach").MemberReach;
   wholeWorkspace: true;
   ruleFiles?: true;
@@ -140,17 +142,21 @@ export type StoredAnyShareSelector =
   | StoredGroupShareSelector
   | StoredWorkspaceShareSelector;
 
-// A workspace share's role decides whether its reach includes rule files.
-// Only share authorization knows it; a caller that passes none gets a
-// member's reach, which hides them.
+/** Whether a stored selector and a grant's access form a readable share. */
+export function storedSelectorReadable(selector: StoredAnyShareSelector, access: unknown): boolean {
+  return "kind" in selector && selector.kind !== "workspace"
+    ? isChatShareAccessValue(access)
+    : isShareAccessValue(access);
+}
+
+// A workspace share's selector needs the member's reach, which only share
+// authorization builds (`validateCurrentShareGrant`), so it is never one of these.
 export function effectiveShareSelector(
   selector: StoredAnyShareSelector,
   access: unknown,
-  workspaceRole: "admin" | "member" = "member",
-): AnyShareSelector | null {
+): Exclude<AnyShareSelector, WorkspaceShareSelector> | null {
   if ("kind" in selector) {
-    if (selector.kind === "workspace")
-      return isShareAccessValue(access) ? { ...selector, access, role: workspaceRole } : null;
+    if (selector.kind === "workspace") return null;
     return isChatShareAccessValue(access) ? { ...selector, access } : null;
   }
   return isShareAccessValue(access) ? { ...selector, access } : null;
@@ -284,8 +290,7 @@ export function isLiveEditShareSelector(
 ): selector is ShareSelector | WorkspaceShareSelector {
   // A workspace share at Edit opens every document its file reach covers;
   // the caller checks the path with `fileSideOf`.
-  if (isWorkspaceSelector(selector))
-    return selector.reach ? selector.reach.hasLevel("edit") : selector.access === "edit";
+  if (isWorkspaceSelector(selector)) return selector.reach.hasLevel("edit");
   if ("kind" in selector) return false;
   return (
     (!("access" in selector) || selector.access === "edit") &&

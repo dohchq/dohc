@@ -24,7 +24,12 @@ export interface EvaluatedMemberReach {
 
 export interface MemberReach {
   evaluated: EvaluatedMemberReach;
+  /** Whether the member holds `level` on some folder. */
   hasLevel(level: ShareAccess): boolean;
+  /** The member's level in a Group. Every Group takes the member level for now. */
+  groupLevel(channelWireId: string): ShareAccess;
+  /** Whether the member holds `level` in some Group. */
+  hasGroupLevel(level: ShareAccess): boolean;
   refresh(): MemberReach;
   revision: string;
   signature(): string;
@@ -150,6 +155,8 @@ export function memberReach(
     hasLevel: (level) =>
       atFolder("") === level ||
       [...rules.exact.keys()].some((folder) => atFolder(folder) === level),
+    groupLevel: () => level,
+    hasGroupLevel: (wanted) => wanted === level,
     revision,
     signature,
     levelAt,

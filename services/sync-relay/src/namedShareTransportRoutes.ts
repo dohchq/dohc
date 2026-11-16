@@ -244,7 +244,11 @@ export function createNamedShareTransportRoutes(
         hold > 0 &&
         isShareAccessValue(knew) &&
         knew !==
-          ("access" in authorized.effectiveSelector ? authorized.effectiveSelector.access : "view")
+          (isWorkspaceSelector(authorized.effectiveSelector)
+            ? authorized.effectiveSelector.reach.evaluated.level
+            : "access" in authorized.effectiveSelector
+              ? authorized.effectiveSelector.access
+              : "view")
       ) {
         return jsonResponse({
           ok: true,
