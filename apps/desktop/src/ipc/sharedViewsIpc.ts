@@ -8,6 +8,7 @@ import {
   sharedViewAccessOperations,
   type CheckSharedViewAccessResult,
   engineStoreRefusalRecovery,
+  UPDATING_ACCESS_MESSAGE,
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import {
@@ -1311,9 +1312,6 @@ function membershipLevel(selector: unknown): { level?: ShareViewSelector["access
 
 // The engine closed a membership's copy for a rebuild.
 class AccessUpdatingError extends Error {}
-
-const UPDATING_ACCESS_MESSAGE =
-  "dohc could not refresh this workspace while its access is being updated.";
 
 function causeOf(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);

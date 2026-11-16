@@ -415,6 +415,11 @@ export const WorkspaceSummary = z.object({
           detail: z.string(),
         })
         .optional(),
+      // The recovery folder the last update of access saved items into, until
+      // the member opens it from its notice.
+      accessSaved: z
+        .object({ folder: z.string(), count: z.number().int().nonnegative() })
+        .optional(),
     })
     .optional(),
   // Share mounts: received shares materialized into this workspace's
@@ -515,7 +520,14 @@ export type CollectionCopyChangedEvent = z.infer<typeof CollectionCopyChangedEve
 
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
+  // The recovery folder an update of access saved into.
+  accessSaved: z.literal(true).optional(),
 });
+
+// How a refresh of a joined copy answers while its access is being updated:
+// it starts the update, and how that ends arrives as the view's state.
+export const UPDATING_ACCESS_MESSAGE =
+  "dohc could not refresh this workspace while its access is being updated.";
 export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
 
 // Who asked for a sync pass now. A person's retry counts toward the attempts

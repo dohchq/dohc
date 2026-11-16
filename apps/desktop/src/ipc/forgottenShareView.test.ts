@@ -129,6 +129,7 @@ async function harness(home: string) {
     thisComputer: () => computer,
     forgetWorkspace,
     showItemInFolder: () => undefined,
+    forgetAccessSaved: async () => undefined,
     openWorkspaceWindow: async () => undefined,
     openWorkspaceManager: () => undefined,
     closeWindowOf: () => undefined,

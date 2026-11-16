@@ -9196,6 +9196,13 @@ function registerIpcHandlers(): void {
     forgetWorkspace,
     trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
+    forgetAccessSaved: async (workspaceId) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (!view?.accessSaved) return;
+      const { accessSaved: _opened, ...rest } = view;
+      await setWorkspaceShareView(workspaceId, rest);
+      notifyRenderer({ workspaceId, summaryChanged: true });
+    },
     openWorkspaceWindow: (workspace) =>
       desktopWindows.openWorkspaceInWindow(workspace, (window) =>
         windowShowsWorkspace(
@@ -10794,6 +10801,16 @@ function registerIpcHandlers(): void {
     },
     notice: (workspaceId, notice) => {
       const view = findWorkspace(workspaceId)?.shareView;
+      // A finished rebuild that saved items keeps their folder for its notice.
+      if (view && notice.kind === "recovered") {
+        void setWorkspaceShareView(workspaceId, {
+          ...view,
+          accessSaved: { folder: notice.folder, count: notice.count },
+        })
+          .then(() => notifyRenderer({ workspaceId, summaryChanged: true }))
+          .catch((error: unknown) => console.error("[desktop] joined copy rebuild state:", error));
+        return;
+      }
       if (!view?.rebuild) return;
       const stopped = shareViewRebuildStop(notice);
       void setWorkspaceShareView(workspaceId, {

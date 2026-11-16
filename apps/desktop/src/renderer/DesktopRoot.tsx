@@ -21,6 +21,7 @@ import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight, LockKeyhole } from "lucide-react";
 import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
+import { UPDATING_ACCESS_MESSAGE } from "../ipc/bridgeContract";
 import {
   REGISTRY_READ_FAILURE_TITLE,
   registryReadFailureNext,
@@ -98,14 +99,35 @@ function UpdatingAccess(props: { workspace: Workspace }) {
         }),
       );
   };
+  const workspaceId = props.workspace.workspaceId;
   const stopped = props.workspace.shareView?.updatingAccessStopped;
-  const tryAgain = (): void => {
-    // The refresh starts the update and answers that access is updating;
-    // how the update ends arrives as this view's state.
+  const ended = stopped?.reason === "ended";
+  const identity = `update-access:${workspaceId}`;
+  const tryAgain = useCallback((): void => {
     void bridge()
-      .refreshSharedView({ workspaceId: props.workspace.workspaceId, trigger: "manual" })
-      .catch(() => undefined);
-  };
+      .refreshSharedView({ workspaceId, trigger: "manual" })
+      .catch((error: unknown) => {
+        // The refresh starts the update and answers that access is updating;
+        // how the update ends arrives as this view's state.
+        if (
+          String(error instanceof Error ? error.message : error).includes(UPDATING_ACCESS_MESSAGE)
+        )
+          return;
+        reportFailure?.({
+          message: readError(error).words ?? "dohc could not update access.",
+          cause: error,
+          retry: tryAgain,
+          identity,
+        });
+      });
+  }, [workspaceId, reportFailure, identity]);
+  // A stopped update is one thing that failed. Waiting for the server shows
+  // here only, as an ended membership does.
+  const failedDetail = stopped?.reason === "failed" ? stopped.detail : null;
+  useEffect(() => {
+    if (failedDetail !== null)
+      reportFailure?.({ message: failedDetail, retry: tryAgain, identity });
+  }, [failedDetail, reportFailure, tryAgain, identity]);
   return (
     <div
       data-testid="workspace-updating-access"
@@ -114,13 +136,15 @@ function UpdatingAccess(props: { workspace: Workspace }) {
     >
       <RegistryErrorTitlebar />
       <LockKeyhole size={20} strokeWidth={1.75} aria-hidden className="text-muted" />
-      <p className="dohc-section-label m-0">Updating access</p>
+      <p className="dohc-section-label m-0">{ended ? "Access ended" : "Updating access"}</p>
       <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
         {workspaceName(props.workspace)}
       </h2>
-      <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
-        The owner changed what you can see here. This copy stays closed until it matches.
-      </p>
+      {ended ? null : (
+        <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
+          The owner changed what you can see here. This copy stays closed until it matches.
+        </p>
+      )}
       {stopped ? (
         <div className="flex max-w-md items-start gap-2 text-left">
           <p className="m-0 select-text text-[13px] leading-relaxed text-ink">{stopped.detail}</p>
@@ -128,7 +152,7 @@ function UpdatingAccess(props: { workspace: Workspace }) {
         </div>
       ) : null}
       <div className="flex flex-wrap justify-center gap-2">
-        {stopped ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
+        {stopped && !ended ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
         <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
       </div>
     </div>

@@ -260,9 +260,12 @@ export interface ShareViewIdentity {
   // Set when the relay changed which items this member sees. The engine closed
   // the copy and answers it only for this rebuild; the view shows "Updating
   // access" until the new copy is swapped in. `stopped` says why the rebuild
-  // isn't running: it waits for the server, the copy holds its member's own
-  // work, or a step failed. Try again starts it again.
+  // isn't running: it waits for the server, a step failed, or the membership
+  // ended. Try again starts it again.
   rebuild?: { rebuildId: string; stopped?: ShareViewRebuildStop };
+  // The recovery folder the last rebuild saved items into, relative to the
+  // root, until the member opens it from its notice.
+  accessSaved?: { folder: string; count: number };
 }
 
 export interface ShareViewRebuildStop {

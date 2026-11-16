@@ -97,6 +97,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
       ...(isRecord(raw.rebuild) && boundedString(raw.rebuild.rebuildId, 1, 200) !== null
         ? { updatingAccess: true as const, ...rebuildStop(raw.rebuild.stopped) }
         : {}),
+      ...accessSaved(raw.accessSaved),
       ...(raw.unsavedPaths !== undefined
         ? {
             unsavedPaths:
@@ -156,6 +157,26 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
 /** Project the whole registry. */
 export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): WorkspaceSummary[] {
   return entries.map(workspaceSummaryFor);
+}
+
+// The recovery folder a rebuild saved into, when the record names one inside
+// the copy's recovery root.
+function accessSaved(raw: unknown): { accessSaved?: { folder: string; count: number } } {
+  if (
+    !isRecord(raw) ||
+    typeof raw.count !== "number" ||
+    !Number.isSafeInteger(raw.count) ||
+    raw.count < 0
+  )
+    return {};
+  const folder = boundedString(raw.folder, 1, 300);
+  if (
+    folder === null ||
+    !folder.startsWith(".dohc/local/recovery/") ||
+    folder.split("/").some((part) => part === ".." || part === "")
+  )
+    return {};
+  return { accessSaved: { folder, count: raw.count } };
 }
 
 // Why a joined copy's rebuild stopped, when the record says so readably.

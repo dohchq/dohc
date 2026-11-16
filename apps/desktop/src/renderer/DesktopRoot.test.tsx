@@ -194,6 +194,10 @@ describe("workspace summary changes", () => {
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
     const detail = "dohc could not update access: the disk is full.";
+    const toastsWith = (text: string) =>
+      screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((toast) => toast.textContent?.includes(text));
     const shareView = {
       shareId: "share",
       granterEmail: null,
@@ -208,6 +212,13 @@ describe("workspace summary changes", () => {
     const panel = screen.getByTestId("workspace-updating-access");
     expect(within(panel).getByText(detail)).toBeTruthy();
     expect(within(panel).getByRole("button", { name: "Copy" })).toBeTruthy();
+    // A stopped update is one thing that failed: a toast and a Notices row with Try again.
+    const [toast] = await waitFor(() => {
+      const found = toastsWith(detail);
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    expect(within(toast!).getByRole("button", { name: "Try again" })).toBeTruthy();
     fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
     await waitFor(() =>
       expect(refreshSharedView).toHaveBeenCalledExactlyOnceWith({
@@ -215,7 +226,75 @@ describe("workspace summary changes", () => {
         trigger: "manual",
       }),
     );
-    expect(screen.queryByRole("alert")).toBeNull();
+    // The refresh answers that access is updating, which is no failure of its own.
+    expect(toastsWith("being updated")).toHaveLength(0);
+  });
+
+  // Try again's own refresh can fail before it starts the update again.
+  it("reports what stopped Try again", async () => {
+    const h = setup();
+    const refreshSharedView = vi.fn(async () => {
+      throw new Error("dohc could not reach the server.");
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      refreshSharedView,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: {
+        reason: "waiting" as const,
+        detail: "dohc could not reach the server. It keeps trying.",
+      },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    // Waiting for the server is no failure yet: it shows here only.
+    expect(screen.queryAllByTestId("workspace-shell-error")).toHaveLength(0);
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not reach the server");
+  });
+
+  it("says a membership ended during an update, with no Try again", async () => {
+    const h = setup();
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail = "Your membership ended. What arrived stays in this folder.";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      ended: true,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "ended" as const, detail },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText("Access ended")).toBeTruthy();
+    expect(within(panel).queryByText("Updating access")).toBeNull();
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    expect(within(panel).queryByText(/The owner changed what you can see/u)).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Open another workspace" })).toBeTruthy();
   });
 
   it("shows Updating access instead of the shell while a joined copy is closed", async () => {
