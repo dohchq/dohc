@@ -79,6 +79,9 @@ The job's filter is `together` in [`pr-checks.yml`](../../.github/workflows/pr-c
 
 To read a failure, open `test-results/together-report.json`. Each case records what every page showed and what the services printed.
 
+The same job has a second leg, `share page`. It runs the share page's own end-to-end tests in `services/share-web/e2e`, on its own runner.
+Run them locally with `pnpm --filter @dohc/share-web test:e2e`.
+
 ## Debug a separate app
 
 Run `pnpm qa:debug` to start a prepared desktop with its own workspace, home, and profile.
@@ -161,7 +164,7 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 The organisation's Team plan permits 60 concurrent standard-runner jobs.
-A combined run peaks at 23 jobs, so two combined runs fit and a third can queue.
+A combined run peaks at 24 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 

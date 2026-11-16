@@ -196,8 +196,9 @@ jobs:
               - 'patches/**'
               - 'scripts/verification/**'
               - '.github/workflows/pr-checks.yml'
-            # The editing-together check. Every path here is also in js, so shared
-            # preparation has built the engine and the share page it starts.
+            # The editing-together check and the share page's end-to-end tests. Every
+            # path here is also in js, so shared preparation has built the engine and
+            # the share page they start.
             together:
               # What a shared note's editors run through: the relay, the share page,
               # the engine, and the packages they are built from.
@@ -219,6 +220,10 @@ jobs:
               - 'apps/desktop/playwright.together.config.ts'
               - 'apps/desktop/package.json'
               - 'services/workspace-api/**'
+              # The share page's tests publish and open these apps.
+              - 'examples/trip-poll/**'
+              - 'examples/fundraiser/**'
+              - 'examples/stock-orders/**'
               - 'scripts/verification/**'
               - 'scripts/lib/**'
               - 'tools/rust-engine-program/**'
@@ -767,14 +772,21 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
 
-  # People edit one shared note together, in headless browsers, against a dohc server of its own
-  # on the runner. It is not part of either gate's time: it has its own filter and its own limit.
+  # Headless browsers against a dohc server of its own on the runner. One leg has people edit one
+  # shared note together; the other runs the share page's end-to-end tests. Neither is part of a
+  # gate's time: the job has its own filter and its own limit.
   together:
-    name: editing together
+    name: ${{ matrix.suite }}
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'together')) || needs.changes.outputs.together == 'true'
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - editing together
+          - share page
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -804,12 +816,18 @@ jobs:
       - name: Unpack the prepared engine and share page
         run: tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"
       - name: Edit together
+        if: matrix.suite == 'editing together'
         env:
           DOHC_REQUIRE_ENGINE_E2E: '1'
         run: pnpm test:together
+      # The viewer is already built, so this starts Playwright without the package's build step.
+      - name: Open and use share links
+        if: matrix.suite == 'share page'
+        working-directory: services/share-web
+        run: node ../../apps/desktop/scripts/run-playwright.mjs --config playwright.config.ts
       # Words and service output only: traces and screenshots stay on the runner.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: always() && matrix.suite == 'editing together'
         with:
           name: editing-together-${{ github.run_attempt }}
           path: test-results/together-report.json

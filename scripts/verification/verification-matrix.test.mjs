@@ -941,7 +941,7 @@ test(
                 assert.deepEqual(report.gates, { rust, js, android, together });
                 assert.deepEqual(report.ciEvidence, [
                   ...(android ? ["Android Kotlin compile"] : []),
-                  ...(together ? ["editing together"] : []),
+                  ...(together ? ["editing together", "share page"] : []),
                 ]);
                 assert.equal(report.full, full);
                 assert.equal(report.repositoryTests, js ? repositoryTests : undefined);
