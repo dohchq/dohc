@@ -445,6 +445,7 @@ describe("createCaptureLiveStores", () => {
                 mergeRemovals: [],
                 heldFiles: [],
                 outsideChanges: [],
+                heldAccessRules: [],
                 retainedCopies: { count: 0, bytes: 0 },
               }
             : { deferredWrites: [], settled: false, running: true, degraded: true, heldFiles: [] },
@@ -505,6 +506,7 @@ describe("createCaptureLiveStores", () => {
                   mergeRemovals: [],
                   heldFiles: [],
                   outsideChanges: [],
+                  heldAccessRules: [],
                   retainedCopies: { count: 0, bytes: 0 },
                 }
               : {
@@ -642,6 +644,7 @@ describe("createCaptureLiveStores", () => {
           mergeRemovals: [],
           heldFiles: [],
           outsideChanges: [],
+          heldAccessRules: [],
           retainedCopies: { count: 0, bytes: 0 },
         },
       };
