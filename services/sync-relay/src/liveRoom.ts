@@ -83,13 +83,16 @@ export interface LiveRooms {
   /**
    * Saves every edit the note's rooms hold, taking no new ones until `then` ends, then ends the
    * rooms: for a step that closes the note to them, such as a restore's fence or the owner's
-   * Stop. A refused save pauses the note, which keeps its edits in the copy, and `then` still
-   * runs. Throws `LiveRoomUnsavedError` without running `then` if the edits could not be saved yet.
+   * Stop. With `whileHosted`, the rooms stay open if the note is still hosted after `then`, as
+   * when one person's access ends and another Edit grant still covers the note. A refused save
+   * pauses the note, which keeps its edits in the copy, and `then` still runs. Throws
+   * `LiveRoomUnsavedError` without running `then` if the edits could not be saved yet.
    */
   saveFirst<T>(
     note: { readonly workspaceId: string; readonly objectId: string },
     then: () => T | Promise<T>,
     signal: AbortSignal,
+    options?: { readonly whileHosted?: boolean },
   ): Promise<T>;
   /** Takes no new edits, saves what each room holds, and ends every room. */
   close(): Promise<void>;
@@ -995,7 +998,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         },
       };
     },
-    async saveFirst(note, then, signal) {
+    async saveFirst(note, then, signal, options) {
       if (closed) throw new Error("Live rooms are closed.");
       const key = noteKey(note);
       holding.set(key, (holding.get(key) ?? 0) + 1);
@@ -1026,6 +1029,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         }
         if (saving.some((room) => room.unsaved.length)) throw new LiveRoomUnsavedError();
         const result = await then();
+        if (options?.whileHosted && storage.serviceHostDocumentEnabled(note)) return result;
         for (const room of [...rooms.values()])
           if (noteKey(room.document) === key && !room.lifetime.signal.aborted) dispose(room);
         return result;
