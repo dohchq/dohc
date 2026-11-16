@@ -404,6 +404,10 @@ export const WorkspaceSummary = z.object({
       unconfirmedChanges: ShareUnconfirmedChangesSchema.optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
+      // The relay changed which items this member sees, and the copy is
+      // closed while it is rebuilt. The shell shows "Updating access"
+      // instead of the workspace.
+      updatingAccess: z.literal(true).optional(),
     })
     .optional(),
   // Share mounts: received shares materialized into this workspace's

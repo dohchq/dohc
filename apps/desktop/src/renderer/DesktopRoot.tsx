@@ -18,7 +18,8 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, LockKeyhole } from "lucide-react";
+import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
 import {
   REGISTRY_READ_FAILURE_TITLE,
@@ -48,7 +49,8 @@ const LazyStatesPage = lazy(() =>
 
 const NOOP = () => undefined;
 
-// The registry error has no workspace shell; it answers menu commands
+// A window with no workspace shell, for the registry error and a copy that
+// is updating access. It answers menu commands
 // itself, reports into its own notices, and offers updates in its title bar.
 function RegistryErrorTitlebar() {
   const reportFailure = useContext(ShellErrorReporter);
@@ -76,6 +78,42 @@ function RegistryErrorTitlebar() {
   return (
     <div className="app-chrome absolute inset-x-0 top-0">
       <Titlebar update={<TitlebarUpdateButton update={update} />} />
+    </div>
+  );
+}
+
+// A joined workspace whose copy the engine closed because the owner changed
+// what this member can see. The shell would read the closed copy, so it is
+// not mounted; this says why and offers another workspace.
+function UpdatingAccess(props: { workspace: Workspace }) {
+  const reportFailure = useContext(ShellErrorReporter);
+  const manageWorkspaces = (): void => {
+    void bridge()
+      .openWorkspaceManager()
+      .catch((error: unknown) =>
+        reportFailure?.({
+          message: "dohc could not open the workspace manager.",
+          cause: error,
+          retry: manageWorkspaces,
+        }),
+      );
+  };
+  return (
+    <div
+      data-testid="workspace-updating-access"
+      role="status"
+      className="relative flex h-screen flex-col items-center justify-center gap-3 bg-bg px-8 text-center"
+    >
+      <RegistryErrorTitlebar />
+      <LockKeyhole size={20} strokeWidth={1.75} aria-hidden className="text-muted" />
+      <p className="dohc-section-label m-0">Updating access</p>
+      <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
+        {workspaceName(props.workspace)}
+      </h2>
+      <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
+        The owner changed what you can see here. This copy stays closed until it matches.
+      </p>
+      <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
     </div>
   );
 }
@@ -410,6 +448,10 @@ export function DesktopRoot() {
             />
             <DevPanel />
           </>
+        ) : workspace.shareView?.updatingAccess ? (
+          <StandaloneNotices>
+            <UpdatingAccess key={workspace.workspaceId} workspace={workspace} />
+          </StandaloneNotices>
         ) : (
           <>
             <DesktopWorkspaceShell

@@ -320,6 +320,10 @@ export interface PullShareViewResult {
   // Set when the relay selected a page under another reach than the one the
   // pull carried. That page applied nothing: read the reach again, then pull on.
   reachChanged?: ShareReachRevisions;
+  // Set when the reach's visibility changed: the engine closed the copy for a
+  // rebuild, and from here on answers this root only for that rebuild.
+  // `commitCursor` then does nothing.
+  rebuildId?: string;
   // Persist the cursor only after the caller has materialized changedPaths
   // to disk — the same contract as pullWorkspaceFromRelay. A crash before
   // the commit re-fetches (and re-replays) the delta; replay is

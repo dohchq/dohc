@@ -532,6 +532,45 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  // Under another visibility the engine closed the copy before it answered:
+  // the closed answer has no cursor, and nothing may commit one.
+  it("returns a closed copy's rebuild id and commits no cursor", async () => {
+    const reach = {
+      revision: "r1",
+      visibilityRevision: "v1",
+      rootLevel: "comment" as const,
+      folders: [],
+    };
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      return {
+        fetched: 0,
+        applied: 0,
+        skipped: 0,
+        refusals: [],
+        hasMore: false,
+        nextCursor: 0,
+        changedPaths: [],
+        reachChanged: { revision: "r2", visibilityRevision: "v2" },
+        rebuildId: "rebuild-1",
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+    const pull = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      reach,
+    });
+    expect(pull).toMatchObject({
+      applied: 0,
+      reachChanged: { revision: "r2", visibilityRevision: "v2" },
+      rebuildId: "rebuild-1",
+    });
+    await pull.commitCursor();
+    expect(daemon.requests.map((request) => request.method)).not.toContain("sync.commitCursor");
+    await sessions.closeAll();
+  });
+
   // The durable record holds every reason — each page reaches the recorder
   // before its cursor commits — so the in-memory aggregate only has to carry
   // enough to log and to show. A relay that refuses on every page must not be

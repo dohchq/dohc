@@ -1161,6 +1161,27 @@ export class EngineRelayClient {
             }),
             "share.view.pull",
           );
+          // The engine closed the copy: the visibility changed, and the old
+          // store answers only its rebuild now. Nothing applied and no cursor
+          // commits.
+          if (result.rebuildId !== undefined) {
+            const closedReach = reachRevisions(result.reachChanged, "share.view.pull");
+            if (!closedReach) {
+              throw new Error("Rust engine share.view.pull closed the copy without a reach.");
+            }
+            return {
+              fetched,
+              applied,
+              skipped,
+              refusals,
+              refusalCount,
+              changedPaths: [...changed.values()],
+              nextCursor,
+              reachChanged: closedReach,
+              rebuildId: stringField(result, "rebuildId", "share.view.pull"),
+              commitCursor: async () => {},
+            };
+          }
           const cursor = pendingCursor(result.pendingCursor, "share.view.pull");
           const pageCursor = numberField(result, "nextCursor", "share.view.pull");
           const hasMore = booleanField(result, "hasMore", "share.view.pull");

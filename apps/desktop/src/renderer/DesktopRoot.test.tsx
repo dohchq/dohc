@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   MenuCommand,
@@ -175,6 +175,42 @@ describe("workspace summary changes", () => {
       },
     };
   }
+
+  // The engine closed the copy: the shell would read it, so it is not
+  // mounted until the summary says the access is current again.
+  it("shows Updating access instead of the shell while a joined copy is closed", async () => {
+    const h = setup();
+    const openWorkspaceManager = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      openWorkspaceManager,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+    expect(within(panel).getByText("Updating access")).toBeTruthy();
+    expect(within(panel).getByRole("heading", { name: "Community" })).toBeTruthy();
+    fireEvent.click(within(panel).getByRole("button", { name: "Open another workspace" }));
+    expect(openWorkspaceManager).toHaveBeenCalledOnce();
+    const { updatingAccess: _, ...current } = shareView;
+    h.replace([{ ...workspace("a"), shareView: current }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(await screen.findByTestId("workspace-shell")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-updating-access")).toBeNull();
+  });
 
   it("keeps all registry changes when a summary refresh overtakes a full refresh", async () => {
     const h = setup();

@@ -10725,13 +10725,6 @@ function registerIpcHandlers(): void {
     readdir,
     mkdir,
     createJoinedWorkspace,
-    // The fresh join that settles a visibility change is not built yet, so
-    // the view keeps what it has and says why in the log.
-    onShareViewVisibilityChanged: ({ workspaceId, shareId, stored, listed }) =>
-      console.warn(
-        `[desktop] share ${shareId} in workspace ${workspaceId} now reaches other items ` +
-          `(visibility ${stored.visibilityRevision} to ${listed.visibilityRevision}); its copy keeps what it has until it is joined again.`,
-      ),
     setWorkspaceShareView,
     refreshNativeWorkspaceSurfaces,
     workspaceAuthorities,

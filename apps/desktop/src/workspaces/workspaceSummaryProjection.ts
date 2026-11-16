@@ -94,6 +94,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
           }
         : {}),
       ...(raw.ended === true ? { ended: true } : {}),
+      ...(isRecord(raw.rebuild) && boundedString(raw.rebuild.rebuildId, 1, 200) !== null
+        ? { updatingAccess: true as const }
+        : {}),
       ...(raw.unsavedPaths !== undefined
         ? {
             unsavedPaths:

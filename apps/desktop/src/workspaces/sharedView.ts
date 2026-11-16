@@ -78,6 +78,9 @@ export interface RefreshSharedViewOutcome {
   // Set when the relay now selects this view under other levels or another
   // visible set. The pull applied nothing and the caller reads the reach.
   reachChanged?: ShareReachRevisions;
+  // Set when the visible set changed: the engine closed the copy, and only
+  // this rebuild reads it until the new copy is swapped in.
+  rebuildId?: string;
 }
 
 export type StandaloneShareViewRefreshOutcome =
@@ -2514,6 +2517,21 @@ async function refreshSharedViewOnce(
       };
     }
     throw error;
+  }
+  // The engine closed the copy for a rebuild and answers only that rebuild
+  // now, so nothing here can read it. Its pull-in-flight marker stays: the
+  // rebuild replaces what it guards.
+  if (pull.rebuildId !== undefined && pull.reachChanged) {
+    return {
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [...(input.unjournalablePaths ?? [])],
+      refusedOps: pull.refusalCount,
+      refusedDetail: pull.refusals[0]?.detail ?? null,
+      reachChanged: pull.reachChanged,
+      rebuildId: pull.rebuildId,
+    };
   }
   const materializationExclusions = new Set(input.excludeFromMaterialization ?? []);
   if (recordChangedPaths) {

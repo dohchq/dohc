@@ -257,6 +257,10 @@ export interface ShareViewIdentity {
   // copy when capture failed before it could enumerate paths. Reopen to resume.
   unsavedPaths?: string[] | null;
   unconfirmedChanges?: ShareUnconfirmedChanges;
+  // Set when the relay changed which items this member sees. The engine closed
+  // the copy and answers it only for this rebuild; the view shows "Updating
+  // access" until the new copy is swapped in.
+  rebuild?: { rebuildId: string };
 }
 
 // A shared channel this workspace joined through a chat grant:

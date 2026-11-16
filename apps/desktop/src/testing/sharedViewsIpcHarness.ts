@@ -144,7 +144,6 @@ export async function createSharedViewsIpcHarness(
     steps.push("reach");
     return { revision: "r1", visibilityRevision: "v1", rootLevel: "edit", folders: [] };
   });
-  const visibilityChanged = vi.fn<Dependencies["onShareViewVisibilityChanged"]>();
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {
     steps.push("mkdir");
@@ -275,7 +274,6 @@ export async function createSharedViewsIpcHarness(
     fetchShareViewInfo: fetchInfo,
     fetchShareViewAccess: fetchAccess,
     fetchShareViewReach: fetchReach,
-    onShareViewVisibilityChanged: visibilityChanged,
     usableRoot: roots.usableRoot,
     readdir: readDir,
     mkdir,
@@ -341,7 +339,6 @@ export async function createSharedViewsIpcHarness(
     narrow,
     fetchAccess,
     fetchReach,
-    visibilityChanged,
     closed,
     recordRefusal,
     handlers,

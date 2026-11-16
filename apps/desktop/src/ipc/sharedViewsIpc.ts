@@ -99,11 +99,6 @@ export function registerSharedViewsIpcHandlers<
   fetchShareViewAccess: typeof fetchShareViewAccess;
   fetchShareViewReach: typeof fetchShareViewReach;
   probeShareViewLog: typeof probeShareViewLog;
-  // A membership's relay now selects a different set of items for it. The
-  // store may hold History the relay withholds, or lack History it serves,
-  // so only a fresh join of the view settles it. Until that exists the view
-  // keeps what it has and its pulls apply nothing.
-  onShareViewVisibilityChanged(change: ShareViewVisibilityChange): void;
   usableRoot(path: string): string;
   readdir(path: string): Promise<string[]>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
@@ -236,7 +231,8 @@ export function registerSharedViewsIpcHandlers<
   // relay selected it under other revisions. Under the same visibility only
   // the levels moved: writers pause while capture keeps what they made, the
   // new levels go in, and the next pull continues. A changed visibility
-  // raises the hook and changes nothing.
+  // changes nothing here: the next pull is served under it, and the engine
+  // closes the copy for a rebuild before that pull answers.
   async function followShareViewReach(
     workspaceId: string,
     rootPath: string,
@@ -252,12 +248,6 @@ export function registerSharedViewsIpcHandlers<
     // visibility of its own to compare.
     const stored = storedShareViewReach(view);
     if (stored && stored.visibilityRevision !== listed.visibilityRevision) {
-      dependencies.onShareViewVisibilityChanged({
-        workspaceId,
-        shareId: view.shareId,
-        stored,
-        listed,
-      });
       return "visibility-changed";
     }
     if (stored?.revision === listed.revision) return "current";
@@ -280,6 +270,20 @@ export function registerSharedViewsIpcHandlers<
     );
     refreshNativeWorkspaceSurfaces();
     return "installed";
+  }
+
+  // The engine closed a membership's copy because the relay changed which
+  // items it sees. Record the rebuild so the view shows "Updating access" and
+  // nothing here reads the copy until the new one is swapped in.
+  async function closeForRebuild(workspaceId: string, rebuildId: string): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.rebuild?.rebuildId === rebuildId) return;
+    await setWorkspaceShareView(workspaceId, { ...view, rebuild: { rebuildId } });
+    notifyRenderer({ workspaceId, summaryChanged: true });
+  }
+
+  function updatingAccess(workspaceId: string): boolean {
+    return requireWorkspace(workspaceId).shareView?.rebuild !== undefined;
   }
 
   // Receive side: open a pasted share code as a READ-ONLY shared view.
@@ -353,9 +357,13 @@ export function registerSharedViewsIpcHandlers<
     const membership = grantedSelector.wholeWorkspace === true;
     const membershipName = info.subjectName ?? "the workspace";
     const unfinished = (error: unknown) =>
-      new Error(
-        `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
-      );
+      error instanceof AccessUpdatingError
+        ? new Error(
+            `dohc could not finish reading ${membershipName} while its access is being updated. What arrived stays in ${rootPath}.`,
+          )
+        : new Error(
+            `dohc could not finish reading ${membershipName}: ${causeOf(error)}. What arrived stays in ${rootPath}. Try again continues from there.`,
+          );
     const kept = membership
       ? listWorkspaces().find(
           (entry) =>
@@ -369,6 +377,8 @@ export function registerSharedViewsIpcHandlers<
         )
       : undefined;
     if (kept) {
+      // Its copy is closed while its access is updated.
+      if (kept.shareView?.rebuild) throw unfinished(new AccessUpdatingError());
       await engineDaemonStartup();
       try {
         await firstPull(kept.rootPath, kept.workspaceId, relay);
@@ -502,6 +512,10 @@ export function registerSharedViewsIpcHandlers<
         throw new ShareUnavailableError();
       }
       if (!outcome.reachChanged) return;
+      if (outcome.rebuildId !== undefined) {
+        await closeForRebuild(workspaceId, outcome.rebuildId);
+        throw new AccessUpdatingError();
+      }
       if (
         attempt > 0 ||
         (await followShareViewReach(workspaceId, rootPath, relay, () => undefined)) !== "installed"
@@ -791,6 +805,8 @@ export function registerSharedViewsIpcHandlers<
           if (!shareViewIdentityIsIntact(workspace.shareView)) {
             throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
           }
+          // A closed copy answers only its rebuild.
+          if (workspace.shareView.rebuild) throw new Error(UPDATING_ACCESS_MESSAGE);
           // A proven large fresh import can publish its workspace handle before
           // initial capture finishes. Every share.* RPC stays fenced until the
           // phase reaches ready or degraded, including the Edit identity call
@@ -908,7 +924,9 @@ export function registerSharedViewsIpcHandlers<
               );
             }
             outcome = await reconcile();
-            if (!("ok" in outcome && !outcome.ok) && outcome.reachChanged && reachRelay) {
+            if (!("ok" in outcome && !outcome.ok) && outcome.rebuildId !== undefined) {
+              await closeForRebuild(workspace.workspaceId, outcome.rebuildId);
+            } else if (!("ok" in outcome && !outcome.ok) && outcome.reachChanged && reachRelay) {
               const followed = await followShareViewReach(
                 workspace.workspaceId,
                 workspace.rootPath,
@@ -954,6 +972,7 @@ export function registerSharedViewsIpcHandlers<
           }
           if (
             outcome.status !== "ended" &&
+            !updatingAccess(input.workspaceId) &&
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {
@@ -1088,6 +1107,8 @@ export function registerSharedViewsIpcHandlers<
               if (!view || !pin) return { status: "unverified" };
               if (!shareViewIdentityIsIntact(view)) return { status: "needs-reopen" };
               if (view.ended) return { status: "ended" };
+              // A closed copy is not narrowed: its rebuild reads the new levels.
+              if (view.rebuild) return { status: "unverified" };
               if (!joinedByAccount(view, credentials)) return { status: "unverified" };
               let stated;
               try {
@@ -1237,19 +1258,18 @@ function membershipPlace(info: {
   };
 }
 
-export interface ShareViewVisibilityChange {
-  workspaceId: string;
-  shareId: string;
-  stored: ListedReach;
-  listed: ListedReach;
-}
-
 // A membership's level follows the relay both ways, so its held pull names
 // it. A path share's pin never rises, so naming its level could only repeat.
 function membershipLevel(selector: unknown): { level?: ShareViewSelector["access"] } {
   const pin = recordedShareSelector(selector);
   return pin?.wholeWorkspace === true ? { level: pin.access } : {};
 }
+
+// The engine closed a membership's copy for a rebuild.
+class AccessUpdatingError extends Error {}
+
+const UPDATING_ACCESS_MESSAGE =
+  "dohc could not refresh this workspace while its access is being updated.";
 
 function causeOf(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
