@@ -229,22 +229,32 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   expect((await validate(input)).kind).toBe("accepted");
 });
 
-it("refuses an edit or settlement check past its time limit, and checks the next edit", async () => {
+it("tries a note's check again after it runs out of time, and refuses it the second time", async () => {
   const { pool, input, validate } = fixture(1_000),
     { checkpoint } = nestedEmphasis(3000);
-  expect(await validate({ ...input, checkpoint })).toEqual({
-    kind: "refused",
-    reason: "capacity-refused",
-    source: "final",
-  });
-  await validate.waitForCapacity!();
-  expect(
-    await pool.normalizeSettlement({
-      document: input.document,
-      currentPath: input.currentPath,
-      checkpoint,
-    }),
-  ).toEqual({ kind: "refused", reason: "capacity-refused", source: "registration-input" });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const slow = { ...input, checkpoint },
+    settlement = { document: input.document, currentPath: input.currentPath, checkpoint };
+  try {
+    await expect(validate(slow)).rejects.toBeInstanceOf(LiveValidatorFailure);
+    expect(log.mock.calls.flat().join(" ")).toMatch(/LiveCheckOverrun .*tried again/);
+    await validate.waitForCapacity!();
+    expect(await validate(slow)).toEqual({
+      kind: "refused",
+      reason: "capacity-refused",
+      source: "final",
+    });
+    await validate.waitForCapacity!();
+    await expect(pool.normalizeSettlement(settlement)).rejects.toBeInstanceOf(LiveValidatorFailure);
+    await validate.waitForCapacity!();
+    expect(await pool.normalizeSettlement(settlement)).toEqual({
+      kind: "refused",
+      reason: "capacity-refused",
+      source: "registration-input",
+    });
+  } finally {
+    log.mockRestore();
+  }
   await validate.waitForCapacity!();
   expect((await validate(input)).kind).toBe("accepted");
 }, 60_000);

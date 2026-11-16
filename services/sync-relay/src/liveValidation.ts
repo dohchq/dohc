@@ -82,8 +82,9 @@ export class LiveValidatorFailure extends Error {
 const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
 /**
  * How long one edit or settlement check may run once its child can read it, several times the
- * slowest ordinary note. Activation and restore read a note's history, which ordinary use can
- * make long, so they have none.
+ * slowest ordinary note. A busy host can slow an ordinary check, so a note's first overrun is
+ * tried again and only a second one in a row refuses it as too large. Activation and restore
+ * read a note's history, which ordinary use can make long, so they have no limit.
  */
 export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
 /** Names each validator failure once per document, candidate edit and error class. */
@@ -124,6 +125,8 @@ export function createLiveValidationExecutor(
 ) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
+  // Each note and kind of check whose last check ran out of time.
+  const overran = new Set<string>();
   let closed = false;
   const hasCapacity = (auxiliary = false) =>
     !closed &&
@@ -253,6 +256,16 @@ export function createLiveValidationExecutor(
     slot.busy = true;
     slot.auxiliary = auxiliary;
     hold(slot, true);
+    const document =
+      // A malformed input reaches the child, which fails it.
+      work.kind === "journal" || work.kind === "settlement" ? work.input?.document : undefined;
+    const note = JSON.stringify([
+      work.kind,
+      document?.workspaceId,
+      document?.mainVersionId,
+      document?.objectId,
+      document?.lineageClaimId,
+    ]);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -273,11 +286,15 @@ export function createLiveValidationExecutor(
         reject(error);
       };
       const abort = () => fail(signal!.reason);
-      // A check past its time limit is refused as too large, as a heap-limit abort is.
+      // A second overrun in a row is refused as too large, as a heap-limit abort is.
       const overrun = () => {
         if (!settle()) return;
         kill(slot);
-        resolve(tooLarge);
+        if (overran.delete(note)) return resolve(tooLarge);
+        if (overran.size >= MAX_LOGGED_VALIDATOR_FAILURES)
+          overran.delete(overran.values().next().value!);
+        overran.add(note);
+        reject(new LiveValidatorFailure("LiveCheckOverrun"));
       };
       const ended = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         if (!settle()) return;
@@ -288,6 +305,7 @@ export function createLiveValidationExecutor(
       const complete = (value: unknown) => {
         if ((value as { kind?: unknown }).kind === "ready") return;
         if (!settle()) return;
+        overran.delete(note);
         slot.busy = false;
         slot.auxiliary = false;
         // A result that arrives after `close` began must not release its hold.
@@ -312,7 +330,7 @@ export function createLiveValidationExecutor(
       } catch (error) {
         fail(error);
       }
-      if (work.kind === "journal" || work.kind === "settlement")
+      if (document)
         void slot.ready.then(() => {
           if (done) return;
           timer = setTimeout(overrun, checkTimeLimitMs);
