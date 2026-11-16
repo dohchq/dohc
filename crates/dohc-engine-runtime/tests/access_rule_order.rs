@@ -2043,3 +2043,45 @@ fn a_store_outside_any_workspace_writes_without_ordering() {
         ])
     );
 }
+
+/// When the workspace folder moves while its store stays open, the folder
+/// the store was opened in no longer holds it. Its rules are not the
+/// workspace's, so every write is refused until the folder is back.
+#[cfg(unix)]
+#[test]
+fn a_write_after_the_workspace_folder_moved_is_refused() {
+    let f = ruled_team();
+    let before = f.journal();
+    let moved = f.root().with_extension("moved");
+    std::fs::rename(f.root(), &moved).expect("move the workspace folder");
+    std::fs::create_dir_all(moved.join("private")).unwrap();
+    std::fs::write(moved.join("private/access.yaml"), NOBODY).unwrap();
+    let write_new = |f: &Fixture, moment: &str| {
+        f.runtime
+            .block_on(f.actor.versioned_text_write_indexed(
+                write("private/new.md", "secret", moment),
+                f.root().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    };
+    let refused = write_new(&f, "m-moved");
+    std::fs::rename(&moved, f.root()).expect("move the workspace folder back");
+    assert!(
+        matches!(
+            &refused,
+            Err(RuntimeError::Sync(SyncError::InvalidInput { reason }))
+                if *reason == dohc_engine_runtime::WORKSPACE_FOLDER_MOVED
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(f.journal(), before);
+    // Back in place, the rule beside the file journals first.
+    f.settle();
+    write_new(&f, "m-back").expect("write once the folder is back");
+    assert_eq!(
+        f.journal()[before.len()..],
+        lines(&["write private/access.yaml", "write private/new.md"])
+    );
+}

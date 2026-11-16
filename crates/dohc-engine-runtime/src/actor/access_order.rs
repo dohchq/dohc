@@ -38,6 +38,7 @@
 //! its folder for the rest of the command. A rule never moves as a rename.
 
 use super::ActorHandle;
+use crate::EngineDbIdentity;
 use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
@@ -104,6 +105,9 @@ struct Cleared {
     /// Folders to judge again when the command ends, and whether a write
     /// under them was refused.
     deferred: BTreeMap<FolderKey, bool>,
+    /// The workspace folder was found to still hold the store in this
+    /// command.
+    root_checked: bool,
 }
 
 /// What a command cleared so far. See [`checkpoint`].
@@ -135,7 +139,7 @@ impl AccessRuleSignals {
 
 thread_local! {
     static CLEARED: RefCell<Cleared> = RefCell::new(Cleared::default());
-    static ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static ROOT: RefCell<Option<Root>> = const { RefCell::new(None) };
     static SIGNALS: RefCell<Option<Arc<AccessRuleSignals>>> = const { RefCell::new(None) };
     /// Counts the rule files the ordering step committed on this thread.
     static RULE_COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -147,6 +151,16 @@ fn signal(pick: impl FnOnce(&AccessRuleSignals) -> &AtomicU64) {
             pick(signals).fetch_add(1, Ordering::AcqRel);
         }
     });
+}
+
+/// The workspace folder a store orders rules under, and how to tell it
+/// still holds that store.
+struct Root {
+    folder: PathBuf,
+    /// The store's path by name, under `folder`.
+    named: PathBuf,
+    /// The open store's file.
+    store: EngineDbIdentity,
 }
 
 /// The workspace folder that holds the store at `named`, the path the
@@ -171,12 +185,17 @@ fn workspace_folder(named: &Path) -> Option<PathBuf> {
 /// order.
 pub(super) fn install(
     named: &Path,
+    store: &EngineDbIdentity,
     bound: bool,
     signals: Arc<AccessRuleSignals>,
 ) -> Result<(), StorageError> {
     SIGNALS.with(|cell| *cell.borrow_mut() = Some(signals));
     let root = match workspace_folder(named) {
-        Some(folder) => Some(folder),
+        Some(folder) => Some(Root {
+            folder,
+            named: named.to_path_buf(),
+            store: store.clone(),
+        }),
         None if bound => {
             return Err(StorageError::InvalidInput {
                 reason: "workspace store is outside its workspace folder",
@@ -189,8 +208,32 @@ pub(super) fn install(
     Ok(())
 }
 
-fn root() -> Option<PathBuf> {
-    ROOT.with(|cell| cell.borrow().clone())
+/// The refusal for a write while the workspace folder no longer holds the
+/// store, as when the folder moved while the store stayed open.
+pub const WORKSPACE_FOLDER_MOVED: &str = "workspace-folder-moved";
+
+/// The workspace folder to order rules under, or `None` for a store with no
+/// workspace. Once per command it checks that the folder still holds this
+/// store, so rules are never read from a folder the workspace left.
+fn root() -> Result<Option<PathBuf>, &'static str> {
+    ROOT.with(|cell| {
+        let cell = cell.borrow();
+        let Some(root) = cell.as_ref() else {
+            return Ok(None);
+        };
+        let checked = CLEARED.with(|cleared| cleared.borrow().root_checked);
+        if !checked {
+            if EngineDbIdentity::of_existing(&root.named).ok().as_ref() != Some(&root.store) {
+                return Err(WORKSPACE_FOLDER_MOVED);
+            }
+            CLEARED.with(|cleared| cleared.borrow_mut().root_checked = true);
+        }
+        Ok(Some(root.folder.clone()))
+    })
+}
+
+fn moved(reason: &'static str) -> RuntimeError {
+    RuntimeError::Sync(SyncError::InvalidInput { reason })
 }
 
 /// Forget what the previous command cleared. Every command reads the disk
@@ -226,7 +269,12 @@ pub(super) fn roll_back(checkpoint: Checkpoint) {
 /// commands, so a writer that retries finds the rule committed.
 pub(super) fn finish_command(store: &mut EngineStore) {
     let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
-    let Some(root) = root().filter(|_| !deferred.is_empty()) else {
+    if deferred.is_empty() {
+        return;
+    }
+    // While the workspace folder no longer holds the store, every write is
+    // refused, so its folders wait for one made once it does again.
+    let Ok(Some(root)) = root() else {
         return;
     };
     let now_ms = wall_clock_ms();
@@ -289,7 +337,7 @@ fn order_as(
     version_id: &str,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let Some(root) = root() else {
+    let Some(root) = root().map_err(moved)? else {
         return Ok(touches.iter().map(|_| Ok(())).collect());
     };
     let leases = LeaseRegistry::new();
@@ -323,8 +371,13 @@ pub(super) fn ordered<R>(
     let mut outcome = work(store);
     for _ in 1..ORDERED_RUNS {
         let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
-        let root = root();
-        let (Err(_), Some(root)) = (&outcome, root.filter(|_| !deferred.is_empty())) else {
+        // A folder the workspace left refused the writer's moments already.
+        let root = if outcome.is_err() && !deferred.is_empty() {
+            root().ok().flatten()
+        } else {
+            None
+        };
+        let (Err(_), Some(root)) = (&outcome, root) else {
             CLEARED.with(|cleared| cleared.borrow_mut().deferred.extend(deferred));
             return outcome;
         };
@@ -450,7 +503,7 @@ fn check_moment(
     workspace_id: &str,
     payload: &serde_json::Value,
 ) -> Result<(), SyncError> {
-    let Some(root) = root() else {
+    let Some(root) = root().map_err(refuse)? else {
         return Ok(());
     };
     let text = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
@@ -1372,7 +1425,7 @@ pub(super) fn order_capture(
     faults: &dyn FaultInjector,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let Some(root) = root() else {
+    let Some(root) = root().map_err(moved)? else {
         return Ok(touches.iter().map(|_| Ok(())).collect());
     };
     let order = Order {
@@ -2585,7 +2638,8 @@ mod tests {
                 ),
             }
         }
-        install(&db, true, Arc::new(AccessRuleSignals::default())).unwrap();
+        let identity = EngineDbIdentity::of_existing(&db).unwrap();
+        install(&db, &identity, true, Arc::new(AccessRuleSignals::default())).unwrap();
         begin_command();
         dohc_engine_sync::adopt_join_identity(
             &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,
@@ -2637,6 +2691,28 @@ mod tests {
                 "delete dev/access.yaml",
             ]
         );
+    }
+
+    /// The workspace folder still holds the store only while the store's
+    /// path by name reaches the open store's file.
+    #[test]
+    fn a_folder_that_no_longer_holds_the_store_is_no_root() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let named = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        std::fs::write(&named, b"").unwrap();
+        let elsewhere = scratch.path().join("elsewhere.db");
+        std::fs::write(&elsewhere, b"").unwrap();
+        let signals = Arc::new(AccessRuleSignals::default());
+        for (store, expected) in [
+            (&named, Ok(Some(std::path::absolute(scratch.path()).unwrap()))),
+            (&elsewhere, Err(WORKSPACE_FOLDER_MOVED)),
+        ] {
+            let store = EngineDbIdentity::of_existing(store).unwrap();
+            install(&named, &store, true, signals.clone()).unwrap();
+            begin_command();
+            assert_eq!(root(), expected);
+        }
+        ROOT.with(|cell| *cell.borrow_mut() = None);
     }
 
     fn committed(files: &[(&str, &str)]) -> Committed {

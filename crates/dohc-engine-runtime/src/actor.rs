@@ -25,6 +25,7 @@ mod access_order;
 pub use access_order::{
     ACCESS_RULE_HELD, ACCESS_RULE_SETTLE, ACCESS_RULE_WAITS, AccessRuleDecided, AccessRuleDecision,
     AccessRuleHoldView, AccessRuleLevelChange, AccessRuleSignals, AccessRuleUndo,
+    WORKSPACE_FOLDER_MOVED,
 };
 mod automations;
 mod capture;
@@ -466,6 +467,7 @@ impl WorkspaceActor {
         let wake = tx.downgrade();
         let access_rules = Arc::new(AccessRuleSignals::default());
         let worker_access_rules = access_rules.clone();
+        let worker_identity = identity.clone();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -473,6 +475,7 @@ impl WorkspaceActor {
                     StorePaths {
                         named: named_path,
                         open: db_path,
+                        identity: worker_identity,
                     },
                     now_ms,
                     mode,
@@ -1224,11 +1227,12 @@ fn replay_retained_owner_private(store: &mut EngineStore) {
     clippy::too_many_arguments,
     reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
 )]
-/// The store a worker opens: by the path SQLite opens, and by its name,
-/// which the access-rule ordering step reads its workspace from.
+/// The store a worker opens: by the path SQLite opens, and by its name and
+/// file, which the access-rule ordering step reads its workspace from.
 struct StorePaths {
     named: PathBuf,
     open: PathBuf,
+    identity: EngineDbIdentity,
 }
 
 fn worker_main(
@@ -1280,8 +1284,10 @@ fn worker_main(
     let StorePaths {
         named,
         open: db_path,
+        identity,
     } = paths;
-    if let Err(err) = access_order::install(&named, root_token.is_some(), access_rules) {
+    if let Err(err) = access_order::install(&named, &identity, root_token.is_some(), access_rules)
+    {
         let _ = startup_tx.send(Err(err));
         return;
     }
@@ -1873,6 +1879,7 @@ pub(crate) mod test_support {
         prepare: impl FnOnce(&ActorHandle),
     ) -> WorkspaceActor {
         let identity = EngineDbIdentity::resolve_or_create(db).unwrap();
+        let worker_identity = identity.clone();
         let writer_lock = acquire_writer_lock(db).unwrap();
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
@@ -1921,6 +1928,7 @@ pub(crate) mod test_support {
                 StorePaths {
                     named: db.clone(),
                     open: db,
+                    identity: worker_identity,
                 },
                 2,
                 ActorOpenMode::ReadWrite,
