@@ -9,6 +9,7 @@ import {
   loopHeldBetween,
   recordEngineRequest,
   recordLiveSubmit,
+  sampleRelayLoop,
   startRelayMainThreadTiming,
   stopRelayMainThreadTiming,
 } from "./relayMainThreadTiming";
@@ -135,6 +136,59 @@ it("reports how long the loop was held between two times", async () => {
   // The sampler runs every 25 ms, so at least 125 of the 150 ms show as one late sample.
   expect(held?.loopMaxMs).toBeGreaterThanOrEqual(120);
   expect(held!.loopHeldMs).toBeGreaterThanOrEqual(held!.loopMaxMs);
+});
+
+it("rests once no write or save has asked for samples for as long as its ring covers", () => {
+  vi.useFakeTimers({
+    toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  startRelayMainThreadTiming();
+  // The ring covers 204.8 s, so the sampler is still running at the end of the third minute.
+  vi.advanceTimersByTime(180_025);
+  expect(vi.getTimerCount()).toBe(1);
+  vi.advanceTimersByTime(60_000);
+  // An idle relay keeps no timer, so nothing wakes it.
+  expect(vi.getTimerCount()).toBe(0);
+  expect(log).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(600_000);
+
+  // An engine request holds no main thread. It is counted, and one timer reports its minute.
+  recordEngineRequest("sync.push", 2, 5);
+  vi.advanceTimersByTime(30_000);
+  recordEngineRequest("sync.push", 2, 5);
+  expect(vi.getTimerCount()).toBe(1);
+  vi.advanceTimersByTime(30_000);
+  expect(vi.getTimerCount()).toBe(0);
+  expect(printedMinutes(log)).toEqual([
+    {
+      loop: null,
+      writes: {},
+      engine: { "sync.push": expect.objectContaining({ count: 2 }) },
+      saves: {},
+    },
+  ]);
+
+  // A save starts the sampler as it begins, and the minute its request began goes on.
+  recordEngineRequest("sync.pullHosted", 1, 1);
+  vi.advanceTimersByTime(20_000);
+  const beforeSave = performance.now() - 1;
+  sampleRelayLoop();
+  const saveStarted = performance.now();
+  vi.advanceTimersByTime(40_000);
+  // No sample covers the rest, so a time within it has no loop figures. The save has its own.
+  expect(loopHeldBetween(beforeSave, performance.now())).toBeNull();
+  expect(loopHeldBetween(saveStarted, performance.now())).toEqual({ loopMaxMs: 0, loopHeldMs: 0 });
+  recordLiveSubmit("success", { checkMs: 40 });
+  expect(printedMinutes(log)[1]).toMatchObject({
+    loop: { samples: 1600 },
+    engine: { "sync.pullHosted": { count: 1 } },
+  });
+  // The save ended 204.8 s before the end of the fourth minute after it, and the sampler rests there.
+  vi.advanceTimersByTime(180_000);
+  expect(vi.getTimerCount()).toBe(1);
+  vi.advanceTimersByTime(60_000);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it("keeps each save result's figures apart, so fast refusals do not move successful saves", () => {

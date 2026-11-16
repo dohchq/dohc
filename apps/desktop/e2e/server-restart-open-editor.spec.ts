@@ -1,36 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
-import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
-import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
-import { resolveEngineBinary } from "../src/testing/engineBinary";
-import { launchDesktopApp } from "./helpers/desktopApp";
-import { relayJson } from "./helpers/relayPeer";
-import { startServerProxy } from "./helpers/selfHostOnboarding";
-import {
-  sharedDatasetViewerOrigin,
-  startSharedDatasetBrowser,
-} from "./helpers/sharedDatasetBrowser";
-import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import {
-  createTempWorkspace,
-  explorerRow,
-  openWorkspaceFromFirstRun,
-  seedCloudCredentials,
-  seedWorkspaceManifest,
-  seedWorkspaceRegistry,
-  waitForWorkspaceFile,
-  writeWorkspaceFiles,
-} from "./helpers/workspace";
+import { openEditLinkOnServer } from "./helpers/editLinkServer";
 
-type Api = DohcDesktopBridge;
-const WORKSPACE_ID = "server-restart-open-editor";
-const OWNER = "e2e-server-restart-owner";
-const TOKEN = `test:${OWNER}`;
 const PATH = "plain.md";
 const PARAGRAPH = "An ordinary paragraph.";
-const CONTENTS = `# Plain\n\n${PARAGRAPH}\n`;
 
 /** What a link holder's page says for `ms` after a restart, each distinct text with the second it first showed. */
 async function watchPage(page: Page, label: string, ms: number): Promise<string[]> {
@@ -59,119 +33,16 @@ async function watchPage(page: Page, label: string, ms: number): Promise<string[
 
 test("@server-restart an open Edit link loses nothing typed through a share service restart, a relay restart and both", async () => {
   test.setTimeout(900_000);
-  const temp = await createTempWorkspace();
-  const exchangeKey = randomBytes(32).toString("base64url");
-  let relay: SyncRelayHandle | undefined;
-  let proxy: Awaited<ReturnType<typeof startServerProxy>> | undefined;
-  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | undefined;
-  let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | undefined;
+  const server = await openEditLinkOnServer({
+    workspaceId: "server-restart-open-editor",
+    owner: "e2e-server-restart-owner",
+    path: PATH,
+    files: [{ path: PATH, contents: `# Plain\n\n${PARAGRAPH}\n` }],
+    env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" },
+  });
   try {
-    const ca = await mintLocalhostCa(temp.baseDir);
-    const env = {
-      NODE_EXTRA_CA_CERTS: ca.caPath,
-      DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
-      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
-      DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
-      DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
-      DOHC_TEST_SYNC_BACKOFF_MS: "250",
-    };
-    proxy = await startServerProxy(ca);
-    const relayOptions = {
-      dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
-      editLinks: {
-        engineExecutable: resolveEngineBinary(),
-        publicOrigin: proxy.origin,
-        trustEnv: env,
-      },
-      linkBoundary: {
-        linkKey: randomBytes(32).toString("base64url"),
-        relayExchangeKey: exchangeKey,
-        publicViewerOrigin: sharedDatasetViewerOrigin,
-      },
-    };
-    relay = await spawnSyncRelay(relayOptions);
-    proxy.routeRelayTo(relay.baseUrl);
-
-    await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    await writeWorkspaceFiles(temp, [{ path: PATH, contents: CONTENTS }]);
-    await seedWorkspaceRegistry(temp, [{ workspaceId: WORKSPACE_ID, rootPath: temp.rootPath }]);
-    await seedCloudCredentials(temp, {
-      serverUrl: proxy.origin,
-      relayUrl: proxy.origin,
-      userId: OWNER,
-      email: `${OWNER}@dohc.test`,
-      token: TOKEN,
-    });
-    owner = await launchDesktopApp({ workspace: temp, env });
-    const page = owner.page;
-    await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(page, WORKSPACE_ID, PATH);
-    await page.evaluate(async (workspaceId) => {
-      await (window as unknown as { dohcDesktop: Api }).dohcDesktop.cloudEnableSync({
-        workspaceId,
-      });
-    }, WORKSPACE_ID);
-    await expect
-      .poll(
-        async () => {
-          const identity = relayAdoptedIdentity(relay!.dbPath, WORKSPACE_ID);
-          if (!identity) return false;
-          const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
-          const result = await relayJson(
-            relay!.baseUrl,
-            TOKEN,
-            `/sync/${WORKSPACE_ID}/log?${query}`,
-          );
-          const ops = (JSON.parse(result.body) as { ops: Array<{ payload: { path?: string } }> })
-            .ops;
-          return ops.some((op) => op.payload.path === PATH);
-        },
-        { timeout: 120_000, intervals: [1000] },
-      )
-      .toBe(true);
-    await explorerRow(page, PATH).click({ timeout: 15_000 });
-    await expect(page.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true", {
-      timeout: 30_000,
-    });
-    const created = await relayJson(relay.baseUrl, TOKEN, `/sync/${WORKSPACE_ID}/shares/links`, {
-      method: "POST",
-      body: JSON.stringify({ paths: [PATH], access: "edit" }),
-    });
-    expect(created.status, created.body).toBe(200);
-    const link = JSON.parse(created.body) as { url: string };
-    await expect
-      .poll(
-        async () => {
-          const listed = await page.evaluate(
-            (workspaceId) =>
-              (window as unknown as { dohcDesktop: Api }).dohcDesktop.listOwnerLiveDocuments({
-                workspaceId,
-              }),
-            WORKSPACE_ID,
-          );
-          return listed.documents.some(
-            (document) => document.path === PATH && document.status === "ready",
-          );
-        },
-        { timeout: 180_000, intervals: [1000] },
-      )
-      .toBe(true);
-
-    shared = await startSharedDatasetBrowser({
-      relayUrl: relay.baseUrl,
-      exchangeKey,
-      editLinks: true,
-    });
-    const browserPage = await shared.browser.newPage();
-    await browserPage.goto(`${sharedDatasetViewerOrigin}/s${new URL(link.url).hash}`);
-    await browserPage.getByRole("button", { name: PATH, exact: true }).click({ timeout: 15_000 });
-    await browserPage
-      .getByRole("button", { name: "Edit file", exact: true })
-      .click({ timeout: 15_000 });
-    const editor = browserPage.getByRole("textbox", { name: "Shared file editor", exact: true });
-    await expect(editor).toHaveAttribute("contenteditable", "true", { timeout: 120_000 });
-
-    const ownerFile = () => readFile(join(temp.rootPath, PATH), "utf8").catch(() => "");
+    const { linkPage: browserPage, editor } = server;
+    const ownerFile = () => readFile(join(server.workspaceRoot, PATH), "utf8").catch(() => "");
     // The page notes every whole word its editor ever holds. Keystrokes that arrive while the editor is being
     // replaced never enter the document, and only a word the editor held can have been dropped.
     await browserPage.evaluate(() => {
@@ -219,37 +90,28 @@ test("@server-restart an open Edit link loses nothing typed through a share serv
       return said;
     };
 
-    const port = relay.port;
     // A word is at risk only in the moment a restart cuts the page's connection, so a hunt for a lost word asks
     // for many share service restarts with DOHC_SERVER_RESTARTS.
     const shareServiceRestarts = Number(process.env.DOHC_SERVER_RESTARTS ?? 1);
     const said: string[][] = [];
     for (let restart = 1; restart <= shareServiceRestarts; restart++)
       said.push(
-        await phase(`share service ${String(restart)}`, async () => shared!.restart(), 6_000),
+        await phase(
+          `share service ${String(restart)}`,
+          async () => server.restartShareService(),
+          6_000,
+        ),
       );
-    said.push(
-      await phase(
-        "relay",
-        async () => {
-          await relay!.stop();
-          relay = await spawnSyncRelay({ ...relayOptions, port });
-          proxy!.routeRelayTo(relay.baseUrl);
-        },
-        20_000,
-      ),
-    );
+    said.push(await phase("relay", () => server.restartRelay(), 20_000));
     // A deploy stops both, and the relay is back some seconds after the share service.
     said.push(
       await phase(
         "whole server",
-        async () => {
-          await relay!.stop();
-          shared!.restart();
-          await browserPage.waitForTimeout(10_000);
-          relay = await spawnSyncRelay({ ...relayOptions, port });
-          proxy!.routeRelayTo(relay.baseUrl);
-        },
+        () =>
+          server.restartRelay(async () => {
+            server.restartShareService();
+            await browserPage.waitForTimeout(10_000);
+          }),
         20_000,
       ),
     );
@@ -296,8 +158,6 @@ test("@server-restart an open Edit link loses nothing typed through a share serv
       editable: "true",
     });
   } finally {
-    await Promise.allSettled([shared?.close(), owner?.close()]);
-    await Promise.allSettled([relay?.stop(), proxy?.close()]);
-    await Promise.allSettled([temp.cleanup()]);
+    await server.close();
   }
 });
