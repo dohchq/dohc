@@ -534,6 +534,8 @@ test(
             const android = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
             // The lockfile and a package's source both reach the editing-together check, which never runs locally either.
             const together = mode === "pr" && !job && (full || changed !== undefined);
+            // Both also reach the Windows package check, which never runs locally either.
+            const windows = together;
             // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
             const repositoryTests =
               changed === "packages/fixture/src/index.ts" && !full && !keepGoing
@@ -938,10 +940,11 @@ test(
                 assert.equal(report.provenance.status, "PASS");
                 assert.equal(Boolean(report.build), desktop);
                 assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
-                assert.deepEqual(report.gates, { rust, js, android, together });
+                assert.deepEqual(report.gates, { rust, js, android, together, windows });
                 assert.deepEqual(report.ciEvidence, [
                   ...(android ? ["Android Kotlin compile"] : []),
                   ...(together ? ["editing together", "share page"] : []),
+                  ...(windows ? ["Windows package"] : []),
                 ]);
                 assert.equal(report.full, full);
                 assert.equal(report.repositoryTests, js ? repositoryTests : undefined);

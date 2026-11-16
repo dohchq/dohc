@@ -229,6 +229,7 @@ export function passedSpecTitles(suites = []) {
 export const ciEvidence = (gates) => [
   ...(gates.android ? ["Android Kotlin compile"] : []),
   ...(gates.together ? ["editing together", "share page"] : []),
+  ...(gates.windows ? ["Windows package"] : []),
 ];
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
@@ -459,7 +460,14 @@ export async function verify(args) {
     const files = base ? changedFiles(baseCommit, mode === "plan") : [];
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const requiredGates = selectedGates(files, workflow);
-    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true, together: true });
+    if (full)
+      Object.assign(requiredGates, {
+        rust: true,
+        js: true,
+        android: true,
+        together: true,
+        windows: true,
+      });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(
       Object.entries(requiredGates).map(([name, needed]) => [

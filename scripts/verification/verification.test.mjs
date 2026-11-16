@@ -1409,7 +1409,7 @@ test("artifact identity includes nested file bytes and names", () => {
   }
 });
 
-// The Rust and JavaScript selection. The Android and editing-together filters have their own tests.
+// The Rust and JavaScript selection. The Android, editing-together, and Windows package filters have their own tests.
 const localGates = (files, workflow) => {
   const { rust, js } = selectedGates(files, workflow);
   return { rust, js };
@@ -1426,7 +1426,7 @@ test("gate selection covers root self-host deployment inputs", () => {
   ]) {
     assert.deepEqual(
       selectedGates([file], workflow),
-      { rust: false, js: true, android: false, together: false },
+      { rust: false, js: true, android: false, together: false, windows: false },
       file,
     );
   }
@@ -1465,6 +1465,7 @@ test("the Android filter in the workflow selects native module, Expo config, and
     js: true,
     android: true,
     together: false,
+    windows: false,
   });
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/mobile/app.json'", "- 'apps/mobile/other.json'");
@@ -1483,16 +1484,25 @@ test("a selected Android gate needs CI evidence, because no local run compiles i
 
 test("a selected editing-together check needs CI evidence, because no local run performs it", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  for (const file of ["services/sync-relay/src/server.ts", "apps/desktop/src/main.ts"])
+  // The share page and the end-to-end helpers reach this check and not the Windows package.
+  for (const file of ["services/share-web/src/server.ts", "apps/desktop/e2e/helpers/syncRelay.ts"])
     assert.deepEqual(
       ciEvidence(selectedGates([file], workflow)),
       ["editing together", "share page"],
+      file,
+    );
+  // The relay and the desktop's source reach both.
+  for (const file of ["services/sync-relay/src/server.ts", "apps/desktop/src/main.ts"])
+    assert.deepEqual(
+      ciEvidence(selectedGates([file], workflow)),
+      ["editing together", "share page", "Windows package"],
       file,
     );
   assert.deepEqual(ciEvidence(selectedGates(["pnpm-lock.yaml"], workflow)), [
     "Android Kotlin compile",
     "editing together",
     "share page",
+    "Windows package",
   ]);
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/desktop/e2e/together/**'", "- 'apps/other/**'");
@@ -1502,6 +1512,23 @@ test("a selected editing-together check needs CI evidence, because no local run 
   assert.equal(selectedGates([spec], narrowed).together, false);
 });
 
+test("a selected Windows package check needs CI evidence, because no local run performs it", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  // The smoke and the packaging configuration reach this check alone.
+  for (const file of [
+    "tools/perf-profiling/packaged-benchmark.mjs",
+    "apps/desktop/electron-builder.yml",
+  ])
+    assert.deepEqual(ciEvidence(selectedGates([file], workflow)), ["Windows package"], file);
+  assert.deepEqual(ciEvidence(selectedGates(["docs/guide.md"], workflow)), []);
+  // The selection reads the filter from the workflow, so a filter change moves it.
+  const narrowed = workflow.replace("- 'tools/perf-profiling/**'", "- 'tools/other/**'");
+  assert.notEqual(narrowed, workflow);
+  const smoke = "tools/perf-profiling/packaged-benchmark.mjs";
+  assert.equal(selectedGates([smoke], workflow).windows, true);
+  assert.equal(selectedGates([smoke], narrowed).windows, false);
+});
+
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), {
@@ -1509,6 +1536,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     js: false,
     android: false,
     together: false,
+    windows: false,
   });
   assert.deepEqual(localGates(["apps/desktop/src/main.ts"], workflow), {
     rust: false,
@@ -1775,7 +1803,13 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.commit, head);
     assert.equal(report.provenance.status, "PASS");
     assert.equal(report.dirty, false);
-    assert.deepEqual(report.gates, { rust: false, js: false, android: false, together: false });
+    assert.deepEqual(report.gates, {
+      rust: false,
+      js: false,
+      android: false,
+      together: false,
+      windows: false,
+    });
     assert.deepEqual(report.ciEvidence, []);
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);

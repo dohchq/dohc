@@ -82,6 +82,22 @@ To read a failure, open `test-results/together-report.json`. Each case records w
 The same job has a second leg, `share page`. It runs the share page's own end-to-end tests in `services/share-web/e2e`, on its own runner.
 Run them locally with `pnpm --filter @dohc/share-web test:e2e`.
 
+## Windows package
+
+The **Windows package** job in the PR checks builds the Windows desktop app and opens it.
+It builds the desktop and the release engine, checks the package's settings, and packs the app with `electron-builder --dir`.
+It then runs the release workflow's Windows packaged smoke against that app: an edit, persistence on disk, and a restart.
+It builds no installer and signs nothing. The release workflow does both.
+
+The job runs when a change touches what goes into the package or the smoke that opens it.
+That is the desktop's source and build scripts, the workspace packages and services the desktop bundles, the engine, the packaging configuration, the smoke, and the install inputs.
+The job's filter is `windows` in [`pr-checks.yml`](../../.github/workflows/pr-checks.yml). `PR verification` requires the job when the filter selects it.
+The job always uses GitHub's `windows-2025` runner and receives no secrets.
+It took about 8 minutes with the Rust build cache and 14 minutes without it.
+
+`pnpm verify:pr` does not run this job. When it selects `windows`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
+To run the same smoke on a Windows computer, build a [fixed preview](#hand-someone-a-fixed-preview).
+
 ## Debug a separate app
 
 Run `pnpm qa:debug` to start a prepared desktop with its own workspace, home, and profile.
@@ -152,6 +168,8 @@ Android compiles only in CI. The **Android Kotlin compile** job runs when a chan
 It generates the Expo Android project and compiles the Kotlin of both native modules for debug. A Kotlin error fails the job with its file and line.
 Nothing Android runs locally. When `pnpm verify:plan` or `pnpm verify:pr` selects `android`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
 
+The Windows package job also runs only in the PR checks. See [Windows package](#windows-package).
+
 The timing targets are 300 s for JavaScript and 600 s for Rust. The failure ceilings are 400 s and 700 s.
 A gate's `seconds` runs from the start of `what changed` to the finish of the gate's last job.
 Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`. Read the receipt's `timing`:
@@ -164,7 +182,7 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 The organisation's Team plan permits 60 concurrent standard-runner jobs.
-A combined run peaks at 24 jobs, so two combined runs fit and a third can queue.
+A combined run peaks at 25 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 

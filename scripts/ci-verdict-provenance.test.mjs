@@ -490,6 +490,9 @@ function workflowContext({
   };
 }
 
+// The Windows package job uses GitHub's Windows runner in every mode.
+const githubRunner = (name) => (name === "windows" ? "windows-2025" : "ubuntu-24.04");
+
 test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
@@ -508,7 +511,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
         const context = workflowContext({ enabled, draft, fork });
         assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
         for (const [name, job] of Object.entries(document.jobs)) {
-          assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"], name);
+          assert.deepEqual(workflowExpression(job["runs-on"], context), [githubRunner(name)], name);
         }
       }
     assert.equal(
@@ -521,7 +524,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
     const manual = workflowContext({ enabled, event: "workflow_dispatch", size: "8" });
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
     for (const [name, job] of Object.entries(document.jobs)) {
-      assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"], name);
+      assert.deepEqual(workflowExpression(job["runs-on"], manual), [githubRunner(name)], name);
     }
   }
 });
@@ -552,8 +555,8 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
         provider: "unknown",
       });
       for (const [name, job] of Object.entries(document.jobs)) {
-        if (name === "javascript-prepare") {
-          assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
+        if (["javascript-prepare", "windows"].includes(name)) {
+          assert.deepEqual(workflowExpression(job["runs-on"], manual), [githubRunner(name)], name);
           continue;
         }
         const cpus = ["changes", "verification"].includes(name) ? "2" : size === "8" ? "8" : "4";
@@ -568,7 +571,7 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
     }
 });
 
-test("runner selection keeps shared preparation on GitHub in every mode", () => {
+test("runner selection keeps shared preparation and the Windows package on GitHub in every mode", () => {
   const { jobs } = load(workflow);
   for (const enabled of ["", "false", "true"]) {
     for (const event of ["pull_request", "workflow_dispatch"])
@@ -579,8 +582,8 @@ test("runner selection keeps shared preparation on GitHub in every mode", () => 
             enabled === "true" || (event === "workflow_dispatch" && provider === "blacksmith");
           const selectedSize = event === "workflow_dispatch" && size === "8" ? "8" : "4";
           for (const [name, job] of Object.entries(jobs)) {
-            let expected = "ubuntu-24.04";
-            if (name !== "javascript-prepare" && all)
+            let expected = githubRunner(name);
+            if (!["javascript-prepare", "windows"].includes(name) && all)
               expected = `blacksmith-${["changes", "verification"].includes(name) ? "2" : selectedSize}vcpu-ubuntu-2404`;
             assert.deepEqual(
               workflowExpression(job["runs-on"], context),
@@ -655,14 +658,26 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     };
     assert.equal(workflowExpression(jobs.together.if, context), together === "true");
   }
-  for (const gate of ["all", "js", "rust", "android", "together"]) {
+  // The Windows package job builds everything it runs, so it needs no other selection.
+  for (const windows of ["true", "false"]) {
+    const context = {
+      ...workflowContext({ enabled: "true" }),
+      needs: { changes: { result: "success", outputs: { js: "false", windows } } },
+    };
+    assert.equal(workflowExpression(jobs.windows.if, context), windows === "true");
+  }
+  for (const gate of ["all", "js", "rust", "android", "together", "windows"]) {
     const context = {
       ...workflowContext({ event: "workflow_dispatch", gate }),
       needs: { changes: { result: "success", outputs: {} } },
     };
     assert.equal(workflowExpression(jobs.javascript.if, context), gate === "all" || gate === "js");
     assert.equal(workflowExpression(jobs.rust.if, context), gate === "all" || gate === "rust");
-    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), gate !== "android");
+    // Android and the Windows package use nothing that shared preparation builds.
+    assert.equal(
+      workflowExpression(jobs["javascript-prepare"].if, context),
+      !["android", "windows"].includes(gate),
+    );
     assert.equal(
       workflowExpression(jobs.android.if, context),
       gate === "all" || gate === "android",
@@ -671,6 +686,10 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(
       workflowExpression(jobs.together.if, context),
       gate === "all" || gate === "together",
+    );
+    assert.equal(
+      workflowExpression(jobs.windows.if, context),
+      gate === "all" || gate === "windows",
     );
     for (const result of ["success", "failure", "skipped"]) {
       const selected = {
@@ -808,11 +827,11 @@ test("prepared artifact consumers share preparation's fingerprint environment", 
 
 test("job names match the workflow graph and timeout backstops", () => {
   const { jobs } = load(workflow);
-  // The graph times the distributed gates. Android and editing together are one job each, outside them.
+  // The graph times the distributed gates. Android, editing together, and the Windows package are one job each, outside them.
   assert.deepEqual(
     Object.keys(CLOUD_JOB_GRAPH).sort(),
     Object.keys(jobs)
-      .filter((name) => !["verification", "android", "together"].includes(name))
+      .filter((name) => !["verification", "android", "together", "windows"].includes(name))
       .sort(),
   );
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
@@ -842,6 +861,7 @@ test("job names match the workflow graph and timeout backstops", () => {
       rust: 55,
       android: 20,
       together: 30,
+      windows: 30,
       verification: 10,
     },
   );
@@ -892,6 +912,84 @@ test("the editing-together check is selected by what it runs and loads, and only
     "README.md",
   ])
     assert.ok(!selects("together", file), file);
+});
+
+test("the Windows package check is selected by what the package is built from and what opens it", () => {
+  const filters = load(
+    load(workflow).jobs.changes.steps.find((step) => step.id === "filter").with.filters,
+  );
+  const selects = (file) => filters.windows.some((pattern) => matchesGlob(file, pattern));
+  for (const file of [
+    // What the desktop build compiles, stages, and bundles.
+    "apps/desktop/src/renderer/AppView.tsx",
+    "apps/desktop/src/main.ts",
+    "apps/desktop/scripts/stage-app-compiler.mjs",
+    "apps/desktop/electron.vite.config.ts",
+    "packages/cli/src/index.ts",
+    "services/sync-relay/src/namedLiveRoutes.ts",
+    "services/sqlite-worker/src/sqliteEngine.ts",
+    "tools/single-react.ts",
+    // The engine, and the build budget its build script imports.
+    "crates/dohc-workspace-engine/src/rpc/owner_activation.rs",
+    "vendor/yrs-0.27.3/src/lib.rs",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "apps/desktop/scripts/build-workspace-engine.mjs",
+    "scripts/verification/build.mjs",
+    "tools/rust-engine-program/build-slot.mjs",
+    // What electron-builder packs.
+    "apps/desktop/electron-builder.yml",
+    "apps/desktop/build/icon.ico",
+    // The smoke and a module it imports.
+    "tools/perf-profiling/packaged-benchmark.mjs",
+    "tools/perf-profiling/window-controller.mjs",
+    "scripts/verification/process.mjs",
+    // What installs it.
+    "apps/site/package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "patches/app-builder-lib@26.15.3.patch",
+    ".node-version",
+    "tsconfig.base.json",
+    ".github/workflows/pr-checks.yml",
+  ])
+    assert.ok(selects(file), file);
+  for (const file of [
+    "docs/guide.md",
+    "README.md",
+    // The build reads no end-to-end test, test configuration, or example app.
+    "apps/desktop/e2e/together/stack.ts",
+    "apps/desktop/e2e/helpers/syncRelay.ts",
+    "apps/desktop/playwright.config.ts",
+    "apps/desktop/vitest.config.ts",
+    "examples/trip-poll/frontend.tsx",
+    // The desktop bundles neither of these services, the site, nor the phone app.
+    "services/share-web/viewer/src/NamedDocumentEditor.tsx",
+    "services/workspace-api/e2e/harness.ts",
+    "apps/site/src/pages/index.astro",
+    "apps/mobile/app/index.tsx",
+    // The release workflow packs its own installers.
+    ".github/workflows/desktop-release.yml",
+    "scripts/check-brand.mjs",
+  ])
+    assert.ok(!selects(file), file);
+});
+
+test("the Windows package job runs the release's packaged smoke and receives no secrets", async () => {
+  const job = load(workflow).jobs.windows;
+  const release = load(
+    await readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"),
+  );
+  const smoke = release.jobs.build.steps.find((step) => step.name === "Windows packaged smoke");
+  const opened = job.steps.at(-1);
+  assert.equal(opened.name, "Open and use the packaged app");
+  assert.equal(opened.run, smoke.run);
+  assert.equal(opened.shell, smoke.shell);
+  // The smoke opens the unpacked app that the step before it packs.
+  assert.match(job.steps.at(-2).run, /electron-builder --publish never --x64 --dir$/u);
+  assert.match(opened.run, /--binary apps\/desktop\/release\/win-unpacked\/dohc\.exe/u);
+  assert.doesNotMatch(JSON.stringify(job), /secrets\.|github\.token/u);
+  assert.equal(job.environment, undefined);
 });
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
@@ -972,7 +1070,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     names = Object.keys(jobs);
   assert.equal(
     names.reduce((total, name) => total + legs(jobs[name]), 0),
-    26,
+    27,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -990,6 +1088,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     "rust-policy",
     "android",
     "together",
+    "windows",
   ];
   const concurrent = (simultaneous) => {
     assert.ok(
@@ -1007,9 +1106,9 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       simultaneous.reduce((n, name) => n + legs(jobs[name]), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 5);
+  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 6);
   assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 24);
+  assert.equal(peak, 25);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
@@ -1093,6 +1192,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     "javascript-prepare",
     "android",
     "together",
+    "windows",
   ]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(
@@ -1186,12 +1286,16 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     android = "false",
     androidResult = android === "true" ? "success" : "skipped",
   ) => ({
-    changes: { result: "success", outputs: { js, rust, android, together: "false" } },
+    changes: {
+      result: "success",
+      outputs: { js, rust, android, together: "false", windows: "false" },
+    },
     javascript: { result: jsResult },
     rust: { result: rustResult },
     "javascript-prepare": { result: confinementResult },
     android: { result: androidResult },
     together: { result: "skipped" },
+    windows: { result: "skipped" },
   });
   // The editing-together check completes as selected, like a gate.
   {
@@ -1221,6 +1325,38 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
         name,
       );
   }
+  // The Windows package check completes as selected, like a gate.
+  {
+    const selected = (choice, result) => {
+      const base = jobs("true", "false", "success", "skipped");
+      return {
+        ...base,
+        changes: { result: "success", outputs: { ...base.changes.outputs, windows: choice } },
+        windows: { result },
+      };
+    };
+    assert.equal(run(selected("true", "success")).status, 0);
+    for (const result of ["failure", "cancelled", "skipped", undefined])
+      assert.equal(run(selected("true", result)).status, 1);
+    assert.equal(run(selected("false", "success")).status, 1);
+    assert.equal(run(selected(undefined, "skipped")).status, 1, "a missing selection fails");
+    // Its own dispatch starts no JavaScript, Rust, or shared preparation job.
+    const alone = {
+      ...jobs(undefined, undefined, "skipped", "skipped", "skipped"),
+      windows: { result: "success" },
+    };
+    assert.equal(run(alone, "workflow_dispatch", "windows").status, 0);
+    assert.equal(
+      run({ ...alone, windows: { result: "skipped" } }, "workflow_dispatch", "windows").status,
+      1,
+    );
+    for (const name of ["javascript", "rust", "javascript-prepare"])
+      assert.equal(
+        run({ ...alone, [name]: { result: "success" } }, "workflow_dispatch", "windows").status,
+        1,
+        name,
+      );
+  }
   for (const js of ["true", "false"])
     for (const rust of ["true", "false"])
       for (const android of ["true", "false"]) {
@@ -1245,7 +1381,10 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(
     run({
       ...jobs("false", "false", "skipped", "skipped"),
-      changes: { result: "success", outputs: { js: "false", rust: "false", together: "false" } },
+      changes: {
+        result: "success",
+        outputs: { js: "false", rust: "false", together: "false", windows: "false" },
+      },
     }).status,
     1,
     "a missing Android selection fails",
@@ -1269,6 +1408,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
         gate === "all" ? "success" : "skipped",
       ),
       together: { result: gate === "all" ? "success" : "skipped" },
+      windows: { result: gate === "all" ? "success" : "skipped" },
     };
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(

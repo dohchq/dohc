@@ -272,6 +272,7 @@ Use the [PR template](.github/pull_request_template.md). State the problem, resu
 Include screenshots or recordings when they help assess a visible change.
 
 PR checks run on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs. Drafts and forks start no automatic checks.
+One job, **Windows package**, runs on `windows-2025`: it builds the Windows desktop app and runs the release's packaged smoke.
 Passing PR checks that cover the head replace a local `pnpm verify:pr`. Windows and macOS behavior still needs its own platform check.
 Before changing CI activation, read [the setup procedure](docs/engineering/enable-blacksmith.md).
 Never check out, install, build, or test fork PR code on shared Windows/Mac hosts or machines with maintainer credentials.
