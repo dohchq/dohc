@@ -236,6 +236,12 @@ fn moved(reason: &'static str) -> RuntimeError {
     RuntimeError::Sync(SyncError::InvalidInput { reason })
 }
 
+/// Refuse a change while the workspace folder no longer holds the store,
+/// before the change reads or writes anything.
+pub(super) fn check_root() -> Result<(), RuntimeError> {
+    root().map(drop).map_err(moved)
+}
+
 /// Forget what the previous command cleared. Every command reads the disk
 /// again.
 pub(super) fn begin_command() {
@@ -2437,6 +2443,7 @@ impl ActorHandle {
     ) -> Result<AccessRuleDecided, RuntimeError> {
         self.run(move |store, _| {
             begin_command();
+            check_root()?;
             let leases = LeaseRegistry::new();
             let order = Order {
                 root: &root,
@@ -2479,6 +2486,7 @@ impl ActorHandle {
     ) -> Result<(), RuntimeError> {
         self.run(move |store, _| {
             begin_command();
+            check_root()?;
             let leases = LeaseRegistry::new();
             let order = Order {
                 root: &root,

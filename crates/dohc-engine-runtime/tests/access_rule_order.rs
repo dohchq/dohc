@@ -28,6 +28,28 @@ struct Fixture {
     runtime: tokio::runtime::Runtime,
 }
 
+/// Every path under `dir`, relative to it, files and folders alike.
+fn walkdir_names(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("read folder") {
+            let path = entry.expect("entry").path();
+            names.push(
+                path.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 impl Fixture {
     fn new() -> Self {
         let f = Self::local();
@@ -51,6 +73,64 @@ impl Fixture {
         let f = Self::with_store(scratch, folder.join("engine.db"));
         f.replicate();
         f
+    }
+
+    /// A workspace whose store a test can take out of the workspace folder
+    /// while it stays open, as moving `.dohc/engine` does. Windows refuses to
+    /// move the folder of an open store, so there `.dohc/engine` is a link
+    /// the test removes.
+    fn movable() -> Self {
+        let scratch = ScratchDir::new().expect("scratch");
+        #[cfg(windows)]
+        let db = {
+            let held = scratch.path().join(".dohc/held-engine");
+            std::fs::create_dir_all(&held).expect("store folder");
+            let engine = scratch.path().join(".dohc/engine");
+            assert!(
+                dohc_engine_testkit::scratch::try_make_dir_alias(&held, &engine).expect("link"),
+                "link .dohc/engine"
+            );
+            engine.join("engine.db")
+        };
+        #[cfg(not(windows))]
+        let db = engine_db_path(&scratch).expect("db");
+        Self::with_store(scratch, db)
+    }
+
+    /// Take the open store out of the workspace folder.
+    fn move_store_away(&self) {
+        let engine = self.root().join(".dohc/engine");
+        #[cfg(windows)]
+        std::fs::remove_dir(&engine).expect("remove the store link");
+        #[cfg(not(windows))]
+        std::fs::rename(&engine, self.root().join(".dohc/engine-moved"))
+            .expect("move the store folder");
+    }
+
+    /// Put the store back where it was opened. Returns what a change wrote
+    /// at `.dohc/engine` while the store was away, which is cleared first.
+    fn move_store_back(&self) -> Vec<String> {
+        let engine = self.root().join(".dohc/engine");
+        let mut stray = Vec::new();
+        if engine.exists() {
+            for entry in walkdir_names(&engine) {
+                stray.push(entry);
+            }
+            std::fs::remove_dir_all(&engine).expect("clear what was written");
+        }
+        #[cfg(windows)]
+        assert!(
+            dohc_engine_testkit::scratch::try_make_dir_alias(
+                &self.root().join(".dohc/held-engine"),
+                &engine
+            )
+            .expect("link"),
+            "link .dohc/engine"
+        );
+        #[cfg(not(windows))]
+        std::fs::rename(self.root().join(".dohc/engine-moved"), &engine)
+            .expect("move the store folder back");
+        stray
     }
 
     fn with_store(scratch: ScratchDir, db: PathBuf) -> Self {
@@ -1097,6 +1177,93 @@ fn undoing_a_restore_puts_the_outside_rule_back() {
     f.settle();
     f.capture_ok(&["team/sub/b.md"]);
     assert!(f.holds().is_empty());
+}
+
+fn moved<T>(result: &Result<T, RuntimeError>) -> bool {
+    matches!(
+        result,
+        Err(RuntimeError::Sync(SyncError::InvalidInput { reason }))
+            if *reason == dohc_engine_runtime::WORKSPACE_FOLDER_MOVED
+    )
+}
+
+/// A movable workspace whose team folder waits for its owner over a
+/// widened rule.
+fn held_team(replicates: bool) -> Fixture {
+    let f = Fixture::movable();
+    if replicates {
+        f.replicate();
+    }
+    f.put("team/access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["team/access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f
+}
+
+/// Once the store leaves the workspace folder while it stays open, a
+/// decision on a held rule and the Undo of one are refused before they keep,
+/// place, remove or commit a rule, or clear the hold, whether or not the
+/// workspace replicates.
+#[test]
+fn a_decision_or_its_undo_after_the_store_moved_changes_nothing() {
+    let seen = || Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes()));
+    let rule = |f: &Fixture| std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap();
+    let held_team_still = vec![("team".to_owned(), "widened".to_owned())];
+    // Every case runs, so one failure shows them all.
+    let mut wrong = Vec::new();
+    for replicates in [true, false] {
+        for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+            let f = held_team(replicates);
+            let before = f.journal();
+            f.move_store_away();
+            let decided = f.decide_on("team", decision, seen(), "widened");
+            let stray = f.move_store_back();
+            // Refused, nothing written where the store was, the rule on disk,
+            // no kept copy, the hold, the journal.
+            let state = (
+                moved(&decided),
+                stray,
+                rule(&f),
+                f.kept_copies(),
+                f.holds(),
+                f.journal() == before,
+            );
+            let refused = (
+                true,
+                Vec::new(),
+                EDIT.to_owned(),
+                Vec::new(),
+                held_team_still.clone(),
+                true,
+            );
+            if state != refused {
+                wrong.push(format!(
+                    "{decision:?}, replicates: {replicates}: {decided:?} {state:?}"
+                ));
+            }
+        }
+        let f = held_team(replicates);
+        let undo = f
+            .decided_on("team", AccessRuleDecision::Accept, seen(), "widened")
+            .expect("accept")
+            .undo
+            .expect("an undo");
+        let before = f.journal();
+        f.move_store_away();
+        let undone = f.undo_rule("team", undo);
+        let stray = f.move_store_back();
+        let state = (moved(&undone), stray, rule(&f), f.journal() == before);
+        if state != (true, Vec::new(), EDIT.to_owned(), true) {
+            wrong.push(format!(
+                "Undo, replicates: {replicates}: {undone:?} {state:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// Undo refuses once the rule changed since the decision, and the rule on
