@@ -38,12 +38,17 @@ function copy(
     view: {
       reach: { signature: "r1", visibilitySignature: "v1" } as Reach,
       rebuild: "rebuild-1" as string | undefined,
+      saved: undefined as { folder: string; count: number } | undefined,
     },
     manifest: "closed" as "closed" | "converged" | "gone",
     notices: [] as ShareViewRebuildNotice[],
     slept: [] as number[],
     builtUnder: [] as Reach[],
     draftsRemoved: [] as string[],
+    // How many installs fail before one lands, as a failed registry write does.
+    installFails: 0,
+    // The engine's answer once it converged, which it gives again until finish.
+    converged: undefined as ShareViewRebuildAnswer<Reach> | undefined,
   };
   const steps: ShareViewRebuildSteps<Reach> = {
     hold: async () => {
@@ -61,22 +66,38 @@ function copy(
       expect(state.held).toBe(true);
       expect(rebuildId).toBe(state.view.rebuild);
       if (state.manifest === "gone") throw new NotRebuilding();
+      if (state.manifest === "converged" && state.converged) return state.converged;
       const next = answers.shift();
       if (next === undefined) throw new Error("no answer");
       if (next instanceof Error) throw next;
       const answer = typeof next === "function" ? await next() : next;
       state.builtUnder.push(reach);
-      if (answer.state === "rebuilt") state.manifest = "converged";
+      if (answer.state === "rebuilt") {
+        state.manifest = "converged";
+        state.converged = answer;
+      }
       return answer;
     },
     // Like the engine: a rebuild already finished has nothing left to delete.
     finish: async (_id, _rebuildId, savedDrafts) => {
       expect(state.manifest).not.toBe("closed");
+      // Only once the view stored the result.
+      expect(state.view.rebuild).toBeUndefined();
       state.manifest = "gone";
       state.draftsRemoved.push(...savedDrafts);
     },
-    install: async (_id, rebuildId, reach) => {
-      if (state.view.rebuild === rebuildId) state.view = { reach, rebuild: undefined };
+    install: async (_id, rebuildId, result) => {
+      if (state.installFails > 0) {
+        state.installFails -= 1;
+        throw new Error("the registry could not be written");
+      }
+      if (state.view.rebuild === rebuildId) {
+        state.view = {
+          reach: result?.reach ?? state.view.reach,
+          rebuild: undefined,
+          saved: result?.recovered ?? undefined,
+        };
+      }
     },
     notice: (_id, notice) => {
       state.notices.push(notice);
@@ -128,9 +149,12 @@ describe("rebuilding a joined copy", () => {
   it("says where files left out of reach were saved", async () => {
     const { state, rebuilds } = copy([rebuilt({ signature: "r2", visibilitySignature: "v2" }, 2)]);
     await rebuilds.run("w", "rebuild-1");
-    expect(state.notices).toEqual([
-      { kind: "recovered", folder: ".dohc/local/recovery/2026-11-16 10-00 UTC", count: 2 },
-    ]);
+    // With the reach, in one write, so a restart can't lose the Notice.
+    expect(state.view.saved).toEqual({
+      folder: ".dohc/local/recovery/2026-11-16 10-00 UTC",
+      count: 2,
+    });
+    expect(state.notices).toEqual([{ kind: "clear" }]);
   });
 
   it("builds again under the newer reach when it moved during the build", async () => {
@@ -206,15 +230,40 @@ describe("rebuilding a joined copy", () => {
     expect(state.notices).toEqual([{ kind: "failed", error: failure }]);
   });
 
-  // A restart between the engine's finish and the view's update: the engine
-  // no longer knows the rebuild, so the view takes the listed reach.
-  it("completes a rebuild the engine already finished", async () => {
+  // The engine no longer knows the rebuild, so nothing says which reach the
+  // store was built under. The view keeps the reach it stored: a pull served
+  // under another one closes the copy again.
+  it("keeps the stored reach when the engine no longer holds the rebuild", async () => {
     const { state, rebuilds } = copy([]);
     state.manifest = "gone";
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(state).toMatchObject({
       open: true,
-      view: { reach: { signature: "r2" }, rebuild: undefined },
+      view: { reach: { signature: "r1" }, rebuild: undefined, saved: undefined },
+    });
+  });
+
+  // The engine converged under r2, and storing that failed. The owner changes
+  // visibility again before Try again. The view takes the reach the store was
+  // built under, not the one listed now, which would hide that the store
+  // still holds what r3 withholds.
+  it("stores the reach the copy was built under when storing it failed and the reach moved again", async () => {
+    const r2 = { signature: "r2", visibilitySignature: "v2" },
+      r3 = { signature: "r3", visibilitySignature: "v3" };
+    const { state, rebuilds } = copy([rebuilt(r2, 1)], [r2, r3]);
+    state.installFails = 1;
+    await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "failed" });
+    await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({
+      kind: "rebuilt",
+      recovered: 1,
+    });
+    expect(state).toMatchObject({
+      manifest: "gone",
+      view: {
+        reach: r2,
+        rebuild: undefined,
+        saved: { folder: ".dohc/local/recovery/2026-11-16 10-00 UTC", count: 1 },
+      },
     });
   });
 

@@ -25,6 +25,7 @@ import { logUnlessClosedCopy } from "./shareViewRebuild";
 import { recordedShareSelector } from "./shareViewRecords";
 import {
   joinedByAccount,
+  shareViewTakesPosts,
   shareViewWriteLevel,
   shareViewWriteScopeOf,
   type ShareViewWritePlace,
@@ -214,8 +215,9 @@ export function createChatWrites(dependencies: {
     currentPathOf,
   } = dependencies;
 
-  // A joined workspace at Comment or Edit somewhere posts in its Groups and
-  // comments on its files, which the relay's append lane admits. Each target
+  // A joined workspace at Comment or Edit in its Groups or on some file posts
+  // in its Groups and comments on its files, which the relay's append lane
+  // admits. Each target
   // then needs its own level (`targetInReach`). Every other received share is read-only for
   // chat, whatever its cached relay capability: there is no durable per-row
   // relay receipt yet.
@@ -224,12 +226,7 @@ export function createChatWrites(dependencies: {
     const pin = recordedShareSelector(view?.grantedSelector);
     // The levels alone: `check` refuses another account in its own words.
     const scope = shareViewWriteScopeOf(view, null);
-    return (
-      !!view &&
-      pin?.wholeWorkspace === true &&
-      scope !== null &&
-      takesPosts(shareViewWriteLevel(scope, "somewhere"))
-    );
+    return !!view && pin?.wholeWorkspace === true && scope !== null && shareViewTakesPosts(scope);
   }
 
   function chatWorkspace(workspaceId: string): ChatWorkspace {

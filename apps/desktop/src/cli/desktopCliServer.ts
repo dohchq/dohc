@@ -110,9 +110,14 @@ import {
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
 
-// A member's refusal names the command that lists their level and role.
-const needsEdit = (action: string, access: string | null | undefined) =>
-  `${action} needs Edit. You can ${access ?? "view"} here. Run dohc members list to see what you can do.`;
+// A member's refusal says why: the membership ended, another account is
+// signed in, or the level here, with the command that lists levels and roles.
+const needsEdit = (action: string, view: ShareViewWriteScope, access: string | null) =>
+  view.ended
+    ? `${action} isn't possible here. Your membership ended.`
+    : view.writer === "other"
+      ? `${action} isn't possible here. This computer is signed in to a different account than the one the owner invited.`
+      : `${action} needs Edit. ${access === null ? "You have no access here." : `You can ${access} here.`} Run dohc members list to see what you can do.`;
 
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
@@ -809,7 +814,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 setCollectionRecordFields(context, input),
               );
             const level = shareViewWriteLevel(view, { path: input.recordPath });
-            if (level !== "edit") throw new Error(needsEdit("Changing a Collection record", level));
+            if (level !== "edit")
+              throw new Error(needsEdit("Changing a Collection record", view, level));
             return await setCollectionRecordFields(joinedRecordContext(), input);
           },
           createRecord: async (input) => {
@@ -817,7 +823,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             if (view?.membership !== true)
               return await runCollectionRecordCreation(cliCollectionEdit, input);
             const level = shareViewWriteLevel(view, { folder: input.collectionPath });
-            if (level !== "edit") throw new Error(needsEdit("Adding a Collection record", level));
+            if (level !== "edit")
+              throw new Error(needsEdit("Adding a Collection record", view, level));
             const created = await withPhysicalWorkspaceOperation(
               workspace.workspaceId,
               async (operation) => {
@@ -954,7 +961,9 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           // server, as its editor does, and the server decides again.
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true && shareViewWriteLevel(view, "somewhere") !== "edit") {
-            throw new Error(needsEdit("Editing a page", shareViewWriteLevel(view, "somewhere")));
+            throw new Error(
+              needsEdit("Editing a page", view, shareViewWriteLevel(view, "somewhere")),
+            );
           }
           return await liveDocuments.editDocument({
             ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
@@ -963,9 +972,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             origin,
             assertEditable: async (resolved) => {
               // An existing page takes the level at its current path.
-              const level =
-                view?.membership === true ? shareViewWriteLevel(view, { path: resolved }) : "edit";
-              if (level !== "edit") throw new Error(needsEdit("Editing a page", level));
+              if (view?.membership === true) {
+                const level = shareViewWriteLevel(view, { path: resolved });
+                if (level !== "edit") throw new Error(needsEdit("Editing a page", view, level));
+              }
               const source = await lossyNoteText(workspace.rootPath, resolved);
               if (
                 source !== null &&
@@ -992,7 +1002,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true) {
             const level = shareViewWriteLevel(view, { path });
-            if (level !== "edit") throw new Error(needsEdit("Adding a page", level));
+            if (level !== "edit") throw new Error(needsEdit("Adding a page", view, level));
             const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             if (
               folder !== "" &&

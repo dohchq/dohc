@@ -618,6 +618,7 @@ import {
 } from "./workspaces/shareViewMarker";
 import {
   joinedByAccount,
+  shareViewTakesPosts,
   shareViewWriteLevel,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
@@ -6924,7 +6925,8 @@ const localDatasetHostFor = async (
     return host;
   });
 // Sends a joined workspace's own Group posts and file comments to the owner,
-// with Comment or Edit somewhere, for the account that joined. The engine and
+// with Comment or Edit in its Groups or on some file, for the account that
+// joined. The engine and
 // relay check each one's own level. Anything else sends nothing.
 function shareViewChatPush(
   workspace: RegistryEntry & { attachmentId?: symbol },
@@ -6933,8 +6935,13 @@ function shareViewChatPush(
   const view = workspace.shareView;
   const pin = recordedShareSelector(view?.grantedSelector);
   const scope = shareViewWriteScopeOf(view, cachedCredentials);
-  const level = scope === null ? null : shareViewWriteLevel(scope, "somewhere");
-  if (!view || !view.shareId || pin?.wholeWorkspace !== true || level === null || level === "view")
+  if (
+    !view ||
+    !view.shareId ||
+    pin?.wholeWorkspace !== true ||
+    scope === null ||
+    !shareViewTakesPosts(scope)
+  )
     return null;
   return receivedShareEngine
     .relayFor({
@@ -10797,24 +10804,21 @@ function registerIpcHandlers(): void {
       for (const recordId of savedDrafts)
         await removeKeptTyping(join(stateDir(), "live-draft-recovery"), workspaceId, recordId);
     },
-    install: async (workspaceId, rebuildId, reach) => {
+    // Stores the reach the copy was built under, and the folder that holds
+    // what it saved for its notice, in the same write that opens the copy.
+    install: async (workspaceId, rebuildId, result) => {
       const view = findWorkspace(workspaceId)?.shareView;
       if (view?.rebuild?.rebuildId !== rebuildId) return;
       const { rebuild: _rebuilt, ...rest } = view;
-      await setWorkspaceShareView(workspaceId, { ...rest, reach });
+      await setWorkspaceShareView(workspaceId, {
+        ...rest,
+        ...(result
+          ? { reach: result.reach, ...(result.recovered ? { accessSaved: result.recovered } : {}) }
+          : {}),
+      });
     },
     notice: (workspaceId, notice) => {
       const view = findWorkspace(workspaceId)?.shareView;
-      // A finished rebuild that saved items keeps their folder for its notice.
-      if (view && notice.kind === "recovered") {
-        void setWorkspaceShareView(workspaceId, {
-          ...view,
-          accessSaved: { folder: notice.folder, count: notice.count },
-        })
-          .then(() => notifyRenderer({ workspaceId, summaryChanged: true }))
-          .catch((error: unknown) => console.error("[desktop] joined copy rebuild state:", error));
-        return;
-      }
       if (!view?.rebuild) return;
       const stopped = shareViewRebuildStop(notice);
       void setWorkspaceShareView(workspaceId, {
@@ -10831,7 +10835,7 @@ function registerIpcHandlers(): void {
       }),
   });
 
-  registerSharedViewsIpcHandlers<
+  const sharedViews = registerSharedViewsIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation,
@@ -10876,7 +10880,26 @@ function registerIpcHandlers(): void {
     recheckRemovedShares,
     showsLive: (attachmentId, path) => engineYDocSessionIpc.showsLive(attachmentId, path),
     rebuildShareView: (workspaceId, rebuildId) => shareViewRebuilds.run(workspaceId, rebuildId),
+    readShareViewRebuild: async (workspaceId) => {
+      const status = await shareViewRebuildEngine("share.view.rebuildStatus", {
+        rootDir: requireWorkspace(workspaceId).rootPath,
+      });
+      const { rebuildId, phase } = (status ?? {}) as { rebuildId?: unknown; phase?: unknown };
+      return typeof rebuildId === "string" && typeof phase === "string"
+        ? { rebuildId, phase }
+        : null;
+    },
+    finishShareViewRebuild: async (workspaceId, rebuildId) => {
+      await shareViewRebuildEngine("share.view.rebuildFinish", {
+        rootDir: requireWorkspace(workspaceId).rootPath,
+        rebuildId,
+      });
+    },
   });
+  // Rebuilds a restart stopped, and any whose id never reached the record.
+  void desktopEngine.startup
+    .then(() => sharedViews.resumeRebuilds())
+    .catch((error: unknown) => console.error("[desktop] joined copy rebuild resume:", error));
 
   // ---- Share mounts ----
   // The receive side materialized inside a host workspace: the share's

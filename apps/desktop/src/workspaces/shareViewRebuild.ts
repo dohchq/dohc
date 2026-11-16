@@ -36,8 +36,17 @@ export type ShareViewRebuildNotice =
   | { kind: "waiting" }
   | { kind: "failed"; error: unknown }
   | { kind: "ended" }
-  | { kind: "recovered"; folder: string; count: number }
   | { kind: "clear" };
+
+/**
+ * What a rebuild left the copy with: the reach the engine built it under, and
+ * the recovery folder it saved items in. Null when the engine no longer holds
+ * the rebuild, which says nothing of the reach the store was built under.
+ */
+export type ShareViewRebuildResult<Reach> = {
+  reach: Reach;
+  recovered: { folder: string; count: number } | null;
+} | null;
 
 export interface ShareViewRebuildSteps<Reach> {
   /** Close every reader and writer of the copy and keep it closed. Says whether it was open. */
@@ -49,10 +58,23 @@ export interface ShareViewRebuildSteps<Reach> {
     rebuildId: string,
     reach: Reach,
   ): Promise<ShareViewRebuildAnswer<Reach>>;
-  /** Delete what the engine kept for the rebuild, and the drafts it saved. */
+  /**
+   * Delete what the engine kept for the rebuild, and the drafts it saved.
+   * Runs only once `install` stored the result: the engine's record of the
+   * rebuild is the only proof of the reach the store was built under.
+   */
   finish(workspaceId: string, rebuildId: string, savedDrafts: readonly string[]): Promise<void>;
-  /** Store the reach and clear the view's rebuild, if it is still this one. */
-  install(workspaceId: string, rebuildId: string, reach: Reach): Promise<void>;
+  /**
+   * Clear the view's rebuild, if it is still this one, and store its result
+   * in the same write: the reach, and the recovery folder for its Notice. A
+   * null result keeps the stored reach, so the next pull rebuilds again if
+   * the relay serves another.
+   */
+  install(
+    workspaceId: string,
+    rebuildId: string,
+    result: ShareViewRebuildResult<Reach>,
+  ): Promise<void>;
   notice(workspaceId: string, notice: ShareViewRebuildNotice): void;
   /** `finished`: the engine no longer holds this rebuild, so it already finished. */
   classify(error: unknown): "unreachable" | "ended" | "finished" | "other";
@@ -77,24 +99,33 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
     let rebuilt = false;
     try {
       for (let moves = 0, waits = 0; ;) {
-        let reach: Reach, answer: ShareViewRebuildAnswer<Reach>;
+        let answer: ShareViewRebuildAnswer<Reach> | null;
         try {
-          reach = await steps.readReach(workspaceId);
+          const reach = await steps.readReach(workspaceId);
           try {
             answer = await steps.rebuild(workspaceId, rebuildId, reach);
           } catch (error) {
             if (steps.classify(error) !== "finished") throw error;
-            answer = {
-              state: "rebuilt",
-              reach,
-              recoveryFolder: null,
-              recovered: 0,
-              savedDrafts: [],
-            };
+            answer = null;
           }
-          if (answer.state === "rebuilt") {
-            await steps.finish(workspaceId, rebuildId, answer.savedDrafts);
-            await steps.install(workspaceId, rebuildId, answer.reach ?? reach);
+          if (answer === null) {
+            await steps.install(workspaceId, rebuildId, null);
+          } else if (answer.state === "rebuilt") {
+            await steps.install(workspaceId, rebuildId, {
+              reach: answer.reach ?? reach,
+              recovered:
+                answer.recoveryFolder === null
+                  ? null
+                  : { folder: answer.recoveryFolder, count: answer.recovered },
+            });
+            // The copy is rebuilt and its result stored. A finish that fails
+            // leaves the engine's record, and the next refresh or start finds
+            // and finishes it.
+            await steps
+              .finish(workspaceId, rebuildId, answer.savedDrafts)
+              .catch((error: unknown) => {
+                console.error("[desktop] joined copy rebuild finish:", error);
+              });
           }
         } catch (error) {
           const kind = steps.classify(error);
@@ -111,7 +142,7 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
           steps.notice(workspaceId, { kind: "failed", error });
           return { kind: "failed", error };
         }
-        if (answer.state === "reachMoved") {
+        if (answer?.state === "reachMoved") {
           moves += 1;
           if (moves < REACH_MOVES) continue;
           const error = new Error("dohc could not update access because it kept changing.");
@@ -119,16 +150,11 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
           return { kind: "failed", error };
         }
         rebuilt = true;
-        steps.notice(
-          workspaceId,
-          answer.recoveryFolder
-            ? { kind: "recovered", folder: answer.recoveryFolder, count: answer.recovered }
-            : { kind: "clear" },
-        );
+        steps.notice(workspaceId, { kind: "clear" });
         return {
           kind: "rebuilt",
-          recoveryFolder: answer.recoveryFolder,
-          recovered: answer.recovered,
+          recoveryFolder: answer?.recoveryFolder ?? null,
+          recovered: answer?.recovered ?? 0,
         };
       }
     } finally {

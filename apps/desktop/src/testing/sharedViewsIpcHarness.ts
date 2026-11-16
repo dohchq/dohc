@@ -236,6 +236,9 @@ export async function createSharedViewsIpcHarness(
     kind: "failed",
     error: new Error("the engine stopped"),
   }));
+  // The rebuild the engine holds a copy closed for. By default none.
+  const readRebuild = vi.fn<Dependencies["readShareViewRebuild"]>(async () => null);
+  const finishRebuild = vi.fn<Dependencies["finishShareViewRebuild"]>(async () => undefined);
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {
       assertCurrent();
@@ -254,7 +257,7 @@ export async function createSharedViewsIpcHarness(
   });
   const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
+  const { resumeRebuilds } = registerSharedViewsIpcHandlers<string, Event, Operation, Lease>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
       handlers.set(channel, handler);
@@ -306,6 +309,8 @@ export async function createSharedViewsIpcHarness(
     syncNotices,
     showsLive,
     rebuildShareView: rebuild,
+    readShareViewRebuild: readRebuild,
+    finishShareViewRebuild: finishRebuild,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
@@ -339,6 +344,9 @@ export async function createSharedViewsIpcHarness(
     syncNotices,
     showsLive,
     rebuild,
+    readRebuild,
+    finishRebuild,
+    resumeRebuilds,
     probeLog,
     registryRead,
     workspaceOperation,

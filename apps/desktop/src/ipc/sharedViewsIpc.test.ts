@@ -905,6 +905,82 @@ describe("registered received-view handlers", () => {
       expect(h.rebuild).toHaveBeenCalledWith("existing", "rebuild-1");
     });
 
+    // The engine closed the copy, but its answer never reached the record: a
+    // crash or a failed write lost the id. A refresh asks the engine first.
+    it("finds a rebuild whose id never reached the record, and starts it", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
+      h.readRebuild.mockResolvedValue({ rebuildId: "rebuild-9", phase: "closed" });
+      await expect(
+        h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
+      ).rejects.toThrow("dohc could not refresh this workspace while its access is being updated.");
+      expect(h.workspace.shareView).toMatchObject({ rebuild: { rebuildId: "rebuild-9" } });
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-9");
+      expect(h.reconcile).not.toHaveBeenCalled();
+    });
+
+    // The record already holds what the rebuild built and opens the copy;
+    // only the engine's finish failed. A refresh finishes it and reads on.
+    it("finishes a converged rebuild the record already installed, and refreshes", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
+      h.readRebuild.mockResolvedValue({ rebuildId: "rebuild-9", phase: "converged" });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.finishRebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-9");
+      expect(h.workspace.shareView).not.toHaveProperty("rebuild");
+      expect(h.rebuild).not.toHaveBeenCalled();
+      expect(h.reconcile).toHaveBeenCalledOnce();
+    });
+
+    // After a restart the window shows Updating access and starts nothing.
+    it("resumes each closed copy's rebuild at start, including one whose id was lost", async () => {
+      const rebuiltReach = { ...stored, signature: "r2", visibilitySignature: "v2" };
+      const h = await harness();
+      Object.assign(h.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+        rebuild: { rebuildId: "rebuild-1" },
+      });
+      await h.resumeRebuilds();
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-1");
+
+      const lost = await harness();
+      Object.assign(lost.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+      });
+      lost.readRebuild.mockResolvedValue({ rebuildId: "rebuild-2", phase: "closed" });
+      lost.rebuild.mockImplementationOnce(async (workspaceId) => {
+        const { rebuild: _closed, ...view } = lost.registry.get(workspaceId)!.shareView!;
+        lost.registry.get(workspaceId)!.shareView = { ...view, reach: rebuiltReach };
+        return { kind: "rebuilt", recoveryFolder: null, recovered: 0 };
+      });
+      await lost.resumeRebuilds();
+      expect(lost.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-2");
+      await vi.waitFor(() =>
+        expect(lost.registry.get("existing")!.shareView).not.toHaveProperty("rebuild"),
+      );
+      expect(lost.registry.get("existing")!.shareView).toMatchObject({ reach: rebuiltReach });
+
+      // An open copy, and a path share, start nothing.
+      const open = await harness();
+      Object.assign(open.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+      });
+      await open.resumeRebuilds();
+      const path = await harness();
+      path.readRebuild.mockResolvedValue({ rebuildId: "rebuild-3", phase: "closed" });
+      await path.resumeRebuilds();
+      expect(open.rebuild).not.toHaveBeenCalled();
+      expect(path.rebuild).not.toHaveBeenCalled();
+      expect(path.readRebuild).not.toHaveBeenCalled();
+    });
+
     it("tells the window why an update of access stopped", async () => {
       const h = await harness();
       Object.assign(h.workspace.shareView!, {
@@ -1004,10 +1080,10 @@ describe("registered received-view handlers", () => {
     });
 
     // The engine closed the copy during the first pull. What arrived stays,
-    // and the view waits for its rebuild instead of reading the closed copy.
-    // Gap 2: the engine closed the copy during the first pull. What arrived
-    // stays, and Try again rebuilds the copy, then finishes the pull from it.
-    it("rebuilds a first open whose access changed when Try again is pressed", async () => {
+    // the open succeeds, and the rebuild starts at once: the window shows
+    // Updating access until it finishes. Opening the folder again continues
+    // the pull from the rebuilt copy.
+    it("rebuilds a first open whose copy the engine closed", async () => {
       const h = await harness();
       h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockImplementationOnce(async () => ({
@@ -1021,14 +1097,6 @@ describe("registered received-view handlers", () => {
           rebuildId: "rebuild-1",
         },
       }));
-      const updating = `dohc could not finish reading Community while its access is being updated. What arrived stays in ${h.openPayload.rootPath}.`;
-      await expect(
-        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
-      ).rejects.toThrow(updating);
-      expect(h.cleanup).not.toHaveBeenCalled();
-      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
-      expect(kept.shareView?.rebuild).toEqual({ rebuildId: "rebuild-1" });
-      expect(h.rebuild).not.toHaveBeenCalled();
       const rebuiltReach = {
         signature: "r2",
         visibilitySignature: "v2",
@@ -1040,21 +1108,33 @@ describe("registered received-view handlers", () => {
         h.registry.get(workspaceId)!.shareView = { ...view, reach: rebuiltReach };
         return { kind: "rebuilt", recoveryFolder: null, recovered: 0 };
       });
+      const opened = (await h.invoke(
+        sharedViewAccessOperations.openSharedView.channel,
+        h.openPayload,
+      )) as { workspace: { workspaceId: string } };
+      expect(h.cleanup).not.toHaveBeenCalled();
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(opened.workspace.workspaceId).toBe(kept.workspaceId);
+      await vi.waitFor(() =>
+        expect(h.rebuild).toHaveBeenCalledExactlyOnceWith(kept.workspaceId, "rebuild-1"),
+      );
+      await vi.waitFor(() =>
+        expect(h.registry.get(kept.workspaceId)!.shareView).not.toHaveProperty("rebuild"),
+      );
+      expect(h.registry.get(kept.workspaceId)!.shareView).toMatchObject({ reach: rebuiltReach });
       h.readDir.mockResolvedValue(["notes.md"]);
       const reopened = (await h.invoke(
         sharedViewAccessOperations.openSharedView.channel,
         h.openPayload,
       )) as { workspace: { workspaceId: string } };
       expect(reopened.workspace.workspaceId).toBe(kept.workspaceId);
-      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith(kept.workspaceId, "rebuild-1");
-      expect(h.registry.get(kept.workspaceId)!.shareView).toMatchObject({ reach: rebuiltReach });
-      expect(h.registry.get(kept.workspaceId)!.shareView).not.toHaveProperty("rebuild");
+      expect(h.rebuild).toHaveBeenCalledOnce();
       expect(h.reconcile).toHaveBeenCalledTimes(2);
     });
 
-    // A copy holding its member's own work is not rebuilt: Try again keeps it
-    // closed and reads nothing from it.
-    it("keeps a first open closed when its copy holds own work", async () => {
+    // A rebuild that stops keeps the copy closed: opening the folder again
+    // tries the rebuild again and reads nothing from the copy.
+    it("keeps a first open closed while its rebuild stops", async () => {
       const h = await harness();
       h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockImplementationOnce(async () => ({
@@ -1068,17 +1148,16 @@ describe("registered received-view handlers", () => {
           rebuildId: "rebuild-1",
         },
       }));
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      await vi.waitFor(() => expect(h.rebuild).toHaveBeenCalledOnce());
       const updating = `dohc could not finish reading Community while its access is being updated. What arrived stays in ${h.openPayload.rootPath}.`;
-      await expect(
-        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
-      ).rejects.toThrow(updating);
       h.readDir.mockResolvedValue(["notes.md"]);
       await expect(
         h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
       ).rejects.toThrow(updating);
       const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
       expect(kept.shareView?.rebuild).toEqual({ rebuildId: "rebuild-1" });
-      expect(h.rebuild).toHaveBeenCalledOnce();
+      expect(h.rebuild).toHaveBeenCalledTimes(2);
       expect(h.reconcile).toHaveBeenCalledOnce();
     });
 

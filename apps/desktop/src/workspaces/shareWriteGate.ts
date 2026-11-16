@@ -123,6 +123,17 @@ export function shareViewWriteLevel(
 }
 
 /**
+ * Whether a joined workspace takes its member's posts anywhere: in its Groups
+ * or on some file. File rules don't lower the Group level, so a Comment member
+ * under a `members: view` rule still posts in Groups.
+ */
+export function shareViewTakesPosts(scope: ShareViewWriteScope): boolean {
+  return [shareViewWriteLevel(scope, "group"), shareViewWriteLevel(scope, "somewhere")].some(
+    (level) => level === "comment" || level === "edit",
+  );
+}
+
+/**
  * Which create and import actions a workspace offers, given the share view it
  * is, or null for an ordinary workspace. The Explorer menu and the command
  * rows both ask this, so neither offers an action its handler refuses.

@@ -1034,6 +1034,24 @@ describe("chat writes", () => {
       expect(group.store.sendMessage).toHaveBeenCalledOnce();
     });
 
+    // File rules don't lower the Group level: a Comment member under a root
+    // `members: view` rule posts in Groups but comments on no file.
+    it("posts in a Group at Comment when every folder is at View", async () => {
+      const test = member("comment");
+      Object.assign(test.row.shareView!, {
+        reach: { signature: "r1", visibilitySignature: "v1", rootLevel: "view", folders: [] },
+      });
+      await test.writeEach.send();
+      expect(test.store.sendMessage).toHaveBeenCalledOnce();
+      await vi.waitFor(() =>
+        expect(test.effects.pushShareViewChat).toHaveBeenCalledWith("workspace"),
+      );
+      const linkedFile = async () => ({ objectId: "object", pathHint: "plans/day-1.md" });
+      await expect(
+        test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
+      ).rejects.toThrow("Only people who can comment post here.");
+    });
+
     it("refuses a file comment signed out or as another account", async () => {
       for (const credentials of [null, signedIn("user-2")]) {
         const test = member("comment");

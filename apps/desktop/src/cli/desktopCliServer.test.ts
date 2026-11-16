@@ -3164,6 +3164,33 @@ describe("a joined workspace through the CLI", () => {
     ).resolves.toEqual({ path: "tasks/Hidden/b.md", recordId: RECORD_ID });
   });
 
+  // No level is given when the membership ended or another account is
+  // signed in; the refusal names that, not a level.
+  it("says why a membership that ended, or another account, changes nothing", async () => {
+    for (const [change, refusal] of [
+      [{ ended: true }, "Adding a Collection record isn't possible here. Your membership ended."],
+      [
+        { writer: "other" },
+        "Adding a Collection record isn't possible here. This computer is signed in to a different account than the one the owner invited.",
+      ],
+    ] as const) {
+      const f = joinedFixture("edit");
+      f.dependencies.sharedViewOf = vi.fn(() => ({
+        ...shareViewWriteScopeOf(f.shareView, null)!,
+        ...change,
+      }));
+      const context = await f.create().openCliWorkspace(f.joined);
+      await expect(
+        context.collections!.writes.createRecord({
+          collectionPath: "tasks",
+          name: "b",
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(refusal);
+      expect(f.dependencies.joinedRecords.create).not.toHaveBeenCalled();
+    }
+  });
+
   // The relay creates the Group in the owner's workspace and decides the
   // role; the view's next pull brings it here.
   it("creates a Group through the relay", async () => {

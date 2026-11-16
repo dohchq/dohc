@@ -142,7 +142,13 @@ export function registerSharedViewsIpcHandlers<
   // rebuild already running for it. Main holds the copy's sessions and
   // reports what stopped it in Notices.
   rebuildShareView(workspaceId: string, rebuildId: string): Promise<ShareViewRebuildOutcome>;
-}): void {
+  // The rebuild the engine holds a record of for the copy, and its phase, or
+  // null when there is none.
+  readShareViewRebuild(workspaceId: string): Promise<{ rebuildId: string; phase: string } | null>;
+  // Delete a converged rebuild's leftovers: its aside and staging stores and
+  // its record.
+  finishShareViewRebuild(workspaceId: string, rebuildId: string): Promise<void>;
+}): { resumeRebuilds(): Promise<void> } {
   const {
     registerHandler,
     assertTrustedSender,
@@ -288,6 +294,29 @@ export function registerSharedViewsIpcHandlers<
     notifyRenderer({ workspaceId, summaryChanged: true });
   }
 
+  // The engine closes the copy before it answers with the rebuild's id, so a
+  // crash or a failed record can lose the id. Ask the engine before reading
+  // the copy, and record the rebuild it names.
+  async function recoverRebuild(workspaceId: string): Promise<void> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.ended || recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true)
+      return;
+    const rebuild = await dependencies.readShareViewRebuild(workspaceId);
+    if (rebuild === null) return;
+    // Only a closed copy can lose its id: the runner needs it to go further.
+    // A converged copy whose record no longer names it was installed, and
+    // only its finish failed, which leaves the hidden History aside.
+    if (rebuild.phase === "converged" && view.rebuild === undefined) {
+      await dependencies
+        .finishShareViewRebuild(workspaceId, rebuild.rebuildId)
+        .catch((error: unknown) => {
+          console.error("[desktop] joined copy rebuild finish:", error);
+        });
+      return;
+    }
+    await closeForRebuild(workspaceId, rebuild.rebuildId);
+  }
+
   function updatingAccess(workspaceId: string): boolean {
     return requireWorkspace(workspaceId).shareView?.rebuild !== undefined;
   }
@@ -414,6 +443,7 @@ export function registerSharedViewsIpcHandlers<
       await engineDaemonStartup();
       // A copy closed for its access is rebuilt first, and the pull continues
       // from the rebuilt copy.
+      await recoverRebuild(kept.workspaceId);
       const rebuilt = await rebuildClosedCopy(kept.workspaceId);
       if (rebuilt?.kind === "ended")
         throw new Error(
@@ -427,7 +457,9 @@ export function registerSharedViewsIpcHandlers<
           throw new Error(
             `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
           );
-        throw unfinished(error);
+        if (!(error instanceof AccessUpdatingError)) throw unfinished(error);
+        // The window shows Updating access until the rebuild finishes.
+        startRebuild(kept.workspaceId);
       } finally {
         notifyRenderer();
       }
@@ -524,7 +556,11 @@ export function registerSharedViewsIpcHandlers<
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
     // renderer a fresh share view with no level to state.
-    if (pullFailure) throw unfinished(pullFailure.error);
+    if (pullFailure && !(pullFailure.error instanceof AccessUpdatingError))
+      throw unfinished(pullFailure.error);
+    // The engine closed the copy during its first pull. The window shows
+    // Updating access until the rebuild finishes.
+    if (pullFailure) startRebuild(created.workspaceId);
     const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return { workspace: summary };
   }
@@ -847,7 +883,8 @@ export function registerSharedViewsIpcHandlers<
           }
           // A closed copy answers only its rebuild, which this starts again
           // after a restart or a Try again.
-          if (workspace.shareView.rebuild) {
+          await recoverRebuild(workspace.workspaceId);
+          if (requireWorkspace(workspace.workspaceId).shareView?.rebuild) {
             startRebuild(workspace.workspaceId);
             throw new Error(UPDATING_ACCESS_MESSAGE);
           }
@@ -1298,6 +1335,21 @@ export function registerSharedViewsIpcHandlers<
       },
     },
   );
+
+  return {
+    // At start nothing else rebuilds a closed copy: its window shows Updating
+    // access and reads nothing. Start each one, as Try again would.
+    async resumeRebuilds() {
+      for (const { workspaceId } of listWorkspaces()) {
+        try {
+          await recoverRebuild(workspaceId);
+        } catch (error) {
+          console.error("[desktop] joined copy rebuild status:", error);
+        }
+        if (requireWorkspace(workspaceId).shareView?.rebuild) startRebuild(workspaceId);
+      }
+    },
+  };
 }
 
 // Where a membership sits on the relay: the role it last named, and the
