@@ -2,14 +2,14 @@
 //
 // At the end nobody was stopped, every page shows the same note, no typed word is missing, and
 // what the server stores is what the pages show. knownFaults.ts lists the edits this run leaves
-// out while a known fault makes them fail by chance, and the one loss it can still explain.
+// out while a known fault makes them fail by chance.
 //
 // TOGETHER_MINUTES, TOGETHER_PEOPLE and TOGETHER_SEED change the run's length, size and choices.
 // TOGETHER_EDITS limits it to some kinds of edit, such as "addLine,typeWord", to find which
 // ones collide. TOGETHER_EVENTS names a file to write what everyone did to.
 import { writeFileSync } from "node:fs";
 import { expect, type Locator } from "@playwright/test";
-import { LEFT_OUT, TOLERATED } from "./knownFaults";
+import { LEFT_OUT } from "./knownFaults";
 import {
   caretSettles,
   clickAt,
@@ -104,13 +104,23 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
       return lines(page).nth(usable[Math.floor(random() * usable.length)] ?? 0);
     };
     const word = () => `w${String(by)}n${String(++serial)}q`;
+    // Other people's edits can move the note between aiming a click and landing it, so a click
+    // can land on the line next to the one meant. Each edit therefore reads back where the caret
+    // or the selection really is, and records that. A person looks before they type, too.
+    const caretLine = () =>
+      page.evaluate(() => {
+        const node = window.getSelection()?.anchorNode;
+        const element = node instanceof Element ? node : node?.parentElement;
+        const block = element?.closest("p, h1, h2, h3");
+        return block ? { text: block.textContent ?? "", todo: block.closest("li") !== null } : null;
+      });
+    const missed = () => new Error("The note moved under the click.");
     return {
       async typeWord() {
-        const target = await anyLine();
-        const host = await target.innerText();
-        if (LEFT_OUT["typing on a line that is empty"] && !host.trim()) return;
+        await clickEndOf(await anyLine());
+        const host = (await caretLine())?.text ?? "";
+        if (LEFT_OUT["typing on a line that is empty"] && !host.trim()) throw missed();
         const pasted = word();
-        await clickEndOf(target);
         await page.keyboard.insertText(` ${pasted}`);
         typed.push({
           word: pasted,
@@ -128,6 +138,7 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
         // The closing letter keeps one marker from being the start of another.
         const id = `DOOMED${String(by)}x${String(++serial)}z`;
         await clickEndOf(after);
+        if (apart && !(await caretLine())?.text.includes(OWN_LINES[by]!)) throw missed();
         await move(person, "Enter");
         await page.keyboard.insertText(`${id} is here to be deleted`);
         doomed.add(id);
@@ -144,7 +155,11 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
         // A triple click selects the whole paragraph, however far it has wrapped.
         await target.click({ clickCount: 3 });
         await caretSettles(page);
-        const text = await target.innerText();
+        const text = await page.evaluate(() => window.getSelection()?.toString() ?? "");
+        if (!text.includes(id)) {
+          await page.keyboard.press("ArrowLeft");
+          throw missed();
+        }
         deletedText.push(text);
         await page.keyboard.press("Backspace");
         await caretSettles(page);
@@ -189,8 +204,10 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
         if (!count || (apart && by >= count)) return;
         const item = apart ? items.nth(by) : items.last();
         const pasted = word();
-        const after = await item.innerText();
+        const after = await item.locator("p").last().innerText();
         await clickEndOf(item.locator("p").last());
+        const landed = await caretLine();
+        if (!landed?.todo || landed.text.trim() !== after.trim()) throw missed();
         await move(person, "Enter");
         await page.keyboard.insertText(pasted);
         typed.push({ word: pasted, by, doomed: null });
@@ -349,6 +366,8 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
     if (count === 1) fate.kept++;
     else if (count > 1) fate.doubled.push(word);
     else if (deletedText.some((text) => text.includes(word))) fate.deletedOnPurpose++;
+    // Typed into a line that someone else then deleted without seeing the word. Its author is
+    // told by a notice, which "typing in a paragraph someone deletes" checks.
     else if (host && deleted.has(host)) fate.goneWithALine++;
     else fate.lost.push(word);
   }
@@ -405,7 +424,4 @@ test(`${String(PEOPLE)} people make ordinary edits for ${String(MINUTES)} minute
   );
   expect(report.stopped, "someone was told editing stopped").toEqual([]);
   expect({ lost: fate.lost, doubled: fate.doubled }).toEqual({ lost: [], doubled: [] });
-  // This fails the run unless a known fault still explains it.
-  if (!TOLERATED["a word goes with a line someone else deletes"])
-    expect(fate.goneWithALine).toBe(0);
 });

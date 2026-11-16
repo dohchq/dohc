@@ -13,8 +13,6 @@ export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
   "joins of neighbouring lines": 4038,
   "a join and a split of one line": 4038,
   "a join and typing in the joined line": 4038,
-  "typing in a paragraph someone deletes": 3983,
-  "one presses Enter on a new empty line at the end of a to-do while its maker types in it": 3983,
   "the share page's server restarts under open pages": 3924,
 };
 
@@ -29,14 +27,6 @@ export const LEFT_OUT: Readonly<Record<string, number>> = {
   "joining and splitting lines": 4038,
   "typing on a line that is empty": 4037,
   "starting a new line where someone else starts one": 4037,
-};
-
-/**
- * What the long run still lets pass, by the fault that explains it. The run can tell this one
- * apart exactly: the word was typed into a line made to be deleted, and someone deleted that line.
- */
-export const TOLERATED: Readonly<Record<string, number>> = {
-  "a word goes with a line someone else deletes": 3983,
 };
 
 /**

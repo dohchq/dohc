@@ -157,6 +157,12 @@ function nothingLost(end: Ending, ...words: string[]): void {
   }
 }
 
+/** The page tells its person that someone else's change removed this text of theirs, and quotes it. */
+function isToldOfRemoved(page: Seen, text: string): void {
+  expect(page.words).toContain("Someone else's change removed this text");
+  expect(page.words).toContain(text);
+}
+
 /**
  * Two people's words ended on one new last line. The page of `stopped` holds both, in either
  * order, and says editing stopped. The other two pages hold only `kept`, and go on editing.
@@ -347,8 +353,11 @@ test("joins of neighbouring lines", async ({ scene }) => {
     "joins of neighbouring lines",
     await ending(scene, two),
     (end) => nothingLost(end),
-    // A line nobody deleted is gone, and nothing tells anyone.
-    (end) => everyPageShows(end, joined("Alpha AppleBravo Banana")),
+    // A line nobody deleted is gone. The person who joined it is told, and can copy it.
+    (end) => {
+      everyPageShows(end, joined("Alpha AppleBravo Banana"));
+      isToldOfRemoved(end.two, "Charlie Cherry");
+    },
   );
 });
 
@@ -381,8 +390,11 @@ test("a join and typing in the joined line", async ({ scene }) => {
     "a join and typing in the joined line",
     await ending(scene, two),
     (end) => nothingLost(end, "TYPEDWORD"),
-    // The typed word is in nobody's note, and nothing tells its author.
-    (end) => everyPageShows(end, joined("Alpha AppleBravo Banana", "Charlie Cherry")),
+    // The typed word is in nobody's note. Its author is told, and can copy it.
+    (end) => {
+      everyPageShows(end, joined("Alpha AppleBravo Banana", "Charlie Cherry"));
+      isToldOfRemoved(end.two, "TYPEDWORD");
+    },
   );
 });
 
@@ -403,24 +415,11 @@ test("typing in a paragraph someone deletes", async ({ scene }) => {
   await clickEndOf(line(two.page, "Charlie Cherry"));
   await type(two, " TYPEDWORD");
 
-  const end = await ending(scene, two);
-  // The author's whole page, since the word may be shown outside the note once the paragraph is gone.
-  const authorsPage = await two.page.locator("body").innerText();
-  judge(
-    "typing in a paragraph someone deletes",
-    { ...end, authorsPage },
-    (seen) => {
-      everyPageShows(seen, without("Charlie Cherry"));
-      expect(seen.authorsPage, "the author is not shown the word they typed").toContain(
-        "TYPEDWORD",
-      );
-    },
-    (seen) => {
-      // The paragraph and the word are gone, and nothing on the author's page says so.
-      everyPageShows(seen, without("Charlie Cherry"));
-      expect(seen.authorsPage).not.toContain("TYPEDWORD");
-    },
-  );
+  // The paragraph goes, and the word with it. Its author is told, and can copy it.
+  judge("typing in a paragraph someone deletes", await ending(scene, two), (end) => {
+    everyPageShows(end, without("Charlie Cherry"));
+    isToldOfRemoved(end.two, "TYPEDWORD");
+  });
 });
 
 test("one deletes a line while the other types at the end of the line above", async ({ scene }) => {
@@ -519,18 +518,16 @@ for (const [where, lastLine] of [
     // Its maker, who has not received any of that, types in it.
     await type(one, "MAKERWORD");
 
-    judge(
-      name,
-      await ending(scene, one),
-      (end) => nothingLost(end, "MAKERWORD", "OTHERWORD"),
-      // Enter on an empty line inside a to-do moves that line out of the to-do. The word its
-      // maker typed in it is in nobody's note, and nothing tells them.
-      (end) =>
-        everyPageShows(end, [
-          ...START.slice(0, START.indexOf(lastLine) + 1),
-          "OTHERWORD",
-          ...START.slice(START.indexOf(lastLine) + 1),
-        ]),
-    );
+    judge(name, await ending(scene, one), (end) => {
+      if (lastLine === "Omega ends the note.") return nothingLost(end, "MAKERWORD", "OTHERWORD");
+      // Enter on an empty line inside a to-do moves that line out of the to-do, which removes
+      // what its maker typed in it. The maker is told, and can copy the word.
+      everyPageShows(end, [
+        ...START.slice(0, START.indexOf(lastLine) + 1),
+        "OTHERWORD",
+        ...START.slice(START.indexOf(lastLine) + 1),
+      ]);
+      isToldOfRemoved(end.one, "MAKERWORD");
+    });
   });
 }
