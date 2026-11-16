@@ -239,7 +239,9 @@ fn canonical_scene_assets(
     Ok(assets)
 }
 
-fn scene_asset_owner_scopes(
+/// The folders that own a drawing's assets, one for its version and one for
+/// each Version it was forked from, each with that Version's id.
+pub fn scene_asset_owner_scopes(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Vec<(String, String)>, CollabError> {

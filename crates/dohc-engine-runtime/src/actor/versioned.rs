@@ -1501,12 +1501,12 @@ fn versioned_text_delete_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    access_order::order_writer(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        &[access_order::Touch::delete(&input.path)],
-    )?;
+    let assets = scene_asset_paths(store, &input.workspace_id, &input.version_id, &input.path)?;
+    let touches: Vec<_> = std::iter::once(input.path.as_str())
+        .chain(assets.iter().map(String::as_str))
+        .map(access_order::Touch::delete)
+        .collect();
+    access_order::order_writer(store, &input.workspace_id, &input.version_id, &touches)?;
     if let Some(expected) = expected_sha256 {
         return checked_delete_on_store(
             store,
@@ -3378,11 +3378,83 @@ fn rollback_changes(
         .optional()
         .map_err(StorageError::corrupt_public)
     })?;
-    Ok(match found {
+    let mut changes = match found {
         None => Vec::new(),
         Some((path, Some(before))) if before == path => vec![(path, false)],
         Some((path, Some(before))) => vec![(path, true), (before, false)],
         Some((path, None)) => vec![(path, true)],
+    };
+    // Rolling back a drawing's delete writes back the assets it deleted.
+    store.read_with(|conn| {
+        let mut assets = conn
+            .prepare_cached(
+                "SELECT asset_path FROM scene_asset_delete_authority_items \
+                 WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        for asset in assets
+            .query_map(
+                params![
+                    input.workspace_id,
+                    input.version_id,
+                    input.mutation_moment_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)?
+        {
+            changes.push((asset.map_err(StorageError::corrupt_public)?, false));
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    Ok(changes)
+}
+
+/// The assets a delete of the drawing at `path` deletes with it: every file
+/// recorded under the drawing's asset folders. A file that is not a drawing,
+/// by the test [`delete_owned_scene_assets_in_tx`] applies, has none.
+pub(super) fn scene_asset_paths(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    store.read_with(|conn| {
+        let object: Option<String> = conn
+            .query_row(
+                "SELECT s.object_id FROM snapshots s WHERE s.workspace_id=?1 \
+                 AND s.version_id=?2 AND s.path=?3 AND s.content_kind='text' \
+                 AND (lower(s.path) GLOB '*.excalidraw' OR EXISTS (SELECT 1 FROM ydoc_docs d \
+                   WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=s.object_id \
+                   AND d.content_kind='scene'))",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        let Some(object) = object else {
+            return Ok(Vec::new());
+        };
+        let key = DocKey::new(workspace_id, version_id, &object)?;
+        let mut paths = Vec::new();
+        let mut under = conn
+            .prepare_cached(
+                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+                 AND path GLOB ?3",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        for (_, folder) in dohc_engine_collab::scene_asset_owner_scopes(conn, &key)? {
+            for asset in under
+                .query_map(
+                    params![workspace_id, version_id, format!("{folder}/*")],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?
+            {
+                paths.push(asset.map_err(StorageError::corrupt_public)?);
+            }
+        }
+        Ok(paths)
     })
 }
 

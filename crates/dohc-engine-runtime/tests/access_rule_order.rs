@@ -1,5 +1,6 @@
 //! A folder's access.yaml reaches the journal before the files it covers, and
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
+use dohc_engine_collab::{ContentKind, DocKey, Regime, ensure_marker, scene_asset_ref};
 use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
@@ -7,7 +8,7 @@ use dohc_engine_runtime::{
     RenameTextFile, RollbackTextFileMutation, RuntimeError, WorkspaceSupervisor, WriteBinary,
     WriteText,
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::SyncError;
 use dohc_engine_testkit::capture::ExistingRootGuard;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -1853,12 +1854,16 @@ fn writers_without_a_step_of_their_own_put_a_pending_rule_first() {
 
 impl Fixture {
     fn rollback(&self, moment: &str) -> Result<(), RuntimeError> {
+        self.rollback_at("crew/a.md", moment)
+    }
+
+    fn rollback_at(&self, path: &str, moment: &str) -> Result<(), RuntimeError> {
         self.runtime
             .block_on(self.actor.versioned_text_rollback(
                 RollbackTextFileMutation {
                     workspace_id: WS.to_owned(),
                     version_id: "main".to_owned(),
-                    path: "crew/a.md".to_owned(),
+                    path: path.to_owned(),
                     mutation_moment_id: moment.to_owned(),
                     request_id: None,
                     metadata_origin: "api".to_owned(),
@@ -2148,6 +2153,125 @@ impl Fixture {
             ))
             .map(drop)
     }
+}
+
+const DRAWING: &str = "drawings/d.excalidraw";
+
+/// A local workspace with a drawing and one asset of it, under an `assets`
+/// folder whose committed rule lets nobody in.
+fn drawing_with_ruled_asset() -> Fixture {
+    let mut f = Fixture::local();
+    f.put("assets/access.yaml", NOBODY);
+    f.put(
+        DRAWING,
+        r#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#,
+    );
+    f.settle();
+    f.capture_ok(&["assets/access.yaml", DRAWING]);
+    f.supervisor.close(&f.db).expect("close");
+    let drawing: String = rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .query_row(
+            "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND path=?2",
+            [WS, DRAWING],
+            |row| row.get(0),
+        )
+        .expect("the drawing's object");
+    let key = DocKey::new(WS, "main", &drawing).expect("doc key");
+    let mut store = EngineStore::open(&f.db, 1).expect("open store");
+    ensure_marker(
+        &mut store,
+        &key,
+        ContentKind::Scene,
+        Regime::LocalOnly,
+        &NoFaults,
+        2,
+    )
+    .expect("scene marker");
+    drop(store);
+    f.actor = f.supervisor.open(&f.db, 1).expect("reopen").actor;
+    let bytes = b"asset bytes".to_vec();
+    let path = scene_asset_ref(WS, "main", &drawing, &hex_sha256(&bytes), "image/png")
+        .expect("asset path");
+    f.runtime
+        .block_on(f.actor.versioned_binary_write(
+            WriteBinary {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "asset-object".to_owned(),
+                path,
+                bytes,
+                moment_id: "m-asset".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 41,
+                request_id: None,
+            },
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("write the asset");
+    f
+}
+
+/// A drawing's assets sit under `assets/excalidraw/`, outside the drawing's
+/// folder. Deleting a drawing deletes its assets with it, and rolling that
+/// delete back writes them again. In a local workspace, a widened rule over
+/// the assets holds each of these writers, and none records anything.
+#[test]
+fn a_rule_over_a_drawings_assets_holds_its_delete_and_rollback() {
+    type Step = fn(&Fixture) -> Result<(), RuntimeError>;
+    let cases: [(&str, Step, Step); 3] = [
+        (
+            "delete",
+            |_| Ok(()),
+            |f| f.versioned_delete(delete(DRAWING, "d-drawing")),
+        ),
+        (
+            "capture retire",
+            |f| {
+                std::fs::remove_file(f.root().join(DRAWING)).expect("remove the drawing");
+                Ok(())
+            },
+            |f| f.retire(DRAWING),
+        ),
+        (
+            "rollback of the delete",
+            |f| {
+                f.versioned_delete(DeleteTextFile {
+                    metadata_correlation_id: None,
+                    ..delete(DRAWING, "d-drawing")
+                })
+            },
+            |f| f.rollback_at(DRAWING, "d-drawing"),
+        ),
+    ];
+    // Every case runs, so one failure shows them all.
+    let mut wrong = Vec::new();
+    for (name, prepare, writer) in cases {
+        let f = drawing_with_ruled_asset();
+        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+        f.put("assets/access.yaml", EDIT);
+        f.settle();
+        let before = f.moments();
+        let result = writer(&f);
+        // Held, nothing recorded, the hold.
+        let state = (held(&result, "assets"), f.moments() == before, f.holds());
+        if state
+            != (
+                true,
+                true,
+                vec![("assets".to_owned(), "widened".to_owned())],
+            )
+        {
+            wrong.push(format!("{name}: {result:?} {state:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 const OP: &str = "dohc-operation:remove-team";

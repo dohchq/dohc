@@ -95,7 +95,7 @@ pub use scene::{
 };
 pub use scene_lifecycle::{
     freeze_scene_asset_delete_authority_in_tx, read_scene_asset_delete_authority,
-    scene_asset_delete_moment_id, SceneAssetDeleteAuthority,
+    scene_asset_delete_moment_id, scene_asset_owner_scopes, SceneAssetDeleteAuthority,
 };
 pub use ydoc::{
     fresh_successor_base, merge_updates, seed_client_id, ContentKind, OffsetMode, Projection,

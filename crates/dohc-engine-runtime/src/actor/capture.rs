@@ -3655,6 +3655,16 @@ fn capture_retire_on_store(
         input.now_ms,
         faults,
     )?;
+    let assets = super::versioned::scene_asset_paths(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        &input.path,
+    )?;
+    let touches: Vec<_> = std::iter::once(input.path.as_str())
+        .chain(assets.iter().map(String::as_str))
+        .map(access_order::Touch::delete)
+        .collect();
     access_order::order_capture(
         store,
         &input.workspace_id,
@@ -3662,10 +3672,10 @@ fn capture_retire_on_store(
         input.now_ms,
         leases,
         faults,
-        &[access_order::Touch::delete(&input.path)],
+        &touches,
     )?
-    .pop()
-    .unwrap_or(Ok(()))?;
+    .into_iter()
+    .collect::<Result<(), _>>()?;
     if confirm_absent {
         confirm_absent_on_disk(
             store,
