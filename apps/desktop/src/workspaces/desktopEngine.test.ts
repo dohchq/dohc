@@ -1500,12 +1500,15 @@ describe("server owner peer lifecycle", () => {
     quarantineMock.read.mockResolvedValue([]);
     f.dependencies.ownerHasOpen = (_workspaceId, path) => path === "notes/plan.md";
     let wakes = 0;
+    // While set, a woken room is still sending what its queue holds.
+    let sending: Promise<void> | undefined;
     ownerDeliveryMock.pass.mockImplementation(async (options) => {
       if (!options.lasting) return "empty";
       // The room waits for an edit until something ends it.
       for (;;) {
         await options.lasting.landed(options.lasting.count(), options.signal);
         wakes += 1;
+        await sending;
       }
     });
     const calls = (path: string) =>
@@ -1525,6 +1528,24 @@ describe("server owner peer lifecycle", () => {
       expect(calls("notes/plan.md")).toHaveLength(1);
       expect(calls("notes/plan.md")[0].lasting).toBeDefined();
       expect(calls("notes/other.md").every((options) => !options.lasting)).toBe(true);
+
+      // The engine refused an edit to the room's note: its queue is full, so another note's
+      // pass does not lift the pause until the room has sent it and waits again.
+      let sent!: () => void;
+      sending = new Promise((resolve) => (sent = resolve));
+      const woken = wakes;
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      await vi.waitFor(() => expect(wakes).toBe(woken + 1));
+      const before = calls("notes/other.md").length;
+      f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(calls("notes/other.md").length).toBeGreaterThan(before));
+      expect(f.engine.ownerLivePausedPaths("owner")).toEqual(["notes/plan.md"]);
+      sending = undefined;
+      sent();
+      await vi.waitFor(() => {
+        f.engine.retryOwnerDelivery("owner");
+        expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+      });
     } finally {
       credentials.abort();
       await f.close();

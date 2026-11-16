@@ -226,6 +226,8 @@ export async function runNativeOwnerDeliveryPass(
     },
   });
   let drainer: OwnerYDocOutboxDrainer | undefined;
+  // One closure watch per route: racing each wait against the route would leave a reaction on it per edit.
+  let route: { ended: Promise<void>; closed: AbortSignal } | undefined;
   /** The lasting pass: deliver what waits, then hold the connection open until an edit lands. */
   async function stayOpen(
     lasting: OwnerLastingEdits,
@@ -265,15 +267,17 @@ export async function runNativeOwnerDeliveryPass(
         return "frozen";
       }
       if (authority.kind !== "authority") return "retry";
-      const waiting = new AbortController();
+      const ended = delivery.ended();
+      if (route?.ended !== ended) {
+        const closed = new AbortController();
+        void ended.then(() => closed.abort());
+        route = { ended, closed: closed.signal };
+      }
       try {
-        const landed = await Promise.race([
-          lasting.landed(seen, AbortSignal.any([signal, waiting.signal])).then(() => true),
-          delivery.ended().then(() => false),
-        ]);
-        if (!landed) return "retry";
-      } finally {
-        waiting.abort();
+        await lasting.landed(seen, AbortSignal.any([signal, route.closed]));
+      } catch (error) {
+        if (signal.aborted || !route.closed.aborted) throw error;
+        return "retry";
       }
     }
   }

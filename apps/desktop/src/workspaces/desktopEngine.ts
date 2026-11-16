@@ -1884,6 +1884,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId))
         ownerDelivery?.retry?.(workspaceId);
     },
+    /** The owner's edit of a shared note reached its queue for the server: its room sends it now. */
+    ownerEditLanded(workspaceId: string): void {
+      const edits = ownerEditsOf(workspaceId);
+      edits.count += 1;
+      for (const wake of [...edits.waiters]) wake();
+    },
     /**
      * The owner opened `path`, which this computer holds an owner binding for,
      * in an editor here. A pass asks the server to host it unless a list read
@@ -1891,12 +1897,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * longer an answer. A pass starts now unless the last list named it live
      * or starting; then the next pass reads the list that decides.
      */
-    /** The owner's edit of a shared note reached its queue for the server: its room sends it now. */
-    ownerEditLanded(workspaceId: string): void {
-      const edits = ownerEditsOf(workspaceId);
-      edits.count += 1;
-      for (const wake of [...edits.waiters]) wake();
-    },
     ownerOpenedLiveDocument(workspaceId: string, path: string): void {
       if (!dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) return;
       ownerOpenRefused.get(workspaceId)?.delete(path);
@@ -2329,6 +2329,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     /** The engine refused an edit to `path` because its queue for the server takes no more. A refused queue has its own notice. */
     noteOwnerLiveEditsPaused(workspaceId: string, path: string): void {
+      // A full queue is not one its room waits at, so the room sends before it counts as idle again.
+      for (const room of ownerRooms.get(workspaceId)?.values() ?? [])
+        if (room.binding.currentPath === path) room.wake?.();
       const paused = pausedOwnerDocuments.get(workspaceId) ?? new Set<string>();
       if (
         !dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ||
