@@ -133,16 +133,17 @@ describe("Members page", () => {
   });
 
   it.each([
-    ["signed-out", { status: status({ connected: false }) }, "Connect to sync.test to see who is in this workspace.", "Connect server"],
-    ["not-synced", { status: status({ workspaceSynced: false, workspaceSyncConnected: false }) }, "Turn on sync to invite people to this workspace.", "Set up sync"],
-    ["other-account", { status: status({ workspaceSyncConnected: false }) }, "Resume sync to see who is in this workspace.", "Sync and sharing"],
-    ["other-server", { status: status({ serverUrl: "https://other.test" }) }, "This workspace syncs with sync.test.", "Sync and sharing"],
-    ["expired", { signInExpired: true, onSignInAgain: vi.fn() }, "until you sign in again.", "Sign in again"],
-  ] as const)("asks for the one thing that lets a %s workspace list Members, without asking the server", async (reason, facts, words, action) => {
+    ["signed-out", { status: status({ connected: false }) }, "Connect server"],
+    ["not-synced", { status: status({ workspaceSynced: false, workspaceSyncConnected: false }) }, "Set up sync"],
+    ["other-account", { status: status({ workspaceSyncConnected: false }) }, "Sync and sharing"],
+    ["other-server", { status: status({ serverUrl: "https://other.test" }) }, "Sync and sharing"],
+    ["expired", { signInExpired: true, onSignInAgain: vi.fn() }, "Sign in again"],
+  ] as const)("shows one screen whose button takes a %s workspace's next step, without asking the server", async (reason, facts, action) => {
     const { props } = renderMembers({ cloud: cloud(facts) });
     const gate = screen.getByTestId("settings-members-gate");
     expect(gate.dataset.reason).toBe(reason);
-    expect(gate.textContent).toContain(words);
+    expect(gate.textContent).toContain("Sync this workspace with your server to see who is in it.");
+    expect(within(gate).getAllByRole("button")).toHaveLength(1);
     await userEvent.click(within(gate).getByRole("button", { name: action }));
     if (reason === "signed-out") expect(props.cloud!.onConnect).toHaveBeenCalled();
     else if (reason === "expired") expect(props.cloud!.onSignInAgain).toHaveBeenCalled();

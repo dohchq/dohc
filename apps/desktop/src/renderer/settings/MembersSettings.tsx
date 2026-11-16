@@ -1,5 +1,5 @@
 import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { CircleCheck, CloudOff, LoaderCircle, LogIn, LogOut, Mail, RotateCcw, Search, ShieldCheck, ShieldOff, UserMinus, UserX } from "lucide-react";
+import { CircleCheck, CloudOff, LoaderCircle, LogOut, Mail, RotateCcw, Search, ShieldCheck, ShieldOff, UserMinus, UserX } from "lucide-react";
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import {
   memberMay,
@@ -9,7 +9,6 @@ import {
 } from "@dohc/security-contract/workspace-members";
 import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import { bridge } from "../bridge";
-import { SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { relativeTime } from "../relativeTime";
@@ -20,7 +19,6 @@ import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
-import { serverName } from "../workbench/accessReason";
 import { relayPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import type { CloudSettings } from "./CloudSyncSettings";
@@ -242,38 +240,21 @@ function MembersGateView(props: { gate: MembersGate; cloud: CloudSettings | unde
           dohc could not read this workspace's sync status.
         </RetryRow>
       );
-    case "not-synced":
+    default: {
+      // One screen for every way the workspace isn't synced with this account.
+      // Sync and sharing explains each; the button takes the one next step.
+      const sync = { label: "Sync and sharing", run: props.onOpenSync };
+      const next =
+        gate.kind === "not-synced" ? { label: "Set up sync", run: props.onOpenSync }
+        : gate.kind === "signed-out" && cloud ? { label: "Connect server", run: cloud.onConnect }
+        : gate.kind === "expired" && cloud?.onSignInAgain ? { label: "Sign in again", run: cloud.onSignInAgain }
+        : sync;
       return (
-        <GateState reason="not-synced" icon={CloudOff} action={{ label: "Set up sync", run: props.onOpenSync, primary: true }}>
-          Turn on sync to invite people to this workspace.
+        <GateState reason={gate.kind} icon={CloudOff} action={{ ...next, primary: true }}>
+          Sync this workspace with your server to see who is in it.
         </GateState>
       );
-    case "signed-out":
-      return (
-        <GateState reason="signed-out" icon={LogIn} action={cloud ? { label: "Connect server", run: cloud.onConnect, primary: true } : undefined}>
-          {gate.server
-            ? <>Connect to <span className="font-medium text-ink">{serverName(gate.server)}</span> to see who is in this workspace.</>
-            : "Connect your server to see who is in this workspace."}
-        </GateState>
-      );
-    case "other-server":
-      return (
-        <GateState reason="other-server" icon={CloudOff} action={{ label: "Sync and sharing", run: props.onOpenSync }}>
-          This workspace syncs with <span className="font-medium text-ink">{serverName(gate.server)}</span>. Connect to it to see who is in this workspace.
-        </GateState>
-      );
-    case "other-account":
-      return (
-        <GateState reason="other-account" icon={CloudOff} action={{ label: "Sync and sharing", run: props.onOpenSync }}>
-          {SYNC_UNCONFIRMED_ACCOUNT} Resume sync to see who is in this workspace.
-        </GateState>
-      );
-    case "expired":
-      return (
-        <GateState reason="expired" icon={LogIn} action={cloud?.onSignInAgain ? { label: "Sign in again", run: cloud.onSignInAgain, primary: true } : undefined}>
-          {SYNC_SIGN_IN_EXPIRED}
-        </GateState>
-      );
+    }
   }
 }
 
