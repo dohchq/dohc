@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -21,6 +21,8 @@ export interface SyncRelayHandle {
   port: number;
   dbPath: string;
   stop(): Promise<void>;
+  /** Ends the relay and every process it started at once, with no shutdown, as a server that loses power. Needs `hardKill`. */
+  kill(): Promise<void>;
   diagnostics(): { stdout: string; stderr: string };
 }
 
@@ -49,6 +51,8 @@ export async function spawnSyncRelay(input: {
    * live host runs this engine. Needs the link boundary.
    */
   editLinks?: { engineExecutable: string; publicOrigin: string; trustEnv?: Record<string, string> };
+  /** Lets `kill()` end the relay together with the engine it started. */
+  hardKill?: boolean;
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
   const deployment = `${dirname(input.dbPath)}-deployment`;
@@ -124,6 +128,8 @@ export async function spawnSyncRelay(input: {
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true,
+      // A process group of its own, so one signal reaches the relay and its engine. Windows ends the tree by pid.
+      detached: input.hardKill === true && process.platform !== "win32",
     },
   );
   // Register at spawn: exitCode can be set before the process's stdio closes.
@@ -150,6 +156,15 @@ export async function spawnSyncRelay(input: {
         clearTimeout(timer);
       }
     })());
+  const kill = async (): Promise<void> => {
+    if (!input.hardKill)
+      throw new Error("Start the relay with hardKill to end it without shutdown.");
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+    if (process.platform === "win32")
+      execFileSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    else process.kill(-child.pid, "SIGKILL");
+    await closed;
+  };
   const startupStatus = () =>
     `after ${Math.round(performance.now() - started)}ms ` +
     `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})`;
@@ -210,6 +225,7 @@ export async function spawnSyncRelay(input: {
     dbPath: input.dbPath,
     diagnostics: () => ({ stdout, stderr }),
     stop,
+    kill,
   };
 }
 
