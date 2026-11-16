@@ -13,7 +13,7 @@ export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
 // Text the engine kept on this computer only: typing capture kept when its
 // file changed outside dohc, and text a merge removed unseen.
-export const LOCAL_ONLY_KEPT_TEXT_ORIGINS = [
+const LOCAL_ONLY_KEPT_TEXT_ORIGINS = [
   "capture-recovery",
   "capture-recovery-cleared",
   "merge-removal",

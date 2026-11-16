@@ -292,7 +292,10 @@ export function useDocumentSaveNotices(input: {
       const { quoted, more } = quoteRemovedText(text.replace(/\s*\n\s*/g, " "));
       const identity = `text-removed:${owner}:${path}:${++removals}`;
       const copy = (): void => {
-        if (!navigator.clipboard) return void failedCopy(new Error("The clipboard is not available."));
+        if (!navigator.clipboard) {
+          failedCopy(new Error("The clipboard is not available."));
+          return;
+        }
         navigator.clipboard.writeText(text).catch(failedCopy);
       };
       const failedCopy = (cause: unknown): void => {

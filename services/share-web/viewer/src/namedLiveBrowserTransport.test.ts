@@ -320,7 +320,12 @@ function host(socket: Socket, value: Session, epoch = 1, policy = limits().provi
         journalCursor: cursor,
       });
       for (let offset = 0; offset < bytes.length; offset += 900)
-        send({ kind: "chunk", transferId: id, offset, bytes: bytes.subarray(offset, offset + 900) });
+        send({
+          kind: "chunk",
+          transferId: id,
+          offset,
+          bytes: bytes.subarray(offset, offset + 900),
+        });
     },
     async submitted(count = 1) {
       await until(() => submissions().length >= count);

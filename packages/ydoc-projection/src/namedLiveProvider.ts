@@ -16,7 +16,10 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
-import { applyUpdateFindingRemovedText, type RemovedText } from "@dohc/ydoc-projection/removed-text";
+import {
+  applyUpdateFindingRemovedText,
+  type RemovedText,
+} from "@dohc/ydoc-projection/removed-text";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -491,7 +494,13 @@ export function createNamedLiveProvider(
               const { ds } = Y.decodeUpdate(content);
               held.receivedCursor = begin.journalCursor;
               highestObservedCursor = Math.max(highestObservedCursor, begin.journalCursor);
-              const removed = applyUpdateFindingRemovedText(doc, content, REMOTE, () => ds, ownText);
+              const removed = applyUpdateFindingRemovedText(
+                doc,
+                content,
+                REMOTE,
+                () => ds,
+                ownText,
+              );
               if (removed) tellRemoved(removed);
               if (!current(held)) return;
             } else quarantine("unexpected-transfer");
