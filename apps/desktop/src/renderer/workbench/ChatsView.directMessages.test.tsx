@@ -202,6 +202,22 @@ describe("ChatsView direct messages", () => {
     expect(listReports()).toHaveLength(1);
   });
 
+  it("files no members notice in New message while the title bar names the server, and files it once the title bar stops", async () => {
+    signedIn([]);
+    bridgeMock.workspaceMembers.mockRejectedValue(UNREACHABLE("workspace-members"));
+    const onError = vi.fn();
+    const onClearError = vi.fn();
+    const memberReports = () => onError.mock.calls.filter((call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-members:workspace-a");
+    const view = renderView(vi.fn(), onError, { variant: "panel", onClearError, serverNamed: true, initialNav: { level: "direct-new" } });
+    // New message still says so in place, with Try again.
+    await screen.findByTestId("chats-dm-new-retry");
+    expect(memberReports()).toEqual([]);
+    await waitFor(() => expect(onClearError).toHaveBeenCalledWith("direct-members:workspace-a"));
+
+    view.rerender({ variant: "panel", onClearError, serverNamed: false, initialNav: { level: "direct-new" } });
+    await waitFor(() => expect(memberReports()).toHaveLength(1));
+  });
+
   it("shows a conversation opened while the server is away as failed, with Try again that reads it once the server answers", async () => {
     bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
     renderView(vi.fn(), vi.fn(), {

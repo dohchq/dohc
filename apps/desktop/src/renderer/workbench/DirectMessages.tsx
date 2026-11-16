@@ -7,7 +7,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { DIRECT_SIGNED_OUT, readError, refusalCode, WORKSPACE_NOT_SYNCED } from "../../ipc/errorWords";
 import { EmptyState, FieldError, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
-import { Menu } from "../ui/Menu";
+import { MENU_ACTIVE_OPTION, Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { relayPresentation } from "./actorPresentation";
@@ -552,7 +552,7 @@ function DirectComposerLine(props: { testId: string; icon: ReactNode; children: 
 type Member = { memberId: string; name: string; paletteSlot: number };
 type MemberList =
   | { workspaceId: string; status: "loading" }
-  | { workspaceId: string; status: "failed"; message: string }
+  | { workspaceId: string; status: "failed"; message: string; cause: unknown }
   // A workspace only on this computer has no members to message yet. Nothing failed.
   | { workspaceId: string; status: "unsynced" }
   | { workspaceId: string; status: "ready"; members: readonly Member[] };
@@ -611,15 +611,20 @@ function NewMessageForAccount(props: NewMessageProps) {
           setList({ workspaceId, status: "unsynced" });
           return;
         }
-        const message = ipcErrorMessage(cause, "dohc could not read this workspace's members.");
-        reportDirect(reporting.current, message, cause, () => setAttempt((count) => count + 1), undefined, { identity: membersIdentity });
-        setList({ workspaceId, status: "failed", message });
+        setList({ workspaceId, status: "failed", message: ipcErrorMessage(cause, "dohc could not read this workspace's members."), cause });
       },
     );
     return () => {
       current = false;
     };
   }, [workspaceId, attempt, membersIdentity]);
+  // One outage, one notice: while the title bar names the server, the failed read says so only in place.
+  const serverNamed = props.serverNamed === true;
+  useEffect(() => {
+    if (members.status !== "failed") return;
+    if (serverNamed) reporting.current.onClearError?.(membersIdentity);
+    else reportDirect(reporting.current, members.message, members.cause, () => setAttempt((count) => count + 1), undefined, { identity: membersIdentity });
+  }, [members, serverNamed, membersIdentity]);
 
   const [picked, setPicked] = useState<string | null>(props.memberId ?? null);
   // Opened for someone, such as from Members' Message: their existing conversation opens directly,
@@ -827,9 +832,8 @@ function NewMessageForAccount(props: NewMessageProps) {
               onMouseDown={(event) => event.preventDefault()}
               onMouseMove={() => { if (highlight !== index) setHighlight(index); }}
               onClick={() => choose(member.memberId)}
-              className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] text-ink ${
-                active?.memberId === member.memberId ? "bg-hover" : ""
-              }`}
+              data-active={active?.memberId === member.memberId || undefined}
+              className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] text-ink ${MENU_ACTIVE_OPTION}`}
             >
               <ChatAvatar presentation={relayPresentation(member.paletteSlot)} name={member.name} kind="human" size="strip" />
               <span className="min-w-0 flex-1 truncate">{member.name}</span>

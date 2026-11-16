@@ -3885,6 +3885,7 @@ export function ChatsView(props: {
         onBack={variant === "panel" ? goBack : undefined}
         onError={props.onError}
         onClearError={props.onClearError}
+        serverNamed={props.serverNamed}
         onOpenSettings={props.onOpenSettings}
         onOpenConversation={(conversationId, title) => {
           openConversation({ level: "direct", conversationId, title });
