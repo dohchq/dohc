@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { createNamedDatasetData } from "./namedDataset";
 import { SHARE_VIEW_REOPEN_MESSAGE } from "./shareViewMarker";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 
 const marker = {
   shareId: "share",
@@ -64,4 +65,11 @@ it.each([
   const deps = input();
   expect(() => createNamedDatasetData({ ...deps, shareView })).toThrow();
   expect(deps.relayJson).not.toHaveBeenCalled();
+});
+it("refuses a joined workspace's Collections while another account is signed in, before transport", async () => {
+  const deps = input(), joined = { ...marker, grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true } };
+  expect(() => createNamedDatasetData({ ...deps, shareView: joined, credentials: { ...deps.credentials, userId: "other" } })).toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+  expect(deps.relayJson).not.toHaveBeenCalled();
+  await createNamedDatasetData({ ...deps, shareView: joined }).list({});
+  expect(deps.relayJson).toHaveBeenCalledOnce();
 });
