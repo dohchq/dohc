@@ -131,9 +131,10 @@ impl EngineService {
                 // Read only; each handler checks the caller and attachment again.
                 | "sync.heldDocuments"
                 | "sync.heldDocument"
-                // The claim ledger, so the relay's automations can run the
-                // field changes this host claims when it accepts a live frame.
-                // Nothing that writes files, chats, schedules, or presses.
+                // The relay drains, reads, and prunes this host's claim ledger:
+                // the field changes it claims when it accepts a live frame.
+                // An automation's effects run against the relay's own copy,
+                // so nothing here starts a run or makes a press.
                 | "automations.subscribe"
                 | "automations.unsubscribe"
                 | "automations.claimNext"
@@ -141,7 +142,9 @@ impl EngineService {
                 | "automations.release"
                 | "automations.retry"
                 | "automations.listClaims"
+                | "automations.getClaim"
                 | "automations.failures"
+                | "automations.pruneHistory"
         ) && self.configured_ordinary_request(ctx, request)
         {
             return Ok(());
@@ -1510,6 +1513,19 @@ mod tests {
             "sync.pullHosted",
             "sync.heldDocuments",
             "sync.heldDocument",
+            // The claim ledger the relay's automations use for a hosted
+            // workspace: `Ledger` in services/sync-relay/src/automationLiveClaims.ts.
+            // A call missing here is refused each time the relay makes it.
+            "automations.subscribe",
+            "automations.unsubscribe",
+            "automations.claimNext",
+            "automations.settle",
+            "automations.release",
+            "automations.retry",
+            "automations.listClaims",
+            "automations.getClaim",
+            "automations.failures",
+            "automations.pruneHistory",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1530,7 +1546,8 @@ mod tests {
                         .ensure_configured_host_method(&ctx, &request)
                         .unwrap_err()
                         .code,
-                    ErrorCode::Forbidden
+                    ErrorCode::Forbidden,
+                    "{method}"
                 );
             }
         }
@@ -1544,6 +1561,16 @@ mod tests {
             "sync.probe",
             "versionedText.write",
             "versionedText.writeBlob",
+            // Every other automation call. None is part of the claim ledger,
+            // and several start runs, make presses, or hand Group watching away.
+            "automations.press",
+            "automations.runNow",
+            "automations.claimSchedule",
+            "automations.scheduleMarks",
+            "automations.makeDurable",
+            "automations.watchGroups",
+            "automations.releaseGroups",
+            "automations.groupSkips",
         ] {
             request.method = method.into();
             assert_eq!(
