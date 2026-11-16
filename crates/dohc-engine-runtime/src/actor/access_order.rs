@@ -2569,7 +2569,8 @@ mod tests {
             put_settled(&root, "team/a.md", "alpha");
             put_settled(&root, "team/access.yaml", edit);
             let identity = EngineDbIdentity::of_existing(&db).unwrap();
-            install(&db, &identity, true, Arc::new(AccessRuleSignals::default())).unwrap();
+            let signals = Arc::new(AccessRuleSignals::default());
+            install(&db, &identity, true, signals.clone()).unwrap();
             begin_command();
             dohc_engine_sync::adopt_join_identity(
                 &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,
@@ -2596,6 +2597,8 @@ mod tests {
                 enrolled.is_ok()
             };
             let mut attempts = vec![enrol(&mut store)];
+            // A waiting enrolment signals, so capture rescans without another trigger.
+            let signalled = signals.waits() > 0;
             if !attempts[0] {
                 // Capture runs before the next attempt, as the refusal's
                 // signal asks, and finds the rule on disk.
@@ -2633,7 +2636,7 @@ mod tests {
                 .into_iter()
                 .map(|hold| (hold.folder, hold.reason))
                 .collect::<Vec<_>>();
-            seen.push((captured, attempts, journal, holds));
+            seen.push((captured, attempts, signalled, journal, holds));
             ROOT.with(|cell| *cell.borrow_mut() = None);
         }
         let (rule, file) = ("team/access.yaml".to_owned(), "team/a.md".to_owned());
@@ -2641,8 +2644,8 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (true, vec![true], journal.clone(), Vec::new()),
-                (false, vec![false, true], journal, Vec::new()),
+                (true, vec![true], false, journal.clone(), Vec::new()),
+                (false, vec![false, true], true, journal, Vec::new()),
             ]
         );
     }
