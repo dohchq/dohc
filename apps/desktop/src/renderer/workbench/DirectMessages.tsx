@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { Ban, Check, CloudOff, PenSquare, Plus, Users, X } from "lucide-react";
+import { Ban, Check, CloudOff, PenSquare, Plus, User, Users, X } from "lucide-react";
 import type { DirectConversation, DirectMessage, DirectPerson } from "@dohc/security-contract/direct-messages";
 import type { MembersResult } from "@dohc/cli/members";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
@@ -427,7 +427,7 @@ function ConversationForAccount(props: ConversationProps) {
       testId="chats-dm"
       large={props.variant === "page"}
       onBack={props.onBack}
-      icon={person ? <DirectAvatar person={person} viewerId={viewerId} /> : <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
+      icon={person ? <DirectAvatar person={person} viewerId={viewerId} /> : <User size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
       action={menuItems.length > 0 ? <MoreMenu label="Conversation options" testId="chats-dm-options" items={menuItems} width={220} /> : undefined}
     />
   );
@@ -449,7 +449,7 @@ function ConversationForAccount(props: ConversationProps) {
       </div>
     );
   } else if (ready && !conversation && shown.status !== "ready") {
-    body = <EmptyState data-testid="chats-dm-missing" icon={Users} title="dohc could not find this conversation." />;
+    body = <EmptyState data-testid="chats-dm-missing" icon={User} title="dohc could not find this conversation." />;
   } else if (shown.status === "loading") {
     body = <SkeletonRows label="Loading messages…" className="pt-4" testId="chats-dm-loading" />;
   } else if (shown.status === "failed") {
@@ -499,6 +499,7 @@ function ConversationForAccount(props: ConversationProps) {
         placeholder={`Message ${name}`}
         sendLabel="Send message"
         candidates={NO_CANDIDATES}
+        noMentions
         onChange={setDraft}
         onSend={submit}
         inset={props.variant === "page" ? "stream" : "narrow"}
@@ -634,15 +635,24 @@ function NewMessageForAccount(props: NewMessageProps) {
     setPickError(false);
     setPicked(memberId);
     setQuery("");
+    // The cleared query lists everyone again: the active row is the pick, so the two never differ.
+    const all = members.status === "ready" ? members.members : [];
+    setHighlight(Math.max(0, all.findIndex((member) => member.memberId === memberId)));
     inputRef.current?.focus();
+  };
+  // Focus stays in the To field, so the list scrolls to keep the active member in view.
+  const moveTo = (index: number) => {
+    setHighlight(index);
+    const member = matches[index];
+    if (member) document.getElementById(`${listId}-${member.memberId}`)?.scrollIntoView?.({ block: "nearest" });
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setHighlight(Math.min(activeIndex + 1, matches.length - 1));
+      moveTo(Math.min(activeIndex + 1, matches.length - 1));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      setHighlight(Math.max(activeIndex - 1, 0));
+      moveTo(Math.max(activeIndex - 1, 0));
     } else if (event.key === "Enter" && active) {
       event.preventDefault();
       choose(active.memberId);
@@ -695,6 +705,14 @@ function NewMessageForAccount(props: NewMessageProps) {
     goStraight.current = false;
     setDraftState(value);
     store.setDraft("new", value);
+  };
+  // Words written here go along to the conversation, unless it already holds words of its own.
+  const openExisting = (conversationId: string) => {
+    if (draft.trim() && !store.draft(conversationId).trim()) {
+      store.setDraft(conversationId, draft);
+      setDraft("");
+    }
+    props.onOpenConversation(conversationId, title);
   };
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
@@ -868,7 +886,7 @@ function NewMessageForAccount(props: NewMessageProps) {
             {resolved?.conversationId ? (
               <p data-testid="chats-dm-new-existing" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
                 <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${title}.`}</span>
-                <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => props.onOpenConversation(resolved.conversationId!, title)}>
+                <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => openExisting(resolved.conversationId!)}>
                   Open conversation
                 </SecondaryButton>
               </p>
@@ -890,6 +908,7 @@ function NewMessageForAccount(props: NewMessageProps) {
             placeholder={pick !== null ? `Message ${title}` : "Write a message"}
             sendLabel="Send message"
             candidates={NO_CANDIDATES}
+            noMentions
             onChange={setDraft}
             onSend={submit}
             inset={props.variant === "page" ? "stream" : "narrow"}

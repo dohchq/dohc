@@ -178,6 +178,8 @@ export function MentionComposer(props: {
   placeholder: string;
   sendLabel: string;
   candidates: readonly MentionCandidate[];
+  // A composer with no one to mention, such as a direct message's, offers no Mention button.
+  noMentions?: boolean;
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onChange: (value: string) => void;
@@ -1140,7 +1142,7 @@ export function MentionComposer(props: {
               )}
             />
           ) : null}
-          <button
+          {props.noMentions ? null : <button
             type="button"
             aria-label="Mention"
             title="Mention a person or agent"
@@ -1154,7 +1156,7 @@ export function MentionComposer(props: {
             className={BAR_BUTTON}
           >
             <AtSign size={16} strokeWidth={1.9} aria-hidden />
-          </button>
+          </button>}
           {props.agentOffer ? <AgentOffer offer={props.agentOffer} /> : <span className="flex-1" />}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}

@@ -227,6 +227,8 @@ describe("ChatsView direct messages", () => {
       }),
     );
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+    // No one else is in a conversation of two, so its composer offers no Mention.
+    expect(within(view).queryByRole("button", { name: "Mention" })).toBeNull();
   });
 
   it("drops a list read for the account signed in before, even on the first session event", async () => {
@@ -544,6 +546,18 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByText("Choose who to message.")).toBeTruthy();
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
 
+    // Focus stays in To, so the arrow keys scroll the list to keep the active member in view.
+    const scrolled: string[] = [];
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, "scrollIntoView")
+      .mockImplementation(function (this: Element) {
+        scrolled.push(this.getAttribute("data-member-id") ?? "");
+      });
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "ArrowDown" });
+    expect(scrolled).toEqual(["sam"]);
+    scrollIntoView.mockRestore();
+    fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "ArrowUp" });
+
     // Picking another person replaces the pick: a conversation is two people.
     await user.click(options[0]!);
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
@@ -553,6 +567,10 @@ describe("ChatsView direct messages", () => {
     await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
       ["sam"],
+    );
+    // The whole list is back, and the active row is the pick, not the row that was first in the filter.
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(
+      /-sam$/,
     );
     await waitFor(() =>
       expect(bridgeMock.directResolve).toHaveBeenLastCalledWith({
@@ -690,9 +708,16 @@ describe("ChatsView direct messages", () => {
     await user.click(await screen.findByTestId("chats-dm-new-member"));
     const existing = await screen.findByTestId("chats-dm-new-existing");
     expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
+    expect(screen.queryByRole("button", { name: "Mention" })).toBeNull();
+    await user.type(screen.getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));
-    expect((await screen.findByTestId("chats-dm-view")).dataset.conversationId).toBe(
-      "conversation-sam",
+    const view = await screen.findByTestId("chats-dm-view");
+    expect(view.dataset.conversationId).toBe("conversation-sam");
+    // The words written in New message go along to the conversation.
+    await waitFor(() =>
+      expect((within(view).getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe(
+        "Lunch?",
+      ),
     );
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
   });
