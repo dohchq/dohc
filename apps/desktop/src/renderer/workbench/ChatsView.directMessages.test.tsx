@@ -6,12 +6,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { bridgeMock, emitCloudSessionChanged, renderView } from "./ChatsView.testHarness";
 import { chatTabPath } from "./workbenchState";
+import { directStore } from "./directConversations";
 
 // Direct messages live on the account's server, so every workspace lists the
 // same People. Each conversation is between two people. Nothing is kept on
 // this computer: while the server is away, the views say so with Try again.
 
 const VIEWER = "me";
+
+function directStoreViewer(): string | null {
+  const state = directStore().snapshot();
+  return state.status === "ready" ? state.viewerId : null;
+}
 const sam = { personId: "sam", name: "Sam Rivera", blocked: false };
 const ana = { personId: "ana", name: "Ana Diaz", blocked: false };
 
@@ -509,6 +515,25 @@ describe("ChatsView direct messages", () => {
     );
     fireEvent.click(await screen.findByTestId("chats-dm-options"));
     expect(await screen.findByRole("menuitem", { name: "Unblock Sam Rivera" })).toBeTruthy();
+  });
+
+  it("names the account that asked for a block when Try again outlives a change of account, so main refuses it", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    bridgeMock.directBlock.mockRejectedValueOnce(new Error("relay unreachable"));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    await openSam();
+    fireEvent.click(await screen.findByTestId("chats-dm-options"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Block Sam Rivera" }));
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    const [, , tryAgain] = onError.mock.calls.at(-1)!;
+    // Sam signs in on this computer; their list has the same conversation.
+    bridgeMock.directConversations.mockResolvedValue({ available: true, viewerId: "sam", conversations: [conversation()] });
+    act(() => emitCloudSessionChanged("session-sam", "ready"));
+    await waitFor(() => expect(directStoreViewer()).toBe("sam"));
+    await act(async () => (tryAgain as () => void)());
+    expect(bridgeMock.directBlock.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId)).toEqual([VIEWER, VIEWER]);
   });
 
   it("starts a new message with one person picked from the workspace's members", async () => {

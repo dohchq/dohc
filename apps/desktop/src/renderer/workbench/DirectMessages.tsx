@@ -204,12 +204,16 @@ async function blockPerson(input: {
   reporting: Reporting;
   /** Runs once the change is made, by the first try or by the notice's Try again. */
   onDone?: () => void;
+  /** The account that asked. Try again keeps it, so main refuses a retry once another account signs in. */
+  viewerId?: string;
 }): Promise<void> {
   const { store, conversationId, person, blocked, reporting } = input;
   const name = directPersonName(person);
   const identity = `direct-block:${conversationId}`;
+  let viewerId = input.viewerId;
   try {
-    await store.setBlocked(conversationId, blocked);
+    viewerId ??= store.viewer();
+    await store.setBlocked(viewerId, conversationId, blocked);
     reporting.onClearError?.(identity);
     // No notice: the blocked line, with its Unblock, shows the change where it happened.
     input.onDone?.();
@@ -217,7 +221,7 @@ async function blockPerson(input: {
     reportDirect(reporting,
       ipcErrorMessage(cause, blocked ? `dohc could not block ${name}.` : `dohc could not unblock ${name}.`),
       cause,
-      () => void blockPerson(input),
+      () => void blockPerson(viewerId === undefined ? input : { ...input, viewerId }),
       undefined,
       { identity },
     );

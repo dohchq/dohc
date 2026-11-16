@@ -139,10 +139,10 @@ export function createDirectStore(api: Api) {
         void refresh();
       });
     },
-    /** Blocks or unblocks the other person. Rejects with the server's reason. */
-    async setBlocked(conversationId: string, blocked: boolean): Promise<void> {
+    /** Blocks or unblocks the other person, as `viewerId`. Rejects with the server's reason. */
+    async setBlocked(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
       const mine = session;
-      await api.directBlock({ viewerId: viewer(), conversationId, blocked });
+      await api.directBlock({ viewerId, conversationId, blocked });
       if (mine !== session) return;
       patch(conversationId, (conversation) => ({ ...conversation, person: { ...conversation.person, blocked } }));
       void refresh();
