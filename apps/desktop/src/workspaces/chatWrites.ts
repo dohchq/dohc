@@ -222,7 +222,8 @@ export function createChatWrites(dependencies: {
   function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
     const view = workspace.shareView;
     const pin = recordedShareSelector(view?.grantedSelector);
-    const scope = shareViewWriteScopeOf(view, currentCredentials());
+    // The levels alone: `check` refuses another account in its own words.
+    const scope = shareViewWriteScopeOf(view, null);
     return (
       !!view &&
       pin?.wholeWorkspace === true &&
@@ -298,10 +299,7 @@ export function createChatWrites(dependencies: {
 
   const takesPosts = (level: string | null) => level === "comment" || level === "edit";
   const levelOf = (workspaceId: string, place: ShareViewWritePlace) => {
-    const scope = shareViewWriteScopeOf(
-      findWorkspace(workspaceId)?.shareView,
-      currentCredentials(),
-    );
+    const scope = shareViewWriteScopeOf(findWorkspace(workspaceId)?.shareView, null);
     return scope === null ? null : shareViewWriteLevel(scope, place);
   };
 

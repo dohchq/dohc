@@ -107,13 +107,15 @@ export type ShareViewWritePlace = { path: string } | { folder: string } | "group
  * all — reading either as writable is the one direction this must never fail.
  *
  * An ended share is a frozen local copy: the submit route is gone, so a write
- * admitted here would land durably and never reach the granter.
+ * admitted here would land durably and never reach the granter. A joined
+ * workspace's level belongs to the account that joined, so another account
+ * signed in takes no write at any place (`ShareViewWriter`).
  */
 export function shareViewWriteLevel(
   scope: ShareViewWriteScope,
   place: ShareViewWritePlace,
 ): ShareAccess | null {
-  if (scope.ended) return null;
+  if (scope.ended || scope.writer === "other") return null;
   if (place === "somewhere") return scope.access;
   if (place === "group") return scope.member === undefined ? scope.access : scope.member;
   if ("path" in place) return scope.levelAt ? scope.levelAt(place.path) : scope.access;

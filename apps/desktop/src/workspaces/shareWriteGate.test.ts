@@ -176,19 +176,42 @@ describe("the joined-account rule", () => {
   const joined = { userId: "recipient-a", relayUrl: "https://relay.test" };
 
   it.each([
-    ["the account that joined", joined, "joined", true],
-    ["another account", { userId: "someone-else", relayUrl: "https://relay.test" }, "other", false],
+    ["the account that joined", joined, "joined", true, true],
+    [
+      "another account",
+      { userId: "someone-else", relayUrl: "https://relay.test" },
+      "other",
+      false,
+      false,
+    ],
     [
       "the same user id on another relay",
       { userId: "recipient-a", relayUrl: "https://other-relay.test" },
       "other",
       false,
+      false,
     ],
-    ["nobody", null, "signed-out", false],
+    ["nobody", null, "signed-out", true, false],
   ] as const)(
-    "with %s signed in, names the writer and takes relay actions as it allows",
-    (_name, credentials, writer, relay) => {
-      expect(shareViewWriteScopeOf(joinedView, credentials)!.writer).toBe(writer);
+    "with %s signed in, takes local writes and relay actions as the writer allows",
+    (_name, credentials, writer, local, relay) => {
+      const scope = shareViewWriteScopeOf(joinedView, credentials)!;
+      expect(scope.writer).toBe(writer);
+      for (const place of [
+        { path: "docs/a.md" },
+        { folder: "docs" },
+        "group",
+        "somewhere",
+      ] as const) {
+        expect(shareViewWriteLevel(scope, place), JSON.stringify(place)).toBe(
+          local ? "edit" : null,
+        );
+      }
+      expect(workspaceCreateOffers(scope, "admin")).toEqual({
+        write: local,
+        folder: local,
+        collection: local,
+      });
       expect(joinedByAccount(joinedView, credentials)).toBe(relay);
     },
   );
