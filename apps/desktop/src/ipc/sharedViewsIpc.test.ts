@@ -178,6 +178,43 @@ describe("share capture Notice dismissal", () => {
   });
 });
 
+describe("recovery folder Notice dismissal", () => {
+  it("forgets only the folder the Notice named, and keeps the rest of the view", async () => {
+    const h = await harness();
+    const view = h.workspace.shareView!;
+    view.accessSaved = { folder: ".dohc/local/recovery/new", count: 2 };
+    const channel = sharedViewAccessOperations.dismissAccessSavedNotice.channel;
+    await h.invoke(channel, {
+      workspaceId: h.workspace.workspaceId,
+      folder: ".dohc/local/recovery/old",
+    });
+    expect(h.setView).not.toHaveBeenCalled();
+    await h.invoke(channel, {
+      workspaceId: h.workspace.workspaceId,
+      folder: ".dohc/local/recovery/new",
+    });
+    const saved = JSON.parse(
+      JSON.stringify(h.registry.get(h.workspace.workspaceId)),
+    ) as typeof h.workspace;
+    expect(saved.shareView).not.toHaveProperty("accessSaved");
+    expect(saved.shareView?.shareId).toBe(view.shareId);
+    expect(h.notify).toHaveBeenCalledWith({
+      workspaceId: h.workspace.workspaceId,
+      summaryChanged: true,
+    });
+  });
+  it("rejects an untrusted or inactive sender", async () => {
+    const h = await harness();
+    h.workspace.shareView!.accessSaved = { folder: "saved", count: 1 };
+    const payload = { workspaceId: h.workspace.workspaceId, folder: "saved" };
+    const channel = sharedViewAccessOperations.dismissAccessSavedNotice.channel;
+    await expect(h.invoke(channel, payload, false)).rejects.toThrow();
+    h.retireRenderer();
+    await expect(h.invoke(channel, payload)).rejects.toThrow();
+    expect(h.setView).not.toHaveBeenCalled();
+  });
+});
+
 describe("metadata-only access checks", () => {
   it("discovers a real relay's Edit-to-View downgrade and revocation", async () => {
     const storage = await testStorage();
@@ -566,6 +603,7 @@ describe("registered received-view handlers", () => {
       sharedViewAccessOperations.openSharedView.channel,
       sharedViewAccessOperations.refreshSharedView.channel,
       sharedViewAccessOperations.dismissShareCaptureNotice.channel,
+      sharedViewAccessOperations.dismissAccessSavedNotice.channel,
       sharedViewAccessOperations.checkSharedViewAccess.channel,
     ]);
     for (const channel of h.handlers.keys())

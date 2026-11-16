@@ -1123,6 +1123,15 @@ export function registerSharedViewsIpcHandlers<
         });
         notifyRenderer({ workspaceId: input.workspaceId, summaryChanged: true });
       },
+      dismissAccessSavedNotice: async (input, { operation }) => {
+        operation.assertCurrent();
+        const view = operation.workspace.shareView;
+        // A dismissal of an older recovery folder must not hide a newer Notice.
+        if (!view || view.accessSaved?.folder !== input.folder) return;
+        const { accessSaved: _dismissed, ...rest } = view;
+        await setWorkspaceShareView(input.workspaceId, rest);
+        notifyRenderer({ workspaceId: input.workspaceId, summaryChanged: true });
+      },
       checkSharedViewAccess: async (input, { event }): Promise<CheckSharedViewAccessResult> => {
         if (checks.has(event.sender)) return { status: "unverified" };
         const controller = new AbortController();

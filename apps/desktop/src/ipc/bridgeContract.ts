@@ -6645,6 +6645,16 @@ export const sharedViewAccessOperations = {
     guard: "active-workspace",
     inactiveMessage: "This share's Notice is no longer open in this window.",
   },
+  // Forgets the recovery folder an update of access saved into, so its Notice
+  // stops coming back. The folder stays on disk.
+  dismissAccessSavedNotice: {
+    capabilityId: "share.access.saved.dismiss",
+    scope: "workspace",
+    channel: "desktop:dismiss-access-saved-notice",
+    payload: z.object({ workspaceId: WORKSPACE_ID, folder: z.string() }),
+    guard: "active-workspace",
+    inactiveMessage: "This workspace's Notice is no longer open in this window.",
+  },
   checkSharedViewAccess: {
     capabilityId: "share.access.read",
     scope: "workspace",

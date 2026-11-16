@@ -8,8 +8,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubReveal(reveal: (payload: unknown) => Promise<void>) {
-  vi.stubGlobal("dohcDesktop", { revealWorkspaceFolder: reveal });
+function stubReveal(
+  reveal: (payload: unknown) => Promise<void>,
+  dismiss: (payload: unknown) => Promise<void> = async () => undefined,
+) {
+  vi.stubGlobal("dohcDesktop", {
+    revealWorkspaceFolder: reveal,
+    dismissAccessSavedNotice: dismiss,
+  });
 }
 
 describe("the notice for items an access change saved", () => {
@@ -27,7 +33,7 @@ describe("the notice for items an access change saved", () => {
         action: expect.objectContaining({ label: "Open folder" }),
       }),
     );
-    report.mock.calls[0]![0].action.run();
+    report.mock.calls[0]![0].action!.run();
     await vi.waitFor(() =>
       expect(reveal).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", accessSaved: true }),
     );
@@ -56,13 +62,33 @@ describe("the notice for items an access change saved", () => {
     );
   });
 
+  it("forgets the folder when the row is dismissed, and says when it could not", async () => {
+    const dismiss = vi.fn(async (_payload: unknown): Promise<void> => {
+      throw new Error("The workspace closed.");
+    });
+    stubReveal(async () => undefined, dismiss);
+    const report = vi.fn<AccessSavedReport>();
+    renderHook(() => useAccessSavedNotice("w", { folder, count: 1 }, report));
+    report.mock.calls[0]![0].onDismiss!();
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
+    expect(dismiss).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", folder });
+    expect(report.mock.calls[1]![0]).toMatchObject({
+      message: "dohc could not dismiss this Notice.",
+      retry: expect.any(Function),
+    });
+    dismiss.mockResolvedValueOnce(undefined);
+    report.mock.calls[1]![0].retry!();
+    await vi.waitFor(() => expect(dismiss).toHaveBeenCalledTimes(2));
+    expect(report).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a folder it could not open, with Try again", async () => {
     stubReveal(async () => {
       throw new Error("dohc could not find the folder.");
     });
     const report = vi.fn<AccessSavedReport>();
     renderHook(() => useAccessSavedNotice("w", { folder, count: 1 }, report));
-    report.mock.calls[0]![0].action.run();
+    report.mock.calls[0]![0].action!.run();
     await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
     expect(report.mock.calls[1]![0]).toMatchObject({
       message: "dohc could not open the recovery folder.",

@@ -93,6 +93,7 @@
     "desktop:dismiss-chat-dispatch-notice",
     "desktop:dismiss-crash-report",
     "desktop:dismiss-kept-typing",
+    "desktop:dismiss-access-saved-notice",
     "desktop:dismiss-share-capture-notice",
     "desktop:dismiss-share-handoff",
     "desktop:dismiss-share-skips",
