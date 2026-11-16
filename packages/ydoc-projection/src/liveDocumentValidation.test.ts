@@ -349,6 +349,27 @@ describe("public Markdown schema", () => {
     }
   });
 
+  it("accepts neighbouring texts in one paragraph, as two editors typing into one new line leave them", () => {
+    const twin = (marks: { first?: object; second?: object }) =>
+      encode("Text", (doc) => {
+        const paragraph = doc.getXmlFragment("body").get(0) as Y.XmlElement;
+        const first = paragraph.get(0) as Y.XmlText,
+          second = new Y.XmlText();
+        paragraph.insert(1, [second]);
+        second.insert(0, " more", marks.second);
+        if (marks.first) first.format(0, first.length, marks.first);
+      });
+    const bold = { bold: {} };
+    for (const [marks, markdown] of [
+      [{}, "Text more"],
+      [{ first: bold, second: bold }, "**Text more**"],
+      [{ first: bold }, "**Text** more"],
+    ] as const)
+      expect(accepted(twin(marks)).projectedMarkdown).toBe(
+        accepted(encode(markdown)).projectedMarkdown,
+      );
+  });
+
   it("keeps invalid roots, nesting and attributes refused beside empty XmlText", () => {
     refused(encode("Text", (doc) => doc.getXmlFragment("body").insert(0, [new Y.XmlText()])));
     refused(
