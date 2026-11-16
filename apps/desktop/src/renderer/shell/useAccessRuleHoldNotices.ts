@@ -4,6 +4,7 @@ import {
   heldOuterAccessRuleFolder,
   isAccessRuleChangedRefusal,
   isAccessRuleNotHeldRefusal,
+  readError,
 } from "../../ipc/errorWords";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
@@ -78,6 +79,12 @@ const reachWords = (reach: AccessRuleReach, level: MemberLevel) => {
 };
 
 /** The place a hold is about, in a sentence: the folder, or this workspace for its own rule. */
+// A refusal that trying again only repeats, such as a moved workspace
+// folder, says what to do instead, so its words replace the row's own.
+const finalWords = (error: unknown): string | null => {
+  const read = readError(error);
+  return read.canRetry === false && read.mapped ? read.words : null;
+};
 const placeOf = (folder: string) => folder || "this workspace";
 // The same place opening a sentence; a folder keeps its own spelling.
 const placeOpening = (folder: string) => folder || "This workspace";
@@ -419,12 +426,13 @@ export function useAccessRuleHoldNotices(
             });
             return;
           }
+          const final = finalWords(error);
           latest.current.reportShellFailure({
             title,
-            message: `${ruleOf(hold.folder)} stays as you chose.`,
+            message: final ?? `${ruleOf(hold.folder)} stays as you chose.`,
             cause: error,
             details,
-            retry: () => undo(asked, hold, decision, change),
+            retry: final ? null : () => undo(asked, hold, decision, change),
           });
         },
       );
@@ -510,14 +518,17 @@ export function useAccessRuleHoldNotices(
             return;
           }
           const place = placeOf(hold.folder);
+          const final = finalWords(error);
           latest.current.reportShellFailure({
             title:
               decision === "restore"
                 ? `dohc could not restore ${ruleOfLower(hold.folder)}`
                 : `dohc could not change access to ${place}`,
-            message: `dohc still doesn't record or share changes in ${place}. Members keep their earlier access.`,
+            message:
+              final ??
+              `dohc still doesn't record or share changes in ${place}. Members keep their earlier access.`,
             cause: error,
-            retry: () => decideRef.current(asked, hold, decision),
+            retry: final ? null : () => decideRef.current(asked, hold, decision),
           });
         },
       );

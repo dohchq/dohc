@@ -524,6 +524,43 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")!.action?.busy).toBeUndefined();
   });
 
+  it("says to open the workspace again when its folder moved, with no Try again, for a choice and its Undo", async () => {
+    const moved = () =>
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [INVALID_PARAMS]: workspace-folder-moved",
+      );
+    const words =
+      "This workspace's folder moved while dohc had it open. Open the workspace again from where it is now.";
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(moved());
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    const chose = () =>
+      h
+        .errors()
+        .shellErrors.find(
+          (error) => error.title === "dohc could not restore the access rule for team",
+        );
+    await waitFor(() => expect(chose()).toMatchObject({ message: words, retry: null }));
+
+    const undo = {
+      path: "team/access.yaml",
+      text: "members: view\n",
+      expectedSha256: "b".repeat(64),
+    };
+    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() => expect(done()).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(moved());
+    act(() => h.errors().runShellErrorAction(done()!.id));
+    const undid = () =>
+      h
+        .errors()
+        .shellErrors.find((error) => error.title === "dohc could not undo your choice for team");
+    await waitFor(() => expect(undid()).toMatchObject({ message: words, retry: null }));
+  });
+
   it("names the level members get from Members settings, in the rows and what Remove rule did", async () => {
     const h = harness([ROOT_REMOVED], membersAt("comment"));
     await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Comment"] }));
