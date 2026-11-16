@@ -505,7 +505,7 @@ function ConversationForAccount(props: ConversationProps) {
 
   const composerShows = person !== null && shown.status === "ready" && !person.blocked;
   useEffect(() => {
-    if (composerShows && store.takeFocus(conversationId)) composer.current?.focus();
+    if (composerShows && store.takeFocus(conversationId)) composer.current?.focusEnd();
   }, [composerShows, handedOff, store, conversationId]);
 
   let footer: ReactNode = null;

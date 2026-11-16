@@ -61,6 +61,8 @@ import { useToastsAbove } from "./toastClearance";
 // What a control outside the composer can ask of it. Neither sends.
 export interface MentionComposerHandle {
   focus(): void;
+  // Focuses with the caret after the draft, to carry on writing it.
+  focusEnd(): void;
   // Adds @handle for a candidate to the end of the draft, as if picked from
   // the @ menu, and puts the caret after it.
   mention(candidateId: string): void;
@@ -269,6 +271,13 @@ export function MentionComposer(props: {
     props.handle,
     () => ({
       focus: () => textareaRef.current?.focus(),
+      focusEnd: () => {
+        const node = textareaRef.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(node.value.length, node.value.length);
+        setCaret(node.value.length);
+      },
       mention: (candidateId) => {
         const candidate = props.candidates.find((value) => value.id === candidateId);
         const pick = rosterPick.current;
@@ -1142,21 +1151,23 @@ export function MentionComposer(props: {
               )}
             />
           ) : null}
-          {props.noMentions ? null : <button
-            type="button"
-            aria-label="Mention"
-            title="Mention a person or agent"
-            tabIndex={-1}
-            disabled={locked}
-            onMouseDown={(event) => {
-              // Insert "@" and open the roster without stealing textarea focus.
-              event.preventDefault();
-              insertAtCaret("@");
-            }}
-            className={BAR_BUTTON}
-          >
-            <AtSign size={16} strokeWidth={1.9} aria-hidden />
-          </button>}
+          {props.noMentions ? null : (
+            <button
+              type="button"
+              aria-label="Mention"
+              title="Mention a person or agent"
+              tabIndex={-1}
+              disabled={locked}
+              onMouseDown={(event) => {
+                // Insert "@" and open the roster without stealing textarea focus.
+                event.preventDefault();
+                insertAtCaret("@");
+              }}
+              className={BAR_BUTTON}
+            >
+              <AtSign size={16} strokeWidth={1.9} aria-hidden />
+            </button>
+          )}
           {props.agentOffer ? <AgentOffer offer={props.agentOffer} /> : <span className="flex-1" />}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}

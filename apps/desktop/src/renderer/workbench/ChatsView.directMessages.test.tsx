@@ -852,6 +852,8 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(within(view).getByTestId("chats-dm-composer")),
     );
+    // The caret sits after the words, so typing carries on writing them.
+    expect((document.activeElement as HTMLTextAreaElement).selectionStart).toBe("Lunch?".length);
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
   });
 
