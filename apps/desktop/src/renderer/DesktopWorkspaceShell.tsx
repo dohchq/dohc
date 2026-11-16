@@ -2496,14 +2496,6 @@ export function DesktopWorkspaceShell(props: {
     access: "view" | "comment" | "edit";
   } | null>(null);
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
-  // About's Access follows a level change at once, as the composer does, and says when the membership ended.
-  const aboutAccessContext = useMemo<AccessContext>(
-    () =>
-      membershipView && shareAccess
-        ? { ...accessContext, membershipLevel: shareAccess, membershipEnded: shareViewEnded }
-        : accessContext,
-    [accessContext, membershipView, shareAccess, shareViewEnded],
-  );
   // A membership's role, as the relay last named it. It is keyed by share, so
   // a registry refresh after a level change keeps it.
   // The view keeps the role the relay last named, and the access check
@@ -2521,6 +2513,23 @@ export function DesktopWorkspaceShell(props: {
   // same cause file that row instead of their own.
   const otherAccountApplies =
     membershipView && !shareViewEnded && cloudStatus?.connected === true && otherAccount;
+  // About's Access follows a level change at once, as the composer does, and says when the membership ended.
+  // While another account is signed in, it says so in the band's words instead of reading Members.
+  const otherAccountEmail = otherAccountApplies ? (cloudStatus?.email ?? null) : undefined;
+  const aboutAccessContext = useMemo<AccessContext>(
+    () =>
+      membershipView && shareAccess
+        ? {
+            ...accessContext,
+            membershipLevel: shareAccess,
+            membershipEnded: shareViewEnded,
+            ...(otherAccountEmail !== undefined
+              ? { otherAccount: { email: otherAccountEmail } }
+              : {}),
+          }
+        : accessContext,
+    [accessContext, membershipView, otherAccountEmail, shareAccess, shareViewEnded],
+  );
   otherAccountNotice.current = otherAccountApplies
     ? {
         ...otherAccountWords(workspaceName(props.workspace), cloudStatus?.email ?? null),

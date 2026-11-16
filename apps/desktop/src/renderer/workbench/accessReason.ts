@@ -31,6 +31,9 @@ export type AccessContext = {
   membershipLevel?: "view" | "comment" | "edit";
   // The joined workspace's membership ended.
   membershipEnded?: boolean;
+  // A joined workspace while another account than the one that joined is
+  // signed in, with that account's email when dohc knows it.
+  otherAccount?: { email: string | null };
   // Your display name, for your avatar's letter where a row reads "You".
   ownName?: string;
 };

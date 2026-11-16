@@ -125,6 +125,18 @@ describe("a joined workspace", () => {
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
   });
 
+  it("says in About's Access that another account is signed in, with no Try again", async () => {
+    const bridge = makeShareBridge(Promise.resolve({ ...storedStateWithTabs(["a.md"]), aboutVisible: true }));
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount: false });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "edit" } }));
+    const note = await screen.findByTestId("about-access-other-account");
+    expect(note.textContent).toBe("This computer is signed in as lee@dohc.test, not the account the owner invited.Switch account");
+    expect(screen.queryByTestId("about-access-failed")).toBeNull();
+    expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+  });
+
   it("shows no Group composer at Comment while another account is signed in", async () => {
     const bridge = makeShareBridge();
     bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,

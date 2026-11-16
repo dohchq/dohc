@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Pencil,
   Share2,
+  User,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -37,6 +38,7 @@ import type {
   EngineMomentRecord,
 } from "../../ipc/bridgeContract";
 import { isChatMentionPageChanged, isWorkspaceUpdatingError } from "../../ipc/errorWords";
+import { joinedByAnother } from "../../ipc/joinedAccountWords";
 import { bridge } from "../bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
@@ -1793,12 +1795,28 @@ export function AboutAccess(props: {
   const joined = membershipLevel !== undefined;
   // The owner's answer names each membership. Access then reads the people from the Members page.
   const ownedMembers = !joined && view.status === "ready" && view.answer.rows.some(isMembershipRow);
+  // Members answers only the account that joined, so another one reads nothing a Try again could fix.
+  const otherAccount = joined ? props.context.otherAccount : undefined;
   const members = useMemberPeople(
     workspaceId,
-    (joined && !membershipEnded) || ownedMembers,
+    (joined && !membershipEnded && !otherAccount) || ownedMembers,
     props.expanded,
     props.notices,
   );
+  if (otherAccount && !membershipEnded) {
+    return (
+      <AboutSection id="access" label="Access" expanded={props.expanded} onToggle={props.onToggle}>
+        <AboutNote
+          testId="about-access-other-account"
+          reason="other-account"
+          icon={User}
+          action={{ label: "Switch account", run: openSyncSettings }}
+        >
+          {joinedByAnother(otherAccount.email)}
+        </AboutNote>
+      </AboutSection>
+    );
+  }
   // A relay that lists no Members page for this account leaves main's answer.
   if (joined && members.people && members.people.status !== "refused") {
     return (
@@ -1846,7 +1864,8 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
           className="shrink-0 text-[11px] tabular-nums text-subtle"
         >
           {/* Beside "Checked" the time reads on its own. Beside any other state it says what it is. */}
-          {answer.freshness === "fresh" ? "" : "Last checked "}{formatShortTime(answer.checkedAtMs)}
+          {answer.freshness === "fresh" ? "" : "Last checked "}
+          {formatShortTime(answer.checkedAtMs)}
         </time>
       ) : null}
       {props.scope ? (

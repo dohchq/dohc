@@ -138,6 +138,7 @@ function Access(props: {
   membershipLevel?: "view" | "comment" | "edit";
   membershipEnded?: boolean;
   ownName?: string;
+  otherAccount?: { email: string | null };
 }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
@@ -152,6 +153,7 @@ function Access(props: {
         sharing: props.sharing ?? false,
         ...(props.membershipLevel ? { membershipLevel: props.membershipLevel } : {}),
         ...(props.membershipEnded ? { membershipEnded: true } : {}),
+        ...(props.otherAccount ? { otherAccount: props.otherAccount } : {}),
         ...(props.ownName ? { ownName: props.ownName } : {}),
       }}
     />
@@ -354,6 +356,50 @@ describe("About Access", () => {
     expect(avatar.textContent).toBe("A");
     expect(row.textContent).toBe("AYouCan comment");
   });
+
+  // Members answers only the account that joined. The band says why once, so Access says it in
+  // the same words and offers no Try again that could not succeed.
+  it.each([
+    [
+      "lee@dohc.test",
+      "This computer is signed in as lee@dohc.test, not the account the owner invited.",
+    ],
+    [null, "This computer is signed in to a different account than the one the owner invited."],
+  ] as const)(
+    "says another account is signed in, in place of Members, for %s",
+    async (email, words) => {
+      bridgeMock.workspaceMembers.mockRejectedValue(
+        new Error(
+          "This computer is signed in to a different account than the one the owner invited.",
+        ),
+      );
+      bridgeMock.getObjectAccess.mockResolvedValue(
+        answer({
+          unknownReason: null,
+          coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+          rows: [
+            share({
+              via: "received",
+              sharerName: "Ana",
+              subjectName: "Lisbon trip",
+              access: "edit",
+              selector: { kind: "workspace", role: "member" },
+            }),
+          ],
+        }),
+      );
+      render(<Access membershipLevel="edit" otherAccount={{ email }} />);
+      const note = await screen.findByTestId("about-access-other-account");
+      expect(note.textContent).toBe(`${words}Switch account`);
+      expect(screen.queryByTestId("about-access-failed")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(screen.queryByTestId("about-access-count")).toBeNull();
+      act(() => within(note).getByRole("button", { name: "Switch account" }).click());
+      expect(openSyncSettings).toHaveBeenCalled();
+      expect(bridgeMock.workspaceMembers).not.toHaveBeenCalled();
+      expect(notices.report).not.toHaveBeenCalled();
+    },
+  );
 
   it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {
     bridgeMock.getObjectAccess.mockResolvedValueOnce(UNKNOWN).mockResolvedValue(answer());
