@@ -10,6 +10,14 @@ import {
 } from "react";
 import { AppState, View } from "react-native";
 import { nativeDurableFile } from "../../modules/durable-file";
+import {
+  appTeardown,
+  createAppRunner,
+  createWorkspaceApps,
+  type AppRunner,
+  type WorkspaceApps,
+} from "../apps/appStore";
+import { canOpenApps } from "../apps/canOpenApps";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
@@ -48,6 +56,10 @@ interface AccountValue {
   readonly notices: NoticeStore | null;
   /** The wakes of the conversations on screen, one sign-in's and open workspace's, in memory only. */
   readonly wakes: ChatWakes | null;
+  /** The app running on the phone, in memory only. */
+  readonly runner: AppRunner;
+  /** The open workspace's published apps. */
+  readonly apps: WorkspaceApps | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -78,17 +90,28 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
 // write's result hands it off. An app-state change tries again whatever failed, and asks again at once. Only where its
 // Sign out delete stands reaches the screen, so the rest of its changes render nothing.
+//
+// A running app (src/apps/appStore.ts) ends before anything else happens at Sign out, a sign-in change, a workspace
+// switch and Show on phone off.
 export function AccountProvider({ children }: { children: ReactNode }) {
+  const [runner] = useState(createAppRunner);
+  const [teardown] = useState(() => appTeardown(runner));
   // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost. With phone writes
   // off it sends nothing, not even records an earlier build kept.
   const [outbox] = useState(() =>
     createOutbox({ files: createDurableFiles(nativeDurableFile()), sends: phoneWrites }),
   );
   const [account] = useState(() =>
-    createAccount({ store: secureSignInStore, fetch, onSignOut: (leave) => outbox.signOut(leave) }),
+    createAccount({
+      store: secureSignInStore,
+      fetch,
+      onSignOut: teardown.signOut((leave) => outbox.signOut(leave)),
+    }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => void account.restore(), [account]);
+  // Subscribed before the cache and the outbox follow the account, so it runs before either clears anything.
+  useEffect(() => teardown.follow(account), [account, teardown]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
   const [cache] = useState(() => createReadCache(createCacheFiles()));
@@ -126,6 +149,25 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
   );
+  // A workspace that stops being the open one, here or from another device, ends its app as the open store changes.
+  useEffect(
+    () => open?.subscribe(() => teardown.open(open.state().currentWorkspaceId)),
+    [open, teardown],
+  );
+  const apps = useMemo(
+    () =>
+      signIn && currentWorkspaceId
+        ? createWorkspaceApps({
+            signIn,
+            workspaceId: currentWorkspaceId,
+            runner,
+            fetch,
+            canOpen: canOpenApps,
+          })
+        : null,
+    [signIn, currentWorkspaceId, runner],
+  );
+  useEffect(() => () => apps?.stop(), [apps]);
   const [noticeFiles] = useState(() => createNoticeFiles());
   useEffect(() => clearNoticesOnSignInChange(account, noticeFiles), [account, noticeFiles]);
   // As the open workspace's store: making one starts nothing, and the effect runs it.
@@ -193,9 +235,17 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       data,
       notices,
       wakes,
-      chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
+      runner,
+      apps,
+      chooseWorkspace: (workspaceId) => {
+        teardown.open(workspaceId);
+        open?.choose(workspaceId);
+      },
       reloadWorkspaces: () => list?.reload(),
-      setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
+      setShowOnPhone: (workspaceId, showOnPhone) => {
+        if (!showOnPhone) teardown.hide(workspaceId);
+        open?.setShowOnPhone(workspaceId, showOnPhone);
+      },
     }),
     [
       account,
@@ -207,6 +257,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       data,
       notices,
       wakes,
+      runner,
+      teardown,
+      apps,
       list,
       open,
     ],

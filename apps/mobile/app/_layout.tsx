@@ -1,4 +1,5 @@
 import { accountWords } from "@dohc/interface-words/account";
+import { appWords } from "@dohc/interface-words/apps";
 import { chatWords } from "@dohc/interface-words/notices";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -65,6 +66,9 @@ export default function RootLayout() {
             />
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
             <Stack.Screen name="outbox" options={{ title: chatWords.messagesOnPhone }} />
+            <Stack.Screen name="app-review" options={{ title: appWords.review }} />
+            {/* The app runs under its own name, without the swipe back that the app's own swipes would meet. */}
+            <Stack.Screen name="app-run" options={{ gestureEnabled: false }} />
             <Stack.Screen
               name="workspaces"
               options={{
