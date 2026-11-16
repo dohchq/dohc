@@ -102,7 +102,8 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
 
   const receive = useCallback((state: NamedLiveBrowserState) => {
     if (state.status === "live") {setLive(true); setPhase({kind: "live"});}
-    setPending(state.pendingUpdates > 0 || state.status === "quarantined");
+    // A live session keeps saving, and the header says "Saving changes…". The person needs the draft only once dohc cannot send it.
+    setPending(state.status === "quarantined" || (state.status !== "live" && state.pendingUpdates > 0));
   }, []);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {

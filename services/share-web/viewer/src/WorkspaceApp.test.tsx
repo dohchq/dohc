@@ -531,6 +531,8 @@ function liveSession() {
       paragraph.insert(0, [new Y.XmlText(text)]); body.insert(body.length, [paragraph]);
       state = {...state, pendingUpdates: 1}; notify();
     },
+    // The connection drops or the session stops taking changes.
+    drop(status: NamedLiveBrowserState["status"]) {state = {...state, status}; notify();},
     edit(change: () => void) {if (state.status !== "live") return false; change(); return true;}};
   return session;
 }
@@ -551,6 +553,18 @@ it("opens a page in the live editor at Edit, as the signed-in account", async ()
   expect(container.querySelector("header .named-document-status")).toBeNull();
   await act(async () => session.type("Leave at ten."));
   expect(container.querySelector("header .named-document-status")?.textContent).toBe("Saving changes…");
+  // Saving on a healthy connection is not a draft to recover.
+  expect(container.querySelector('[aria-label="Draft recovery"]')).toBeNull();
+  expect(button("Open current file")).toBeUndefined();
+});
+
+// The draft needs the person only once dohc cannot send it.
+it.each(["quarantined", "disconnected"] as const)("offers the draft to review once a %s session still holds unsent edits", async status => {
+  const session = await editing({level: "edit"});
+  expect(container.querySelector('[aria-label="Draft recovery"]')).toBeNull();
+  await act(async () => session.drop(status));
+  await settle(() => container.querySelector('[aria-label="Draft recovery"]') !== null);
+  expect(button("Open current file")).not.toBeUndefined();
 });
 
 it("waits for the owner's dohc with the page readable, raises a toast after 15 seconds, and opens by itself once ready", async () => {
@@ -614,9 +628,10 @@ const recovery = () => container.querySelector<HTMLElement>('[aria-label="Unsent
 
 it("keeps a later draft's unsent text after the person discarded an earlier one", async () => {
   const options: {level: Level} = {level: "edit"};
-  await editing(options);
+  const first = await editing(options);
   const next = liveSession();
   vi.mocked(memberDocument).mockReturnValueOnce({session: next as never, close: vi.fn()});
+  await act(async () => first.drop("disconnected"));
   await settle(() => button("Open current file") !== undefined);
   await click("Open current file"); await click("Discard draft and continue");
   await settle(() => next.reconnect.mock.calls.length === 1);
