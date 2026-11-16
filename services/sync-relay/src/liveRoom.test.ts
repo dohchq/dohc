@@ -1170,14 +1170,18 @@ it("checks the part of an edit it keeps, not the edit as sent", async () => {
   // An edit that lists editor 7 twice: Yjs applies its second list alone, which hides the first.
   // Each list is an edit's bytes without its count of editors and its removals, which are none yet.
   const listed = (bytes: Uint8Array) => bytes.slice(1, -1);
-  const twice = new Uint8Array([
-    2,
-    ...listed(edit(7, (page) => page.getXmlFragment("body").push([new Y.XmlElement("bogus")]))),
-    ...listed(edit(7, (page) => page.getMap("frontmatter").set("k", "ok"))),
-    0,
-  ]);
+  const bogus = listed(
+    edit(7, (page) => page.getXmlFragment("body").push([new Y.XmlElement("bogus")])),
+  );
+  const ok = listed(edit(7, (page) => page.getMap("frontmatter").set("k", "ok")));
+  const twice = new Uint8Array([2, ...bogus, ...ok, 0]);
   expect(Y.decodeUpdate(twice).structs.map((struct) => struct.id.clock)).toEqual([0, 0]);
   expect(await a.submit(twice)).toEqual({ result: "refused", reason: "invalid-update" });
+  // The same with editor 8 between them, which keeps editor 7's lists apart once trimmed.
+  const between = listed(edit(8, (page) => page.getMap("frontmatter").set("j", "ok")));
+  const apart = new Uint8Array([3, ...bogus, ...between, ...ok, 0]);
+  expect(Y.decodeUpdate(apart).structs.map((struct) => struct.id.client)).toEqual([7, 8, 7]);
+  expect(await a.submit(apart)).toEqual({ result: "refused", reason: "invalid-update" });
   // Editor 5 adds a paragraph and removes it, and Yjs collects its words (5,1 to 5,3).
   await take(
     edit(

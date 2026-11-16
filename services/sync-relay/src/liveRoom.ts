@@ -230,9 +230,17 @@ export function roomAdmissible(doc: Y.Doc, update: Uint8Array): { clients: numbe
   const have = Y.decodeStateVector(Y.encodeStateVector(doc));
   const reach = new Map(have);
   const clients = new Set<number>();
+  // Yjs applies only an editor's last list of an update, while a save merges every list.
+  const listed = new Set<number>();
+  let last: number | undefined;
   for (const struct of decoded.structs) {
     if (struct instanceof Y.Skip) return null;
     const { client, clock } = struct.id;
+    if (client !== last) {
+      if (listed.has(client)) return null;
+      listed.add(client);
+      last = client;
+    }
     const at = reach.get(client) ?? 0;
     if (clock > at) return null;
     const end = clock + struct.length;
