@@ -39,6 +39,7 @@ import {
   advanceLiveRoomPosition,
   appendLiveRoomEdit,
   deleteSavedLiveRoomEdits,
+  recordLiveRoomSave,
   liveRoomDocuments,
   liveRoomEdits,
   liveRoomLineageIsCurrent,
@@ -441,6 +442,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             authors,
             committed(journalCursor) {
               deleteSavedLiveRoomEdits(storage, room.document, through);
+              recordLiveRoomSave(storage, room.document, journalCursor, through);
               // The room moves on only once the save's transaction has committed.
               return () => {
                 room.savedThrough = through;

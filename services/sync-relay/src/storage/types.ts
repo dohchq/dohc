@@ -796,6 +796,10 @@ export interface SyncRelayStorage {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
     nextCursor: string | null;
   };
+  retiredAcceptedCursor(workspaceId: string, objectId: string): number | null;
+  readRetiredJournalPage(
+    input: Parameters<typeof import("./serviceActivationRetirement").readRetiredJournalPage>[1],
+  ): import("./serviceActivationRetirement").RetiredJournalPage | null;
   currentServiceHostWorkspace(
     workspaceId: string,
     includeUndrained?: boolean,

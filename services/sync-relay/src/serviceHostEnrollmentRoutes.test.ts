@@ -18,6 +18,7 @@ import type { StorageContext } from "./storage/context";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import {
   createServiceHostEnrollmentRoutes,
+  isServiceHostEnrollmentPath,
   discoverServiceHostDocuments,
 } from "./serviceHostEnrollmentRoutes";
 import { createServiceHostReplication } from "./serviceHostReplication";
@@ -1072,6 +1073,87 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&retired=1"))).status).toBe(
     404,
   );
+});
+
+// Proves: once a retirement finishes, its owner reads F on the retired row and the note's journal
+// through F, a page at a time. Before then, for another lineage or generation, or for anyone else,
+// there is no journal to read.
+it("serves a finished retirement's F and journal to the workspace owner alone", async () => {
+  const f = await fixture(),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  retainServiceActivation(f.raw, namespace, true);
+  const stop = await f.handle(
+    f.request("DELETE", {
+      path: binding.currentPath,
+      retire: true,
+      restoreFenceGeneration: binding.restoreFenceGeneration,
+    }),
+  );
+  expect(await stop.json()).toMatchObject({ status: "retired", acceptedCursor: 0 });
+  const query = (values: Record<string, string>) =>
+    `/journal?${new URLSearchParams({
+      objectId: enrolled.objectId,
+      lineageClaimId: binding.lineageClaimId,
+      restoreFenceGeneration: String(binding.restoreFenceGeneration),
+      after: "0",
+      ...values,
+    })}`;
+  const journal = (values: Record<string, string> = {}) =>
+    f.handle(f.request("GET", undefined, {}, query(values)));
+  // The relay sends these routes only the paths this matcher accepts.
+  expect(
+    isServiceHostEnrollmentPath(new URL(f.request("GET", undefined, {}, query({})).url).pathname),
+  ).toBe(true);
+  const retired = async () =>
+    (
+      (await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()) as {
+        documents: object[];
+      }
+    ).documents;
+  // Still retiring: the host has not published its last output.
+  expect(await retired()).toEqual([
+    { path: enrolled.path, objectId: enrolled.objectId, status: "retired", stopped: true },
+  ]);
+  const waiting = await journal();
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toEqual({ ok: false, code: "retirement-not-found" });
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_service_activations SET state_bytes=NULL,retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}'",
+    )
+    .run();
+  expect(await retired()).toEqual([
+    {
+      path: enrolled.path,
+      objectId: enrolled.objectId,
+      status: "retired",
+      stopped: true,
+      acceptedCursor: 0,
+    },
+  ]);
+  expect(await (await journal()).json()).toEqual({
+    ok: true,
+    acceptedCursor: 0,
+    rows: [],
+    nextAfter: null,
+  });
+  for (const values of <Record<string, string>[]>[
+    { restoreFenceGeneration: String(binding.restoreFenceGeneration + 1) },
+    { lineageClaimId: "c".repeat(64) },
+    { objectId: "object-2" },
+  ])
+    expect((await journal(values)).status).toBe(409);
+  for (const values of <Record<string, string>[]>[
+    { after: "-1" },
+    { after: "01" },
+    { lineageClaimId: "C".repeat(64) },
+  ])
+    expect((await journal(values)).status).toBe(400);
+  expect((await f.handle(f.request("GET", undefined, {}, `${query({})}&after=0`))).status).toBe(
+    404,
+  );
+  f.setActor({ workspaceId: scope.workspaceId, userId: "editor-1" });
+  expect((await journal()).status).toBe(404);
 });
 
 // Proves: a retired row whose document was deleted leaves Live documents, since
