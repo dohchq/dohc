@@ -42,6 +42,7 @@ function fixture() {
         listeners.delete(listener);
       };
     },
+    onRemovedText: () => () => {},
     close: vi.fn(() => {
       state = { ...state, status: "closed" };
       notify();

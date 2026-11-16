@@ -1819,6 +1819,20 @@ export const CaptureRecoveryStatusResult = z.object({
       deleted: z.boolean(),
     }),
   ),
+  // Text a merged change from elsewhere removed without having seen it,
+  // kept until its notice is dismissed. Each carries the text's start and its whole
+  // length, in UTF-16 units; the History change holds all of it.
+  mergeRemovals: z.array(
+    z.object({
+      momentId: z.string(),
+      versionId: z.string(),
+      objectId: z.string(),
+      path: z.string(),
+      quote: z.string().min(1),
+      length: z.number().int().positive(),
+      authorKnown: z.boolean(),
+    }),
+  ),
 });
 export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
 export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId: z.string() });
@@ -2101,6 +2115,8 @@ const EngineMomentFields = z.object({
     "ydoc",
     "capture-recovery",
     "capture-recovery-cleared",
+    "merge-removal",
+    "merge-removal-cleared",
   ]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // How each author looks, in the order of `authors`: the same token chats use.
@@ -9012,6 +9028,12 @@ export const EngineYDocSaveStateEvent = z.object({
   // The file changed outside dohc while this session held it. `unsaved` is
   // whether the document had edits no save carried.
   changedOutside: z.object({ unsaved: z.boolean() }).strict().optional(),
+  // Text this device typed that someone else's change removed without having
+  // seen it. It says nothing about the save state, which the event repeats.
+  textRemoved: z
+    .object({ text: z.string().min(1) })
+    .strict()
+    .optional(),
   // A settle failed to write the file, and why when a check can tell. Absent
   // for an edit refusal, an author-capacity refusal, and an error no settle
   // reported.

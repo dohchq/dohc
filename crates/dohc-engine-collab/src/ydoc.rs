@@ -51,8 +51,11 @@ mod nested_markdown_contract_tests;
 #[cfg(test)]
 mod outside_save_fold_tests;
 mod reference_links;
+mod removed_text;
 mod restore_copy;
 mod wikilinks;
+
+pub use removed_text::RemovedText;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
@@ -1337,6 +1340,12 @@ impl Ydoc {
     pub fn richdoc_remove_block(&self, index: u32) -> Vec<u8> {
         let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         self.with_delta(|txn| frag.remove_range(txn, index, 1))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn richdoc_block_count(&self) -> u32 {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        frag.len(&self.doc.transact())
     }
 
     /// Insert `text` at a UTF-16 `offset` into the text of the [`ROOT_BODY`]

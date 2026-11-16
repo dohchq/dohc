@@ -1,6 +1,7 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
+  isCaptureRecoveryOrigin,
   VersionedTextStoreError,
   type VersionedTextStoreErrorCode,
 } from "@dohc/workspace-contracts/engine";
@@ -267,9 +268,7 @@ function momentMetadataFromOrigin(
   supplied?: ActorNeutralWriteMetadata,
 ): MomentMetadata {
   const metadata = metadataFromOrigin(origin, supplied);
-  return origin === "ydoc" || origin === "capture-recovery" || origin === "capture-recovery-cleared"
-    ? { ...metadata, origin }
-    : metadata;
+  return origin === "ydoc" || isCaptureRecoveryOrigin(origin) ? { ...metadata, origin } : metadata;
 }
 
 function snapshotFromWire(

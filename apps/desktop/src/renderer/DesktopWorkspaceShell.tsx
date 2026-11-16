@@ -139,6 +139,7 @@ import { useScheduleHostNotice } from "./shell/useScheduleHostNotice";
 import { useCollectionCopiesLeftNotice } from "./shell/useCollectionCopiesLeftNotice";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
+import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
@@ -1065,6 +1066,7 @@ export function DesktopWorkspaceShell(props: {
     showKeptCopySaved,
     showOutsideCopies,
     showCaptureRecoveries,
+    showMergeRemovals,
     showCaptureHolds,
     showDirectWriteNotice,
     dismissShellError,
@@ -4719,6 +4721,12 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
+  const mergeRemovals = useMergeRemovalNotices({
+    workspaceId,
+    workspaceIsReady: workspaceIsReady && !shareView,
+    show: showMergeRemovals,
+    reportShellError,
+  });
   const [heldEvent, setHeldEvent] = useState<{
     admission: typeof workspaceAdmission;
     files: CaptureFileHold[];
@@ -6134,6 +6142,8 @@ export function DesktopWorkspaceShell(props: {
         void refreshKeptCopies();
         // Capture records kept typing in the batch that took the outside text.
         void captureRecoveries.refresh();
+        // A merge records text a change from elsewhere removed unseen.
+        void mergeRemovals.refresh();
       }
     });
     const unsubscribe = bridge().onWorkspaceActivity((event: WorkspaceActivityEvent) => {
@@ -6186,6 +6196,7 @@ export function DesktopWorkspaceShell(props: {
     refreshDatasets,
     refreshKeptCopies,
     captureRecoveries,
+    mergeRemovals,
     hasCommittedListing,
     invalidateVisibility,
     readCloudStatusAgainIfBusy,

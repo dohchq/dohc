@@ -594,6 +594,52 @@ describe("named live browser provider", () => {
     expect(value.body.toString()).toContain("peer");
     expect(value.state().pendingUpdates).toBe(0);
   });
+  it("tells the page when someone deletes the paragraph it was typing in", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    edit(value, " mine");
+    await host.ack(await host.submitted(), 1, 4);
+    const before = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
+
+    expect(value.body.length).toBe(0);
+    expect(removed).toEqual([" mine"]);
+  });
+  it("tells a desktop whose editor typed through the page that its text was removed", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    const editor = new Y.Doc();
+    cleanup.push(() => editor.destroy());
+    Y.applyUpdate(editor, Y.encodeStateAsUpdate(value.doc));
+    const before = Y.encodeStateVector(editor);
+    const line = (getDohcYDocBodyFragment(editor).get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    line.insert(line.length, " from the editor");
+    value.doc.transact(() => Y.applyUpdate(value.doc, Y.encodeStateAsUpdate(editor, before)));
+    await host.ack(await host.submitted(), 1, 4);
+    const hostBefore = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, hostBefore), 5);
+
+    expect(removed).toEqual([" from the editor"]);
+  });
+  it("says nothing when someone deletes a paragraph after seeing what the page typed", async () => {
+    const { value, host, doc } = await live();
+    const removed: string[] = [];
+    value.onRemovedText((text) => removed.push(text.text));
+    edit(value, " mine");
+    const submitted = await host.submitted();
+    Y.applyUpdate(doc, submitted.bytes);
+    await host.ack(submitted, 1, 4);
+    const before = Y.encodeStateVector(doc);
+    getDohcYDocBodyFragment(doc).delete(0, 1);
+    await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 5);
+
+    expect(value.body.length).toBe(0);
+    expect(removed).toEqual([]);
+  });
   it("refuses an ACK from an unattempted host epoch", async () => {
     const { value, host } = await live();
     edit(value, " draft");
