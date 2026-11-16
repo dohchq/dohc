@@ -634,12 +634,14 @@ fn rendering(source: &str) -> Vec<String> {
     out
 }
 
+/// Another check a finding needs, given the first reading's body and the
+/// first write.
+type Also = (&'static str, fn(&Value, &str) -> bool);
+
 struct Named {
     id: &'static str,
     source: String,
-    /// Another check this finding needs, given the first reading's body and
-    /// the first write.
-    also: Option<(&'static str, fn(&Value, &str) -> bool)>,
+    also: Option<Also>,
 }
 
 fn named_cases() -> Vec<Named> {
