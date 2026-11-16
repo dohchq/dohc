@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { parseArgs, parseEnv } from "node:util";
+import { isDeepStrictEqual, parseArgs, parseEnv } from "node:util";
 import { pathToFileURL } from "node:url";
 import { composeArgs, readSettings, validateSettings } from "./config.mjs";
 
@@ -79,13 +79,15 @@ export function updateImageSetting(original, image) {
 
 /** Adds the key that seals link sessions to a configuration made before that key existed. */
 export function addSessionSealKey(original, key = randomBytes(32).toString("base64url")) {
-  if (parseEnv(original).DOHC_SHARE_WEB_SESSION_SEAL_KEY) return original;
+  const before = parseEnv(original);
+  if (before.DOHC_SHARE_WEB_SESSION_SEAL_KEY) return original;
   // An empty assignment would be read after the new one, so it is replaced where it stands.
   const empty = /^[ \t]*(?:export[ \t]+)?DOHC_SHARE_WEB_SESSION_SEAL_KEY[ \t]*=.*$/m;
   const updated = empty.test(original)
     ? original.replace(empty, () => `DOHC_SHARE_WEB_SESSION_SEAL_KEY='${key}'`)
     : `${original}${original.endsWith("\n") ? "" : "\n"}DOHC_SHARE_WEB_SESSION_SEAL_KEY='${key}'\n`;
-  if (parseEnv(updated).DOHC_SHARE_WEB_SESSION_SEAL_KEY !== key)
+  // A line inside a quoted multiline value can look like an assignment. Every other value must read as before.
+  if (!isDeepStrictEqual(parseEnv(updated), { ...before, DOHC_SHARE_WEB_SESSION_SEAL_KEY: key }))
     throw new Error(
       "Add DOHC_SHARE_WEB_SESSION_SEAL_KEY to the configuration by hand, outside quoted multiline values.",
     );

@@ -26,6 +26,11 @@ const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
 );
 
 const config = loadConfig();
+// An operator who never ran the upgrade that adds the key would otherwise see link holders signed out with no cause.
+if (!config.sessionSealKey && !["development", "test"].includes(process.env.NODE_ENV ?? ""))
+  console.warn(
+    "[share-web] DOHC_SHARE_WEB_SESSION_SEAL_KEY is not set. Open share pages stop working when share-web restarts.",
+  );
 const viewerAssetsDir = viewerAssetsDirectory();
 
 try {

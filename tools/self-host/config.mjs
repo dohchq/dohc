@@ -65,8 +65,16 @@ export function validateSettings(settings) {
     errors.push(
       "Set DOHC_SHARE_WEB_SESSION_SEAL_KEY to the key that bootstrap generated, or to 32 or more random characters.",
     );
-  if (sealKey && sealKey === settings.DOHC_RELAY_EXCHANGE_KEY)
-    errors.push("DOHC_SHARE_WEB_SESSION_SEAL_KEY must differ from DOHC_RELAY_EXCHANGE_KEY.");
+  // What a browser holds is made from this key, so it is no other secret of the deployment.
+  for (const name of [
+    "DOHC_RELAY_EXCHANGE_KEY",
+    "DOHC_RELAY_LINK_KEY",
+    "DOHC_SNAPSHOT_KEY",
+    "BETTER_AUTH_SECRET",
+    "POSTGRES_PASSWORD",
+  ])
+    if (sealKey && sealKey === settings[name])
+      errors.push(`DOHC_SHARE_WEB_SESSION_SEAL_KEY must differ from ${name}.`);
   if (settings.DOHC_POSTGRES_HOST) {
     if (
       !/^(?=.{1,253}$)[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/.test(

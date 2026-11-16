@@ -179,7 +179,12 @@ test("share links get their own generated seal key, which an upgrade adds to an 
     validateSettings({ ...generated, DOHC_SHARE_WEB_SESSION_SEAL_KEY: undefined }),
     [],
   );
-  for (const invalid of ["change-me", "short", generated.DOHC_RELAY_EXCHANGE_KEY])
+  for (const invalid of [
+    "change-me",
+    "short",
+    generated.DOHC_RELAY_EXCHANGE_KEY,
+    generated.DOHC_SNAPSHOT_KEY,
+  ])
     assert.ok(
       validateSettings({ ...generated, DOHC_SHARE_WEB_SESSION_SEAL_KEY: invalid }).some((error) =>
         error.includes("DOHC_SHARE_WEB_SESSION_SEAL_KEY"),
@@ -200,10 +205,12 @@ test("share links get their own generated seal key, which an upgrade adds to an 
     assert.equal(updated.match(/DOHC_SHARE_WEB_SESSION_SEAL_KEY/g).length, 1);
     assert.equal(addSessionSealKey(updated), updated);
   }
-  assert.throws(
-    () => addSessionSealKey("NOTE='keep\nDOHC_SHARE_WEB_SESSION_SEAL_KEY=\n'\n", key),
-    /by hand/,
-  );
+  // A line of a quoted value that looks like the empty assignment is not replaced.
+  for (const quoted of [
+    "NOTE='keep\nDOHC_SHARE_WEB_SESSION_SEAL_KEY=\n'\n",
+    'DOHC_SMTP_PASSWORD="keep\nDOHC_SHARE_WEB_SESSION_SEAL_KEY="\n',
+  ])
+    assert.throws(() => addSessionSealKey(quoted, key), /by hand/, quoted);
 });
 
 test("diagnostics reject placeholders and invalid origins without revealing secrets", () => {
