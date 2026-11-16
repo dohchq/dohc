@@ -85,7 +85,15 @@ it("lists live documents with each state and reason, and pages with the list's c
         objectId: "object-old",
         status: "retired",
         canResume: true,
+        stopped: true,
         deferredStop: { unsentEdits: 1, editable: false },
+      },
+      {
+        path: "ended.md",
+        objectId: "object-ended",
+        status: "retired",
+        canResume: false,
+        stopped: false,
       },
     ],
   };
@@ -101,6 +109,7 @@ it("lists live documents with each state and reason, and pages with the list's c
         "long.md · history too long · can resume",
         "failing.md · can't start · server's reason engine-refused since 2026-11-13T01:00:00.000Z · can resume",
         "old.md · stopped · can resume · Stop waits for 1 unsent edit",
+        "ended.md · not live",
         "More documents; use --cursor notes/old.md",
       ].join("\n") + "\n",
     stderr: "",
