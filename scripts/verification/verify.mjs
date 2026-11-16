@@ -185,6 +185,8 @@ export function desktopProofTags({ platform = process.platform } = {}) {
       "@share-link-agent-sign-in",
       "@live-owner-open",
       "@new-page-edit-link",
+      "@two-computer-drag",
+      "@two-computer-conflict",
       ...(gallery ? ["@states-page"] : []),
     ],
     required: [
@@ -194,6 +196,8 @@ export function desktopProofTags({ platform = process.platform } = {}) {
       "@share-link-agent-sign-in",
       "@live-owner-open",
       "@new-page-edit-link",
+      "@two-computer-drag",
+      "@two-computer-conflict",
       ...(gallery ? ["@states-baselines"] : []),
     ],
   };

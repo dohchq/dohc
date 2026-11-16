@@ -87,7 +87,7 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   );
 });
 
-test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open and the New page Edit link everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open, the New page Edit link and the two-computer Collection tests everywhere and the pixel baseline on Windows", () => {
   const restart = [
     "@restart-durability-idle-external",
     "@restart-durability-overlapping-typing",
@@ -101,6 +101,8 @@ test("desktop proofs require each restart proof, smoke, onboarding, the agent si
     "@share-link-agent-sign-in",
     "@live-owner-open",
     "@new-page-edit-link",
+    "@two-computer-drag",
+    "@two-computer-conflict",
   ];
   assert.deepEqual(desktopProofTags({ platform: "win32" }), {
     selected: [...everywhere, "@states-page"],
