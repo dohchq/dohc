@@ -412,8 +412,20 @@ export function makeBlockControlsPlugin({
           if (event.buttons === 0) hoverBlock(view, hoveredBlock(view, event.target, refs.live));
           return false;
         },
-        mouseleave(view) {
-          hoverBlock(view, null);
+        mouseleave(view, event) {
+          if (event.buttons === 0) {
+            hoverBlock(view, null);
+            return false;
+          }
+          // A held button that leaves is let go outside the editor, where no
+          // mousemove reaches this plugin.
+          window.addEventListener(
+            "mouseup",
+            () => {
+              if (!view.isDestroyed && !view.dom.matches(":hover")) hoverBlock(view, null);
+            },
+            { once: true },
+          );
           return false;
         },
       },

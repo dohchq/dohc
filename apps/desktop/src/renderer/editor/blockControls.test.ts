@@ -745,7 +745,18 @@ describe("blockControls gutter coverage", () => {
     const second = editor.view.nodeDOM(topLevelBlocks(editor)[1]!.pos) as Element;
     second.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1 }));
     expect(visibleControls(editor)).toEqual([first]);
+    // A selection dragged out past the editor's edge leaves with the button down.
+    editor.view.dom.dispatchEvent(new MouseEvent("mouseleave", { buttons: 1 }));
+    expect(visibleControls(editor)).toEqual([first]);
     expect(hover(editor, second).map(blockAfter)).toEqual([second]);
+  });
+
+  it("hides the controls when a held button is let go outside the editor", () => {
+    const editor = track(paragraphs(3));
+    blockControls(editor, 0);
+    editor.view.dom.dispatchEvent(new MouseEvent("mouseleave", { buttons: 1 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    expect(visibleControls(editor)).toEqual([]);
   });
 
   it("keeps the handle whose menu is open while the pointer moves away", () => {
