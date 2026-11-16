@@ -25,6 +25,9 @@ const KEY_INTERVAL_MS = Number(process.env.DOHC_LARGE_NOTE_KEY_INTERVAL_MS ?? 10
 const TRACE = process.env.DOHC_LARGE_NOTE_TRACE === "1";
 // "timeline" records a Chromium trace of the measured keys instead: layout, style and paint times.
 const TIMELINE = process.env.DOHC_LARGE_NOTE_TRACE === "timeline";
+// How long the note must go without a long task before its keys are timed. 0 times the
+// keys a person types as soon as the note opens.
+const QUIET_MS = Number(process.env.DOHC_LARGE_NOTE_QUIET_MS ?? 3_000);
 // "open" traces every process from the click that opens a note until its caret is placed.
 const OPEN_TRACE = process.env.DOHC_LARGE_NOTE_TRACE === "open";
 // "0" turns the spellchecker off for the run, to measure what it costs.
@@ -185,7 +188,7 @@ async function startMainProfile(app: ElectronApplication): Promise<() => Promise
 }
 
 /** Waits until the page has gone `quietMs` without a long task. */
-async function settle(page: Page, quietMs = 3_000): Promise<number> {
+async function settle(page: Page, quietMs: number): Promise<number> {
   return page.evaluate(
     (quiet) =>
       new Promise<number>((resolve) => {
@@ -317,7 +320,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       step(
         `editable after ${Math.round(openToEditableMs)} ms, accessibility [${await accessibilityFeatures()}]`,
       );
-      const settledAfterMs = await settle(page);
+      const settledAfterMs = await settle(page, QUIET_MS);
       step(`quiet after ${Math.round(settledAfterMs)} ms`);
       const clickStartedAt = performance.now();
       const editor = page.getByTestId("markdown-editor");

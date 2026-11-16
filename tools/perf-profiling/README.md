@@ -504,6 +504,7 @@ Read `large-note-typing.json` in the output directory.
 | `DOHC_LARGE_NOTE_ORDER` | `small,plain,rich,rich,plain,small` | The notes to open, in order. |
 | `DOHC_LARGE_NOTE_SAMPLES` | `60` | Measured keys in each round, after five warm-up keys. |
 | `DOHC_LARGE_NOTE_KEY_INTERVAL_MS` | `100` | Time between keys. |
+| `DOHC_LARGE_NOTE_QUIET_MS` | `3000` | How long the note must go without a long task before its keys are timed. `0` times the keys a person types as soon as the note opens. |
 | `DOHC_LARGE_NOTE_TRACE` | off | `1` keeps a CPU profile of the renderer and of the main process. `timeline` keeps a Chromium trace of the measured keys. `open` keeps a trace of every process from the click that opens a note until its caret is placed. |
 | `DOHC_LARGE_NOTE_SPELLCHECK` | on | `0` turns the spellchecker off. |
 | `DOHC_LARGE_NOTE_SWITCHES` | none | Extra Chromium switches, separated by spaces. |
