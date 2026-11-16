@@ -339,6 +339,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding;
     // The room's queue is empty and it waits for an edit.
     idle: boolean;
+    // Sends the queue's head now, for entries the engine adds without an edit landing.
+    wake?: () => void;
     // The relay took an edit since the room last waited.
     acknowledged: boolean;
     end: AbortController;
@@ -836,16 +838,19 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                           waited();
                           const wake = () => {
                             room.idle = false;
+                            room.wake = undefined;
                             edits.waiters.delete(wake);
                             landedSignal.removeEventListener("abort", stop);
                             resolve();
                           };
                           const stop = () => {
                             room.idle = false;
+                            room.wake = undefined;
                             edits.waiters.delete(wake);
                             reject(landedSignal.reason);
                           };
                           edits.waiters.add(wake);
+                          room.wake = wake;
                           landedSignal.addEventListener("abort", stop, { once: true });
                         }),
                       acknowledged: () => {
@@ -1167,10 +1172,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
                     check();
                     const native = nativeOwnerDeliveryModule;
-                    const roomUp =
-                      ownerRooms.get(workspaceId)?.get(document.binding.objectId)?.end.signal
-                        .aborted === false;
-                    // A note in its room delivers there.
+                    const room = ownerRooms.get(workspaceId)?.get(document.binding.objectId);
+                    const roomUp = room?.end.signal.aborted === false;
+                    // A note in its room delivers there. Its turn wakes the room for an entry the
+                    // engine queued itself, such as a Collection adoption.
+                    if (roomUp) room.wake?.();
                     const result = roomUp
                       ? ("room" as const)
                       : await sessions.run(operation.workspace, async (binding) => {

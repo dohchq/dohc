@@ -1492,21 +1492,21 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  it("keeps one connection for a shared note its owner has open, and passes leave that note to it", async () => {
+  it("keeps one connection for a shared note its owner has open, and passes wake it instead of delivering", async () => {
     const { f, credentials } = await quarantinedOwner([
       { path: "notes/plan.md", objectId: "object" },
       { path: "notes/other.md", objectId: "other" },
     ]);
     quarantineMock.read.mockResolvedValue([]);
     f.dependencies.ownerHasOpen = (_workspaceId, path) => path === "notes/plan.md";
+    let wakes = 0;
     ownerDeliveryMock.pass.mockImplementation(async (options) => {
       if (!options.lasting) return "empty";
-      // The room stays open until something ends it.
-      return new Promise((_, reject) =>
-        options.signal.addEventListener("abort", () => reject(options.signal.reason), {
-          once: true,
-        }),
-      );
+      // The room waits for an edit until something ends it.
+      for (;;) {
+        await options.lasting.landed(options.lasting.count(), options.signal);
+        wakes += 1;
+      }
     });
     const calls = (path: string) =>
       ownerDeliveryMock.pass.mock.calls
@@ -1520,6 +1520,8 @@ describe("server owner peer lifecycle", () => {
         f.engine.retryOwnerDelivery("owner");
         await vi.waitFor(() => expect(calls("notes/other.md").length).toBeGreaterThan(before));
       }
+      // The note's turns wake its room, so an entry the engine queued without an edit goes.
+      await vi.waitFor(() => expect(wakes).toBeGreaterThan(0));
       expect(calls("notes/plan.md")).toHaveLength(1);
       expect(calls("notes/plan.md")[0].lasting).toBeDefined();
       expect(calls("notes/other.md").every((options) => !options.lasting)).toBe(true);
