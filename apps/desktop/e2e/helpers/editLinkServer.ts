@@ -38,6 +38,8 @@ export interface EditLinkServer {
   filesOnServer(): Promise<Set<string>>;
   /** A new share service behind the same address, as after its restart. */
   restartShareService(): void;
+  /** The share service gone for `ms`, then a new one behind the same address. */
+  restartShareServiceAfter(ms: number): Promise<void>;
   /** Stops the relay and starts it again on the same port. `whileDown` runs between the two. */
   restartRelay(whileDown?: () => Promise<void>): Promise<void>;
   quitDesktop(): Promise<void>;
@@ -181,6 +183,7 @@ export async function openEditLinkOnServer(input: {
       editor,
       filesOnServer: pathsOnServer,
       restartShareService: () => shared!.restart(),
+      restartShareServiceAfter: (ms) => shared!.restartAfter(ms),
       async restartRelay(whileDown) {
         const port = relay!.port;
         await relay!.stop();

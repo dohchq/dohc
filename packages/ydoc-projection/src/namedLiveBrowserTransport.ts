@@ -208,7 +208,11 @@ export function createNamedLiveBrowserTransport<
         return;
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
-        reconnectDelayMs = Math.min(10_000, reconnectDelayMs * 2);
+        // A server that restarts is back within seconds. For a minute after the page was last live it waits
+        // at most two seconds between failed attempts, so it is live again soon after the server is.
+        const longestMs =
+          accessStoodAt !== undefined && Date.now() - accessStoodAt < 60_000 ? 2_000 : 10_000;
+        reconnectDelayMs = Math.min(longestMs, reconnectDelayMs * 2);
         void connect();
       }, reconnectDelayMs);
     }
