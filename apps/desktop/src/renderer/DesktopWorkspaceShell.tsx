@@ -7043,6 +7043,7 @@ export function DesktopWorkspaceShell(props: {
     membership: membershipView,
     workspaceName: workspaceName(props.workspace),
     enabled: shareViewWritable,
+    otherAccount,
     ready: workspaceIsReady,
     ownerName: shareGranterName,
     refreshShareView,

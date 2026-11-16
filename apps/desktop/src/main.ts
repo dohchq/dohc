@@ -10626,6 +10626,7 @@ function registerIpcHandlers(): void {
     withStaleSensitiveWorkspaceOperation,
     shareViewFiles,
     receivedShareEngine,
+    joinedByAnotherAccount: otherAccountOf,
   });
   shareDirectWrites = shareProposalsIpc;
   registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);

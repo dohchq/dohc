@@ -48,6 +48,7 @@ import type {
 } from "../workspaces/workspaceAssets";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { createShareDirectWriteQueue } from "../workspaces/shareDirectWriteQueue";
+import { readError } from "./errorWords";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type {
   listMyShareProposals,
@@ -117,6 +118,11 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
   shareViewFiles: Pick<ShareViewFiles, "reconcile">;
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "relayFor">;
   automationDefinitionsChanged?(workspaceId: string): void;
+  /**
+   * A joined workspace while another account than the one that joined is
+   * signed in (main's `otherAccountOf`). Asked after the credentials warm.
+   */
+  joinedByAnotherAccount(workspaceId: string): boolean;
 }) {
   type Handlers = OperationHandlers<typeof shareProposalOperations, unknown, Operation>;
   const {
@@ -538,9 +544,20 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
   // after the window leaves the view. Saves are already in the share view's
   // journal, so nothing is captured first. After the owner ends the share or
   // stops the person, the relay answers that the share is unavailable.
+  //
+  // While another account is signed in to a joined workspace, nothing goes:
+  // that session cannot send the joined account's changes, and the band
+  // already says why nothing syncs. The changes wait in the journal, and the
+  // window pushes them once the joined account is back.
   function pushDirectWrites(workspaceId: string): Promise<PushShareDirectWritesResult> {
     return withRecipientScope(
-      (inner) => dependencies.withWorkspaceAuthority(workspaceId, inner),
+      (inner) => dependencies.withWorkspaceAuthority(workspaceId, async (operation) => {
+        await warmCredentialCache();
+        operation.assertCurrent();
+        return dependencies.joinedByAnotherAccount(workspaceId)
+          ? PushShareDirectWritesResult.parse({ status: "pushed", writes: [] })
+          : inner(operation);
+      }),
       requireShareViewProposalScope,
       async (operation) => {
         const scope = operation.resolve();
@@ -591,7 +608,9 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
           return PushShareDirectWritesResult.parse({
             status: "failed",
             writes,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            // The cause in a person's words, or none: an engine refusal's
+            // own message, such as "workspace operation failed", is not.
+            errorMessage: readError(error).words ?? "",
             lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
             pagesWaiting: waiting && waiting.pages > 0 && waiting.collectionWrites === 0 && !waiting.morePending
               ? waiting.pages

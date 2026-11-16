@@ -4,6 +4,7 @@ import type {
   PushShareDirectWritesResult,
   ShareDirectWriteAnswerDelivery,
 } from "../../ipc/bridgeContract";
+import { readError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 
 export type DirectWriteNoticeKind =
@@ -43,6 +44,9 @@ export function useShareDirectWrites(input: {
   workspaceName: string;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
+  // A joined workspace while another account is signed in. Main sends
+  // nothing then, so the view pushes when the joined account is back.
+  otherAccount?: boolean;
   ready: boolean;
   ownerName: string;
   refreshShareView(): Promise<ShareViewRefresh>;
@@ -74,7 +78,7 @@ export function useShareDirectWrites(input: {
         await report({
           status: "failed",
           writes: [],
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorMessage: readError(error).words ?? "",
           lasting: false,
           pagesWaiting: null,
         });
@@ -233,8 +237,9 @@ export function useShareDirectWrites(input: {
 
   useEffect(() => {
     // Anything a closed view left unsent goes once this workspace is ready.
-    if (input.sharedView && input.enabled && input.ready) void pushOnOpen.current?.();
-  }, [input.sharedView, input.enabled, input.ready, input.workspaceId]);
+    if (input.sharedView && input.enabled && input.ready && !input.otherAccount)
+      void pushOnOpen.current?.();
+  }, [input.sharedView, input.enabled, input.ready, input.workspaceId, input.otherAccount]);
 
   useLayoutEffect(() => {
     // A committed Notice is shown even if readiness or workspace changed.
