@@ -222,6 +222,16 @@ impl PageCheck {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl PageCheck {
+    /// Whether the check has ended, with a verdict or because it was stopped.
+    pub(crate) fn has_ended(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+}
+
 #[cfg(test)]
 impl PageCheck {
     /// Waits for the check to end by itself.
