@@ -89,22 +89,21 @@ const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
  */
 export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
 const LIVE_CHECK_RETRY_WINDOW_MS = 5 * 60_000;
-/** One edit or settlement: its note, and the bytes its check reads. */
+/**
+ * One edit or settlement: its note, and the edit's own bytes or the settled state. Other edits
+ * accepted between two tries change the journal before an edit, not the edit.
+ */
 function checkedInput(work: Extract<LiveValidationWork, { kind: "journal" | "settlement" }>) {
   const { document } = work.input;
-  const hash = createHash("sha256");
-  const parts =
-    work.kind === "journal"
-      ? [work.input.checkpoint, ...work.input.suffix, work.input.candidate]
-      : [work.input.checkpoint];
-  for (const bytes of parts) hash.update(`${bytes.byteLength}:`).update(bytes);
   return JSON.stringify([
     work.kind,
     document.workspaceId,
     document.mainVersionId,
     document.objectId,
     document.lineageClaimId,
-    hash.digest("hex"),
+    createHash("sha256")
+      .update(work.kind === "journal" ? work.input.candidate : work.input.checkpoint)
+      .digest("hex"),
   ]);
 }
 /** Names each validator failure once per document, candidate edit and error class. */
@@ -303,12 +302,11 @@ export function createLiveValidationExecutor(
         if (!settle()) return;
         kill(slot);
         const last = overran.get(input);
+        // A check that started before the last overrun ran beside it, so it leaves that mark be.
+        if (last !== undefined && startedAt < last)
+          return reject(new LiveValidatorFailure("LiveCheckOverrun"));
         overran.delete(input);
-        if (
-          last !== undefined &&
-          startedAt >= last &&
-          startedAt - last < LIVE_CHECK_RETRY_WINDOW_MS
-        )
+        if (last !== undefined && startedAt - last < LIVE_CHECK_RETRY_WINDOW_MS)
           return resolve(tooLarge);
         if (overran.size >= MAX_LOGGED_VALIDATOR_FAILURES)
           overran.delete(overran.keys().next().value!);

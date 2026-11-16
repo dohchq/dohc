@@ -238,10 +238,11 @@ it("tries a check again after it runs out of time, and refuses it the second tim
   try {
     await expect(validate(slow)).rejects.toBeInstanceOf(LiveValidatorFailure);
     expect(log.mock.calls.flat().join(" ")).toMatch(/LiveCheckOverrun .*tried again/);
-    // Another edit to the note that completes in between leaves the overrun counted.
+    // Another edit to the note that is accepted in between leaves the overrun counted, though
+    // the edit is then tried after it.
     await validate.waitForCapacity!();
     expect((await validate(input)).kind).toBe("accepted");
-    expect(await validate(slow)).toEqual({
+    expect(await validate({ ...slow, suffix: [input.candidate] })).toEqual({
       kind: "refused",
       reason: "capacity-refused",
       source: "final",
