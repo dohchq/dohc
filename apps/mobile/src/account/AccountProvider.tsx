@@ -9,7 +9,6 @@ import {
   type ReactNode,
 } from "react";
 import { AppState, View } from "react-native";
-import { nativeDurableFile } from "../../modules/durable-file";
 import {
   appTeardown,
   createAppRunner,
@@ -21,7 +20,7 @@ import { canOpenApps } from "../apps/canOpenApps";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
-import { createDurableFiles } from "../server/durableFiles";
+import { createKeptDatabase } from "../server/keptDatabase";
 import { createNoticeFiles } from "../server/noticeFiles";
 import {
   clearNoticesOnSignInChange,
@@ -46,7 +45,7 @@ interface AccountValue {
   readonly state: AccountState;
   /** Chat writes waiting for the server. Only the composer adds to it, while phone writes are on. */
   readonly outbox: Outbox;
-  /** Where a Sign out's delete of the outbox stands. */
+  /** Whether a Sign out's delete of the outbox failed. */
   readonly deletion: OutboxState["deletion"];
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
@@ -96,10 +95,10 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
   const [teardown] = useState(() => appTeardown(runner));
-  // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost. With phone writes
-  // off it sends nothing, not even records an earlier build kept.
+  // Sign out deletes the account's outbox rows: the sign-in ends, and its token goes, once that delete has committed.
+  // With phone writes off it sends nothing, not even records an earlier build kept. kept.db opens once per install.
   const [outbox] = useState(() =>
-    createOutbox({ files: createDurableFiles(nativeDurableFile()), sends: phoneWrites }),
+    createOutbox({ store: createKeptDatabase(), sends: phoneWrites }),
   );
   const [account] = useState(() =>
     createAccount({
@@ -283,8 +282,8 @@ export function useSignIn(): SignIn {
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
   const { state, deletion } = useAccount();
-  // Once Connect shows, it stays while a Sign out's delete is owed, even if a sign-in finishes meanwhile, so the
-  // delete's failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
+  // Once Connect shows, it stays while a Sign out's delete has failed, even if a sign-in finishes meanwhile, so the
+  // failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
   const [onConnect, setOnConnect] = useState(false);
   const showConnect = state.status === "signed-out" || (onConnect && deletion !== "none");
   if (showConnect !== onConnect) setOnConnect(showConnect);

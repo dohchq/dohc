@@ -92,7 +92,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const READY: OutboxState = {
   status: "ready",
   records: [],
-  aside: [],
   unreadable: [],
   deletion: "none",
   unconfirmed: [],
@@ -250,7 +249,6 @@ describe("Try again on a wake", () => {
   it.each<[string, OutboxState, boolean]>([
     ["writes are off", READY, false],
     ["the outbox is locked", { ...READY, status: "locked" }, true],
-    ["a Sign out's delete is owed", { ...READY, deletion: "owed" }, true],
     ["a Sign out's delete failed", { ...READY, deletion: "failed" }, true],
   ])("sends nothing when %s", async (_case, state, enabled) => {
     const { server, wakes, callsTo, open, phase } = setup(context([SOURCE]));
@@ -268,7 +266,6 @@ describe("Try again on a wake", () => {
 
   it.each<[string, Partial<OutboxState>]>([
     ["the outbox locks", { status: "locked" }],
-    ["a Sign out's delete is owed", { deletion: "owed" }],
     ["a Sign out's delete failed", { deletion: "failed" }],
   ])("sends nothing when, during the alert, %s", async (_case, change) => {
     const { server, wakes, callsTo, open, phase } = setup(context([UNCONFIRMED]));

@@ -100,7 +100,6 @@ function fakeOutbox() {
     state: () => ({
       status: "ready",
       records,
-      aside: [],
       unreadable: [],
       deletion: "none",
       unconfirmed: [],

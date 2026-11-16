@@ -1,4 +1,3 @@
-import { accountWords } from "@dohc/interface-words/account";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
@@ -48,22 +47,20 @@ export interface OutboxProblem {
   readonly retry?: () => void;
 }
 
-/** What the outbox's state says above the composer, or null. Each Try again is the outbox's `wake`. */
+/**
+ * What the outbox's state says above the composer, or null. Try again is the outbox's `wake`. The words name where a
+ * failed Sign out is tried again and a damaged file is deleted, since the composer can do neither.
+ */
 export function outboxProblem(
   state: OutboxState | null,
   blocked: Blocked,
   wake: () => void,
 ): OutboxProblem | null {
   if (state === null) return null;
-  if (blocked === "deleting")
-    return state.deletion === "failed" || state.deletion === "failed-unmarked"
-      ? {
-          text: accountWords.signOutDeleteFailed(state.deletion === "failed-unmarked"),
-          retry: wake,
-        }
-      : null;
+  if (blocked === "deleting") return { text: chatWords.signOutDeleteFailedHere };
   if (blocked === "locked") return { text: chatWords.unlockToSend };
   if (blocked === "failed") return { text: chatWords.outboxUnreadable, retry: wake };
+  if (blocked === "damaged") return { text: chatWords.outboxDamagedHere };
   return null;
 }
 

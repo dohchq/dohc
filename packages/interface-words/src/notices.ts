@@ -83,14 +83,31 @@ export const chatWords = {
   sending: "Sending",
   /** The server has answered "pending" for a long time. It may still be saved. */
   stillSending: "Still sending",
-  /** Kept on the phone, withheld: nothing sends it until Send. */
+  /** Kept on the phone, withheld: nothing sends it until Send, unless `notSentMaySendOnReopen` says otherwise. */
   notSent: "This message has not been sent.",
+  /** Withheld, but the phone's storage may still hold it ready to send, as after a failed commit or Discard. */
+  notSentMaySendOnReopen:
+    "This message has not been sent. It may send if you close dohc and open it again.",
   /** Enqueue failed and nothing was kept: the text stays in the composer. */
   notKept: "dohc could not keep this message on your phone.",
   unlockToSend: "Unlock this phone to send messages",
   /** The read of which messages a chat takes failed, so the composer can't show. */
   lanesFailed: "dohc could not read what you can send in this chat.",
   outboxUnreadable: "dohc could not read messages waiting on this phone.",
+  /** kept.db is damaged. Nothing replaces it until the person deletes it, in Messages on this phone. */
+  outboxDamaged: "The file that keeps messages waiting on this phone is damaged.",
+  /** Above the composer, which can't delete it, so it names where the person can. */
+  outboxDamagedHere:
+    "The file that keeps messages waiting on this phone is damaged. Delete it in Settings, under Messages on this phone.",
+  /** Above the composer after a Sign out whose delete failed; Settings has its Try again. */
+  signOutDeleteFailedHere:
+    "dohc could not delete the messages waiting on this phone. Try again in Settings.",
+  deleteDamagedTitle: "Delete messages waiting on this phone?",
+  deleteDamagedBody:
+    "Messages that haven't been sent will be lost. Messages the server has stay in their chats.",
+  deleteDamagedConfirm: "Delete messages",
+  /** The damaged file's delete failed: it stays, still damaged, with Try again. */
+  deleteDamagedFailed: "dohc could not delete the damaged file.",
   /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
   unreadableMessage: "This message could not be read",
   copyMessage: "Copy message",
@@ -136,8 +153,11 @@ export const chatWords = {
   /** A reaction's button: a tap on one that's yours removes it. */
   reaction: (emoji: string, count: number, mine: boolean) =>
     `${mine ? `Remove ${emoji} reaction` : emoji}, ${count} ${count === 1 ? "reaction" : "reactions"}`,
-  /** A reaction kept on the phone, withheld: nothing sends it until Send. */
+  /** A reaction kept on the phone, withheld: nothing sends it until Send, unless the next word says otherwise. */
   reactionNotSent: (emoji: string) => `Your ${emoji} reaction has not been sent.`,
+  /** Withheld, but the commit that would have made it sendable failed and may still stand. */
+  reactionNotSentMaySendOnReopen: (emoji: string) =>
+    `Your ${emoji} reaction has not been sent. It may send if you close dohc and open it again.`,
   /** The server has answered "pending" for a reaction for a long time. It may still be saved. */
   reactionStillSending: (emoji: string) => `Your ${emoji} reaction is still sending.`,
   /** The server refused a reaction, or can't find its message. */
