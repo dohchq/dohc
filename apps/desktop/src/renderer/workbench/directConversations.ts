@@ -35,8 +35,10 @@ export function createDirectStore(api: Api) {
   const readSent = new Map<string, number>();
   // Unsent typing and each failed send's id, so Try again never sends twice.
   const drafts = new Map<string, string>();
-  // Told when New message hands its words to a conversation, so one already showing takes them.
+  // Told when New message hands over to a conversation, so one already showing takes the words and focus.
   const handedOff = new Set<(key: string) => void>();
+  // Conversations New message handed over to whose composer hasn't taken focus yet.
+  const focusOn = new Set<string>();
   const unsent = new Map<string, { messageId: string; body: string }>();
 
   const set = (next: DirectListState) => {
@@ -93,6 +95,7 @@ export function createDirectStore(api: Api) {
         session += 1;
         readSent.clear();
         drafts.clear();
+        focusOn.clear();
         unsent.clear();
         set({ status: "loading" });
       }
@@ -154,13 +157,19 @@ export function createDirectStore(api: Api) {
       if (value) drafts.set(key, value);
       else drafts.delete(key);
     },
-    /** Gives `value` to `key`'s draft unless it holds words of its own. True when it took them. */
+    /**
+     * Hands New message over to `key`: its composer takes focus, and `value` unless it holds words
+     * of its own. True when it took the words.
+     */
     handOff(key: string, value: string): boolean {
-      if (drafts.get(key)?.trim()) return false;
-      drafts.set(key, value);
+      const took = value.trim() !== "" && !drafts.get(key)?.trim();
+      if (took) drafts.set(key, value);
+      focusOn.add(key);
       for (const listener of [...handedOff]) listener(key);
-      return true;
+      return took;
     },
+    /** True once after a hand-over to `key`: the composer that asks takes focus. */
+    takeFocus: (key: string) => focusOn.delete(key),
     onHandOff(listener: (key: string) => void): () => void {
       handedOff.add(listener);
       return () => handedOff.delete(listener);

@@ -187,8 +187,15 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
     const onError = vi.fn();
     const onClearError = vi.fn();
-    const listReports = () => onError.mock.calls.filter((call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-list");
-    const view = renderView(vi.fn(), onError, { variant: "panel", onClearError, serverNamed: true });
+    const listReports = () =>
+      onError.mock.calls.filter(
+        (call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-list",
+      );
+    const view = renderView(vi.fn(), onError, {
+      variant: "panel",
+      onClearError,
+      serverNamed: true,
+    });
     // The People section still says so in place, with Try again.
     await screen.findByTestId("chats-dms-retry");
     expect(listReports()).toEqual([]);
@@ -207,14 +214,28 @@ describe("ChatsView direct messages", () => {
     bridgeMock.workspaceMembers.mockRejectedValue(UNREACHABLE("workspace-members"));
     const onError = vi.fn();
     const onClearError = vi.fn();
-    const memberReports = () => onError.mock.calls.filter((call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-members:workspace-a");
-    const view = renderView(vi.fn(), onError, { variant: "panel", onClearError, serverNamed: true, initialNav: { level: "direct-new" } });
+    const memberReports = () =>
+      onError.mock.calls.filter(
+        (call) =>
+          (call[4] as { identity?: string } | undefined)?.identity === "direct-members:workspace-a",
+      );
+    const view = renderView(vi.fn(), onError, {
+      variant: "panel",
+      onClearError,
+      serverNamed: true,
+      initialNav: { level: "direct-new" },
+    });
     // New message still says so in place, with Try again.
     await screen.findByTestId("chats-dm-new-retry");
     expect(memberReports()).toEqual([]);
     await waitFor(() => expect(onClearError).toHaveBeenCalledWith("direct-members:workspace-a"));
 
-    view.rerender({ variant: "panel", onClearError, serverNamed: false, initialNav: { level: "direct-new" } });
+    view.rerender({
+      variant: "panel",
+      onClearError,
+      serverNamed: false,
+      initialNav: { level: "direct-new" },
+    });
     await waitFor(() => expect(memberReports()).toHaveLength(1));
   });
 
@@ -380,6 +401,10 @@ describe("ChatsView direct messages", () => {
       ),
     );
     expect(onCloseTab).toHaveBeenCalledOnce();
+    // New message's tab closes first, so opening the conversation is the last move and its group ends active.
+    expect(onCloseTab.mock.invocationCallOrder[0]).toBeLessThan(
+      onOpenInTab.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("files no notice when a conversation can't be read because nobody is signed in", async () => {
@@ -648,9 +673,13 @@ describe("ChatsView direct messages", () => {
 
     // A row that slides under a still pointer doesn't take the active row; moving the pointer does.
     fireEvent.mouseEnter(options[1]!);
-    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(/-ana$/);
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(
+      /-ana$/,
+    );
     fireEvent.mouseMove(options[1]!);
-    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(/-sam$/);
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(
+      /-sam$/,
+    );
 
     // Picking another person replaces the pick: a conversation is two people.
     await user.click(options[0]!);
@@ -805,7 +834,10 @@ describe("ChatsView direct messages", () => {
     const existing = await screen.findByTestId("chats-dm-new-existing");
     expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
     // The line sits under the list, so the rows don't move when it appears.
-    expect(screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Mention" })).toBeNull();
     await user.type(screen.getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));
@@ -817,6 +849,9 @@ describe("ChatsView direct messages", () => {
         "Lunch?",
       ),
     );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(view).getByTestId("chats-dm-composer")),
+    );
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
   });
 
@@ -827,14 +862,25 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
     history([sent(2, "sam", "See you at nine")]);
     // The conversation shows in one group the whole time; New message opens in another.
-    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
     const shown = await screen.findByTestId("chats-dm-view");
     renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct-new" } });
     const newMessage = await screen.findByTestId("chats-dm-new");
     await user.click(await within(newMessage).findByTestId("chats-dm-new-member"));
     await user.type(within(newMessage).getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(await within(newMessage).findByTestId("chats-dm-new-open-existing"));
-    await waitFor(() => expect((within(shown).getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe("Lunch?"));
+    await waitFor(() =>
+      expect((within(shown).getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe(
+        "Lunch?",
+      ),
+    );
+    // The conversation's composer takes focus, so the person carries on where the words went.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(shown).getByTestId("chats-dm-composer")),
+    );
   });
 
   it("opens the existing conversation when Members' Message names someone already in one", async () => {

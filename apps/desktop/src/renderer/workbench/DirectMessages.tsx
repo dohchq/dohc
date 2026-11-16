@@ -18,7 +18,7 @@ import { chatRowMenuItems } from "./chatRowMenu";
 import { ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { showChat } from "./chatsOnScreen";
 import { EMPTY_ART } from "./EmptyArt";
-import { MentionComposer } from "./MentionComposer";
+import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import type { ChatErrorNotice } from "./ChatsView";
 import {
   directMessageRecord,
@@ -369,9 +369,13 @@ function ConversationForAccount(props: ConversationProps) {
     setDraftState(value);
     store.setDraft(conversationId, value);
   };
-  // Words New message hands over while this conversation already shows.
+  // New message handed over: take its words and focus, whether this conversation already showed or just opened.
+  const composer = useRef<MentionComposerHandle | null>(null);
+  const [handedOff, setHandedOff] = useState(0);
   useEffect(() => store.onHandOff((key) => {
-    if (key === conversationId) setDraftState(store.draft(key));
+    if (key !== conversationId) return;
+    setDraftState(store.draft(key));
+    setHandedOff((count) => count + 1);
   }), [store, conversationId]);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
@@ -499,6 +503,11 @@ function ConversationForAccount(props: ConversationProps) {
     );
   }
 
+  const composerShows = person !== null && shown.status === "ready" && !person.blocked;
+  useEffect(() => {
+    if (composerShows && store.takeFocus(conversationId)) composer.current?.focus();
+  }, [composerShows, handedOff, store, conversationId]);
+
   let footer: ReactNode = null;
   if (person && shown.status === "ready") {
     footer = person.blocked ? (
@@ -507,6 +516,7 @@ function ConversationForAccount(props: ConversationProps) {
       </DirectComposerLine>
     ) : (
       <MentionComposer
+        handle={composer}
         pinned
         testIdPrefix="chats-dm"
         composerId={`chats-dm-composer-${conversationId}`}
@@ -729,7 +739,7 @@ function NewMessageForAccount(props: NewMessageProps) {
   };
   // Words written here go along to the conversation, unless it already holds words of its own.
   const openExisting = (conversationId: string) => {
-    if (draft.trim() && store.handOff(conversationId, draft)) setDraft("");
+    if (store.handOff(conversationId, draft)) setDraft("");
     props.onOpenConversation(conversationId, title);
   };
   const [sending, setSending] = useState(false);
