@@ -44,6 +44,8 @@ mod live_changes;
 mod markdown_recovery;
 pub use held_change::{HeldChangeAction, HeldChangeResult};
 mod materialization;
+mod rebuild;
+pub use rebuild::{RebuildHead, RebuildJob};
 mod relay;
 #[cfg(unix)]
 mod retained;

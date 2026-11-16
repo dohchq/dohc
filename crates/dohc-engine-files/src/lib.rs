@@ -89,3 +89,19 @@ pub use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 pub mod retained;
+
+/// The filesystem `path` lives on: the volume serial number on Windows, the
+/// device id elsewhere. Two paths with the same identity can be renamed into
+/// each other without a copy.
+pub fn filesystem_identity(path: &std::path::Path) -> std::io::Result<u64> {
+    #[cfg(windows)]
+    {
+        let handle = winapi_util::Handle::from_path_any(path)?;
+        Ok(winapi_util::file::information(&handle)?.volume_serial_number())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(std::fs::metadata(path)?.dev())
+    }
+}

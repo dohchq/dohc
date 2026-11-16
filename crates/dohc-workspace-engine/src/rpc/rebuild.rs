@@ -131,6 +131,8 @@ mod tests {
             revision: "rev-2".to_owned(),
             visibility_revision: "vis-2".to_owned(),
             closed_at_ms: 1,
+            plan: None,
+            share_refresh_existed: None,
         }
     }
 

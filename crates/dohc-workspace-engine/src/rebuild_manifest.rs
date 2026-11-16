@@ -50,6 +50,65 @@ pub struct RebuildManifest {
     pub revision: String,
     pub visibility_revision: String,
     pub closed_at_ms: i64,
+    /// What the rebuild does to the files on disk, from `planned` on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<RebuildPlan>,
+    /// Whether `.dohc/local/share-refresh` existed when the swap began, from
+    /// `swapping` on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_refresh_existed: Option<bool>,
+}
+
+/// The plan for converging the files on disk to the new store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildPlan {
+    /// The reach the new store was built under, as main stores it.
+    pub reach: serde_json::Value,
+    /// The recovery folder, relative to the root with `/` separators, when
+    /// the plan saves anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_folder: Option<String>,
+    #[serde(default)]
+    pub recovery: Vec<RecoveryItem>,
+    #[serde(default)]
+    pub jobs: Vec<PlannedJob>,
+    /// The last converge wave that finished, 0 before the first.
+    #[serde(default)]
+    pub waves_done: u8,
+}
+
+/// A file the plan moves to the recovery folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryItem {
+    pub number: u32,
+    /// Where the file was, relative to the root.
+    pub path: String,
+    /// Its name in the recovery folder, `<number> <name>`.
+    pub destination: String,
+    pub reason: String,
+    #[serde(default)]
+    pub done: bool,
+    /// Set once done: whether there was a file to move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found: Option<bool>,
+}
+
+/// A materialization job a converge wave adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedJob {
+    /// 1 for deletes, 3 for writes.
+    pub wave: u8,
+    pub path: String,
+    #[serde(default)]
+    pub delete: bool,
+    pub content_sha256: String,
+    /// The bytes the file must hold for the job to replace them, `None` when
+    /// there must be no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +186,8 @@ mod tests {
             revision: "rev-2".to_owned(),
             visibility_revision: "vis-2".to_owned(),
             closed_at_ms: 7,
+            plan: None,
+            share_refresh_existed: None,
         }
     }
 

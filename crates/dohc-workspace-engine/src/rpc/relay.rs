@@ -312,7 +312,7 @@ struct ShareFileStatusesParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct GrantedSelectorParams {
+pub(super) struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
     version_id: Option<String>,
@@ -935,7 +935,9 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
 /// read must never pin. The refusal names the accepted set, like the
 /// relay's own — the caller is an agent reading this error, and "unknown share
 /// access" told it nothing it could act on.
-fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::ShareGrant, WireError> {
+pub(super) fn share_grant(
+    selector: GrantedSelectorParams,
+) -> Result<dohc_engine_sync::ShareGrant, WireError> {
     let access = dohc_engine_sync::ShareAccess::parse(&selector.access).ok_or_else(|| {
         WireError::new(
             ErrorCode::InvalidParams,
@@ -1152,7 +1154,7 @@ impl EngineService {
         }
     }
 
-    async fn relay_execute(
+    pub(super) async fn relay_execute(
         &self,
         ctx: &RequestContext,
         open: &OpenWorkspace,
@@ -2469,6 +2471,8 @@ impl EngineService {
                 revision: served.revision.clone(),
                 visibility_revision: served.visibility_revision.clone(),
                 closed_at_ms: now_ms()?,
+                plan: None,
+                share_refresh_existed: None,
             };
             self.close_for_rebuild(&open.root, &manifest)?;
             let mut result = relay_outcome_json(outcome)?;

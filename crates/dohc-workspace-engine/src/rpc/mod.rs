@@ -26,6 +26,7 @@ pub(super) mod retained_copies;
 pub(super) mod retained_versions;
 pub(super) mod search;
 pub(super) mod secrets;
+mod share_view_rebuild;
 pub(super) mod versioned;
 pub(super) mod versions;
 pub(super) mod work_references;
