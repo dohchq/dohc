@@ -38,6 +38,17 @@ fn moment(seq: i64, moment_id: &str, object_id: &str, path: &str, bytes: &[u8]) 
 /// The relay's log for the member under one visibility: `open/a.md`, `c.md`
 /// and `d.md` always, and `hidden/b.md` when the member reaches it.
 fn serve(relay: &FakeRelay, signature: &str, visibility: &str, with_hidden: bool) {
+    serve_with(relay, signature, visibility, with_hidden, &[]);
+}
+
+/// `serve`, with more ops after those, each with its file's bytes.
+fn serve_with(
+    relay: &FakeRelay,
+    signature: &str,
+    visibility: &str,
+    with_hidden: bool,
+    more: &[(Value, &'static [u8])],
+) {
     let mut state = relay.state.lock().expect("relay state");
     let mut ops = vec![
         moment(1, "moment-a", "object-a", "open/a.md", A_BYTES),
@@ -47,8 +58,13 @@ fn serve(relay: &FakeRelay, signature: &str, visibility: &str, with_hidden: bool
     if with_hidden {
         ops.push(moment(4, "moment-b", "object-b", "hidden/b.md", B_BYTES));
     }
+    ops.extend(more.iter().map(|(op, _)| op.clone()));
     state.share_ops.insert(SHARE.to_owned(), ops);
-    for bytes in [A_BYTES, B_BYTES, C_BYTES, D_BYTES] {
+    let more_bytes = more.iter().map(|(_, bytes)| *bytes);
+    for bytes in [A_BYTES, B_BYTES, C_BYTES, D_BYTES]
+        .into_iter()
+        .chain(more_bytes)
+    {
         state
             .share_blobs
             .insert((SHARE.to_owned(), hex_sha256(bytes)), bytes.to_vec());
@@ -90,8 +106,27 @@ where
         &'b ScratchDir,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>>,
 {
+    closed_copy_serving(workspace_id, hidden_before, hidden_after, &[], edit).await
+}
+
+/// `closed_copy_with`, with the relay serving `more` ops under both
+/// visibilities.
+async fn closed_copy_serving<F>(
+    workspace_id: &str,
+    hidden_before: bool,
+    hidden_after: bool,
+    more: &[(Value, &'static [u8])],
+    edit: F,
+) -> ClosedCopy
+where
+    F: for<'b> FnOnce(
+        &'b InProcessTransport<EngineService>,
+        &'b WorkspaceHandle,
+        &'b ScratchDir,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'b>>,
+{
     let relay = FakeRelay::start(RelayState::default());
-    serve(&relay, "r1", "v1", hidden_before);
+    serve_with(&relay, "r1", "v1", hidden_before, more);
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
@@ -128,7 +163,7 @@ where
     }
     edit(&transport, &handle, &scratch).await;
 
-    serve(&relay, "r2", "v2", hidden_after);
+    serve_with(&relay, "r2", "v2", hidden_after, more);
     let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
     let rebuild_id = closed["rebuildId"].as_str().expect("closed").to_owned();
     close(&transport, &handle, &mut id).await;
@@ -536,6 +571,113 @@ async fn a_narrowing_saves_unsent_work_and_undoes_unsent_deletes_and_moves() {
     assert_no_old_store(&copy.scratch);
 }
 
+/// The member copies a shared file into a folder the owner then hides. The new
+/// store holds the copy's bytes under the original's path, but the copy is the
+/// member's own and unsent: it goes to the recovery folder, not away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_copy_of_a_held_file_in_a_hidden_folder_is_saved() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-unsent-copy",
+        true,
+        false,
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "objectId": "mine-copy", "path": "hidden/copy.md",
+                        "text": "open file body", "momentId": "copy-a", "origin": "api", "nowMs": 3_000,
+                    }),
+                )
+                .await;
+                std::fs::write(scratch.path().join("hidden/copy.md"), A_BYTES).expect("copy");
+            })
+        },
+    )
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert!(!root.join("hidden/copy.md").exists());
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 copy.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 copy.md")).expect("copy"),
+        A_BYTES
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("| 0002 copy.md | hidden/copy.md | Not sent. |"),
+        "{contents}"
+    );
+    finish(&copy).await;
+}
+
+/// The member restores an older version of a shared file and doesn't send it.
+/// The new store holds that version in History, but the restore is the
+/// member's: it goes to the recovery folder before the shared version returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_restore_of_an_older_version_is_saved() {
+    const A2_BYTES: &[u8] = b"open file body, edited by the owner";
+    let copy = closed_copy_serving(
+        "rpc-rebuild-unsent-restore",
+        true,
+        false,
+        &[(
+            moment(5, "moment-a2", "object-a", "open/a.md", A2_BYTES),
+            A2_BYTES,
+        )],
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                // The disk holds the older bytes, and the restore journals them.
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "objectId": "object-a", "path": "open/a.md",
+                        "text": "open file body", "momentId": "restore-a", "origin": "api", "nowMs": 3_000,
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    std::fs::read(scratch.path().join("open/a.md")).expect("a"),
+                    A_BYTES
+                );
+            })
+        },
+    )
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A2_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 a.md")).expect("restore"),
+        A_BYTES
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("| 0002 a.md | open/a.md | Your change wasn't sent."),
+        "{contents}"
+    );
+    finish(&copy).await;
+}
+
 /// A file on disk whose bytes the new store holds is replaced in place, with
 /// those bytes as its preimage, and nothing goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -900,6 +1042,111 @@ async fn a_pull_that_marks_a_move_across_the_reach_closes_the_copy_and_its_rebui
         std::fs::read(copy.scratch.path().join("open/e.md")).expect("the moved file"),
         B_BYTES
     );
+}
+
+/// Main lost the answer that closed the copy: it quit, or failed to store the
+/// id, before it recorded it. A restarted engine still names the rebuild from
+/// the manifest, and the rebuild under that id finishes. Once it has, no
+/// rebuild is named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_engine_names_a_rebuild_whose_closing_answer_was_lost() {
+    let mut copy = closed_copy("rpc-rebuild-lost-answer", true, false).await;
+    let closed_with = std::mem::take(&mut copy.rebuild_id);
+    let root = copy.scratch.path().to_string_lossy().into_owned();
+    let status = || async {
+        InProcessTransport::new(Arc::new(EngineService::new()))
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    92,
+                    "share.view.rebuildStatus",
+                    None,
+                    json!({ "rootDir": root }),
+                ),
+            )
+            .await
+            .expect("status")
+            .result
+    };
+    let named = status().await;
+    assert_eq!(
+        named,
+        json!({ "rebuildId": closed_with, "phase": "closed" })
+    );
+    copy.rebuild_id = named["rebuildId"].as_str().expect("id").to_owned();
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        status().await,
+        json!({ "rebuildId": closed_with, "phase": "converged" })
+    );
+    finish(&copy).await;
+    assert_eq!(status().await, json!({ "rebuildId": null, "phase": null }));
+    assert!(!copy.scratch.path().join("hidden/b.md").exists());
+}
+
+/// A copy's first pull reads every page for the first time, and the relay
+/// selects each one under the reach the member has now. So a later page of
+/// that pull that marks a move applies, and the copy doesn't close and
+/// download everything again. Once the copy has caught up, a marked page
+/// closes it as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_pull_over_several_pages_applies_a_marked_later_page() {
+    let workspace_id = "rpc-relay-first-pull-marked";
+    let relay = FakeRelay::start(RelayState {
+        share_page_limit: Some(2),
+        ..RelayState::default()
+    });
+    let mut arrived = moment(5, "moment-e", "object-e", "open/e.md", B_BYTES);
+    arrived["reachMove"] = json!("arrival");
+    serve_with(&relay, "r1", "v1", false, &[(arrived, B_BYTES)]);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r1", "v1") });
+    // Two pages: seq 1 and 2, then seq 3 and the marked seq 5.
+    for (page, more) in [(1, true), (2, false)] {
+        let pulled = call(
+            &transport,
+            &handle,
+            &mut id,
+            "share.view.pull",
+            pull.clone(),
+        )
+        .await;
+        assert!(pulled.get("rebuildId").is_none(), "page {page}: {pulled}");
+        assert_eq!(pulled["hasMore"], json!(more), "page {page}: {pulled}");
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.commitCursor",
+            json!({ "workspaceId": workspace_id, "pendingCursor": pulled["pendingCursor"] }),
+        )
+        .await;
+    }
+    let text = call(
+        &transport,
+        &handle,
+        &mut id,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "open/e.md" }),
+    )
+    .await;
+    assert_eq!(text["text"], "hidden file body", "the marked page applied");
+
+    // Caught up: the next marked page closes the copy.
+    {
+        let mut state = relay.state.lock().expect("relay state");
+        let mut left = moment(6, "moment-f", "object-f", "open/f.md", C_BYTES);
+        left["reachMove"] = json!("departure");
+        state.share_ops.get_mut(SHARE).expect("ops").push(left);
+    }
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert!(closed["rebuildId"].is_string(), "{closed}");
+    close(&transport, &handle, &mut id).await;
 }
 
 /// Two file threads the relay serves with the files: one on `open/a.md`, and

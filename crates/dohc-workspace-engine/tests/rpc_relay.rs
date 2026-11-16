@@ -122,6 +122,8 @@ struct RelayState {
     // The reach signatures each share's log pages name, as (signature,
     // visibility signature).
     share_signatures: HashMap<String, (String, String)>,
+    // The most ops one share log page holds. Unset, one page holds them all.
+    share_page_limit: Option<usize>,
     refuse_claims: bool,
 }
 
@@ -246,6 +248,9 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             .into_iter()
             .filter(|row| row["relaySeq"].as_i64().unwrap_or(0) > since)
             .collect::<Vec<_>>();
+        let limit = state.share_page_limit.unwrap_or(usize::MAX);
+        let has_more = rows.len() > limit;
+        let rows: Vec<Value> = rows.into_iter().take(limit).collect();
         let next = rows
             .last()
             .and_then(|row| row["relaySeq"].as_i64())
@@ -254,7 +259,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             "ops": rows,
             "ownOriginId": "relay:share-member:authenticated-origin",
             "nextCursor": next,
-            "hasMore": false,
+            "hasMore": has_more,
         });
         if let Some((signature, visibility)) = state.share_signatures.get(share_id) {
             page["reach"] = json!({

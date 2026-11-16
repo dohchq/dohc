@@ -702,6 +702,9 @@ pub struct ShareViewPullOutcome {
     /// carries. The page then applied nothing and the cursor stays where it
     /// was: the caller reads the reach again before it pulls on.
     pub reach_changed: Option<ShareReachSignatures>,
+    /// The page was read from the start of the share, as a copy's first
+    /// pull begins.
+    pub from_start: bool,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -4871,8 +4874,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     }
 
     /// Send a whole-workspace share view's own posts in its Groups to the
-    /// owner, through the share's append lane. Only a Comment or Edit grant
-    /// posts. A view that never posted has no identity and sends nothing.
+    /// owner, through the share's append lane. Only a grant with Comment or
+    /// Edit in its Groups or on some file posts: file rules don't lower the
+    /// Group level. A view that never posted has no identity and sends
+    /// nothing.
     pub fn push_share_view_groups(
         &self,
         store: &mut EngineStore,
@@ -4882,9 +4887,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
         if granted.scope != crate::share::ShareScope::Workspace
-            || !granted
-                .highest()
-                .is_some_and(crate::share::ShareAccess::takes_comments)
+            || !(granted.group_level().takes_comments()
+                || granted
+                    .highest()
+                    .is_some_and(crate::share::ShareAccess::takes_comments))
         {
             return Err(local(SyncError::InvalidInput {
                 reason: "only a membership with Comment or Edit somewhere posts in its Groups and on its files",
@@ -5278,6 +5284,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// A membership's page that marks a move across the edge of its reach
     /// applies nothing, as one under another reach does, unless it is the
     /// copy's first page: a new copy starts from what the reach serves now.
+    /// A first pull longer than a page goes on through
+    /// `pull_share_view_through_moves`.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
@@ -5289,10 +5297,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.pull_share_view_page(store, workspace_id, share_id, granted, true, faults)
     }
 
-    /// Pull one page of a membership into the store its rebuild fills. It
-    /// pulls from the start, so a marked move is already the History the
-    /// reach serves, and the page applies.
-    pub fn pull_share_view_to_rebuild(
+    /// Pull one page of a membership that applies a page marking a move
+    /// across the reach's edge. For a pull that began at the start of the
+    /// share, such as a rebuild's or a copy's first: the relay selects each
+    /// object by what the reach serves now, so a move marked before that pull
+    /// began is already in what it reads.
+    pub fn pull_share_view_through_moves(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
@@ -5315,6 +5325,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut cursor =
             crate::read_share_cursor(store, workspace_id, share_id, crate::CursorKind::ShareView)
                 .map_err(local)?;
+        let from_start = cursor == 0;
         let scope_id = format!("view:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
@@ -5351,6 +5362,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         cursor,
                     },
                     reach_changed: Some(served),
+                    from_start: cursor == 0,
                 });
             }
         }
@@ -5503,6 +5515,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 cursor,
             },
             reach_changed: None,
+            from_start,
         })
     }
 

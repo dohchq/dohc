@@ -20,7 +20,8 @@
 //! - `swapped`: converge the files in three waves, then `converged`.
 //!
 //! `share.view.rebuildFinish` deletes what the rebuild left once main has
-//! stored the new reach, and the manifest last.
+//! stored the new reach, and the manifest last. `share.view.rebuildStatus`
+//! names the manifest's rebuild, for a main that never heard its id.
 //!
 //! The caller closes every handle on the root first.
 
@@ -33,8 +34,8 @@ use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::{
-    ActorHandle, RebuildCarried, RebuildHead, RebuildJob, RebuildUnsent, RelayOperation,
-    RelayOperationOutcome,
+    ActorHandle, RebuildCarried, RebuildHead, RebuildJob, RebuildRemoval, RebuildUnsent,
+    RelayOperation, RelayOperationOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -98,6 +99,12 @@ struct LiveDraft {
 struct FinishParams {
     root_dir: String,
     rebuild_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StatusParams {
+    root_dir: String,
 }
 
 /// A copy `closed` writes under the staging folder: its name and bytes.
@@ -271,6 +278,24 @@ impl EngineService {
             .map_err(|_| failed("share-view-rebuild-manifest-unwritable"))?;
         lock(&self.rebuilding_roots).remove(&root);
         Ok(json!({ "finished": true }))
+    }
+
+    /// The rebuild a root's manifest names, and its phase, or nulls. The
+    /// engine closes a copy before main hears the rebuild id, so a main that
+    /// stopped or failed in between asks here before it opens or refreshes
+    /// the copy.
+    pub(super) fn share_view_rebuild_status(&self, params: Value) -> Result<Value, WireError> {
+        let params: StatusParams = parse(params)?;
+        let root = root_binding::canonical_root(Path::new(&params.root_dir))
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "rootDir is unavailable"))?;
+        Ok(
+            match rebuild_manifest::read_manifest(&root).map_err(|_| updating_access())? {
+                Some(manifest) => {
+                    json!({ "rebuildId": manifest.rebuild_id, "phase": manifest.phase })
+                }
+                None => json!({ "rebuildId": null, "phase": null }),
+            },
+        )
     }
 
     fn rebuild_manifest(
@@ -469,7 +494,7 @@ impl EngineService {
                         workspace_id: params.workspace_id.clone(),
                         share_id: params.share_id.clone(),
                         granted,
-                        rebuild: true,
+                        through_moves: true,
                     },
                     "share.view.rebuild",
                 )
@@ -775,6 +800,31 @@ fn plan(
         .iter()
         .map(|version| version.path.as_str())
         .collect();
+    // An unsent move the plan undoes: its source comes back from the new
+    // store, so its destination is replaced like any file the store holds.
+    let undoes = |removal: &&RebuildRemoval| {
+        new_heads.contains_key(removal.path.as_str()) && !new.disk.contains_key(&removal.path)
+    };
+    let moved_back: HashSet<&str> = old
+        .unsent
+        .removals
+        .iter()
+        .filter(undoes)
+        .filter_map(|removal| removal.moved_to.as_deref())
+        .collect();
+    // Bytes on disk the member wrote there and hasn't sent. The new store
+    // may hold the same bytes elsewhere, a copy's original or an older
+    // version in History, but they are still the member's change at this
+    // path, so they go to recovery rather than being replaced.
+    let own_on_disk: HashSet<(&str, &str)> = old
+        .unsent
+        .versions
+        .iter()
+        .filter(|version| !moved_back.contains(version.path.as_str()))
+        .map(|version| (version.path.as_str(), version.sha256.as_str()))
+        .collect();
+    let replaceable =
+        |path: &str, d: &String| new.held.contains(d) && !own_on_disk.contains(&(path, d.as_str()));
     let paths: BTreeSet<&str> = old_heads.keys().chain(new_heads.keys()).copied().collect();
     let mut jobs = Vec::new();
     // What to save: where it comes from, what it was, its name and why.
@@ -792,10 +842,10 @@ fn plan(
         let n = new_heads.get(path);
         match (new.disk.get(path), n) {
             (Some(d), Some(n)) if *d == n.sha256 => {}
-            (Some(d), Some(n)) if new.held.contains(d) => {
+            (Some(d), Some(n)) if replaceable(path, d) => {
                 jobs.push(write(path, &n.sha256, Some(d)));
             }
-            (Some(d), None) if new.held.contains(d) => jobs.push(PlannedJob {
+            (Some(d), None) if replaceable(path, d) => jobs.push(PlannedJob {
                 wave: 1,
                 path: path.to_owned(),
                 delete: true,
@@ -872,9 +922,7 @@ fn plan(
         .unsent
         .removals
         .iter()
-        .filter(|removal| {
-            new_heads.contains_key(removal.path.as_str()) && !new.disk.contains_key(&removal.path)
-        })
+        .filter(undoes)
         .map(|removal| UndoneChange {
             path: removal.path.clone(),
             moved_to: removal.moved_to.clone(),

@@ -458,6 +458,7 @@ impl EngineService {
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
             "share.view.rebuild" => Box::pin(self.share_view_rebuild(&ctx, request.params)).await?,
             "share.view.rebuildFinish" => self.share_view_rebuild_finish(request.params).await?,
+            "share.view.rebuildStatus" => self.share_view_rebuild_status(request.params)?,
             "links.in" | "links.resolve" | "links.edges" => {
                 self.links_read(&ctx, request.workspace, request.params, &request.method)
                     .await?
@@ -1876,6 +1877,7 @@ mod tests {
             "share.view.pull",
             "share.view.rebuild",
             "share.view.rebuildFinish",
+            "share.view.rebuildStatus",
             "share.view.pushChat",
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",

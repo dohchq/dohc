@@ -113,9 +113,9 @@ pub enum RelayOperation {
         /// The selector the relay stated for this share, pinned by the
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
-        /// Fills a rebuild's new store, which applies a page that marks a move
-        /// across the reach's edge instead of stopping at it.
-        rebuild: bool,
+        /// Applies a page that marks a move across the reach's edge instead
+        /// of stopping at it, for a pull that began at the start of the share.
+        through_moves: bool,
     },
     /// Send a membership view's own posts in Groups through the share append
     /// lane. The grant must name the whole workspace at Comment or Edit.
@@ -3311,9 +3311,15 @@ fn run_relay_operation(
             workspace_id,
             share_id,
             granted,
-            rebuild,
-        } => if rebuild {
-            client.pull_share_view_to_rebuild(store, &workspace_id, &share_id, &granted, &NoFaults)
+            through_moves,
+        } => if through_moves {
+            client.pull_share_view_through_moves(
+                store,
+                &workspace_id,
+                &share_id,
+                &granted,
+                &NoFaults,
+            )
         } else {
             client.pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
         }
@@ -4209,7 +4215,7 @@ mod hosted_refusal_tests {
                 workspace_id: ws(),
                 share_id: "share".into(),
                 granted: granted(),
-                rebuild: false,
+                through_moves: false,
             },
             RelayOperation::RecordShareViewIdentity {
                 workspace_id: ws(),

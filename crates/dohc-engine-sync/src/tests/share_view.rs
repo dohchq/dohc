@@ -4375,7 +4375,7 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
         let mut answers = Vec::new();
         for _ in 0..2 {
             let pull = if rebuild {
-                client.pull_share_view_to_rebuild(&mut engine, "ws", "share", &grant, &NoFaults)
+                client.pull_share_view_through_moves(&mut engine, "ws", "share", &grant, &NoFaults)
             } else {
                 client.pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
             }

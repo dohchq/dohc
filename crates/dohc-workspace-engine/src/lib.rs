@@ -121,6 +121,10 @@ pub struct EngineService {
     /// Roots whose copy is closed for a rebuild, with its id. See
     /// `rpc::rebuild`.
     rebuilding_roots: Mutex<HashMap<std::path::PathBuf, String>>,
+    /// Roots whose copy's first pull has more pages to read. Their later
+    /// pages apply a marked move rather than close the copy. Kept in memory:
+    /// a restart mid-pull closes the copy on such a page and rebuilds it.
+    first_pull_roots: Mutex<std::collections::HashSet<std::path::PathBuf>>,
     /// Where a harness stops the next rebuild, as a crash would.
     #[cfg(feature = "harness")]
     rebuild_crash_at: Mutex<Option<String>>,
@@ -271,6 +275,7 @@ impl EngineService {
             bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
             rebuilding_roots: Mutex::new(HashMap::new()),
+            first_pull_roots: Mutex::new(std::collections::HashSet::new()),
             #[cfg(feature = "harness")]
             rebuild_crash_at: Mutex::new(None),
         }

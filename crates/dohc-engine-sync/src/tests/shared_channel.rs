@@ -1650,6 +1650,33 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             ("chat.decision.set", 3, Some(json!("t-group"))),
         ]
     );
+    drop(pushes);
+
+    // The reverse: a Comment member under a View rule everywhere still posts
+    // in its Groups, which take the member level, not the files' level.
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "chat.message.append",
+        &json!({"threadId": "t-group", "messageId": "m-later"}),
+        2_000,
+        &NoFaults,
+    )
+    .expect("journal a later Group post");
+    let ruled = ShareGrant {
+        access: ShareAccess::Comment,
+        ..listed(ShareAccess::View)
+    };
+    assert_eq!(
+        client
+            .push_share_view_groups(&mut engine, "ws", "share", &ruled, &NoFaults)
+            .expect("a Comment member under a View rule sends its Group posts")
+            .pushed,
+        1
+    );
 }
 
 /// A membership at Comment or Edit also sends its Comments on files. A file

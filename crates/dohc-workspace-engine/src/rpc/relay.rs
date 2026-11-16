@@ -2441,6 +2441,7 @@ impl EngineService {
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let share_id = params.share_id.clone();
+        let first_pull = lock(&self.first_pull_roots).contains(&open.root);
         let outcome = self
             .relay_execute(
                 ctx,
@@ -2450,11 +2451,24 @@ impl EngineService {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
                     granted,
-                    rebuild: false,
+                    through_moves: first_pull,
                 },
                 "share.view.pull",
             )
             .await?;
+        // A copy's first pull reads on through marked moves until it has read
+        // every page.
+        if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome {
+            let mut roots = lock(&self.first_pull_roots);
+            if pulled.reach_changed.is_none()
+                && pulled.has_more
+                && (first_pull || pulled.from_start)
+            {
+                roots.insert(open.root.clone());
+            } else {
+                roots.remove(&open.root);
+            }
+        }
         // The relay now selects other items for this member, or moved one
         // across the edge of their reach. The copy may hold History the relay
         // withholds, so it closes before this answers: from here on only its
