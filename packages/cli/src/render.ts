@@ -443,7 +443,11 @@ function renderLiveDocuments(
     ...page.documents.map((row) =>
       [
         lineSafe(row.path),
-        row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
+        row.reason
+          ? LIVE_REASON_WORDS[row.reason]
+          : row.status === "retired" && row.stopped === false
+            ? "not live"
+            : LIVE_STATUS_WORDS[row.status],
         ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
         ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
         ...(row.deferredStop

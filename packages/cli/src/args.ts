@@ -783,6 +783,7 @@ const DOCUMENT_VERBS = {
     operands: "",
     notes: [
       "status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
+      "stopped is false on a retired document the server released without its owner's Pause or Stop. Opening it makes it live again.",
       "reason says why a document is not live. canResume is true when resume can start it again.",
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
