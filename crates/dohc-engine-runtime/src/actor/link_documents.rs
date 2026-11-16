@@ -164,6 +164,9 @@ pub(super) fn settled(
     Ok(())
 }
 
+/// Settles an open document so the pass can rewrite it, or returns false
+/// when it can't. `relevant` is asked about the document's text and, when
+/// that holds no links, about the file's own text too.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn baseline(
     store: &mut EngineStore,
@@ -173,7 +176,7 @@ pub(super) fn baseline(
     path: &str,
     token: &CancellationToken,
     recorder: &dyn super::materialization::SelfWriteRecorder,
-    relevant: impl FnOnce(&str) -> bool,
+    mut relevant: impl FnMut(&str) -> bool,
 ) -> Result<bool, RuntimeError> {
     let Some(marker) = store.read_with(|c| read_marker_in(c, key))? else {
         return Ok(false);
@@ -192,6 +195,17 @@ pub(super) fn baseline(
         .preserved_markdown_source(&projection.content)
         .unwrap_or(projection.content);
     if !relevant(&text) {
+        // The file may still hold links the document holds as text. The pass
+        // can rewrite neither, and settling would write over the file's links,
+        // so the note counts as relevant and unusable, and is left unchecked.
+        let head = dohc_engine_domain::VersionedTextStore::new(store).read_text(
+            &key.workspace_id,
+            &key.version_id,
+            path,
+        )?;
+        if let Some(head) = head.filter(|head| head.text != text) {
+            relevant(&head.text);
+        }
         return Ok(false);
     }
     store.read_with(|c| {

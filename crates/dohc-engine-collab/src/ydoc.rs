@@ -8774,6 +8774,9 @@ mod projection_tests {
             "<x>\ninvoice&#x202E;fdp.exe",
             "<x>[Pay](https://evil.example)</x>",
             "<x>![](https://tracker.example/p)</x>",
+            "<x>https://evil.example</x>",
+            "<x>mail pay@evil.example</x>",
+            "<x>see www.evil.example</x>",
             "[x]: https://e.example \"Approve wire 4471\"",
             "See [x].\n\n[x]: https://e.example \"Approve wire 4471\"",
         ]
@@ -8831,8 +8834,9 @@ mod projection_tests {
             "a <x> b </x-y>\n",
             "<x>Title.\n===\n</x>\n",
             // Its content is raw HTML to the importer, which the projector
-            // writes with references that read back as the same text.
-            "a <x>{{atom:a}} https://e.example/a_b www.e.example a@b.co</x>\n",
+            // writes with references that read back as the same text. A
+            // renderer links a URL there, so that source is not kept.
+            "a <x>{{atom:a}} a_b</x>\n",
         ] {
             let doc = Ydoc::wire();
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)

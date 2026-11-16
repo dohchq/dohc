@@ -49,6 +49,9 @@ fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
         ("[$$x$$](u)\n", [r#""insert":"$$x$$""#, r#""href":"u""#]),
         ("**$$x$$**\n", [r#""insert":"$$x$$""#, r#""bold""#]),
         ("![$$x$$](u)\n", [r#""alt":"$$x$$""#, r#""src":"u""#]),
+        ("==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
+        ("++$$x$$++\n", [r#""insert":"$$x$$""#, r#""underline""#]),
+        ("# ==$$x$$==\n", [r#""insert":"$$x$$""#, r#""highlight""#]),
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
@@ -125,6 +128,27 @@ fn nested_html_tags_read_in_time() {
         .unwrap();
     // Reading each tag's run once takes milliseconds; reading every run
     // inside it again at each tag takes minutes.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn tags_in_a_highlight_read_in_time() {
+    // Each tag follows a decoded `<` and holds `\=`, which a highlight reads
+    // as `=` only in source.
+    let tags: String = (0..16384)
+        .map(|i| format!("&lt;<t{i} a=\"\\=\"> a "))
+        .collect();
+    let source = format!("=={tags}==\n");
+    let started = std::time::Instant::now();
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+        .unwrap();
+    // Telling each tag is source by finding it in the note takes the
+    // note's length for each tag.
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "{:?}",

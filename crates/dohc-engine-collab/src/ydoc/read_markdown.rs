@@ -77,6 +77,17 @@ fn renders_markup(text: &str) -> bool {
 }
 
 impl Marks {
+    /// Whether both write the same attributes, which `raw` is not one of.
+    fn writes_as(&self, other: &Marks) -> bool {
+        self.bold == other.bold
+            && self.italic == other.italic
+            && self.strike == other.strike
+            && self.code == other.code
+            && self.underline == other.underline
+            && self.highlight == other.highlight
+            && self.link == other.link
+    }
+
     fn attrs(&self) -> Option<Attrs> {
         let mut attrs = Attrs::new();
         for (on, name) in [
@@ -193,15 +204,27 @@ pub(super) fn insert_element<F: XmlFragment>(
     for child in element.children.iter().rev() {
         match child {
             Child::Element(child) => insert_element(txn, &el, 0, child),
-            Child::Text(runs) if runs.len() == 1 && runs[0].1.attrs().is_none() => {
-                el.insert(txn, 0, XmlTextPrelim::new(runs[0].0.as_str()));
-            }
             Child::Text(runs) => {
+                // Runs whose written marks match join, since each delta
+                // takes time that grows with the text before it.
+                let mut deltas: Vec<(std::borrow::Cow<'_, str>, &Marks)> = Vec::new();
+                for (run, marks) in runs {
+                    match deltas.last_mut() {
+                        Some((text, last)) if last.writes_as(marks) => text.to_mut().push_str(run),
+                        _ => deltas.push((run.as_str().into(), marks)),
+                    }
+                }
+                if let [(run, marks)] = deltas.as_slice() {
+                    if marks.writes_as(&Marks::default()) {
+                        el.insert(txn, 0, XmlTextPrelim::new(run.as_ref()));
+                        continue;
+                    }
+                }
                 let text = el.insert(txn, 0, XmlTextPrelim::new(""));
                 text.apply_delta(
                     txn,
-                    runs.iter().map(|(run, marks)| {
-                        Delta::Inserted(run.as_str(), marks.attrs().map(Box::new))
+                    deltas.iter().map(|(run, marks)| {
+                        Delta::Inserted(run.as_ref(), marks.attrs().map(Box::new))
                     }),
                 );
             }
@@ -946,16 +969,17 @@ impl<'a> Reader<'a> {
                     raw: false,
                     ..marks.clone()
                 };
-                let read_inside = frame.pieces[pieces..].iter().any(|piece| match piece {
-                    Piece::Text { marks: inner, .. } => {
-                        inner.raw
-                            || Marks {
-                                raw: false,
-                                ..inner.clone()
-                            } != plain
-                    }
-                    _ => true,
-                });
+                let read_inside = holds_bare_link(&frame.pieces[pieces..])
+                    || frame.pieces[pieces..].iter().any(|piece| match piece {
+                        Piece::Text { marks: inner, .. } => {
+                            inner.raw
+                                || Marks {
+                                    raw: false,
+                                    ..inner.clone()
+                                } != plain
+                        }
+                        _ => true,
+                    });
                 frame.tags.truncate(at);
                 frame.pieces.truncate(pieces);
                 frame.brackets.retain(|&index| index < pieces);
@@ -1764,9 +1788,11 @@ fn merge(mut pieces: Vec<Piece>) -> Vec<Piece> {
         };
         // Source text joins only the source text right after it, so each
         // piece with an offset is still the source as written there.
+        // A piece without one that starts with `<` joins nothing, so each such
+        // piece that holds a tag is still an inline HTML run as written.
         let joins = match (*at, *next_at) {
             (Some(at), Some(next_at)) => at + text.len() == next_at,
-            (None, None) => true,
+            (None, None) => !text.starts_with('<') && !next.starts_with('<'),
             _ => false,
         };
         let joins = joins && *marks == *next_marks;
@@ -2053,10 +2079,11 @@ fn mark(mut piece: Piece, src: &str, pair: Pair) -> Piece {
                 marks.highlight = true;
                 // The editor reads every `\=` in a highlight's source as
                 // `=`, also inside code and raw HTML.
-                // An inline HTML run is source with no offset kept.
+                // An inline HTML run is source with no offset kept, and
+                // `merge` joins it to nothing.
                 let raw = match at {
                     Some(at) => src.get(*at..*at + text.len()) == Some(text.as_str()),
-                    None => text.starts_with('<') && src.contains(text.as_str()),
+                    None => text.starts_with('<'),
                 };
                 if raw && text.contains("\\=") {
                     *text = text.replace("\\=", "=");
@@ -2075,6 +2102,19 @@ fn mark(mut piece: Piece, src: &str, pair: Pair) -> Piece {
                 text: "=".to_owned(),
                 marks: Marks {
                     highlight: true,
+                    ..Marks::default()
+                },
+                at: None,
+            };
+        }
+        // A math block can't hold the mark, so the span stays its source
+        // text with it.
+        Piece::DisplayMath { source, .. } => {
+            piece = Piece::Text {
+                text: src[source.clone()].to_owned(),
+                marks: Marks {
+                    highlight: pair == Pair::Highlight,
+                    underline: pair == Pair::Underline,
                     ..Marks::default()
                 },
                 at: None,
@@ -2226,6 +2266,24 @@ fn bare_links(pieces: Vec<Piece>) -> Vec<Piece> {
         }
     }
     out
+}
+
+/// Whether source text among `pieces` holds a URL or email address that
+/// `bare_links` would link.
+fn holds_bare_link(pieces: &[Piece]) -> bool {
+    pieces.iter().any(|piece| match piece {
+        Piece::Text {
+            text,
+            marks,
+            at: Some(_),
+        } if marks.link.is_none() && !marks.code => {
+            (text.contains("://") || text.contains('@') || contains_ignore_case(text, "www."))
+                && text
+                    .char_indices()
+                    .any(|(index, _)| bare_link(text, index).is_some())
+        }
+        _ => false,
+    })
 }
 
 fn contains_ignore_case(text: &str, needle: &str) -> bool {

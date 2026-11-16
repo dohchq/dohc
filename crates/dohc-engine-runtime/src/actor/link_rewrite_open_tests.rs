@@ -327,15 +327,15 @@ async fn open_update_and_history_moment_commit_or_roll_back_together() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn literal_wikilinks_without_editor_elements_stay_unrewritten() {
+async fn literal_wikilinks_without_editor_elements_stay_unchecked() {
     let f = Fixture::new(1, 1).await;
     let (lease, doc) = f.open_document_with_elements("source-0000", false).await;
     let before = doc.encode_state_vector();
     let result = f.pass("literal-open", Arc::new(NoFaults)).await.unwrap();
-    // The open document is the note, and its text holds no links.
+    // The file holds links the open document holds as text, so the pass can
+    // rewrite neither and says so.
     assert_eq!(result["documents"], 0);
-    assert_eq!(result["links"], 0);
-    assert_eq!(result["unchecked"], json!([]));
+    assert_eq!(result["unchecked"], json!(["source-0000.md"]));
     assert_eq!(f.text("source-0000.md").await, BODY);
     assert_eq!(
         f.document("source-0000").await.encode_state_vector(),
