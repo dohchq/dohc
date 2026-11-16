@@ -1582,12 +1582,17 @@ fn drained<R>(store: &EngineStore, outcome: Result<R, RuntimeError>) -> Result<R
     outcome.and_then(|value| drain.map(|()| value))
 }
 
-/// The store's path as a person can read it. On Linux it goes through the
-/// held folder's current name, not this process's descriptor for it.
+/// The store's path by its folder's current name. On Linux and a Mac the
+/// store opens through the folder's descriptor or ID, a path with no
+/// workspace folders above it.
 fn shown_path(path: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
+    let by_name = dohc_linux_files::held::path_by_name;
+    #[cfg(target_vendor = "apple")]
+    let by_name = dohc_macos_files::path_by_name;
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     if let (Some(folder), Some(name)) = (path.parent(), path.file_name())
-        && let Ok(current) = dohc_linux_files::held::path_by_name(folder)
+        && let Ok(current) = by_name(folder)
     {
         return current.join(name);
     }

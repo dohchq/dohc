@@ -154,7 +154,7 @@ fn signal(pick: impl FnOnce(&AccessRuleSignals) -> &AtomicU64) {
 /// anywhere else belongs to no workspace on disk, so it has no rules to order.
 pub(super) fn install(db_path: &Path, signals: Arc<AccessRuleSignals>) {
     SIGNALS.with(|cell| *cell.borrow_mut() = Some(signals));
-    let root = db_path
+    let root = super::shown_path(db_path)
         .parent()
         .filter(|engine| engine.file_name().is_some_and(|name| name == "engine"))
         .and_then(Path::parent)
