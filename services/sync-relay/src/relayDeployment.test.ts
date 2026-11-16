@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
 import { openSyncRelayStorage } from "./storage";
 import { RelayWriteOwner } from "./storage/writeOwner";
@@ -22,6 +22,7 @@ import type { SqliteDb } from "./storage/types";
 import { guardRelayResponses } from "./relayResponseStanding";
 import type { StorageContext } from "./storage/context";
 import { acquireSupervisorOwnership } from "../../../packages/app-backend-runtime/src/worker-ownership";
+import { buildRelayFixture } from "../scripts/build.mjs";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -49,10 +50,25 @@ function read(path: string, table: string, bigInts = false) {
   }
 }
 
-// tsx compiles each fixture child on startup; under load that took over 20 s.
-// 45 s matches main.integration's tsx startup bound, and each test allows its
-// children plus 10 s.
-const TSX_CHILD_TIMEOUT_MS = 45_000;
+// Each child runs the fixture built once here. Run through tsx, a child compiled the relay's 304
+// modules again on every start, about 2.5 s each, and about one start in a few hundred never
+// finished. The bundle is built inside this package so that its external packages resolve.
+let buildDirectory: string;
+let crashFixture: string;
+beforeAll(async () => {
+  const output = fileURLToPath(new URL("../.output", import.meta.url));
+  mkdirSync(output, { recursive: true });
+  buildDirectory = mkdtempSync(join(output, "deployment-crash-"));
+  crashFixture = join(buildDirectory, "deployment-crash.js");
+  await buildRelayFixture(
+    fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)),
+    crashFixture,
+  );
+}, 30_000);
+afterAll(() => {
+  if (buildDirectory) rmSync(buildDirectory, { recursive: true, force: true });
+});
+const CHILD_TIMEOUT_MS = 45_000;
 
 describe("relay deployment continuity", () => {
   it("reuses its private dataset root and reclaims crashed preview directories on restart", async () => {
@@ -94,29 +110,17 @@ describe("relay deployment continuity", () => {
         first = openRelayDeployment(f.configPath);
       try {
         expect(() => openRelayDeployment(f.configPath)).toThrow();
-        const contender = spawnSync(
-          process.execPath,
-          [
-            "--import",
-            "tsx",
-            fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)),
-            f.configPath,
-            "contender",
-          ],
-          { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS },
-        );
+        const contender = spawnSync(process.execPath, [crashFixture, f.configPath, "contender"], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: CHILD_TIMEOUT_MS,
+        });
         expect(contender.error).toBeUndefined();
         expect(contender.status, contender.stderr).toBe(0);
         const missingConfig = spawnSync(
           process.execPath,
-          [
-            "--import",
-            "tsx",
-            fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)),
-            join(f.root, "missing.json"),
-            "contender",
-          ],
-          { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS },
+          [crashFixture, join(f.root, "missing.json"), "contender"],
+          { encoding: "utf8", windowsHide: true, timeout: CHILD_TIMEOUT_MS },
         );
         expect(missingConfig.error).toBeUndefined();
         expect(missingConfig.status).not.toBe(0);
@@ -139,7 +143,7 @@ describe("relay deployment continuity", () => {
         second.storage.close();
       }
     },
-    2 * TSX_CHILD_TIMEOUT_MS + 10_000,
+    2 * CHILD_TIMEOUT_MS + 10_000,
   );
 
   it.each(["relay", "continuity", "lock"])(
@@ -443,17 +447,11 @@ describe("relay deployment continuity", () => {
       const side = join(f.continuityDirectory, "continuity.sqlite"),
         confirmed = read(side, "continuity");
       const crash = (point: string, status: number) => {
-        const child = spawnSync(
-          process.execPath,
-          [
-            "--import",
-            "tsx",
-            fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)),
-            f.configPath,
-            point,
-          ],
-          { encoding: "utf8", windowsHide: true, timeout: TSX_CHILD_TIMEOUT_MS },
-        );
+        const child = spawnSync(process.execPath, [crashFixture, f.configPath, point], {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: CHILD_TIMEOUT_MS,
+        });
         expect(child.error).toBeUndefined();
         expect(child.stderr).toBe("");
         expect(child.status).toBe(status);
@@ -539,7 +537,7 @@ describe("relay deployment continuity", () => {
       expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
       expect(read(side, "continuity")).toEqual(settled);
     },
-    2 * TSX_CHILD_TIMEOUT_MS + 10_000,
+    2 * CHILD_TIMEOUT_MS + 10_000,
   );
 });
 
