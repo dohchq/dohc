@@ -467,7 +467,7 @@ fn production_docs(source: &str) -> [Ydoc; 2] {
 
 /// Every source seeds both builders with the body the reader reads, and the
 /// first fold may restyle the note but folding what it writes changes
-/// nothing.
+/// nothing the editor shows and writes the same file.
 #[test]
 fn every_source_seeds_both_builders_and_folds_stably() {
     let sources = nested_sources()
@@ -549,16 +549,59 @@ fn every_source_seeds_both_builders_and_folds_stably() {
         again
             .rewrite_content_to_markdown(ContentKind::Richdoc, &canonical)
             .unwrap();
-        // The writer escapes the backtick that would open a fence, which
-        // reads back as an escaped backtick: the same text and the same file.
-        let escapes_a_fence = source.starts_with("```bad`info\n");
-        if (again.canonical_content()["body"] != body && !escapes_a_fence)
+        // The writer escapes a `[`, `*` or backtick that would start a
+        // checkbox, a mark or a fence, which reads back as an escape: the
+        // same text and the same file.
+        if shown(&again.canonical_content()["body"]) != shown(&body)
             || again.project_richdoc().unwrap() != canonical
         {
             unstable.push(source);
         }
     }
     assert!(unstable.is_empty(), "{unstable:?}");
+}
+
+/// A body as the editor shows it: each escape read as its text, joined with
+/// the runs beside it that have the same marks.
+fn shown(node: &Value) -> Value {
+    let Some(children) = node.get("children").and_then(Value::as_array) else {
+        return node.clone();
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for child in children {
+        let runs = if child["tag"] == "escapedPunctuation" {
+            vec![serde_json::json!({ "insert": child["attrs"]["value"] })]
+        } else if child["type"] == "xmlText" {
+            child["delta"].as_array().cloned().unwrap_or_default()
+        } else {
+            out.push(shown(child));
+            continue;
+        };
+        if out.last().is_none_or(|last| last["type"] != "xmlText") {
+            out.push(serde_json::json!({ "type": "xmlText", "delta": [] }));
+        }
+        let delta = out.last_mut().unwrap()["delta"].as_array_mut().unwrap();
+        for run in runs {
+            match delta.last_mut() {
+                Some(last)
+                    if last.get("attrs") == run.get("attrs")
+                        && last["insert"].is_string()
+                        && run["insert"].is_string() =>
+                {
+                    let joined = format!(
+                        "{}{}",
+                        last["insert"].as_str().unwrap(),
+                        run["insert"].as_str().unwrap()
+                    );
+                    last["insert"] = Value::String(joined);
+                }
+                _ => delta.push(run),
+            }
+        }
+    }
+    let mut shown = node.clone();
+    shown["children"] = Value::Array(out);
+    shown
 }
 
 #[test]
