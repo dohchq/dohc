@@ -238,7 +238,8 @@ describe("a joined workspace", () => {
 
   it.each([
     ["at View", { access: "view" as const }, "Only people who can comment post here."],
-    ["after the membership ends", { ended: true }, "Your membership ended."],
+    // The band says the membership ended, so Comments does not say it again.
+    ["after the membership ends", { ended: true }, "Comments are read-only."],
   ])("says who comments %s, with no comment control", async (_, change, note) => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     vi.stubGlobal("dohcDesktop", bridge);

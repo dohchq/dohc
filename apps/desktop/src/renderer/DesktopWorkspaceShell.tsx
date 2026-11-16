@@ -1796,7 +1796,8 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const sharing = shareTarget !== null;
   // The name you chose in Settings, or else your account's email.
-  const ownName = props.userSettings?.settings.profile.preferredName || cloudStatus?.email || undefined;
+  const ownName =
+    props.userSettings?.settings.profile.preferredName || cloudStatus?.email || undefined;
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
@@ -3525,14 +3526,18 @@ export function DesktopWorkspaceShell(props: {
       }
     : {};
   // A path share reads its files' comments and adds none. A damaged
-  // membership has no level to read, so it adds none either.
+  // membership has no level to read, so it adds none either. After a
+  // membership ends, the band above says so, and Comments says only what
+  // it means here.
   const fileCommentsClosed = !shareView
     ? undefined
     : !membershipView
       ? "Chats are read-only in this shared view."
-      : shareViewDamaged && !shareViewEnded
-        ? shareWriteRefusal
-        : membershipPostingClosed;
+      : shareViewEnded
+        ? "Comments are read-only."
+        : shareViewDamaged
+          ? shareWriteRefusal
+          : membershipPostingClosed;
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
