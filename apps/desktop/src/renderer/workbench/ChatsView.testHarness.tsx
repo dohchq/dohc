@@ -466,15 +466,16 @@ export function renderView(
   onError = vi.fn<TestChatsViewProps["onError"]>(),
   extra: ExtraProps = {},
 ) {
-  const { unmount } = render(
+  const view = (props: ExtraProps) => (
     <ChatsView
       workspaceId="workspace-a"
       onOpenFileChat={onOpenFileChat}
       onError={onError}
-      {...extra}
-    />,
+      {...props}
+    />
   );
-  return { onOpenFileChat, onError, unmount };
+  const { unmount, rerender } = render(view(extra));
+  return { onOpenFileChat, onError, unmount, rerender: (next: ExtraProps) => rerender(view(next)) };
 }
 
 export const mentionRoster = [

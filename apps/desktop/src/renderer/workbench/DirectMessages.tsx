@@ -41,6 +41,9 @@ type ReportError = (message: string, cause?: unknown, retry?: () => void, refuse
 interface Reporting {
   onError: ReportError;
   onClearError?: (identity: string) => void;
+  // The title bar names the server as the problem, so a list read that fails
+  // files no notice of its own: the server's report covers it.
+  serverNamed?: boolean;
 }
 
 const NO_CANDIDATES: readonly MentionCandidate[] = [];
@@ -69,15 +72,16 @@ function preview(conversation: DirectConversation, viewerId: string): string {
 /** Reports a failed list read once per message, and takes it back when a read works. */
 function useListFailureReport(state: DirectListState, store: DirectStore, reporting: Reporting) {
   const failure = state.status === "failed" ? state.message : state.status === "ready" ? state.failure : null;
+  const serverNamed = reporting.serverNamed === true;
   const report = useRef(reporting);
   report.current = reporting;
   useEffect(() => {
-    if (failure) {
+    if (failure && !serverNamed) {
       report.current.onError(failure, undefined, () => void store.refresh(), undefined, { identity: LIST_IDENTITY });
-    } else if (state.status === "ready") {
+    } else if (failure || state.status === "ready") {
       report.current.onClearError?.(LIST_IDENTITY);
     }
-  }, [failure, state.status, store]);
+  }, [failure, serverNamed, state.status, store]);
 }
 
 /** The People section of the Chats sidebar. Hidden while signed out. */

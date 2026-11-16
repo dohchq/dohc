@@ -183,6 +183,25 @@ describe("ChatsView direct messages", () => {
     expect(retry.isConnected).toBe(false);
   });
 
+  it("files no list notice while the title bar names the server, and files it once the title bar stops", async () => {
+    bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
+    const onError = vi.fn();
+    const onClearError = vi.fn();
+    const listReports = () => onError.mock.calls.filter((call) => (call[4] as { identity?: string } | undefined)?.identity === "direct-list");
+    const view = renderView(vi.fn(), onError, { variant: "panel", onClearError, serverNamed: true });
+    // The People section still says so in place, with Try again.
+    await screen.findByTestId("chats-dms-retry");
+    expect(listReports()).toEqual([]);
+    await waitFor(() => expect(onClearError).toHaveBeenCalledWith("direct-list"));
+
+    view.rerender({ variant: "panel", onClearError, serverNamed: false });
+    await waitFor(() => expect(listReports()).toHaveLength(1));
+    onClearError.mockClear();
+    view.rerender({ variant: "panel", onClearError, serverNamed: true });
+    await waitFor(() => expect(onClearError).toHaveBeenCalledWith("direct-list"));
+    expect(listReports()).toHaveLength(1);
+  });
+
   it("shows a conversation opened while the server is away as failed, with Try again that reads it once the server answers", async () => {
     bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
     renderView(vi.fn(), vi.fn(), {

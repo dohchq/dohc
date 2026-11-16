@@ -364,6 +364,9 @@ export function ChatsView(props: {
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string, undo?: () => void) => void;
   onClearError?: (identity: string) => void;
+  // The title bar names the server as the problem. Direct messages need the
+  // server, so their list then files no notice of its own.
+  serverNamed?: boolean;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
   // Removing a member is undoable for a while. The shell shows that notice
@@ -3904,6 +3907,7 @@ export function ChatsView(props: {
         onOpenSettings={props.onOpenSettings}
         onError={props.onError}
         onClearError={props.onClearError}
+        serverNamed={props.serverNamed}
       />
     );
   }
@@ -4875,6 +4879,7 @@ export function ChatsView(props: {
             onNew={() => openConversation({ level: "direct-new" })}
             onError={props.onError}
             onClearError={props.onClearError}
+            serverNamed={props.serverNamed}
           />
           {/* Agents cannot run in a joined workspace yet, so it lists none. */}
           {!inJoinedWorkspace &&
