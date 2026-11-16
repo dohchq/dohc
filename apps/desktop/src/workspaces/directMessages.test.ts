@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { ipcWireError, readError } from "../ipc/errorWords";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
@@ -15,7 +15,7 @@ const conversation = (last: DirectMessage, unread = 1): DirectConversation => ({
 function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   let account: Account | null = options.account === undefined ? { relayUrl: "https://relay.test", userId: "ann" } : options.account;
   let offline = false;
-  const routes = new Map<string, () => Response>();
+  const routes = new Map<string, () => Response | Promise<Response>>();
   const requests: string[] = [];
   const tokens: string[] = [];
   let changes = 0;
@@ -129,6 +129,25 @@ describe("direct messages for the signed-in account", () => {
     expect((await h.service.list()).conversations[0]?.unread).toBe(0);
     expect(lists).toBe(2);
     expect(h.service.listed("ann")?.conversations[0]?.unread).toBe(0);
+    stop();
+  });
+
+  it("keeps the newer list when an older read answers after it, so a read Notice stays cleared", async () => {
+    const h = harness();
+    const answers: Array<(response: Response) => void> = [];
+    let activity = 0;
+    h.routes.set("/sync/direct/activity", () => activity++ === 0 ? Response.json({ revision: 1 }) : new Promise<Response>(() => {}));
+    h.routes.set("/sync/direct/conversations", () => new Promise<Response>((resolve) => answers.push(resolve)));
+    const stop = h.service.listen();
+    // The follow loop's read at revision 1 is on its way; a window's read overtakes it after a read mark.
+    await vi.waitFor(() => expect(answers).toHaveLength(1));
+    const windowRead = h.service.list();
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    answers[1]!(Response.json({ revision: 2, conversations: [conversation(message(2), 0)] }));
+    expect((await windowRead).conversations[0]!.unread).toBe(0);
+    answers[0]!(Response.json({ revision: 1, conversations: [conversation(message(2), 1)] }));
+    await vi.waitFor(() => expect(h.changes()).toBe(1));
+    expect(h.service.listed("ann")?.conversations[0]!.unread).toBe(0);
     stop();
   });
 
