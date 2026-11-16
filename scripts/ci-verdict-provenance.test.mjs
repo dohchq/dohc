@@ -873,6 +873,10 @@ test("the editing-together check is selected by what it runs and loads, and only
     "apps/desktop/scripts/run-playwright.mjs",
     "apps/desktop/playwright.together.config.ts",
     "services/workspace-api/e2e/harness.ts",
+    // The share page's own tests, and an app they publish.
+    "services/share-web/e2e/smoke.spec.ts",
+    "examples/trip-poll/package.json",
+    "tools/single-react.ts",
     "scripts/verification/wait-preparation.mjs",
     "pnpm-lock.yaml",
     ".github/workflows/pr-checks.yml",
@@ -960,12 +964,15 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
   }
 });
 
+// One runner per matrix leg: the gates split by shard, the browser job by suite.
+const legs = (job) => (job.strategy?.matrix?.shard ?? job.strategy?.matrix?.suite)?.length ?? 1;
+
 test("the workflow graph pins its total and peak concurrent jobs", () => {
   const { jobs } = load(workflow),
     names = Object.keys(jobs);
   assert.equal(
-    names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
-    25,
+    names.reduce((total, name) => total + legs(jobs[name]), 0),
+    26,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -988,10 +995,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     assert.ok(
       simultaneous.every((name) => simultaneous.every((other) => !before.get(name).has(other))),
     );
-    return simultaneous.reduce(
-      (n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1),
-      0,
-    );
+    return simultaneous.reduce((n, name) => n + legs(jobs[name]), 0);
   };
   let peak = 0;
   for (let mask = 1; mask < 2 ** names.length; mask++) {
@@ -1000,12 +1004,12 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       continue;
     peak = Math.max(
       peak,
-      simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
+      simultaneous.reduce((n, name) => n + legs(jobs[name]), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 4);
+  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 5);
   assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 23);
+  assert.equal(peak, 24);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 

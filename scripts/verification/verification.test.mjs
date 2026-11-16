@@ -1482,10 +1482,15 @@ test("a selected Android gate needs CI evidence, because no local run compiles i
 test("a selected editing-together check needs CI evidence, because no local run performs it", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   for (const file of ["services/sync-relay/src/server.ts", "apps/desktop/src/main.ts"])
-    assert.deepEqual(ciEvidence(selectedGates([file], workflow)), ["editing together"], file);
+    assert.deepEqual(
+      ciEvidence(selectedGates([file], workflow)),
+      ["editing together", "share page"],
+      file,
+    );
   assert.deepEqual(ciEvidence(selectedGates(["pnpm-lock.yaml"], workflow)), [
     "Android Kotlin compile",
     "editing together",
+    "share page",
   ]);
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/desktop/e2e/together/**'", "- 'apps/other/**'");

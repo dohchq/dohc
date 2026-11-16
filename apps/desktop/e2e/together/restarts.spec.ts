@@ -140,28 +140,26 @@ test("the share page's server restarts under open pages", async ({ stack }) => {
     .toBe(true)
     .catch(() => undefined);
 
-  judge(
-    name,
-    { editing, reading },
-    (end) => {
-      expect(end.editing.stopped, `the person editing was told: ${end.editing.words}`).toBe(false);
-      expect(end.reading).not.toContain(gone);
-      expect(end.reading).toContain("AFTER");
-    },
-    (end) => {
-      // Editing does not come back, and the reader is told to ask for a new link, though the link
-      // still works. The person editing keeps the note on their page as it was.
-      expect(end.editing.words).toContain("Editing is no longer available.");
-      expect(end.editing.lines).toEqual([
-        "Together",
-        "Alpha Apple BEFORE",
-        "Bravo Banana",
-        "Omega ends the note.",
-      ]);
-      expect(end.reading).toContain(gone);
-    },
-  );
-  // Whatever the pages say, the link itself still opens the note for someone new.
   const fresh = await openReader(stack.browser, note);
-  await expect(fresh.locator("body")).toContainText("BEFORE", { timeout: 60_000 });
+  let freshReading = "";
+  await expect
+    .poll(
+      async () => {
+        freshReading = await fresh.locator("body").innerText();
+        return freshReading.includes("AFTER");
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true)
+    .catch(() => undefined);
+  // The editing page is read last. It must still be editable once both readers have the word.
+  editing = await person.sees();
+
+  judge(name, { editing, reading, freshReading }, (end) => {
+    expect(end.editing.stopped, `the person editing was told: ${end.editing.words}`).toBe(false);
+    expect(end.editing.lines).toContain("Alpha Apple BEFORE AFTER");
+    expect(end.reading).not.toContain(gone);
+    expect(end.reading).toContain("AFTER");
+    expect(end.freshReading).toContain("AFTER");
+  });
 });

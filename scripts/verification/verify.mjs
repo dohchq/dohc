@@ -183,7 +183,7 @@ export function passedSpecTitles(suites = []) {
 /** The PR checks a selection needs a passing CI run of, because no local run performs them. */
 export const ciEvidence = (gates) => [
   ...(gates.android ? ["Android Kotlin compile"] : []),
-  ...(gates.together ? ["editing together"] : []),
+  ...(gates.together ? ["editing together", "share page"] : []),
 ];
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
