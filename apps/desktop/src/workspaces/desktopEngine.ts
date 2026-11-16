@@ -50,6 +50,7 @@ import {
   listedOwnerDeliveryPaths,
   readyOwnerDeliveryDocuments,
   startServerOwnerDelivery,
+  type ListedOwnerDeliveryDocument,
 } from "./serverOwnerDelivery";
 import type { LiveDocumentPath } from "./moveAcceptedEditsGuard";
 import {
@@ -228,6 +229,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   notifyOwnerDraftsChanged?(workspaceId: string): void;
   // The shared notes whose edits wait on this computer for the server, as last read.
   ownerPendingPaths?(workspaceId: string): readonly string[];
+  // Whether an editor here has the shared note at `path` open as its owner.
+  ownerHasOpen?(workspaceId: string, path: string): boolean;
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
@@ -329,6 +332,59 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerQuarantineReads = new Map<string, number>();
   const ownerQuarantineAttempts = new Map<string, number>();
   const ownerQuarantineHeads = new Map<string, OwnerLiveHeadCache>();
+  // Each shared note its owner has open here joins its live room: one connection
+  // that carries each edit as it lands and puts the room's unsaved edits on the
+  // owner's screen. The pass loop starts and ends rooms, by workspace and object.
+  interface OwnerRoom {
+    binding: LiveObjectBinding;
+    // The room's queue is empty and it waits for an edit.
+    idle: boolean;
+    // The relay took an edit since the room last waited.
+    acknowledged: boolean;
+    end: AbortController;
+    ended: Promise<void>;
+  }
+  const ownerRooms = new Map<string, Map<string, OwnerRoom>>();
+  // A room that closed on its own opens again after this time, by object.
+  const ownerRoomRetryAt = new Map<string, number>();
+  // Notes a Stop release or a move's catch-up holds: no room opens for them.
+  const ownerRoomsHeld = new Map<string, number>();
+  // The owner's edits that reached a queue for the server, by workspace.
+  const ownerEdits = new Map<string, { count: number; waiters: Set<() => void> }>();
+  const ownerEditsOf = (workspaceId: string) => {
+    let edits = ownerEdits.get(workspaceId);
+    if (!edits) ownerEdits.set(workspaceId, (edits = { count: 0, waiters: new Set() }));
+    return edits;
+  };
+  function endOwnerRooms(workspaceId?: string, objectIds?: readonly string[]): Promise<void> {
+    const ending: Promise<void>[] = [];
+    for (const [id, rooms] of ownerRooms)
+      if (workspaceId === undefined || id === workspaceId)
+        for (const [objectId, room] of rooms)
+          if (!objectIds || objectIds.includes(objectId)) {
+            room.end.abort();
+            ending.push(room.ended);
+          }
+    return Promise.all(ending).then(() => undefined);
+  }
+  /** Ends the rooms of `objectIds` and keeps them closed while `work` runs. */
+  async function withoutOwnerRooms<Result>(
+    workspaceId: string,
+    objectIds: readonly string[],
+    work: () => Promise<Result>,
+  ): Promise<Result> {
+    for (const id of objectIds) ownerRoomsHeld.set(id, (ownerRoomsHeld.get(id) ?? 0) + 1);
+    try {
+      await endOwnerRooms(workspaceId, objectIds);
+      return await work();
+    } finally {
+      for (const id of objectIds) {
+        const held = (ownerRoomsHeld.get(id) ?? 1) - 1;
+        if (held) ownerRoomsHeld.set(id, held);
+        else ownerRoomsHeld.delete(id);
+      }
+    }
+  }
   const releaseIncident = (row: Pick<UnwrittenRelease, "objectId" | "binding">) =>
     row.binding
       ? `release:${row.binding.lineageClaimId}:${row.binding.restoreFenceGeneration}`
@@ -437,6 +493,19 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
    * so the release writes every one through `acceptedCursor`.
    */
   async function releaseOwnerLiveStop(
+    workspaceId: string,
+    client: EngineClient,
+    workspaceHandle: string,
+    binding: LiveObjectBinding,
+    acceptedCursor: number,
+    signal?: AbortSignal,
+    journal?: OwnerJournalRead,
+  ) {
+    return withoutOwnerRooms(workspaceId, [binding.objectId], () =>
+      releaseHeld(workspaceId, client, workspaceHandle, binding, acceptedCursor, signal, journal),
+    );
+  }
+  async function releaseHeld(
     workspaceId: string,
     client: EngineClient,
     workspaceHandle: string,
@@ -603,10 +672,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     pausedOwnerDocuments.clear();
     ownerStopFailures.clear();
     liveDocumentPaths.clear();
+    ownerRoomRetryAt.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
-    if (previous)
-      ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(
+    const rooms = [...ownerRooms.values()].some((open) => open.size) ? endOwnerRooms() : undefined;
+    if (previous || rooms)
+      ownerDeliverySettled = Promise.all([ownerDeliverySettled, rooms, previous?.stop()]).then(
         () => undefined,
       );
     return ownerDeliverySettled;
@@ -671,6 +742,167 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             if (now?.get(path) !== at) return;
             now?.delete(path);
             if (answer === "refused") refused.add(path);
+          };
+          // A note's room runs beside the pass loop. It takes the workspace session one
+          // engine call at a time, so closing the workspace never waits for it.
+          const startOwnerRoom = (
+            workspaceId: string,
+            document: ListedOwnerDeliveryDocument,
+            documents: ListedOwnerDeliveryDocument[],
+          ) => {
+            const withOperation = workspaceAuthorities.withOperation;
+            if (!withOperation) return;
+            const objectId = document.binding.objectId,
+              end = new AbortController(),
+              room: OwnerRoom = {
+                binding: document.binding,
+                idle: false,
+                acknowledged: false,
+                end,
+                ended: Promise.resolve(),
+              };
+            const rooms = ownerRooms.get(workspaceId) ?? new Map<string, OwnerRoom>();
+            ownerRooms.set(workspaceId, rooms.set(objectId, room));
+            const ended = () => new Error("This live editing session ended.");
+            const waited = () => {
+              if (!room.acknowledged) return;
+              room.acknowledged = false;
+              notifyRenderer({ workspaceId });
+              dependencies.notifyOwnerDraftsChanged?.(workspaceId);
+              // The next pass lifts a pause on a note whose room has delivered every edit.
+              if (pausedOwnerDocuments.get(workspaceId)?.has(document.binding.currentPath))
+                ownerDelivery?.retry?.(workspaceId);
+            };
+            room.ended = (async () => {
+              try {
+                await withOperation(workspaceId, async (operation) => {
+                  const session = await server.connect(
+                    operation.workspace,
+                    AbortSignal.any([end.signal, operation.signal]),
+                  );
+                  if (!session) return;
+                  const signal = AbortSignal.any([end.signal, operation.signal, session.signal]);
+                  const native = (nativeOwnerDeliveryModule ??=
+                    await import("./nativeOwnerDelivery"));
+                  const opened = await sessions.runIfOpen(operation.workspace, async (binding) => ({
+                    binding,
+                    client: daemon.currentClient(),
+                  }));
+                  if (!opened || !(opened.client instanceof EngineClient)) return;
+                  const { binding, client } = opened;
+                  const assertCurrent = () => {
+                    signal.throwIfAborted();
+                    operation.assertCurrent();
+                    session.assertCurrent();
+                    sessions.assertCurrentBinding(operation.workspace, binding);
+                    if (
+                      generation !== ownerDeliveryGeneration ||
+                      isQuitting() ||
+                      daemon.currentClient() !== client ||
+                      binding.client !== source.currentClient()
+                    )
+                      throw ended();
+                  };
+                  const hold = async <T>(work: () => Promise<T>): Promise<T> => {
+                    let ran = false;
+                    const result = await sessions.runIfOpen(operation.workspace, (current) => {
+                      if (current !== binding) throw ended();
+                      ran = true;
+                      return work();
+                    });
+                    if (!ran) throw ended();
+                    return result as T;
+                  };
+                  assertCurrent();
+                  const outcome = await native.runNativeOwnerDeliveryPass({
+                    client,
+                    workspaceHandle: binding.workspace,
+                    document,
+                    config: { ...profile, relayUrl: session.relayUrl, documents },
+                    refusals: (ownerRefusals ??= new native.OwnerKnownRefusals()),
+                    signal,
+                    bearer: session.bearer,
+                    accountId: session.accountId,
+                    assertCurrent,
+                    hold,
+                    lasting: {
+                      count: () => ownerEditsOf(workspaceId).count,
+                      landed: (seen, landedSignal) =>
+                        new Promise<void>((resolve, reject) => {
+                          const edits = ownerEditsOf(workspaceId);
+                          if (edits.count > seen) return resolve();
+                          landedSignal.throwIfAborted();
+                          room.idle = true;
+                          waited();
+                          const wake = () => {
+                            room.idle = false;
+                            edits.waiters.delete(wake);
+                            landedSignal.removeEventListener("abort", stop);
+                            resolve();
+                          };
+                          const stop = () => {
+                            room.idle = false;
+                            edits.waiters.delete(wake);
+                            reject(landedSignal.reason);
+                          };
+                          edits.waiters.add(wake);
+                          landedSignal.addEventListener("abort", stop, { once: true });
+                        }),
+                      acknowledged: () => {
+                        room.acknowledged = true;
+                      },
+                    },
+                  });
+                  waited();
+                  if (quarantinesMayChange(workspaceId, objectId, outcome))
+                    await hold(() =>
+                      readQuarantinesAfterPass(workspaceId, client, binding.workspace),
+                    );
+                });
+              } catch (error) {
+                if (!end.signal.aborted) console.error("[desktop] owner live room failed:", error);
+              } finally {
+                if (rooms.get(objectId) === room) rooms.delete(objectId);
+                // A room that closed on its own waits, and a pass takes its note meanwhile.
+                if (!end.signal.aborted && generation === ownerDeliveryGeneration) {
+                  ownerRoomRetryAt.set(objectId, Date.now() + profile.retryDelayMs * 5);
+                  ownerDelivery?.retry?.(workspaceId);
+                }
+              }
+            })();
+          };
+          // Rooms for the listed notes their owner has open here, except those refused or held.
+          const syncOwnerRooms = (
+            workspaceId: string,
+            documents: ListedOwnerDeliveryDocument[],
+          ) => {
+            const ownerHasOpen = dependencies.ownerHasOpen;
+            if (!ownerHasOpen) return;
+            const refused = refusedPaths(workspaceId),
+              frozen = frozenOwnerDocuments.get(workspaceId),
+              now = Date.now();
+            const wanted = (document: ListedOwnerDeliveryDocument) => {
+              const path = document.binding.currentPath;
+              return (
+                !ownerRoomsHeld.has(document.binding.objectId) &&
+                !refused.has(path) &&
+                !frozen?.has(path) &&
+                ownerHasOpen(workspaceId, path)
+              );
+            };
+            const rooms = ownerRooms.get(workspaceId);
+            for (const [objectId, room] of rooms ?? []) {
+              const listed = documents.find((document) => document.binding.objectId === objectId);
+              if (!listed || !sameBinding(listed.binding, room.binding) || !wanted(listed))
+                room.end.abort();
+            }
+            for (const document of documents) {
+              const objectId = document.binding.objectId,
+                retryAt = ownerRoomRetryAt.get(objectId) ?? 0;
+              if (retryAt > now || ownerRooms.get(workspaceId)?.has(objectId)) continue;
+              ownerRoomRetryAt.delete(objectId);
+              if (wanted(document)) startOwnerRoom(workspaceId, document, documents);
+            }
           };
           ownerDelivery = startServerOwnerDelivery({
             workspaceIds: () => server.workspaceIds(),
@@ -788,6 +1020,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       workspaceId,
                       listedOwnerDeliveryPaths(response, documents),
                     );
+                    syncOwnerRooms(workspaceId, documents);
                     const { documents: rows, diverged } = response as {
                       documents: {
                         path: string;
@@ -934,41 +1167,51 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
                     check();
                     const native = nativeOwnerDeliveryModule;
-                    const result = await sessions.run(operation.workspace, async (binding) => {
-                      const client = daemon.currentClient();
-                      if (!(client instanceof EngineClient))
-                        throw new Error("Owner delivery requires the desktop daemon client.");
-                      const assertCurrent = () => {
-                        check();
-                        sessions.assertCurrentBinding(operation.workspace, binding);
-                        if (
-                          daemon.currentClient() !== client ||
-                          binding.client !== source.currentClient()
-                        )
-                          throw new Error("This live editing session ended.");
-                      };
-                      assertCurrent();
-                      const outcome = await native.runNativeOwnerDeliveryPass({
-                        client,
-                        workspaceHandle: binding.workspace,
-                        document,
-                        config: { ...profile, relayUrl: session.relayUrl, documents },
-                        refusals: (ownerRefusals ??= new native.OwnerKnownRefusals()),
-                        signal,
-                        bearer: session.bearer,
-                        accountId: session.accountId,
-                        assertCurrent,
-                        onEnrolled: async () => {
-                          await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
-                        },
-                        ...(fullPass || document.head === undefined
-                          ? {}
-                          : { serverHead: document.head }),
-                      });
-                      if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome))
-                        await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
-                      return outcome;
-                    });
+                    const roomUp =
+                      ownerRooms.get(workspaceId)?.get(document.binding.objectId)?.end.signal
+                        .aborted === false;
+                    // A note in its room delivers there.
+                    const result = roomUp
+                      ? ("room" as const)
+                      : await sessions.run(operation.workspace, async (binding) => {
+                          const client = daemon.currentClient();
+                          if (!(client instanceof EngineClient))
+                            throw new Error("Owner delivery requires the desktop daemon client.");
+                          const assertCurrent = () => {
+                            check();
+                            sessions.assertCurrentBinding(operation.workspace, binding);
+                            if (
+                              daemon.currentClient() !== client ||
+                              binding.client !== source.currentClient()
+                            )
+                              throw new Error("This live editing session ended.");
+                          };
+                          assertCurrent();
+                          const outcome = await native.runNativeOwnerDeliveryPass({
+                            client,
+                            workspaceHandle: binding.workspace,
+                            document,
+                            config: { ...profile, relayUrl: session.relayUrl, documents },
+                            refusals: (ownerRefusals ??= new native.OwnerKnownRefusals()),
+                            signal,
+                            bearer: session.bearer,
+                            accountId: session.accountId,
+                            assertCurrent,
+                            onEnrolled: async () => {
+                              await readQuarantinesAfterPass(
+                                workspaceId,
+                                client,
+                                binding.workspace,
+                              );
+                            },
+                            ...(fullPass || document.head === undefined
+                              ? {}
+                              : { serverHead: document.head }),
+                          });
+                          if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome))
+                            await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                          return outcome;
+                        });
                     check();
                     // A document the server refused names itself in its own notice. It
                     // is not retrying, and the rest of the workspace keeps delivering.
@@ -980,11 +1223,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     else failures.delete(path);
                     if (blocked) frozen.add(path);
                     else if (result !== "retry") frozen.delete(path);
-                    // A pass delivers one waiting edit, so only an empty queue takes edits again.
+                    // A pass delivers one waiting edit, so only an empty queue takes edits again,
+                    // as does a room's that waits for an edit.
                     // A refused queue, which this pass may have found, has its own notice.
+                    const idleRooms = new Set(
+                      [...(ownerRooms.get(workspaceId)?.values() ?? [])].flatMap((room) =>
+                        room.idle ? [room.binding.currentPath] : [],
+                      ),
+                    );
                     for (const pausedPath of paused)
                       if (
                         (pausedPath === path && result === "empty") ||
+                        idleRooms.has(pausedPath) ||
                         refusedPaths(workspaceId).has(pausedPath)
                       ) {
                         paused.delete(pausedPath);
@@ -1056,42 +1306,44 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                   check();
                   const native = (nativeOwnerDeliveryModule ??=
                     await import("./nativeOwnerDelivery"));
-                  return await catchUpOwnerDocuments(
-                    documents,
-                    objectIds,
-                    (document) =>
-                      sessions.run(operation.workspace, async (binding) => {
-                        const client = daemon.currentClient();
-                        if (!(client instanceof EngineClient)) return "retry";
-                        const assertCurrent = () => {
-                          check();
-                          sessions.assertCurrentBinding(operation.workspace, binding);
-                          if (
-                            daemon.currentClient() !== client ||
-                            binding.client !== source.currentClient()
-                          )
-                            throw new Error("This live editing session ended.");
-                        };
-                        assertCurrent();
-                        const result = await native.runNativeOwnerDeliveryPass({
-                          client,
-                          workspaceHandle: binding.workspace,
-                          document,
-                          config: { ...profile, relayUrl: session.relayUrl, documents },
-                          refusals: (ownerRefusals ??= new native.OwnerKnownRefusals()),
-                          signal,
-                          bearer: session.bearer,
-                          accountId: session.accountId,
-                          assertCurrent,
-                          observedOnly: true,
-                        });
-                        if (quarantinesMayChange(workspaceId, document.binding.objectId, result))
-                          await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
-                        if (result === "acknowledged" || result === "frozen")
-                          dependencies.notifyOwnerDraftsChanged?.(workspaceId);
-                        return result;
-                      }),
-                    check,
+                  return await withoutOwnerRooms(workspaceId, objectIds, () =>
+                    catchUpOwnerDocuments(
+                      documents,
+                      objectIds,
+                      (document) =>
+                        sessions.run(operation.workspace, async (binding) => {
+                          const client = daemon.currentClient();
+                          if (!(client instanceof EngineClient)) return "retry";
+                          const assertCurrent = () => {
+                            check();
+                            sessions.assertCurrentBinding(operation.workspace, binding);
+                            if (
+                              daemon.currentClient() !== client ||
+                              binding.client !== source.currentClient()
+                            )
+                              throw new Error("This live editing session ended.");
+                          };
+                          assertCurrent();
+                          const result = await native.runNativeOwnerDeliveryPass({
+                            client,
+                            workspaceHandle: binding.workspace,
+                            document,
+                            config: { ...profile, relayUrl: session.relayUrl, documents },
+                            refusals: (ownerRefusals ??= new native.OwnerKnownRefusals()),
+                            signal,
+                            bearer: session.bearer,
+                            accountId: session.accountId,
+                            assertCurrent,
+                            observedOnly: true,
+                          });
+                          if (quarantinesMayChange(workspaceId, document.binding.objectId, result))
+                            await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                          if (result === "acknowledged" || result === "frozen")
+                            dependencies.notifyOwnerDraftsChanged?.(workspaceId);
+                          return result;
+                        }),
+                      check,
+                    ),
                   );
                 });
               } finally {
@@ -1633,6 +1885,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
      * longer an answer. A pass starts now unless the last list named it live
      * or starting; then the next pass reads the list that decides.
      */
+    /** The owner's edit of a shared note reached its queue for the server: its room sends it now. */
+    ownerEditLanded(workspaceId: string): void {
+      const edits = ownerEditsOf(workspaceId);
+      edits.count += 1;
+      for (const wake of [...edits.waiters]) wake();
+    },
     ownerOpenedLiveDocument(workspaceId: string, path: string): void {
       if (!dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)) return;
       ownerOpenRefused.get(workspaceId)?.delete(path);

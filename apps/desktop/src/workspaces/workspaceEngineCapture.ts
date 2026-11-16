@@ -670,6 +670,8 @@ export interface WorkspaceEngineCapture {
     ) => void;
     // `paused`: this file's queue for the server takes no more edits.
     onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
+    // An edit of this owner's shared note is in its queue for the server.
+    onOwnerEditQueued?: () => void;
     // A reopen found another object at this path: this document was moved,
     // or deleted and replaced. The session stops reopening and saves nothing
     // more, so the caller sets the editor's text aside.
@@ -2752,6 +2754,8 @@ export function createWorkspaceEngineCapture(
       head?: YdocDeliveredHead,
     ) => void;
     onEditRefused?: (requestId: string, message: string, paused?: boolean) => void;
+    // An edit of this owner's shared note is in its queue for the server.
+    onOwnerEditQueued?: () => void;
     onSettled: (
       result: {
         sha256: string;
@@ -3308,6 +3312,7 @@ export function createWorkspaceEngineCapture(
                   recordedStateVector = Y.encodeStateVector(recordedDoc);
                 }
               }
+              if (lane === "owner-outbox") input.onOwnerEditQueued?.();
             },
             onLocalUpdateRefused: (id, error) => {
               for (const record of pendingRecords) {
@@ -5534,6 +5539,7 @@ export function createWorkspaceEngineCapture(
           });
         },
         onEditRefused: input.onEditRefused,
+        onOwnerEditQueued: input.onOwnerEditQueued,
         onSettled,
         onSettleStart,
         onSettleError,

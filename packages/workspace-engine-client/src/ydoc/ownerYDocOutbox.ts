@@ -32,6 +32,7 @@ const OWNER_YDOC_OUTBOX_METHOD = {
   readPending: "ydoc.ownerOutbox.readPending",
   listRestoreFenced: "ydoc.ownerOutbox.listRestoreFenced",
   acknowledge: "ydoc.ownerOutbox.acknowledge",
+  acknowledgeTaken: "ydoc.ownerOutbox.acknowledgeTaken",
   quarantine: "ydoc.ownerOutbox.quarantine",
   retry: "ydoc.ownerOutbox.retry",
 } as const;
@@ -785,6 +786,31 @@ export class OwnerYDocOutbox {
       await this.requester.request(
         OWNER_YDOC_OUTBOX_METHOD.acknowledge,
         { outboxId, receipts: validatedReceipts } as unknown as JsonValue,
+        { workspace: this.workspace },
+      ),
+      "owner outbox acknowledge result",
+    );
+    return {
+      acknowledged: wireInteger(raw, "acknowledged", 1),
+      pendingBytes: wireInteger(raw, "pendingBytes"),
+      oldestEntryAtMs: raw.oldestEntryAtMs === null ? null : wireInteger(raw, "oldestEntryAtMs"),
+    };
+  }
+
+  /**
+   * The relay took the queue's first delivery: a live room wrote it down
+   * unsaved, or the journal committed it before its frame arrived. It leaves
+   * the queue at once, and the owner's page keeps it until a frame holds it.
+   */
+  async acknowledgeTaken(
+    outboxId: string,
+    receipt: LiveUpdateReceipt,
+  ): Promise<{ acknowledged: number; pendingBytes: number; oldestEntryAtMs: number | null }> {
+    this.assertLive();
+    const raw = record(
+      await this.requester.request(
+        OWNER_YDOC_OUTBOX_METHOD.acknowledgeTaken,
+        { outboxId, receipt: parseLiveUpdateReceipt(receipt) } as unknown as JsonValue,
         { workspace: this.workspace },
       ),
       "owner outbox acknowledge result",

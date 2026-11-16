@@ -657,6 +657,10 @@ impl EngineService {
                 self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.ownerOutbox.acknowledgeTaken" => {
+                self.owner_ydoc_outbox_acknowledge_taken(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "ydoc.ownerOutbox.quarantine" => {
                 self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
                     .await?

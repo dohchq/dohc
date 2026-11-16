@@ -7130,6 +7130,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   onLiveEditsPaused: (workspaceId, path) =>
     desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
   onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
+  onOwnerEdit: (workspaceId) => desktopEngine.ownerEditLanded(workspaceId),
   sessionFor: (sender) => rendererWorkspaceSessions.current(sender as WebContents),
   authorities: workspaceAuthorities,
   acquireWorkspace: (workspaceId) => {
@@ -7408,6 +7409,7 @@ const desktopEngine = createDesktopEngine({
   },
   notifyOwnerDraftsChanged: (workspaceId) => ownerPendingShare.refresh(workspaceId),
   ownerPendingPaths: (workspaceId) => ownerPendingShare.paths(workspaceId),
+  ownerHasOpen: (workspaceId, path) => engineYDocSessionIpc.ownerHasOpen(workspaceId, path),
   notifyOwnerLiveStopped: (workspaceId, objectId, path) => {
     sendRendererActivity({ workspaceId, liveDocumentStopped: objectId });
     void engineYDocSessionIpc

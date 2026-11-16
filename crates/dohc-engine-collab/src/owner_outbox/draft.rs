@@ -53,6 +53,10 @@ impl OwnerLayer {
         self.rows.retain(|held, _| *held > cursor);
     }
 
+    pub(crate) fn drop_at(&mut self, cursor: i64) {
+        self.rows.remove(&cursor);
+    }
+
     pub(super) fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
         if !self.holds(binding) {
             return Vec::new();
@@ -3475,6 +3479,139 @@ mod tests {
         .unwrap();
         let copy = copy_text(&store).unwrap();
         assert!(copy.contains("Saved row") && copy.contains("Unsaved row"));
+    }
+
+    /// Two edits typed one after the other: the head goes alone, the second
+    /// waits behind it.
+    fn typed_head_and_second(
+        store: &mut EngineStore,
+        observed: &ObservedOwnerBinding,
+        checkpoint: &[u8],
+    ) -> Typed {
+        let owner = Ydoc::wire();
+        owner.apply(checkpoint).unwrap();
+        type_drafts(store, observed, &owner, 1, &["Taken head", "Second edit"])
+    }
+
+    fn row_cursors(cache: &crate::WriterDocCache, key: &DocKey) -> Vec<i64> {
+        cache
+            .owner_layer(key)
+            .map(|layer| layer.rows.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_taken_delivery_leaves_the_queue_and_stays_on_screen_until_a_save_holds_it() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let ((head, head_delta), (second, _)) = (&typed[0], &typed[1]);
+        let outbox = head.outbox_id.clone();
+        let shown = |store: &EngineStore, cache: &mut crate::WriterDocCache| {
+            snapshot_text(
+                &open_draft_cached(store, cache, &observed.binding, revision(store, &observed))
+                    .unwrap(),
+            )
+        };
+
+        // Only the head can be taken.
+        assert!(matches!(
+            super::super::acknowledge_taken(
+                &mut store,
+                &mut cache,
+                "workspace",
+                &outbox,
+                &receipt_for(&second.delivery_id, &second.update_digest, 5),
+            ),
+            Err(OwnerOutboxError::ReceiptMismatch)
+        ));
+        assert!(row_cursors(&cache, &key).is_empty());
+
+        let receipt = receipt_for(&head.delivery_id, &head.update_digest, 5);
+        let taken =
+            super::super::acknowledge_taken(&mut store, &mut cache, "workspace", &outbox, &receipt)
+                .unwrap();
+        assert_eq!(taken.acknowledged, 1);
+        let waiting = super::super::read_pending(&store, "workspace", &outbox).unwrap();
+        assert_eq!(waiting.entries.len(), 1);
+        assert_eq!(waiting.entries[0].delivery_id, second.delivery_id);
+        assert_eq!(row_cursors(&cache, &key), vec![5]);
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Taken head") && text.contains("Second edit"));
+        assert!(!stored_text(&store).contains("Taken head"));
+
+        // A room save at 7 holds rows through 5: the note has the head and
+        // the row goes.
+        feed(&mut store, &observed, 7, head_delta.clone());
+        cache.drop_owner_rows_through(&key, 5);
+        assert!(row_cursors(&cache, &key).is_empty());
+        assert!(stored_text(&store).contains("Taken head"));
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Taken head") && text.contains("Second edit"));
+
+        // The same answer again changes nothing.
+        super::super::acknowledge_taken(&mut store, &mut cache, "workspace", &outbox, &receipt)
+            .unwrap();
+        assert!(row_cursors(&cache, &key).is_empty());
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &outbox)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn without_a_room_the_frame_at_the_taken_cursor_drops_its_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let (head, head_delta) = &typed[0];
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Row at 6");
+        put_committed_row(&store, &mut cache, &observed.binding, 6, row).unwrap();
+
+        feed(&mut store, &observed, 5, head_delta.clone());
+        cache.drop_owner_row_at(&key, 5);
+        assert_eq!(row_cursors(&cache, &key), vec![6]);
+        assert!(stored_text(&store).contains("Taken head"));
+    }
+
+    #[test]
+    fn a_delivery_whose_frame_came_first_is_acknowledged_without_a_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let ((head, head_delta), (second, _)) = (&typed[0], &typed[1]);
+        feed(&mut store, &observed, 5, head_delta.clone());
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        assert!(row_cursors(&cache, &key).is_empty());
+        let waiting = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        assert_eq!(waiting.entries.len(), 1);
+        assert_eq!(waiting.entries[0].delivery_id, second.delivery_id);
     }
 
     #[test]
