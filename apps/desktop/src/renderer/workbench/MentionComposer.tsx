@@ -267,17 +267,18 @@ export function MentionComposer(props: {
   // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
+  const focusEnd = () => {
+    const node = textareaRef.current;
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+    setCaret(node.value.length);
+  };
   useImperativeHandle(
     props.handle,
     () => ({
       focus: () => textareaRef.current?.focus(),
-      focusEnd: () => {
-        const node = textareaRef.current;
-        if (!node) return;
-        node.focus();
-        node.setSelectionRange(node.value.length, node.value.length);
-        setCaret(node.value.length);
-      },
+      focusEnd,
       mention: (candidateId) => {
         const candidate = props.candidates.find((value) => value.id === candidateId);
         const pick = rosterPick.current;
@@ -288,9 +289,7 @@ export function MentionComposer(props: {
         }
         // Already mentioned: the caret goes back to the end, as on the first press.
         if (pick?.candidate.id === candidateId && agentRosterPickIsPresent(pick, props.value)) {
-          node?.focus();
-          node?.setSelectionRange(props.value.length, props.value.length);
-          setCaret(props.value.length);
+          focusEnd();
           return;
         }
         // A mention glued to a word is not a mention; give it its own word.

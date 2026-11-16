@@ -3888,10 +3888,10 @@ export function ChatsView(props: {
         serverNamed={props.serverNamed}
         onOpenSettings={props.onOpenSettings}
         onOpenConversation={(conversationId, title) => {
-          // The conversation takes a tab of its own, so New message's has done its job. It closes first,
-          // so opening the conversation is the last move and its group ends active.
-          if (variant === "page" && props.editorTabPath && props.onOpenInTab) props.onCloseTab?.();
+          // The conversation takes a tab of its own, so New message's has done its job. It closes after,
+          // so a group holding only New message keeps the conversation. The composer's focus makes its group active.
           openConversation({ level: "direct", conversationId, title });
+          if (variant === "page" && props.editorTabPath && props.onOpenInTab) props.onCloseTab?.();
         }}
       />
     );

@@ -401,9 +401,9 @@ describe("ChatsView direct messages", () => {
       ),
     );
     expect(onCloseTab).toHaveBeenCalledOnce();
-    // New message's tab closes first, so opening the conversation is the last move and its group ends active.
-    expect(onCloseTab.mock.invocationCallOrder[0]).toBeLessThan(
-      onOpenInTab.mock.invocationCallOrder[0]!,
+    // The conversation opens before New message's tab closes, so a group holding only New message keeps it.
+    expect(onOpenInTab.mock.invocationCallOrder[0]).toBeLessThan(
+      onCloseTab.mock.invocationCallOrder[0]!,
     );
   });
 
@@ -893,14 +893,20 @@ describe("ChatsView direct messages", () => {
     history([sent(2, "sam", "See you at nine")]);
     let finishSend: (value: { conversationId: string; seq: number }) => void = () => {};
     bridgeMock.directSend.mockReturnValueOnce(new Promise((resolve) => (finishSend = resolve)));
-    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
     const shown = await screen.findByTestId("chats-dm-view");
     const composer = (await within(shown).findByTestId("chats-dm-composer")) as HTMLTextAreaElement;
     await user.type(composer, "On my way{Enter}");
     await waitFor(() => expect(composer.disabled).toBe(true));
     // New message sits in a tab of its own, so Open conversation goes to the tab already showing Sam.
     renderView(vi.fn(), vi.fn(), {
-      variant: "page", editorTabPath: chatTabPath({ kind: "new" }), onOpenInTab: vi.fn(), onCloseTab: vi.fn(),
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "new" }),
+      onOpenInTab: vi.fn(),
+      onCloseTab: vi.fn(),
       initialNav: { level: "direct-new" },
     });
     const newMessage = await screen.findByTestId("chats-dm-new");
@@ -908,7 +914,9 @@ describe("ChatsView direct messages", () => {
     await user.type(within(newMessage).getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(await within(newMessage).findByTestId("chats-dm-new-open-existing"));
     await act(async () => finishSend({ conversationId: "conversation-sam", seq: 3 }));
-    await waitFor(() => expect(document.activeElement).toBe(within(shown).getByTestId("chats-dm-composer")));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(shown).getByTestId("chats-dm-composer")),
+    );
   });
 
   it("opens the existing conversation when Members' Message names someone already in one", async () => {
