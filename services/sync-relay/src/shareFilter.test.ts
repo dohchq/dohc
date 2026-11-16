@@ -33,9 +33,9 @@ import type { MemberReach } from "./storage/memberReach";
 // A member whose rules give `level` everywhere.
 function memberAt(level: ShareAccess): WorkspaceShareSelector {
   const reach: MemberReach = {
-    evaluated: { revision: "test", role: "member", level, rules: [] },
-    revision: "test",
+    evaluated: { role: "member", level, rules: [] },
     signature: () => "test",
+    keyedSignature: () => "test",
     levelAt: () => level,
     folderLevel: () => level,
     hasLevel: (wanted) => wanted === level,

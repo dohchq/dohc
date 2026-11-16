@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
   accessRuleFolder,
   accessRuleSet,
@@ -16,7 +16,6 @@ import { accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
 import type { SqliteDb } from "./types";
 
 export interface EvaluatedMemberReach {
-  revision: string;
   role: "admin" | "member";
   level: ShareAccess;
   rules: [string, ShareAccess | null][];
@@ -30,8 +29,16 @@ export interface MemberReach {
   groupLevel(channelWireId: string): ShareAccess;
   /** Whether the member holds `level` in some Group. */
   hasGroupLevel(level: ShareAccess): boolean;
-  revision: string;
+  /**
+   * Equal exactly when two evaluated reaches are. It names hidden folders, so
+   * it stays in the relay: a member could test guesses against it.
+   */
   signature(): string;
+  /**
+   * The signature a member is served on their pages: `signature`, keyed with
+   * a relay secret and bound to this member, so a guess can't be tested.
+   */
+  keyedSignature(key: string | Uint8Array): string;
   levelAt(path: string): ShareAccess | null;
   folderLevel(folder: string): ShareAccess | null;
   objectVisible(objectId: string): boolean;
@@ -113,9 +120,6 @@ export function memberReach(
     objects.set(id, result);
     return result;
   };
-  // Settle compares this to decide whether reach changed. It names hidden
-  // folders, so it stays a function: it never serializes into a selector or
-  // reaches a member.
   const signature = () =>
     createHash("sha256")
       .update(
@@ -132,17 +136,8 @@ export function memberReach(
         ]),
       )
       .digest("hex");
-  // Only `settleMemberRevisions` writes revisions, at the end of each write
-  // transaction, so a read takes the stored one as it is.
-  const stored = db
-    .prepare(
-      "SELECT revision FROM sync_relay_member_revisions WHERE workspace_id = ? AND user_id = ?",
-    )
-    .get(workspaceId, userId);
-  const revision = stored ? String(stored.revision) : "unsettled";
   return {
     evaluated: {
-      revision,
       role,
       level,
       rules: [...rules.exact].map(([folder, rule]) => [
@@ -155,8 +150,11 @@ export function memberReach(
       [...rules.exact.keys()].some((folder) => atFolder(folder) === level),
     groupLevel: () => level,
     hasGroupLevel: (wanted) => wanted === level,
-    revision,
     signature,
+    keyedSignature: (key) =>
+      createHmac("sha256", key)
+        .update(JSON.stringify(["dohc/member-reach/v1", workspaceId, userId, signature()]))
+        .digest("hex"),
     levelAt,
     folderLevel: atFolder,
     nearestRule: (path) => nearestRuleFolder(rules, path),

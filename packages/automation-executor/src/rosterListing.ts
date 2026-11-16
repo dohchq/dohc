@@ -109,7 +109,6 @@ const WorkspaceGrant = z.object({
   }),
   access: z.enum(SHARE_ACCESS_VALUES),
   memberReach: z.object({
-    revision: z.string().min(1),
     role: z.enum(["admin", "member"]),
     level: z.enum(SHARE_ACCESS_VALUES),
     rules: z.array(z.tuple([z.string(), z.enum(SHARE_ACCESS_VALUES).nullable()])),

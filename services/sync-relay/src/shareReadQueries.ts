@@ -393,6 +393,7 @@ export function createShareReadQueries(
             opKind: row.opKind,
             payload,
             recordedAtMs: row.recordedAtMs,
+            ...(decision.allowed && decision.reachMove ? { reachMove: decision.reachMove } : {}),
           };
         },
       );

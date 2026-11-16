@@ -1810,11 +1810,7 @@ export function createSyncRelayHandler({
         return respondToLinkAgents(request, route, actor);
       }
 
-      if (
-        route.route === "share-log" ||
-        route.route === "share-blob" ||
-        route.route === "share-reach"
-      ) {
+      if (route.route === "share-log" || route.route === "share-blob") {
         return await respondToNamedShareTransport(request, route, actor);
       }
 

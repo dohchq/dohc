@@ -46,7 +46,6 @@ import { initializeChatWakeSchema } from "./chatWakes";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import { initializeAccessRuleSchema } from "./accessRules";
 import { initializeAccountEmails } from "./accountEmails";
-import { initializeMemberRevisions } from "./memberRevisions";
 import {
   initializePushDeviceSchema,
   initializePushRevokedSessionSchema,
@@ -1679,7 +1678,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeCurrentFileKeySchema(db);
   initializeAccessRuleSchema(db);
   initializeAccountEmails(db);
-  initializeMemberRevisions(db);
   initializeWorkReferenceSchema(db);
   initializeCollectionWriteSchema(db);
   initializeAutomationPressSchema(db);

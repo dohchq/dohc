@@ -2,8 +2,6 @@ import type { MemberFolders } from "./shareFilter";
 import { memberReach } from "./storage/memberReach";
 import { currentAccessRuleSet } from "./storage/accessRules";
 import type { AccessRuleSet } from "@dohc/security-contract/access-rules";
-import { memberInventory } from "./storage/memberInventory";
-import { watchMemberReachWrites, settleMemberRevisions } from "./storage/memberRevisions";
 import { accountEmail, refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
 import { normalizeRuleEmail } from "@dohc/security-contract/access-rules";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
@@ -397,8 +395,6 @@ export function openSyncRelayStorage(
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
     watchLiveAuthorityWrites(db);
-    watchMemberReachWrites(db);
-    owner.write(() => settleMemberRevisions(db));
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
@@ -2267,11 +2263,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   // A write no live host needs to hear about, such as current view persistence or a room's
   // taken edit, wakes no relay-write observer.
   quietTx<T>(run: () => T): T {
-    return this.owner.write(() => {
-      const value = run();
-      settleMemberRevisions(this.db);
-      return value;
-    });
+    return this.owner.write(run);
   }
 
   /**
@@ -2283,12 +2275,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
    */
   tx<T>(run: () => T, scope?: RelayWriteScope): T {
     const operation = run;
-    run = () =>
-      this.withTransactionRules(() => {
-        const value = operation();
-        settleMemberRevisions(this.db);
-        return value;
-      });
+    run = () => this.withTransactionRules(operation);
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db
       .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
@@ -2475,10 +2462,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   readShareTx<T>(read: () => T): T {
     return this.db.isTransaction ? read() : this.readTx(read);
-  }
-
-  memberInventory(shareId: string, userId: string, key: string | Uint8Array) {
-    return memberInventory(this, shareId, userId, key);
   }
 
   refreshAccountEmail(userId: string, email: AccountEmail | null, nowMs: number): void {

@@ -801,6 +801,10 @@ export type ShareOpDecision =
       payload: unknown;
       // Every blob hash this op legitimately exposes to the recipient.
       blobSha256s: string[];
+      // A member's rename across the edge of their reach, served as the
+      // delete or write they see. Their copy can't tell it from an ordinary
+      // one otherwise, and it changes which History they may hold.
+      reachMove?: "departure" | "arrival";
     };
 
 function collectString(value: unknown): string | null {
@@ -1376,13 +1380,14 @@ export function filterOpForShare(
     const moved = boundaryMove(files, record, (path) => pathVisibleThroughShare(files, path), chat);
     // A member never learns what a file held after it left their reach.
     if (moved?.departs) {
-      if (moved.decision.allowed)
-        (moved.decision.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
-      return moved.decision;
+      if (!moved.decision.allowed) return moved.decision;
+      (moved.decision.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
+      return { ...moved.decision, reachMove: "departure" };
     }
     if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
       return { allowed: false };
-    return moved ? moved.decision : filterOpForShare(files, opKind, payloadJson, chat);
+    if (!moved) return filterOpForShare(files, opKind, payloadJson, chat);
+    return moved.decision.allowed ? { ...moved.decision, reachMove: "arrival" } : moved.decision;
   }
 
   if (isWorkspaceSelector(selector)) {

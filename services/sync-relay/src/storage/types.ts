@@ -1788,11 +1788,6 @@ export interface SyncRelayStorage {
     relaySeq: number;
   }): boolean;
   readShareTx<T>(read: () => T): T;
-  memberInventory(
-    shareId: string,
-    userId: string,
-    key: string | Uint8Array,
-  ): import("./memberInventory").MemberInventory;
   memberReach(
     workspaceId: string,
     userId: string,

@@ -266,7 +266,8 @@ export function createLinkAuthorityResolver(input: {
       expected &&
       "reach" in expected.effectiveSelector &&
       expected.effectiveSelector.reach &&
-      (!("reach" in files) || files.reach?.revision !== expected.effectiveSelector.reach.revision)
+      (!("reach" in files) ||
+        files.reach?.signature() !== expected.effectiveSelector.reach.signature())
     )
       throw invalidLinkCapability();
     return {

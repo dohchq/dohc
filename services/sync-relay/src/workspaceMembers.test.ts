@@ -430,7 +430,7 @@ describe("what a member reaches", () => {
     const shareId = await shareIdOf(h, "ana");
     await ownerWrite(h, "docs/access.yaml", "people:\n  ana@dohc.test: edit\n");
     expect(await pulledText(h, "ana", shareId)).toContain("docs/plan.md");
-    const revision = storage.memberReach(WORKSPACE, "ana", "member", "comment").revision;
+    const signature = storage.memberReach(WORKSPACE, "ana", "member", "comment").signature();
     const counted = lookups;
     email = "another@dohc.test";
     // Within a minute the feed reuses the stored email.
@@ -438,7 +438,9 @@ describe("what a member reaches", () => {
     expect(lookups).toBe(counted);
     now += 60_000;
     expect(await pulledText(h, "ana", shareId)).not.toContain("docs/plan.md");
-    expect(storage.memberReach(WORKSPACE, "ana", "member", "comment").revision).not.toBe(revision);
+    expect(storage.memberReach(WORKSPACE, "ana", "member", "comment").signature()).not.toBe(
+      signature,
+    );
     // A failed lookup fails the read and leaves the stored email as it was.
     failing = true;
     now += 60_000;
@@ -546,30 +548,18 @@ describe("what a member reaches", () => {
     expect(asAdmin).toContain("docs/.access.yaml.swp");
   });
 
-  it("filters member ops and blobs, and inventories current and deleted reachable objects in one cut", async () => {
+  it("filters member ops and blobs, and has no separate reach read", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     await ownerWrite(h, "private/access.yaml", "");
     await ownerWrite(h, "private/deep/secret.md", "PRIVATE CONTENT");
     await ownerWrite(h, "public/deep/hello.md", "PUBLIC CONTENT");
-    const inventory = async () => {
-      const response = await h(request("ana", `/sync/shares/${shareId}/reach`));
-      expect(response.status, await response.clone().text()).toBe(200);
-      return json(response);
-    };
-    const first = await inventory();
-    expect(first.folders).toEqual([
-      { path: "", level: "comment" },
-      { path: "docs", level: "comment" },
-      { path: "public", level: "comment" },
-      { path: "public/deep", level: "comment" },
-    ]);
-    expect((first.files as Array<{ path: string }>).map((f) => f.path)).toEqual([
-      "docs/plan.md",
-      "public/deep/hello.md",
-    ]);
-    expect(first.objects).toHaveLength(2);
+    // A member learns of a reach change from their pages (decision 18A).
+    expect((await h(request("ana", `/sync/shares/${shareId}/reach`))).status).toBe(404);
+    const signature = async () =>
+      ((await json(await pull(h, "ana", shareId))).reach as { signature: string }).signature;
+    const first = await signature();
     const body = await pulledText(h, "ana", shareId);
     expect(body).not.toContain("private/");
     expect(body).not.toContain(sha256("PRIVATE CONTENT"));
@@ -579,26 +569,23 @@ describe("what a member reaches", () => {
     expect((await blob("ana", "PRIVATE CONTENT")).status).toBe(404);
     expect((await blob("ana", "PUBLIC CONTENT")).status).toBe(200);
     await ownerWrite(h, "public/deep/hello.md", "changed");
-    expect((await inventory()).revision).toBe(first.revision);
+    expect(await signature()).toBe(first);
     await ownerWrite(h, "private/access.yaml", "members: view\n");
-    const opened = await inventory();
-    expect(opened.revision).not.toBe(first.revision);
-    expect(
-      (opened.files as Array<{ path: string }>).some((f) => f.path === "private/deep/secret.md"),
-    ).toBe(true);
+    const opened = await signature();
+    expect(opened).not.toBe(first);
+    expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
     await ownerWrite(h, "private/access.yaml", "");
-    const restored = await inventory();
-    expect(restored.revision).not.toBe(first.revision);
-    expect(restored.revision).not.toBe(opened.revision);
+    // The signature is a function of reach, so the same reach signs the same.
+    expect(await signature()).toBe(first);
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
     ).toBe(200);
-    expect((await inventory()).revision).not.toBe(first.revision);
+    expect(await signature()).not.toBe(first);
     expect((await blob("ana", "PRIVATE CONTENT")).status).toBe(200);
     expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
   });
 
-  it("advances a member's revision only when their reach changes", async () => {
+  it("changes a member's page signature only when their reach changes, and marks moves across it in the pull", async () => {
     const { h, storage } = await seed();
     const ana = await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
@@ -613,30 +600,49 @@ describe("what a member reaches", () => {
     // Only `Edit/`'s own rule raises its level; its twin `edit/` keeps the default.
     await ownerWrite(h, "Edit/access.yaml", "members: edit\n");
     await ownerWrite(h, "Edit/e.md", "e");
-    const revision = async () => {
-      const response = await h(request("ana", `/sync/shares/${shareId}/reach`));
-      expect(response.status, await response.clone().text()).toBe(200);
-      return (await json(response)).revision as string;
+    // Each page, a Group pull's included, carries the same signature.
+    const read = async () => {
+      const [files, group] = await Promise.all([
+        pull(h, "ana", shareId),
+        pull(h, "ana", shareId, GROUP),
+      ]);
+      expect(files.status, await files.clone().text()).toBe(200);
+      expect(group.status).toBe(200);
+      const [body, groupBody] = [await json(files), await json(group)];
+      const signature = (body.reach as { signature: string }).signature;
+      expect(signature).toMatch(/^[0-9a-f]{64}$/);
+      expect((groupBody.reach as { signature: string }).signature).toBe(signature);
+      const marks = (body.ops as Array<{ reachMove?: string; payload: { path: string } }>).flatMap(
+        (op) => (op.reachMove ? [[op.reachMove, op.payload.path]] : []),
+      );
+      return { signature, marks };
     };
-    let last = await revision();
-    const expectRevision = async (changed: boolean, step: string) => {
-      const next = await revision();
-      if (changed) expect(next, step).not.toBe(last);
-      else expect(next, step).toBe(last);
+    let last = await read();
+    const expectStep = async (changed: boolean, step: string, mark?: [string, string]) => {
+      const next = await read();
+      if (changed) expect(next.signature, step).not.toBe(last.signature);
+      else expect(next.signature, step).toBe(last.signature);
+      expect(next.marks, step).toEqual([...last.marks, ...(mark ? [mark] : [])]);
       last = next;
     };
     await ownerWrite(h, "docs/a.md", "edited");
-    await expectRevision(false, "content edit");
+    await expectStep(false, "content edit");
     await ownerRename(h, "docs/a.md", "docs/moved/a.md");
-    await expectRevision(false, "move within one rule");
+    await expectStep(false, "move within one rule");
     await ownerRename(h, "docs/b.md", "same/b.md");
-    await expectRevision(false, "move across rules at the same level");
+    await expectStep(false, "move across rules at the same level");
     await ownerRename(h, "docs/c.md", "view/c.md");
-    await expectRevision(true, "move across rules to another level");
+    await expectStep(false, "move across rules to another level");
     await ownerRename(h, "hide/d.md", "docs/d.md");
-    await expectRevision(true, "move out of a case twin's hidden folder");
+    await expectStep(false, "move out of a case twin's hidden folder", ["arrival", "docs/d.md"]);
     await ownerRename(h, "Edit/e.md", "edit/e.md");
-    await expectRevision(true, "move from a ruled folder to its case twin");
+    await expectStep(false, "move from a ruled folder to its case twin");
+    await ownerRename(h, "docs/moved/a.md", "Hide/a.md");
+    await expectStep(false, "move into a hidden folder", ["departure", "docs/moved/a.md"]);
+    await ownerWrite(h, "plain/access.yaml", "members: comment\n");
+    await expectStep(false, "a rule that gives the level its folder already has");
+    await ownerWrite(h, "Hide/inner/access.yaml", "members: edit\n");
+    await expectStep(false, "a rule inside a hidden folder");
     // A rename in another Version leaves main's reach alone.
     const context = storage as StorageContext;
     context.tx(() =>
@@ -661,15 +667,20 @@ describe("what a member reaches", () => {
           1,
         ),
     );
-    await expectRevision(false, "rename in a fork");
+    await expectStep(false, "rename in a fork");
+    await ownerWrite(h, "view/access.yaml", "members: edit\n");
+    await expectStep(true, "a rule that changes a level");
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
     ).toBe(200);
-    await expectRevision(true, "member level change");
+    await expectStep(true, "member level change");
     expect(
       (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
     ).toBe(200);
-    await expectRevision(true, "role change");
+    const admin = await read();
+    expect(admin.signature, "role change").not.toBe(last.signature);
+    // An admin reaches every folder, so no move crosses their edge.
+    expect(admin.marks).toEqual([]);
   });
 
   it("checks proposals, pages and Comments at the folder target, including hidden and folded ancestors", async () => {

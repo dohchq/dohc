@@ -556,7 +556,7 @@ describe("Groups a workspace membership reaches", () => {
       files: {
         paths: [],
         versionId: null,
-        memberReach: { revision: "test", role: "member", level: access, rules: [] },
+        memberReach: { role: "member", level: access, rules: [] },
         access,
       },
       chat: { kind: "groups", canPost: access !== "view" },
@@ -1149,7 +1149,7 @@ it("stops each step outside any Collection editor's evaluated folder reach", () 
       paths: [],
       versionId: null,
       access: "edit",
-      memberReach: { revision: "one", role: "member", level: "edit", rules: [["Budget", null]] },
+      memberReach: { role: "member", level: "edit", rules: [["Budget", null]] },
     },
     chat: null,
   };

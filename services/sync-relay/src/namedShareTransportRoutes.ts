@@ -1,5 +1,6 @@
 import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 import { jsonResponse } from "@dohc/service-http";
+import { randomBytes } from "node:crypto";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { accountDisplayName } from "./accountDisplayName";
 import {
@@ -38,13 +39,13 @@ import {
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import type { MemberReach } from "./storage/memberReach";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 /** How old a member's stored account email may be when their feed or browser reads. */
 export const MEMBER_IDENTITY_MAX_AGE_MS = 60_000;
 
 export type NamedShareTransportRoute =
-  | { route: "share-reach"; shareId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
 
@@ -129,7 +130,6 @@ export function createNamedShareTransportRoutes(
     | "appendBrowserChatBatch"
     | "putBlob"
     | "listWorkReferences"
-    | "memberInventory"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string, signal?: AbortSignal, maxAgeMs?: number) => Promise<void>,
@@ -150,21 +150,15 @@ export function createNamedShareTransportRoutes(
   lookupUserDisplayName?: LogAuthorNameLookup,
   identityKey?: string | Uint8Array,
 ) {
+  // A relay without a link key runs only in development or test. Its reach
+  // signatures change at each start, which costs a member a rebuild.
+  const reachKey = identityKey ?? randomBytes(32);
   return async function respondToNamedShareTransport(
     request: Request,
     route: NamedShareTransportRoute,
     actor: { userId: string },
     browserMessageId?: string,
   ): Promise<Response> {
-    if (route.route === "share-reach") {
-      if (request.method !== "GET") throw relayError("method_not_allowed");
-      await claimPendingShares(actor.userId);
-      if (!identityKey) throw notFound();
-      return jsonResponse({
-        ok: true,
-        ...storage.memberInventory(route.shareId, actor.userId, identityKey),
-      });
-    }
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
       let claimed = false;
@@ -222,8 +216,15 @@ export function createNamedShareTransportRoutes(
         : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
-      const authorizeRead = () =>
-        pullSelector(requireShareAction(route.shareId, actor.userId, "read").effectiveSelector);
+      // A member's page carries their keyed reach signature, read in the
+      // page's own transaction: a change tells the member to look again.
+      let reach: MemberReach | undefined;
+      const signed = () => (reach ? { reach: { signature: reach.keyedSignature(reachKey) } } : {});
+      const authorizeRead = () => {
+        const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;
+        reach = isWorkspaceSelector(selector) ? selector.reach : undefined;
+        return pullSelector(selector);
+      };
       let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
@@ -259,6 +260,7 @@ export function createNamedShareTransportRoutes(
           hasMore: false,
           ownOriginId,
           levelChanged: true,
+          ...signed(),
         });
       }
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
@@ -322,7 +324,7 @@ export function createNamedShareTransportRoutes(
           if (levelChanged || page.ops.length > 0 || page.hasMore) break;
         }
         if (levelChanged) {
-          requireShareAction(route.shareId, actor.userId, "read");
+          authorizeRead();
           return jsonResponse({
             ok: true,
             ops: [],
@@ -330,6 +332,7 @@ export function createNamedShareTransportRoutes(
             hasMore: false,
             ownOriginId,
             levelChanged: true,
+            ...signed(),
           });
         }
       }
@@ -369,6 +372,7 @@ export function createNamedShareTransportRoutes(
         ...page,
         ops,
         ownOriginId,
+        ...signed(),
       });
     }
 

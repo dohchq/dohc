@@ -457,7 +457,7 @@ describe("workspace members on the roster", () => {
       recipientEmail: `${access}@dohc.test`,
       selector: { kind: "workspace" },
       access,
-      memberReach: { revision: "test", role: "member", level: access, rules: [] },
+      memberReach: { role: "member", level: access, rules: [] },
       ...overrides,
     });
   const trip = { path: "Trip", name: "Trip" };
@@ -485,13 +485,13 @@ describe("workspace members on the roster", () => {
         paths: [],
         versionId: null,
         access: "edit",
-        memberReach: { revision: "test", role: "member", level: "edit", rules: [] },
+        memberReach: { role: "member", level: "edit", rules: [] },
       },
       {
         paths: [],
         versionId: null,
         access: "view",
-        memberReach: { revision: "test", role: "member", level: "view", rules: [] },
+        memberReach: { role: "member", level: "view", rules: [] },
       },
     ]);
     expect(

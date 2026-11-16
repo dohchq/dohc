@@ -214,6 +214,26 @@ describe("the relay's access rule index", () => {
     }
   });
 
+  it("keys the signature a member is served to the relay and the member", () => {
+    const r = relay();
+    try {
+      r.write("Private/access.yaml", "");
+      const sam = () => memberReach(r.storageDb, "ws", "sam", "member", "edit");
+      const served = sam().keyedSignature("relay-key");
+      expect(served).toMatch(/^[0-9a-f]{64}$/);
+      expect(sam().keyedSignature("relay-key")).toBe(served);
+      // Without the relay's key, a member can't rebuild it from a guessed folder name.
+      expect(sam().keyedSignature("another-key")).not.toBe(served);
+      expect(served).not.toBe(sam().signature());
+      // Another member with the same reach is served another signature.
+      expect(
+        memberReach(r.storageDb, "ws", "ana", "member", "edit").keyedSignature("relay-key"),
+      ).not.toBe(served);
+    } finally {
+      r.db.close();
+    }
+  });
+
   it("signs evaluated reach for rules, identity, level and role, but not ordinary writes", () => {
     const r = relay();
     try {

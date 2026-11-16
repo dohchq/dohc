@@ -51,7 +51,6 @@ export interface FileScope {
   paths: readonly string[];
   versionId: string | null;
   memberReach?: {
-    revision: string;
     role: "admin" | "member";
     level: ShareAccess;
     rules: readonly (readonly [string, ShareAccess | null])[];
