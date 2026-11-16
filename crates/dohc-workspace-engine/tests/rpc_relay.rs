@@ -117,6 +117,9 @@ struct RelayState {
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
+    // The reach revisions each share's log pages name, as (revision,
+    // visibility revision).
+    share_revisions: HashMap<String, (String, String)>,
     refuse_claims: bool,
 }
 
@@ -245,12 +248,17 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             .last()
             .and_then(|row| row["relaySeq"].as_i64())
             .unwrap_or(since);
-        return TestResponse::json(json!({
+        let mut page = json!({
             "ops": rows,
             "ownOriginId": "relay:share-member:authenticated-origin",
             "nextCursor": next,
             "hasMore": false,
-        }));
+        });
+        if let Some((revision, visibility)) = state.share_revisions.get(share_id) {
+            page["revision"] = json!(revision);
+            page["visibilityRevision"] = json!(visibility);
+        }
+        return TestResponse::json(page);
     }
     if path.ends_with("/blobs/have") {
         return TestResponse::json(json!({ "missing": [] }));
@@ -3070,4 +3078,105 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
     }
+}
+
+/// A membership's pull whose page the relay selected under another visibility
+/// closes the copy before it answers: the manifest is on disk in `closed`,
+/// the answer names its rebuild id, and from then on the root answers only
+/// requests that carry that id. A page under new levels alone closes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-relay-visibility";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    let pull = json!({
+        "workspaceId": workspace_id,
+        "shareId": "membership",
+        "grantedSelector": {
+            "paths": [], "access": "view", "wholeWorkspace": true,
+            "reach": { "revision": "r1", "visibilityRevision": "v1", "rootLevel": "view", "folders": [] },
+        },
+    });
+    let manifest = scratch.path().join(".dohc/local/rebuild.json");
+    let serve = |revision: &str, visibility: &str| {
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .share_revisions
+            .insert(
+                "membership".to_owned(),
+                (revision.to_owned(), visibility.to_owned()),
+            );
+    };
+
+    serve("r2", "v1");
+    let levels_only = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_eq!(
+        levels_only["reachChanged"],
+        json!({ "revision": "r2", "visibilityRevision": "v1" })
+    );
+    assert!(levels_only.get("rebuildId").is_none());
+    assert!(!manifest.exists());
+
+    serve("r2", "v2");
+    let closed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_eq!(
+        closed["reachChanged"],
+        json!({ "revision": "r2", "visibilityRevision": "v2" })
+    );
+    let rebuild_id = closed["rebuildId"].as_str().expect("rebuild id").to_owned();
+    assert!(
+        closed.get("pendingCursor").is_none(),
+        "a closed copy commits no cursor"
+    );
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+    assert_eq!(
+        (
+            &written["rebuildId"],
+            &written["phase"],
+            &written["shareId"],
+            &written["visibilityRevision"]
+        ),
+        (
+            &json!(rebuild_id),
+            &json!("closed"),
+            &json!("membership"),
+            &json!("v2")
+        )
+    );
+
+    id += 1;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(id, "share.view.pull", Some(handle.clone()), pull.clone()),
+        )
+        .await
+        .expect_err("a closed copy refuses its pull");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::Forbidden, "share-view-updating-access")
+    );
+    let mut tagged = pull;
+    tagged["rebuildId"] = json!(rebuild_id);
+    call(&transport, &handle, &mut id, "share.view.pull", tagged).await;
 }

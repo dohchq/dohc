@@ -2432,8 +2432,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
         let granted = share_grant(params.granted_selector)?;
+        let stored_visibility = granted
+            .reach
+            .as_ref()
+            .map(|reach| reach.visibility_revision.clone());
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let share_id = params.share_id.clone();
         let outcome = self
             .relay_execute(
                 ctx,
@@ -2447,6 +2452,33 @@ impl EngineService {
                 "share.view.pull",
             )
             .await?;
+        // The relay now selects other items for this member. The copy may
+        // hold History the relay withholds, so it closes before this answers:
+        // from here on only its rebuild reads it.
+        if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome
+            && let Some(served) = &pulled.reach_changed
+            && let Some(stored) = stored_visibility
+            && served.visibility_revision != stored
+        {
+            let manifest = crate::rebuild_manifest::RebuildManifest {
+                rebuild_id: crate::rebuild_manifest::new_rebuild_id().map_err(|_| {
+                    WireError::new(ErrorCode::Internal, "rebuild-id-generation-failed")
+                })?,
+                phase: crate::rebuild_manifest::RebuildPhase::Closed,
+                share_id,
+                revision: served.revision.clone(),
+                visibility_revision: served.visibility_revision.clone(),
+                closed_at_ms: now_ms()?,
+            };
+            self.close_for_rebuild(&open.root, &manifest)?;
+            let mut result = relay_outcome_json(outcome)?;
+            // The page applied nothing and a closed copy commits no cursor.
+            if let Some(result) = result.as_object_mut() {
+                result.remove("pendingCursor");
+            }
+            result["rebuildId"] = json!(manifest.rebuild_id);
+            return Ok(result);
+        }
         let pending = match &outcome {
             RelayOperationOutcome::ShareViewPulled(outcome) => Some((
                 IssuedCursor::ShareView(outcome.pending_cursor.clone()),
