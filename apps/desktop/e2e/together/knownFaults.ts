@@ -13,7 +13,6 @@ export const KNOWN_FAULTS: Readonly<Record<string, number>> = {
   "joins of neighbouring lines": 4038,
   "a join and a split of one line": 4038,
   "a join and typing in the joined line": 4038,
-  "the share page's server restarts under open pages": 3924,
 };
 
 /**

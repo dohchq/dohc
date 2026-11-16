@@ -72,6 +72,7 @@ async function startShareService(input: {
   port: number;
   relayUrl: string;
   exchangeKey: string;
+  sealKey: string;
 }): Promise<Service> {
   const profile = selfHostLiveProfile();
   const main = pathToFileURL(join(shareWebRoot, "src/main.ts")).href;
@@ -92,6 +93,8 @@ async function startShareService(input: {
         DOHC_SHARE_WEB_RELAY_URL: input.relayUrl,
         DOHC_SHARE_WEB_PUBLIC_RELAY_URL: input.relayUrl,
         DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: input.exchangeKey,
+        // The same key before and after a restart, as a self-hosted server keeps it, so open pages go on working.
+        DOHC_SHARE_WEB_SESSION_SEAL_KEY: input.sealKey,
         DOHC_SHARE_WEB_PUBLIC_ORIGIN: VIEWER_ORIGIN,
         DOHC_SHARE_WEB_PUBLIC_HOSTS: VIEWER_HOST,
         DOHC_SHARE_WEB_INTERNAL_HOSTS: `127.0.0.1:${String(input.port)}`,
@@ -232,6 +235,7 @@ export async function startTogetherStack(): Promise<TogetherStack> {
   await mkdir(workspaceRoot);
   const exchangeKey = randomBytes(32).toString("base64url");
   const linkKey = randomBytes(32).toString("base64url");
+  const sealKey = randomBytes(32).toString("base64url");
   const closers: Array<() => Promise<unknown>> = [];
   const close = async (): Promise<void> => {
     for (const closer of closers.splice(0).reverse()) await closer().catch(() => undefined);
@@ -267,7 +271,7 @@ export async function startTogetherStack(): Promise<TogetherStack> {
 
     const sharePort = await reservePort();
     const openShareService = () =>
-      startShareService({ port: sharePort, relayUrl: relay.baseUrl, exchangeKey });
+      startShareService({ port: sharePort, relayUrl: relay.baseUrl, exchangeKey, sealKey });
     let shareService = await openShareService();
     let shareOutput = "";
     closers.push(() => shareService.stop());
