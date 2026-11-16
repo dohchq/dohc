@@ -147,6 +147,8 @@ export function resolveCompatibleDatasetRevision(
 export interface DatasetAuthority {
   /** Trusted automation ceiling, checked at admission and inside each commit transaction. */
   authorizeOperation?: (datasetId: string, operationId: string) => void;
+  /** A ceiling that waits, checked after a write's operation runs and before its commit. */
+  beforeCommit?: () => Promise<void>;
   caller: AppBackendCaller;
   /** Stable identity derived from the credential, never from request JSON. */
   principalKey: string;
@@ -546,6 +548,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       agent: agent(result.agent, caller),
       person: person(result.person, caller),
       authorizeOperation: result.authorizeOperation,
+      beforeCommit: result.beforeCommit,
     };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
@@ -2219,6 +2222,9 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         accountAndAttach: resources.accountAndAttach,
         signal: raw.signal,
         authorize,
+        ...(permitted.authority.beforeCommit
+          ? { beforeCommit: permitted.authority.beforeCommit }
+          : {}),
         recordCommit: (commit) =>
           automations.recordCommit({ ...commit, approved: permitted.revision, actor: committedBy }),
         ...(operation.reversedBy === undefined

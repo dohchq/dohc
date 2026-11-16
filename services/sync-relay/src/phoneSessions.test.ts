@@ -63,6 +63,7 @@ const sessions: AccountSessions = {
       userAgent: null,
     })),
   revoke: async () => true,
+  phoneSessionIsCurrent: async () => true,
 };
 
 async function relay() {

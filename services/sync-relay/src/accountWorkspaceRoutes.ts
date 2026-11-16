@@ -66,6 +66,8 @@ export async function bearerAccountSession(
 export function createAccountWorkspaceRoutes(options: {
   storage: SyncRelayStorage;
   resolveAccountSession: ResolveAccountSession;
+  /** Runs once a workspace stops showing on the phone. */
+  hidden?(userId: string, workspaceId: string): void;
 }) {
   const { storage } = options;
   const account = async (request: Request) =>
@@ -99,6 +101,7 @@ export function createAccountWorkspaceRoutes(options: {
     ) {
       throw notFound();
     }
+    if (!body.showOnPhone) options.hidden?.(userId, route.workspaceId);
     return jsonResponse({
       ok: true,
       workspaceId: route.workspaceId,

@@ -36,6 +36,8 @@ export function createAccountSessionRoutes(options: {
   resolveAccountSession: ResolveAccountSession;
   sessions: AccountSessions;
   feedWaits: Pick<AccountFeedWaits, "wakeAccount">;
+  /** Runs once a session is revoked. */
+  revoked?(userId: string, sessionId: string): void;
 }) {
   const { storage, sessions } = options;
 
@@ -58,6 +60,7 @@ export function createAccountSessionRoutes(options: {
         throw notFound();
       // A feed held under the revoked session checks it now, instead of at the end of its hold.
       options.feedWaits.wakeAccount(caller.userId);
+      options.revoked?.(caller.userId, route.sessionId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
     }
     const listed = await sessions.list(caller.userId);

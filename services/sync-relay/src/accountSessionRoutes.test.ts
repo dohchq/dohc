@@ -53,6 +53,8 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
       rows.splice(index, 1);
       return true;
     },
+    phoneSessionIsCurrent: async ({ userId, sessionId }) =>
+      rows.some((row) => row.userId === userId && row.sessionId === sessionId),
   };
   return {
     resolveAccountSession,

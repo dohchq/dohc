@@ -61,6 +61,8 @@ export interface DatasetInvocation extends DatasetAccess {
   files?: AppOperationFile[];
   /** Derived by the trusted host. Called again at commit and before disclosure. */
   authorize(): void;
+  /** Derived by the trusted host. Awaited after a write's operation runs and before its commit. */
+  beforeCommit?: () => Promise<void>;
   accountAndAttach?: CommitOperationInput["accountAndAttach"];
   /** Runs inside the commit transaction. A receipt replay never reaches it. */
   recordCommit?: (commit: Readonly<DatasetCommit>) => unknown;
@@ -1114,6 +1116,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         DEFAULT_LIMITS.resultBytes,
         "Operation result",
       );
+      if (input.beforeCommit) {
+        // A refusal here stops the worker below, which rolls the proposal back.
+        await input.beforeCommit();
+        currentAuthority();
+      }
       const committed = options.journal.commitOperation({
         expected: worker.cursor,
         proposalId: prepared.proposalId,

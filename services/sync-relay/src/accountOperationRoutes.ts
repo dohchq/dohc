@@ -13,6 +13,7 @@ import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplay
 import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
+import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
@@ -63,7 +64,7 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 /**
  * A signed-in account's reads, chat writes, read marks, wake retries, and
  * conversation contexts in a workspace it owns, through this server's copy
- * of it, while it shows on the phone; its change feed, at
+ * of it, while it shows on the phone; its published apps (phoneApps.ts); its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -91,6 +92,8 @@ export function createAccountOperationRoute(options: {
   lookupUserDisplayName?: LookupUserDisplayName;
   /** This server's public origin, which issues its accounts' actor keys. Writes need it. */
   serverUrl?: string;
+  /** The workspace's published apps, their review and approval, and launch grants. */
+  phoneApps?: PhoneApps;
 }) {
   const { storage, limiter } = options;
   const session = (request: Request) =>
@@ -110,8 +113,9 @@ export function createAccountOperationRoute(options: {
         "This sign-in is asking faster than your server answers. Try again shortly.",
       );
     }
-    // The feeds read only the relay's own tables; every other operation needs a copy.
-    if (!feed && !wakeFeed && options.copies() === undefined) throw copiesUnavailable();
+    const app = options.phoneApps !== undefined && isPhoneAppOperation(route.operation);
+    // The feeds and the app operations read only the relay's own tables; every other operation needs a copy.
+    if (!feed && !wakeFeed && !app && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
@@ -124,6 +128,7 @@ export function createAccountOperationRoute(options: {
       !(
         feed ||
         wakeFeed ||
+        app ||
         write ||
         mark ||
         retry ||
@@ -185,6 +190,12 @@ export function createAccountOperationRoute(options: {
         : badRequest("request body must be valid JSON");
     }
     await authorize();
+    // Synchronous on the relay's tables, so nothing changes between the check above and the answer.
+    if (app)
+      return jsonResponse({
+        ok: true,
+        result: options.phoneApps!.run(caller, route.workspaceId, route.operation, args),
+      });
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = {
       reason: "account",

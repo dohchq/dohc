@@ -41,6 +41,12 @@ import {
   accountDeletionKey,
   accountDeletionFenceKey,
 } from "@dohc/workspace-auth/accountDeletion";
+import {
+  APP_LAUNCH_PURGE_BATCH,
+  APP_LAUNCH_PURGE_KEY_HEADER,
+  APP_LAUNCH_PURGE_PATH,
+  appLaunchPurgeKey,
+} from "@dohc/security-contract/account-deletion";
 import { createAccountDeletionRoute, fencePendingAccountDeletions } from "./accountDeletionRoute";
 import type { StorageContext } from "./storage/context";
 import { startLiveJournalCheck } from "./storage/liveJournalCheck";
@@ -679,6 +685,32 @@ const relayApplication = createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  // The relay has already ended these launches, so every later call share-web makes for them is refused.
+  // This ends share-web's own state without waiting for that call.
+  // Share-web ends only these launches, so a purge that arrives late can't end a newer one.
+  endShareWebAppLaunches: (launchHashes) => {
+    const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
+    if (!shareWebOrigin || !origin || !relayExchangeKey) return;
+    for (let start = 0; start < launchHashes.length; start += APP_LAUNCH_PURGE_BATCH)
+      fetch(new URL(APP_LAUNCH_PURGE_PATH, origin), {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          "content-type": "application/json",
+          [APP_LAUNCH_PURGE_KEY_HEADER]: appLaunchPurgeKey(relayExchangeKey),
+        },
+        body: JSON.stringify({
+          launchHashes: launchHashes.slice(start, start + APP_LAUNCH_PURGE_BATCH),
+        }),
+      })
+        .then(async (response) => {
+          await response.body?.cancel();
+          if (!response.ok)
+            console.error(`Share-web refused the end of phone app sessions: ${response.status}.`);
+        })
+        .catch(() => console.error("Share-web did not confirm the end of phone app sessions."));
+  },
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
@@ -1450,6 +1482,8 @@ const publicationOperator = await startPublicationOperator(
   storage,
   operatorSocketPath(),
   operatorSecretPath(),
+  ({ ownerUserId, workspaceId, publicationId }) =>
+    relayApplication.endPhoneAppLaunches({ userId: ownerUserId, workspaceId, publicationId }),
 );
 
 // A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.

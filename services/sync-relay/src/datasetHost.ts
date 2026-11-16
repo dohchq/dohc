@@ -203,10 +203,17 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       !storage.workspaceIsOwnedBy(workspaceId, auth.userId)
     )
       throw notFound();
+    const launch = auth.launch;
     return {
       caller: { kind: "owner", userId: auth.userId },
       principalKey: ownerPrincipalKey(workspaceId),
       person: auth.userId,
+      ...(launch
+        ? {
+            authorizeOperation: () => launch.authorizeOperation(),
+            beforeCommit: () => launch.recheck(),
+          }
+        : {}),
     };
   }
   function enroll(workspaceId: string, datasetId: string, authority: DatasetAuthority) {
