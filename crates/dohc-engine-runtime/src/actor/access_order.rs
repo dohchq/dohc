@@ -25,9 +25,10 @@
 //! that refusal, capture ([`order_capture`]) and the versioned text and
 //! binary writes, renames and deletes ([`order_writer`]) and Undo
 //! ([`order_undo`]) run [`order_paths`] before their transaction: it commits a
-//! changed rule first. Rollback and merge run through [`ordered`], which
-//! judges each folder the check refused and runs the writer again, so their
-//! callers never see that refusal either. Capture judges
+//! changed rule first. Rollback, merge and conflict resolution run through
+//! [`ordered`], which runs the same step over the paths they will change and,
+//! should the check still refuse, judges each folder it refused and runs the
+//! writer again, so their callers never see that refusal either. Capture judges
 //! the rule bytes it read itself, so a widening it found is held rather than
 //! committed. A rule moment no step judged is a change made through dohc and
 //! commits as written.
@@ -364,16 +365,32 @@ fn order_as(
 /// waiting in turn.
 const ORDERED_RUNS: usize = 8;
 
-/// Run a writer that has no step of its own. When the commit-point check
-/// refused one of its moments, judge the refused folders now, which commits
-/// a rule that goes first, and run the writer again, so its caller never
-/// sees the refusal. A folder that waits or is held answers for the writer.
-/// The writers journal inside their one transaction, so a refused run left
-/// nothing behind.
+/// Run a writer that cannot name its paths until its transaction reads them.
+/// Its caller predicts them from the store, each with whether the writer
+/// deletes it, and [`order_writer`] runs over those first, in a workspace
+/// that replicates or not. When the commit-point check still refused one of
+/// its moments, judge the refused folders now, which commits a rule that goes
+/// first, and run the writer again, so its caller never sees the refusal. A
+/// folder that waits or is held answers for the writer. The writers journal
+/// inside their one transaction, so a refused run left nothing behind.
 pub(super) fn ordered<R>(
     store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    changes: &[(String, bool)],
     mut work: impl FnMut(&mut EngineStore) -> Result<R, RuntimeError>,
 ) -> Result<R, RuntimeError> {
+    let touches: Vec<Touch<'_>> = changes
+        .iter()
+        .map(|(path, deletes)| {
+            if *deletes {
+                Touch::delete(path)
+            } else {
+                Touch::write(path)
+            }
+        })
+        .collect();
+    order_writer(store, workspace_id, version_id, &touches)?;
     let mut outcome = work(store);
     for _ in 1..ORDERED_RUNS {
         let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));

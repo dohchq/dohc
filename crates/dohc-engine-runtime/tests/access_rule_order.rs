@@ -1931,6 +1931,193 @@ fn a_rollback_across_two_waiting_rules_commits_both_first() {
     }
 }
 
+impl Fixture {
+    /// The moments the store records, in order.
+    fn moments(&self) -> Vec<String> {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .prepare("SELECT moment_id FROM moments WHERE workspace_id=?1 ORDER BY moment_order")
+            .unwrap()
+            .query_map([WS], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn rename(&self, from: &str, to: &str, moment: &str) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.versioned_text_rename(
+                RenameTextFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: from.to_owned(),
+                    to_path: to.to_owned(),
+                    moment_id: moment.to_owned(),
+                    request_id: None,
+                    metadata_origin: "cli".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 40,
+                },
+                self.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    }
+
+    /// Merge team/a.md from the feature Version into Main.
+    fn merge_feature(&self) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.versioned_text_merge(
+                MergeTextFileFromVersion {
+                    workspace_id: WS.to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "feature".to_owned(),
+                    path: "team/a.md".to_owned(),
+                    object_id: "ignored".to_owned(),
+                    moment_id: "m-merge".to_owned(),
+                    request_id: None,
+                    conflict_id: "conflict-merge".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 42,
+                },
+                self.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    }
+}
+
+fn move_team_to_crew(f: &Fixture) -> Result<(), RuntimeError> {
+    f.versioned_write(write("team/a.md", "alpha", "m-alpha"))?;
+    f.rename("team/a.md", "crew/a.md", "m-move")
+}
+
+fn edit_on_feature(f: &Fixture) -> Result<(), RuntimeError> {
+    f.versioned_write(write("team/a.md", "alpha", "m-alpha"))?;
+    f.runtime.block_on(f.actor.create_named_version(
+        CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feature".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 41,
+            request_id: None,
+        },
+        Arc::new(NoFaults),
+        CancellationToken::new(),
+    ))?;
+    f.versioned_write(WriteText {
+        version_id: "feature".to_owned(),
+        ..write("team/a.md", "alpha 2", "m-feature")
+    })
+}
+
+/// In a workspace that does not replicate, no commit-point check stops a
+/// moment, so rollback, merge and conflict resolution are judged before they
+/// change anything: under a folder held for its owner each is refused and
+/// records nothing. Rolling back a move is judged at both of its paths.
+#[test]
+fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
+    type Step = fn(&Fixture) -> Result<(), RuntimeError>;
+    let cases: [(&str, &str, Step, Step); 4] = [
+        (
+            "rollback into a held folder",
+            "team",
+            move_team_to_crew,
+            |f| f.rollback("m-move"),
+        ),
+        (
+            "rollback out of a held folder",
+            "crew",
+            move_team_to_crew,
+            |f| f.rollback("m-move"),
+        ),
+        ("merge", "team", edit_on_feature, Fixture::merge_feature),
+        (
+            "conflict resolution",
+            "team",
+            |f| {
+                edit_on_feature(f)?;
+                f.versioned_write(write("team/a.md", "alpha 3", "m-main"))?;
+                f.merge_feature()
+            },
+            |f| {
+                f.runtime
+                    .block_on(f.actor.conflict_resolve_indexed(
+                        dohc_engine_runtime::ResolveTextConflict {
+                            workspace_id: WS.to_owned(),
+                            conflict_id: "conflict-merge".to_owned(),
+                            resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+                            object_id: "resolved-object".to_owned(),
+                            write_moment_id: "resolved-write".to_owned(),
+                            delete_moment_id: "resolved-delete".to_owned(),
+                            metadata_origin: "api".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 43,
+                            request_id: None,
+                            conflict_answer_budget_bytes: usize::MAX,
+                        },
+                        dohc_engine_collab::LeaseRegistry::new(),
+                        f.root().to_path_buf(),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    ))
+                    .map(drop)
+            },
+        ),
+    ];
+    // Every case runs, so one failure shows them all.
+    let mut wrong = Vec::new();
+    for (name, folder, prepare, writer) in cases {
+        let f = Fixture::local();
+        let rule = format!("{folder}/access.yaml");
+        f.put(&rule, NOBODY);
+        f.settle();
+        f.capture_ok(&[&rule]);
+        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+        f.put(&rule, EDIT);
+        f.settle();
+        let before = f.moments();
+        let result = writer(&f);
+        // Held, nothing recorded, the hold.
+        let state = (held(&result, folder), f.moments() == before, f.holds());
+        if state != (true, true, vec![(folder.to_owned(), "widened".to_owned())]) {
+            wrong.push(format!("{name}: {result:?} {state:?}"));
+        }
+    }
+    // Nor are they let through once the store left the workspace folder.
+    let moved_cases: [(&str, Step, Step); 2] = [
+        ("rollback", move_team_to_crew, |f| f.rollback("m-move")),
+        ("merge", edit_on_feature, Fixture::merge_feature),
+    ];
+    for (name, prepare, writer) in moved_cases {
+        let f = Fixture::movable();
+        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+        let before = f.moments();
+        f.move_store_away();
+        let result = writer(&f);
+        let stray = f.move_store_back();
+        let state = (moved(&result), stray, f.moments() == before);
+        if state != (true, Vec::new(), true) {
+            wrong.push(format!(
+                "{name} after the store moved: {result:?} {state:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 const OP: &str = "dohc-operation:remove-team";
 const COPY: &str = "dohc-operation:copy-rule";
 
