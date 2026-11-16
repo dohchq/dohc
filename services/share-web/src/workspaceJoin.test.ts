@@ -50,7 +50,6 @@ it("answers signed out without asking the relay when no account cookie came", as
 
 it.each([
   [401, {}, 401, "signed_out"],
-  [404, {code: "invite_link_off"}, 404, "link_off"],
   [404, {}, 404, "link_off"],
   [403, {code: "member_removed"}, 403, "removed"],
   [409, {code: "workspace_full"}, 409, "full"],

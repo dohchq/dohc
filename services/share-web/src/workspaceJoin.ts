@@ -12,7 +12,6 @@ const ROUTES = {
 
 // The relay's refusal codes for an invite link, by what the page tells the person.
 const RELAY_CODES: Record<string, JoinRefusal> = {
-  invite_link_off: "link_off",
   member_removed: "removed",
   workspace_full: "full",
 };
