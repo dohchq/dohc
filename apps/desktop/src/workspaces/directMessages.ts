@@ -162,6 +162,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
       } catch {
         if (stop.aborted) return;
+        // The windows read the list again on this change; it must reach the server and fail, not repeat the last answer.
+        if (listed?.key === key) listed = { ...listed, fresh: false };
         // Every failure is a change, so a window shows that the server is away instead of waiting to fail a send.
         // Not only the first: a server shutting down can fail this call and still answer the list read it starts.
         dependencies.changed();

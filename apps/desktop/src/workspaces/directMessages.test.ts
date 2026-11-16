@@ -174,6 +174,8 @@ describe("direct messages for the signed-in account", () => {
     h.goOffline();
     // Losing the server is a change, so an open conversation shows that it failed.
     await expect.poll(() => h.changes()).toBeGreaterThanOrEqual(3);
+    // The window reads the list again on that change, and it fails rather than repeating the last answer.
+    await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
     h.goOnline();
     const offline = h.changes();
     await expect.poll(() => h.changes()).toBeGreaterThan(offline);
