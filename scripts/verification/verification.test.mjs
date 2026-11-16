@@ -26,6 +26,13 @@ import {
   sourceFingerprint,
 } from "./build.mjs";
 import {
+  checkClass,
+  expectedTests,
+  flagReading,
+  IOS_UI_CLASSES,
+  IOS_UI_EXCLUSIONS,
+} from "./ios-ui.mjs";
+import {
   changedFiles,
   ciEvidence,
   desktopProofCommand,
@@ -1527,6 +1534,105 @@ test("a selected Windows package check needs CI evidence, because no local run p
   const smoke = "tools/perf-profiling/packaged-benchmark.mjs";
   assert.equal(selectedGates([smoke], workflow).windows, true);
   assert.equal(selectedGates([smoke], narrowed).windows, false);
+});
+
+test("the iOS job's selection skips only the Mac's tests and names each that it skips", () => {
+  assert.ok(!IOS_UI_CLASSES.includes("PageAccessibilityTests"), "its only test needs VoiceOver");
+  for (const excluded of Object.keys(IOS_UI_EXCLUSIONS))
+    assert.ok(IOS_UI_CLASSES.includes(excluded.split("/")[0]), excluded);
+  const source =
+    "func testOne() {}\nfunc testVoiceOverSpeaksEachRowOnce() async throws {}\nfunc helper() {}";
+  assert.deepEqual(expectedTests("NoticesAccessibilityTests", source), {
+    expected: ["testOne"],
+    problems: [],
+  });
+  assert.deepEqual(expectedTests("NoticesAccessibilityTests", "func testOne() {}").problems, [
+    "NoticesAccessibilityTests/testVoiceOverSpeaksEachRowOnce is excluded but is not a test",
+  ]);
+  assert.deepEqual(expectedTests("NoticesActionsTests", "").problems, [
+    "NoticesActionsTests has no tests",
+  ]);
+});
+
+test("an iOS class passes only when every expected test reports one ordinary pass", () => {
+  const source = "func testA() {}\nfunc testB() {}";
+  const results = (...cases) => ({
+    testNodes: [
+      {
+        nodeType: "Test Plan",
+        children: [
+          {
+            nodeType: "Unit test bundle",
+            name: "dohcUITests",
+            children: [
+              {
+                nodeType: "Test Suite",
+                name: "NoticesActionsTests",
+                children: cases.map(([name, result]) => ({
+                  nodeType: "Test Case",
+                  name: `${name}()`,
+                  result,
+                  durationInSeconds: 4,
+                  children: [{ nodeType: "Failure Message", name: "ignored" }],
+                })),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const check = (data, status = 0) =>
+    checkClass({ name: "NoticesActionsTests", source, results: data, status });
+  const passed = check(results(["testA", "Passed"], ["testB", "Passed"]));
+  assert.deepEqual(passed.problems, []);
+  assert.equal(passed.passed, 2);
+  assert.deepEqual(passed.rows[0], {
+    suite: "NoticesActionsTests",
+    name: "testA",
+    result: "Passed",
+    seconds: 4,
+  });
+  for (const [data, status, problem] of [
+    [results(["testA", "Passed"]), 0, "NoticesActionsTests/testB: no result"],
+    [results(["testA", "Passed"], ["testB", "Skipped"]), 0, "NoticesActionsTests/testB: Skipped"],
+    [
+      results(["testA", "Passed"], ["testB", "Expected Failure"]),
+      0,
+      "NoticesActionsTests/testB: Expected Failure",
+    ],
+    [results(["testA", "Passed"], ["testB", "Failed"]), 65, "NoticesActionsTests/testB: Failed"],
+    [
+      results(["testA", "Passed"], ["testB", "Passed"], ["testB", "Passed"]),
+      0,
+      "NoticesActionsTests/testB: 2 results",
+    ],
+    [
+      results(["testA", "Passed"], ["testB", "Passed"], ["testC", "Passed"]),
+      0,
+      "NoticesActionsTests/testC: not selected, reported Passed",
+    ],
+    [results(["testA", "Passed"], ["testB", "Passed"]), 65, "xcodebuild exited 65"],
+    [results(["testA", "Passed"], ["testB", "Passed"]), "", "xcodebuild exited "],
+    [null, 0, "NoticesActionsTests/testA: no result"],
+  ])
+    assert.ok(check(data, status).problems.includes(problem), problem);
+});
+
+test("the iOS job reads build flags from the plain JS bundle", () => {
+  assert.equal(flagReading('const sampleBuild = "1" === "1";', "sampleBuild").state, "on");
+  assert.equal(flagReading("var sampleBuild=!0;", "sampleBuild").state, "on");
+  assert.equal(flagReading('const phoneWrites = undefined === "1";', "phoneWrites").state, "off");
+  assert.equal(flagReading("var phoneWrites=!1;", "phoneWrites").state, "off");
+  // A minified module whose last statement sets the flag ends at the module wrapper, not a semicolon.
+  assert.equal(flagReading("e.sampleBuild=!0},123,[]);", "sampleBuild").state, "on");
+  assert.equal(flagReading("e.phoneWrites=!1},123,[]);", "phoneWrites").state, "off");
+  assert.equal(flagReading('a.phoneWrites=void 0==="1",b=2;', "phoneWrites").state, "off");
+  assert.equal(
+    flagReading('var phoneWrites=!1;var phoneWrites="1"==="1";', "phoneWrites").state,
+    "undetermined",
+  );
+  assert.equal(flagReading("phoneWrites === 1", "phoneWrites").state, "undetermined");
 });
 
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {

@@ -170,6 +170,8 @@ Nothing Android runs locally. When `pnpm verify:plan` or `pnpm verify:pr` select
 
 The Windows package job also runs only in the PR checks. See [Windows package](#windows-package).
 
+The iOS sample UI tests run in their own advisory workflow on GitHub's free `xcode-27` runner. They don't gate merges, and a newer push cancels the running job.
+
 The timing targets are 300 s for JavaScript and 600 s for Rust. The failure ceilings are 400 s and 700 s.
 A gate's `seconds` runs from the start of `what changed` to the finish of the gate's last job.
 Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`. Read the receipt's `timing`:
