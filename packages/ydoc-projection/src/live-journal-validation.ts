@@ -1,7 +1,7 @@
 export {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
-  liveEditFitsNote,
+  liveEditFitsCopy,
 } from "./liveDocumentValidation.js";
 export type { LiveMarkdownJournalTiming } from "./liveDocumentValidation.js";
 export type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";

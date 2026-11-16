@@ -10,7 +10,7 @@
 // Each save tells it the last position the save holds, so it can let go of those.
 import { createHash, randomUUID } from "node:crypto";
 import * as Y from "yjs";
-import { liveEditFitsNote } from "@dohc/ydoc-projection/live-journal-validation";
+import { liveEditFitsCopy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import {
   liveAuthorIdentity,
@@ -160,6 +160,8 @@ interface Room {
   failingSince?: number;
   /** How many callers are saving everything first; while any is, the room takes no edits. */
   closing: number;
+  /** A copy of `doc` that each edit is checked on before the room takes it. Built when needed. */
+  copy?: Y.Doc;
 }
 
 /** Why a note that paused takes no edits. Its owner's Resume lifts it. */
@@ -352,6 +354,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       room.doc.off("update", observe);
     }
     if (!changed) return;
+    if (room.copy) Y.applyUpdate(room.copy, changed);
     room.bytes += changed.byteLength;
     passOn(
       room,
@@ -579,6 +582,28 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.members || room.unsaved.length || room.saving) return;
     dispose(room);
   }
+  /**
+   * Applies an edit to the room's copy of the note and says whether it fits there. The copy is
+   * built again whenever it may differ from the note, as after an edit the room did not take.
+   */
+  function fitsCopy(room: Room, bytes: Uint8Array) {
+    if (
+      room.copy &&
+      Buffer.compare(Y.encodeStateVector(room.copy), Y.encodeStateVector(room.doc)) !== 0
+    )
+      dropCopy(room);
+    if (!room.copy) {
+      room.copy = new Y.Doc({ gc: false });
+      Y.applyUpdate(room.copy, Y.encodeStateAsUpdate(room.doc));
+    }
+    if (liveEditFitsCopy(room.copy, bytes)) return true;
+    dropCopy(room);
+    return false;
+  }
+  function dropCopy(room: Room) {
+    room.copy?.destroy();
+    room.copy = undefined;
+  }
   function dispose(room: Room, reason: Error = new Error("Live room closed.")) {
     clearTimeout(room.timer);
     room.timer = undefined;
@@ -587,6 +612,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     for (const subscriber of room.subscribers) subscriber.wake?.();
     room.subscribers.clear();
     room.doc.destroy();
+    dropCopy(room);
     if (rooms.get(room.key) === room) rooms.delete(room.key);
   }
 
@@ -953,10 +979,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           const sender = host.room.sender(input.authorContext);
           if (!sender) return refused("provenance-refused");
           const plan = roomAdmissible(held.doc, bytes);
-          if (!plan || !liveEditFitsNote(held.doc, bytes)) return refused("invalid-update");
+          if (!plan) return refused("invalid-update");
           const seed = liveJournalSeedClientId(storage, held.document);
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");
+          if (!fitsCopy(held, bytes)) return refused("invalid-update");
           const have = Y.decodeStateVector(Y.encodeStateVector(held.doc));
           let written: ReturnType<typeof appendLiveRoomEdit>;
           try {
@@ -971,10 +998,14 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
               receivedAtMs: Date.now(),
             });
           } catch (error) {
+            dropCopy(held);
             if (error instanceof SyncRelayQuotaExceededError) return refused("capacity-refused");
             throw error;
           }
-          if (written.kind === "refused") return refused("provenance-refused");
+          if (written.kind === "refused") {
+            dropCopy(held);
+            return refused("provenance-refused");
+          }
           Y.applyUpdate(held.doc, bytes, subscriber);
           held.bytes += bytes.byteLength;
           held.unsaved.push({ position: written.position, sender, bytes });

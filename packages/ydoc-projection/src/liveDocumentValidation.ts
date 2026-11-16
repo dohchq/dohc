@@ -858,107 +858,27 @@ function validateMarkAttributes(name: string, value: unknown): void {
 }
 
 type Shared = ReturnType<Y.Doc["get"]>;
-/** Where an item sits: a root by name or a shared type, and the key it sets, if any. */
-type Place = { readonly parent: string | Shared; readonly sub: string | null };
-const GONE = Symbol("gone");
 
 /**
- * Whether an edit adds only kinds of content a note can hold: the three roots, the elements and
- * marks the shared schema has, each element's own attributes, and frontmatter and metadata
- * values. It reads the edit and the items it builds on, not the whole note, and checks no values
- * or nesting; the full check at save does that. As Yjs does, it reads an id from `doc` when `doc`
- * has it. False when the edit builds on something neither it nor `doc` has.
+ * Applies an edit to `copy`, a copy of the note kept for this check alone, and says whether each
+ * item the edit added that the note still shows is a kind of content a note can hold: the three
+ * roots, the elements and marks the shared schema has, each element's own attributes, and
+ * frontmatter and metadata values, and that each new item sits among items of its own parent.
+ * Yjs has placed each item by then, so this reads where it really sits. It checks no values or
+ * nesting; the full check at save does that. False when the edit can't be applied whole. After false, `copy` may hold part of the edit, so the caller
+ * builds it again.
  */
-export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
-  let structs: ReturnType<typeof Y.decodeUpdate>["structs"];
+export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
+  const before = Y.decodeStateVector(Y.encodeStateVector(copy));
   try {
-    structs = Y.decodeUpdate(update).structs;
+    Y.applyUpdate(copy, update);
   } catch {
     return false;
   }
+  if (copy.store.pendingStructs !== null || copy.store.pendingDs !== null) return false;
   const schema = getDohcProseMirrorSchema();
-  const own = new Map<number, (Y.Item | Y.GC)[]>();
-  for (const struct of structs) {
-    if (struct instanceof Y.Skip) continue;
-    const items = own.get(struct.id.client) ?? [];
-    items.push(struct);
-    own.set(struct.id.client, items);
-  }
-  for (const items of own.values()) items.sort((a, b) => a.id.clock - b.id.clock);
-  const inEdit = (id: Y.ID) => {
-    const items = own.get(id.client) ?? [];
-    let low = 0,
-      high = items.length - 1;
-    while (low <= high) {
-      const middle = (low + high) >> 1,
-        item = items[middle]!;
-      if (id.clock < item.id.clock) high = middle - 1;
-      else if (id.clock >= item.id.clock + item.length) low = middle + 1;
-      else return item;
-    }
-    return undefined;
-  };
-  const inDoc = (id: Y.ID) => {
-    try {
-      return Y.getItem(doc.store, id) as Y.Item | Y.GC;
-    } catch {
-      return undefined;
-    }
-  };
-  // Yjs keeps what the note already has under an id and takes from an edit only what is past it.
-  const noted = (id: Y.ID) => id.clock < Y.getState(doc.store, id.client);
-  const find = (id: Y.ID) => (noted(id) ? inDoc(id) : inEdit(id));
   const roots = new Map<Shared, string>();
-  for (const [name, type] of doc.share) roots.set(type, name);
-  const places = new Map<Y.Item, Place | typeof GONE | null>();
-  // An item with a left or right neighbour carries no parent of its own and sits beside it.
-  const placeOf = (start: Y.Item) => {
-    const chain: Y.Item[] = [];
-    let item = start;
-    let found: Place | typeof GONE | null | undefined;
-    for (;;) {
-      found = places.get(item);
-      if (found !== undefined) break;
-      // A neighbour that leads back here is never resolved.
-      places.set(item, null);
-      chain.push(item);
-      const parent = item.parent as string | Y.ID | null;
-      const neighbour = item.origin ?? item.rightOrigin;
-      const near =
-        typeof parent === "string"
-          ? undefined
-          : parent
-            ? find(parent)
-            : neighbour
-              ? find(neighbour)
-              : undefined;
-      // Yjs drops an item whose parent or neighbour the note has already collected.
-      if (
-        near &&
-        (!(near instanceof Y.Item) || (parent && near.content instanceof Y.ContentDeleted))
-      ) {
-        found = GONE;
-        break;
-      }
-      if (typeof parent === "string") found = { parent, sub: item.parentSub };
-      else if (parent)
-        found =
-          near?.content instanceof Y.ContentType
-            ? { parent: near.content.type, sub: item.parentSub }
-            : null;
-      // By the id it names: an edit's struct can start in what the note holds and run past it.
-      else if (near instanceof Y.Item && neighbour && !noted(neighbour)) {
-        item = near;
-        continue;
-      } else {
-        const type = near?.parent as Shared | null | undefined;
-        found = near && type ? { parent: roots.get(type) ?? type, sub: near.parentSub } : null;
-      }
-      break;
-    }
-    for (const item of chain) places.set(item, found);
-    return found;
-  };
+  for (const [name, type] of copy.share) roots.set(type, name);
   const xmlChild = (content: Y.Item["content"]) =>
     content instanceof Y.ContentType &&
     (content.type instanceof Y.XmlText ||
@@ -971,55 +891,54 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
     (content instanceof Y.ContentType &&
       !(content.type instanceof Y.XmlHook) &&
       (content.type instanceof Y.Map || content.type instanceof Y.Array));
-  for (const struct of structs) {
-    if (!(struct instanceof Y.Item)) continue;
-    const held = Y.getState(doc.store, struct.id.client) - struct.id.clock;
-    const runsOn = held > 0 && held < struct.length;
-    const deleted = struct.content instanceof Y.ContentDeleted;
-    if (deleted && !runsOn) continue;
-    const place = placeOf(struct);
-    if (place === GONE) continue;
-    if (!place) return false;
-    const { parent, sub } = place,
-      content = struct.content;
-    // Yjs links the part past what the note holds beside the note's last item of the run, and
-    // keeps the parent it read from the start. Both must be the same place, deleted or not.
-    if (runsOn) {
-      const left = inDoc(Y.createID(struct.id.client, struct.id.clock + held - 1));
-      if (!(left instanceof Y.Item)) return false;
-      const type = left.parent as Shared | null;
-      if (!type || (roots.get(type) ?? type) !== parent || left.parentSub !== sub) return false;
+  for (const [client, structs] of copy.store.clients) {
+    const from = before.get(client) ?? 0;
+    if (from >= Y.getState(copy.store, client)) continue;
+    // Yjs may join a new item to the one before it, so the first one read can start before `from`.
+    for (let index = Y.findIndexSS(structs, from); index < structs.length; index += 1) {
+      const item = structs[index];
+      if (!(item instanceof Y.Item)) continue;
+      const type = item.parent as Shared | null;
+      if (!type) return false;
+      // Yjs links an item beside the one its edit names. An edit can name one under another parent
+      // or key, which puts the item in that list while it still names its own parent.
+      for (const near of [item.left, item.right])
+        if (near && (near.parent !== type || near.parentSub !== item.parentSub)) return false;
+      // A removed item stays removed, so what it holds never shows.
+      if (item.deleted) continue;
+      const parent = roots.get(type) ?? type,
+        sub = item.parentSub,
+        content = item.content;
+      const fits =
+        parent === "body"
+          ? sub === null && xmlChild(content)
+          : parent === "frontmatter"
+            ? sub !== null && value(content)
+            : parent === "meta"
+              ? sub !== null &&
+                (META_KEYS.has(sub) ||
+                  ENGINE_META_KEYS.has(sub) ||
+                  sub.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) &&
+                content instanceof Y.ContentAny
+              : typeof parent === "string"
+                ? false
+                : parent instanceof Y.XmlElement
+                  ? sub === null
+                    ? xmlChild(content)
+                    : Object.hasOwn(schema.nodes[parent.nodeName]?.spec.attrs ?? {}, sub) &&
+                      content instanceof Y.ContentAny
+                  : parent instanceof Y.XmlText
+                    ? sub === null &&
+                      (content instanceof Y.ContentString ||
+                        (content instanceof Y.ContentFormat &&
+                          Object.hasOwn(schema.marks, markNameOf(content.key))))
+                    : parent instanceof Y.XmlHook || parent instanceof Y.XmlFragment
+                      ? false
+                      : parent instanceof Y.Map
+                        ? sub !== null && value(content)
+                        : parent instanceof Y.Array && sub === null && value(content);
+      if (!fits) return false;
     }
-    if (deleted) continue;
-    const fits =
-      parent === "body"
-        ? sub === null && xmlChild(content)
-        : parent === "frontmatter"
-          ? sub !== null && value(content)
-          : parent === "meta"
-            ? sub !== null &&
-              (META_KEYS.has(sub) ||
-                ENGINE_META_KEYS.has(sub) ||
-                sub.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) &&
-              content instanceof Y.ContentAny
-            : typeof parent === "string"
-              ? false
-              : parent instanceof Y.XmlElement
-                ? sub === null
-                  ? xmlChild(content)
-                  : Object.hasOwn(schema.nodes[parent.nodeName]?.spec.attrs ?? {}, sub) &&
-                    content instanceof Y.ContentAny
-                : parent instanceof Y.XmlText
-                  ? sub === null &&
-                    (content instanceof Y.ContentString ||
-                      (content instanceof Y.ContentFormat &&
-                        Object.hasOwn(schema.marks, markNameOf(content.key))))
-                  : parent instanceof Y.XmlHook || parent instanceof Y.XmlFragment
-                    ? false
-                    : parent instanceof Y.Map
-                      ? sub !== null && value(content)
-                      : parent instanceof Y.Array && sub === null && value(content);
-    if (!fits) return false;
   }
   return true;
 }

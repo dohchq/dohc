@@ -1097,6 +1097,34 @@ it("refuses an edit that adds what a note can't hold, before it writes or passes
   expect(unsaved(f)).toHaveLength(1);
 });
 
+// Proves: the room checks each edit on its copy of the note, which holds the owner's changes too.
+it("checks an edit on the owner's changes the room took", async () => {
+  const f = note();
+  const outside: Uint8Array[] = [];
+  const room = rooms(f, {}, { outside });
+  const a = editor(f, room, ana);
+  await a.open();
+  // The owner adds a list of days; the page gets it.
+  const owner = new Y.Doc();
+  Y.applyUpdate(owner, Y.encodeStateAsUpdate(a.doc));
+  const start = Y.encodeStateVector(owner);
+  owner.getMap("frontmatter").set("days", new Y.Map());
+  outside.push(Y.encodeStateAsUpdate(owner, start));
+  await a.next();
+  const days = a.doc.getMap("frontmatter").get("days") as Y.Map<unknown>;
+  const edit = (change: () => void) => {
+    const before = Y.encodeStateVector(a.doc);
+    change();
+    return Y.encodeStateAsUpdate(a.doc, before);
+  };
+  expect((await a.submit(edit(() => days.set("one", "Lisbon")))).result).toBe("success");
+  expect(await a.submit(edit(() => days.set("two", new Y.XmlHook("h") as never)))).toEqual({
+    result: "refused",
+    reason: "invalid-update",
+  });
+  expect(unsaved(f)).toHaveLength(1);
+});
+
 it("saves every taken edit before a step that closes the note, taking none until the step ends, then ends the room", async () => {
   const f = note();
   let release!: () => void;

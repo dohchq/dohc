@@ -11,7 +11,7 @@ import { type OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
 import {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
-  liveEditFitsNote,
+  liveEditFitsCopy,
   type LiveMarkdownRegistrationEvidence,
 } from "./liveDocumentValidation.js";
 import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from "./liveValidationPolicy.js";
@@ -1112,10 +1112,17 @@ describe("live edit format guard", () => {
         (node) => node instanceof Y.XmlElement && node.nodeName === "paragraph",
       ) as Y.XmlElement;
   const words = (page: Y.Doc) => paragraph(page).get(0) as Y.XmlText;
+  // The room's copy of `note`, kept uncollected as the room's own note is.
+  const copyOf = (note: Y.Doc) => {
+    const copy = new Y.Doc({ gc: false });
+    Y.applyUpdate(copy, Y.encodeStateAsUpdate(note));
+    return copy;
+  };
+  const fits = (note: Y.Doc, edit: Uint8Array) => liveEditFitsCopy(copyOf(note), edit);
 
   it("takes a whole note and the edits a page makes to it", () => {
     const note = markdownToYDoc(markdown);
-    expect(liveEditFitsNote(new Y.Doc(), Y.encodeStateAsUpdate(note))).toBe(true);
+    expect(fits(new Y.Doc(), Y.encodeStateAsUpdate(note))).toBe(true);
     const edits: ((page: Y.Doc) => void)[] = [
       (page) => words(page).insert(5, " there", { bold: {} }),
       (page) => words(page).format(0, 5, { italic: {} }),
@@ -1135,7 +1142,7 @@ describe("live edit format guard", () => {
       (page) => page.getMap("meta").set("dohcMarkdownCrlf", true),
       (page) => page.getMap("meta").set("dohcFrontmatterSourceItem:title", "x"),
     ];
-    for (const edit of edits) expect(liveEditFitsNote(note, sent(note, edit))).toBe(true);
+    for (const edit of edits) expect(fits(note, sent(note, edit))).toBe(true);
   });
 
   it("refuses an edit that adds what a note can't hold", () => {
@@ -1158,18 +1165,18 @@ describe("live edit format guard", () => {
       "meta type": (page) => page.getMap("meta").set("schemaVersion", new Y.Map() as never),
     };
     for (const [name, edit] of Object.entries(edits))
-      expect(liveEditFitsNote(note, sent(note, edit)), name).toBe(false);
-    expect(liveEditFitsNote(note, new Uint8Array([1, 2, 3]))).toBe(false);
+      expect(fits(note, sent(note, edit)), name).toBe(false);
+    expect(fits(note, new Uint8Array([1, 2, 3]))).toBe(false);
   });
 
   // Proves: a long mark name is refused in time linear in its length, so it can't hold up admission.
   it("refuses a long unknown mark name without stalling", () => {
     const note = markdownToYDoc(markdown);
     const edit = sent(note, (page) => words(page).format(0, 2, { ["x".repeat(1 << 18)]: true }));
-    expect(liveEditFitsNote(note, edit)).toBe(false);
+    expect(fits(note, edit)).toBe(false);
     // The name is read from the key's start: a line break before a known mark's name keeps it unknown.
     const split = sent(note, (page) => words(page).format(0, 2, { "x\nbold--12345678": {} }));
-    expect(liveEditFitsNote(note, split)).toBe(false);
+    expect(fits(note, split)).toBe(false);
   });
 
   it("follows a run of typing back to where it starts", () => {
@@ -1179,17 +1186,17 @@ describe("live edit format guard", () => {
       words(page).insert(1, "abc");
       words(page).insert(4, "d", { bold: {} });
     });
-    expect(liveEditFitsNote(note, typed)).toBe(true);
+    expect(fits(note, typed)).toBe(true);
     const marked = sent(note, (page) => {
       words(page).insert(1, "abc");
       words(page).insert(4, "d", { blink: true });
     });
-    expect(liveEditFitsNote(note, marked)).toBe(false);
+    expect(fits(note, marked)).toBe(false);
   });
 
   it("passes what the note already holds or has already collected", () => {
     const note = markdownToYDoc(markdown);
-    expect(liveEditFitsNote(note, Y.encodeStateAsUpdate(note))).toBe(true);
+    expect(fits(note, Y.encodeStateAsUpdate(note))).toBe(true);
     // A page types into a paragraph another page removed, and the note collected its words.
     const late = sent(note, (page) => words(page).insert(1, "x"));
     const removed = sent(note, (page) =>
@@ -1198,7 +1205,7 @@ describe("live edit format guard", () => {
         .delete(page.getXmlFragment("body").toArray().indexOf(paragraph(page))),
     );
     Y.applyUpdate(note, removed);
-    expect(liveEditFitsNote(note, late)).toBe(true);
+    expect(fits(note, late)).toBe(true);
 
     // One edit can hold both the words typed into a paragraph and its collected removal.
     const page = new Y.Doc();
@@ -1212,7 +1219,7 @@ describe("live edit format guard", () => {
     );
     page.getXmlFragment("body").delete(0);
     const both = Y.mergeUpdates([Y.encodeStateAsUpdate(page, start), typed]);
-    expect(liveEditFitsNote(note, both)).toBe(true);
+    expect(fits(note, both)).toBe(true);
   });
 
   it("places what an edit builds on by the note's own items, as Yjs does, not the edit's copies", () => {
@@ -1242,11 +1249,10 @@ describe("live edit format guard", () => {
     const landed = clone();
     Y.applyUpdate(landed, attribute);
     expect(paragraph(landed).getAttribute("onclick")).toBe("alert(1)");
-    expect(liveEditFitsNote(note, attribute)).toBe(false);
+    expect(fits(note, attribute)).toBe(false);
 
     // A collected item claimed at the text run's id, so the edit's own copy says its child is
-    // dropped. Yjs puts the child on the note's text run. (This edit's removals then take the
-    // paragraph out too; one written by hand needn't.)
+    // dropped. Yjs puts the child on the note's text run.
     const gone = new Y.Doc();
     gone.clientID = 7;
     const outer = new Y.Map<unknown>();
@@ -1267,8 +1273,11 @@ describe("live edit format guard", () => {
     expect(Y.decodeUpdate(dropped).structs.some((struct) => struct instanceof Y.GC)).toBe(true);
     const placed = clone();
     Y.applyUpdate(placed, dropped);
-    expect((Y.getItem(placed.store, Y.createID(9, 0)) as Y.Item).parent).toBeInstanceOf(Y.XmlText);
-    expect(liveEditFitsNote(note, dropped)).toBe(false);
+    const child = Y.getItem(placed.store, Y.createID(9, 0)) as Y.Item;
+    expect(child.parent).toBeInstanceOf(Y.XmlText);
+    // The same removals take out the text run it lands on, so it never shows.
+    expect(child.deleted).toBe(true);
+    expect(fits(note, dropped)).toBe(true);
   });
 
   it("refuses an edit whose run past the note's text would sit somewhere else", () => {
@@ -1306,7 +1315,7 @@ describe("live edit format guard", () => {
     collected.getXmlFragment("body").delete(0, 1);
     expect(Y.getItem(collected.store, Y.createID(9, 2))).toBeInstanceOf(Y.GC);
     expect(
-      liveEditFitsNote(
+      fits(
         collected,
         run((doc) => text(doc, 1).insert(0, "abcdef")),
       ),
@@ -1323,7 +1332,7 @@ describe("live edit format guard", () => {
       ),
     );
     expect(
-      liveEditFitsNote(
+      fits(
         blocks,
         run((doc) => text(doc, 0).insert(0, "XXXXXXXXX")),
       ),
@@ -1333,7 +1342,7 @@ describe("live edit format guard", () => {
     const days = run((doc) =>
       (doc.getMap("frontmatter").get("days") as Y.Array<number>).push([1, 2, 3, 4, 5, 6]),
     );
-    expect(liveEditFitsNote(holding(abc), days)).toBe(false);
+    expect(fits(holding(abc), days)).toBe(false);
 
     // The note took a title and "ab". A title set five times under those ids sends the first four
     // as one deleted struct, whose new part would be linked into the text as the title's value.
@@ -1351,7 +1360,63 @@ describe("live edit format guard", () => {
         (struct) => struct.length === 4 && (struct as Y.Item).content instanceof Y.ContentDeleted,
       ),
     ).toBe(true);
-    expect(liveEditFitsNote(titled, retitled)).toBe(false);
+    expect(fits(titled, retitled)).toBe(false);
+  });
+
+  // Proves: an edit the check takes is in the copy, so the next edit is read against it.
+  it("keeps each edit it takes in the copy", () => {
+    const note = markdownToYDoc(markdown);
+    const copy = copyOf(note);
+    const page = copyOf(note);
+    const next = (edit: (doc: Y.Doc) => void) => {
+      const before = Y.encodeStateVector(page);
+      edit(page);
+      return Y.encodeStateAsUpdate(page, before);
+    };
+    const heading = new Y.XmlElement("heading");
+    heading.setAttribute("level", 2 as never);
+    expect(
+      liveEditFitsCopy(
+        copy,
+        next((doc) => doc.getXmlFragment("body").insert(0, [heading])),
+      ),
+    ).toBe(true);
+    // Each builds on the one before, which only the copy holds.
+    expect(
+      liveEditFitsCopy(
+        copy,
+        next(() => heading.insert(0, [new Y.XmlText("Day one")])),
+      ),
+    ).toBe(true);
+    expect(
+      liveEditFitsCopy(
+        copy,
+        next(() => heading.setAttribute("onclick", "x")),
+      ),
+    ).toBe(false);
+    expect(
+      liveEditFitsCopy(
+        copyOf(note),
+        next(() => heading.setAttribute("level", 3 as never)),
+      ),
+    ).toBe(false);
+  });
+
+  // Proves: an edit that needs something the copy doesn't have is refused, not held for later.
+  it("refuses an edit that builds on what the copy doesn't have", () => {
+    const note = markdownToYDoc(markdown);
+    const page = copyOf(note);
+    const first = sent(page, (doc) => words(doc).insert(1, "ab"));
+    Y.applyUpdate(page, first);
+    const second = sent(page, (doc) => words(doc).insert(3, "cd"));
+    expect(fits(note, second)).toBe(false);
+    // Removing words the copy never had.
+    expect(
+      fits(
+        note,
+        sent(page, (doc) => words(doc).delete(1, 2)),
+      ),
+    ).toBe(false);
   });
 
   it("takes an edit that runs on from text the note already holds", () => {
@@ -1370,6 +1435,6 @@ describe("live edit format guard", () => {
     expect(
       Y.decodeUpdate(edit).structs.some((struct) => struct.id.client === 9 && struct.length === 6),
     ).toBe(true);
-    expect(liveEditFitsNote(note, edit)).toBe(true);
+    expect(fits(note, edit)).toBe(true);
   });
 });
