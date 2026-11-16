@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AccessRuleHold, AccessRuleReach, AccessRuleUndo } from "../../ipc/bridgeContract";
 import {
   heldOuterAccessRuleFolder,
@@ -230,29 +230,49 @@ export function useAccessRuleHoldNotices(
       : undefined;
   const levelRef = useRef<MemberLevel>(null);
   levelRef.current = level ?? memberLevel?.level ?? null;
-  useEffect(() => {
-    if (!levelKey) return;
-    let live = true;
-    const answer = (read: MemberLevel) => {
-      if (live && currentWorkspace.current === workspaceId)
-        setMemberLevel({ workspaceId, key: levelKey, level: read });
-    };
-    bridge()
-      .workspaceMembers({ workspaceId, request: { action: "list" } })
+  const levelKeyRef = useRef(levelKey);
+  levelKeyRef.current = levelKey;
+  const levelAsked = useRef(0);
+  // Resolves to the level as Members settings has it now. Only the latest
+  // read updates the rows, so an earlier answer arriving late shows nothing.
+  const readLevel = (asked: string): Promise<MemberLevel> => {
+    const order = ++levelAsked.current;
+    const key = levelKeyRef.current;
+    return bridge()
+      .workspaceMembers({ workspaceId: asked, request: { action: "list" } })
       .then(
-        (result) => answer(result.status === "ready" ? result.view.memberLevel : null),
-        () => answer(null),
-      );
-    return () => {
-      live = false;
-    };
+        (result) => (result.status === "ready" ? result.view.memberLevel : null),
+        () => null,
+      )
+      .then((read) => {
+        if (levelAsked.current === order && currentWorkspace.current === asked) {
+          levelRef.current = read;
+          setMemberLevel({ workspaceId: asked, key, level: read });
+        }
+        return read;
+      });
+  };
+  const readLevelRef = useRef(readLevel);
+  readLevelRef.current = readLevel;
+  useEffect(() => {
+    if (levelKey) void readLevelRef.current(workspaceId);
   }, [workspaceId, levelKey]);
+  // The owner may have changed the level in Settings or another window since.
+  const readMemberLevel = useCallback(() => {
+    if (levelKeyRef.current) void readLevelRef.current(currentWorkspace.current);
+  }, []);
 
   // The hold's row; `busy` names the pressed button, which reads as working
   // while both wait. A busy row, or one put back after a failure, files
   // without a new toast.
-  const show = (asked: string, hold: AccessRuleHold, busy?: Decision, quiet = false): void => {
-    const words = accessRuleHoldWords(hold, levelRef.current);
+  const show = (
+    asked: string,
+    hold: AccessRuleHold,
+    shownLevel: MemberLevel,
+    busy?: Decision,
+    quiet = false,
+  ): void => {
+    const words = accessRuleHoldWords(hold, shownLevel);
     const decide = (decision: Decision) => () => decideRef.current(asked, hold, decision);
     const action: NonNullable<ShellError["action"]> = {
       label: busy === "restore" ? "Restoring…" : "Restore rule",
@@ -292,7 +312,7 @@ export function useAccessRuleHoldNotices(
   // lists it now. A hold it no longer lists was decided: its row goes.
   const putBack = (asked: string, identity: string): boolean => {
     const now = latest.current.holds?.find((hold) => identityOf(hold) === identity);
-    if (now) show(asked, now, undefined, true);
+    if (now) show(asked, now, levelRef.current, undefined, true);
     else latest.current.clearIdentity(identity);
     return now !== undefined;
   };
@@ -373,7 +393,26 @@ export function useAccessRuleHoldNotices(
     const identity = identityOf(hold);
     if (running.current.has(identity)) return;
     running.current.set(identity, decision);
-    show(asked, hold, decision);
+    const shownLevel = levelRef.current;
+    show(asked, hold, shownLevel, decision);
+    // The row's words name the members' level, so the choice runs only on
+    // the level the owner saw. A changed one updates the row instead.
+    if (!usesMemberLevel(hold)) {
+      run(asked, hold, decision, shownLevel);
+      return;
+    }
+    void readLevel(asked).then((now) => {
+      if (now === shownLevel) {
+        run(asked, hold, decision, now);
+        return;
+      }
+      running.current.delete(identity);
+      if (currentWorkspace.current === asked) putBack(asked, identity);
+    });
+  };
+
+  const run = (asked: string, hold: AccessRuleHold, decision: Decision, now: MemberLevel): void => {
+    const identity = identityOf(hold);
     void bridge()
       .decideAccessRule({
         workspaceId: asked,
@@ -387,7 +426,7 @@ export function useAccessRuleHoldNotices(
       .then(
         (decided) => {
           if (currentWorkspace.current !== asked) return;
-          const message = accessRuleDecidedWords(hold, decision, decided.kept, levelRef.current);
+          const message = accessRuleDecidedWords(hold, decision, decided.kept, now);
           // Where no file change reverses it, the earlier rule is in History.
           const step: ShellError["action"] = decided.undo
             ? { label: "Undo", run: () => undo(asked, hold, decision, decided.undo!), ends: true }
@@ -456,9 +495,12 @@ export function useAccessRuleHoldNotices(
       showRef.current(
         workspaceId,
         hold,
+        level ?? null,
         running.current.get(identity),
         was?.judged === next.judged,
       );
     }
   }, [holds, level, workspaceId, reportShellFailure, clearIdentity]);
+
+  return { readMemberLevel };
 }

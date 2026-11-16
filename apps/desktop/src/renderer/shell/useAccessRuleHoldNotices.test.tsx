@@ -76,9 +76,10 @@ function harness(
   const openHistory = vi.fn();
   const openMembers = vi.fn();
   let errors!: ReturnType<typeof useShellError>;
+  let notices!: ReturnType<typeof useAccessRuleHoldNotices>;
   function Shell(props: { holds: readonly AccessRuleHold[] }) {
     errors = useShellError("ws-a");
-    useAccessRuleHoldNotices({
+    notices = useAccessRuleHoldNotices({
       workspaceId: "ws-a",
       holds: props.holds,
       showNotice,
@@ -100,6 +101,7 @@ function harness(
     openMembers,
     row,
     errors: () => errors,
+    readMemberLevel: () => notices.readMemberLevel(),
     list: (next: readonly AccessRuleHold[]) => view.rerender(<Shell holds={next} />),
   };
 }
@@ -482,6 +484,33 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() =>
       expect(done()).toMatchObject({
         message: "Removed the workspace's access rule. Members can now comment on this workspace.",
+      }),
+    );
+  });
+
+  it("reads the level again when asked, and stops a choice made on a level that changed since", async () => {
+    const h = harness([ROOT_REMOVED], membersAt("comment"));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Comment"] }));
+    const first = h.row("")!.id;
+    // Settings saved a new level, or the owner came back to Notices.
+    h.bridge.workspaceMembers.mockImplementation(membersAt("edit"));
+    act(() => h.readMemberLevel());
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Edit"] }));
+    expect(h.row("")!.id).toBe(first);
+    // Another window changed it again before the owner chose.
+    h.bridge.workspaceMembers.mockImplementation(membersAt("view"));
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → View"] }));
+    await waitFor(() => expect(h.row("")!.action?.busy).toBeUndefined());
+    expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+    expect(h.errors().shellErrors.filter((error) => error.tone === "success")).toEqual([]);
+    // Choosing on the level shown now runs, and says what it did at that level.
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce());
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(done()).toMatchObject({
+        message: "Removed the workspace's access rule. Members can now view this workspace.",
       }),
     );
   });

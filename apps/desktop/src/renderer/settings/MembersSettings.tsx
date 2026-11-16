@@ -168,6 +168,8 @@ export function MembersSettings(props: {
   onClearError?: (identity: string) => void;
   /** Opens New message in Chats with this member chosen. */
   onMessage?: (memberId: string) => void;
+  /** The members' level changed here. */
+  onLevelSaved?: () => void;
 }) {
   const { workspaceId } = props;
   const gate = membersGate(props.cloud, props.joined);
@@ -183,8 +185,16 @@ export function MembersSettings(props: {
     },
     [],
   );
-  const report = useRef({ onError: props.onError, onClearError: props.onClearError });
-  report.current = { onError: props.onError, onClearError: props.onClearError };
+  const report = useRef({
+    onError: props.onError,
+    onClearError: props.onClearError,
+    onLevelSaved: props.onLevelSaved,
+  });
+  report.current = {
+    onError: props.onError,
+    onClearError: props.onClearError,
+    onLevelSaved: props.onLevelSaved,
+  };
 
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
   // One change runs at a time. Its controls wait, and the view it answers is
@@ -275,6 +285,7 @@ export function MembersSettings(props: {
         return false;
       }
       settle();
+      if (request.action === "level" && result.status === "ready") report.current.onLevelSaved?.();
       if (!scope.isCurrent(token)) return true;
       report.current.onClearError?.(identity);
       setEnded(request.action === "end" && result.status === "ready" ? scopeKey : null);

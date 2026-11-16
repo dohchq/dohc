@@ -7992,7 +7992,7 @@ export function DesktopWorkspaceShell(props: {
     const id = shellErrorsRef.current.find((error) => error.identity === identity)?.id;
     if (id !== undefined) setNoticeShown((current) => ({ id, seq: (current?.seq ?? 0) + 1 }));
   }, []);
-  useAccessRuleHoldNotices({
+  const { readMemberLevel } = useAccessRuleHoldNotices({
     workspaceId,
     holds: shareView ? undefined : syncStatus?.heldAccessRules,
     reportShellFailure,
@@ -8002,6 +8002,12 @@ export function DesktopWorkspaceShell(props: {
     openHistory: openHistoryView,
     openMembers: () => openSettings("members"),
   });
+  // A held rule's words name the members' level, which Settings can change.
+  const settingsWereOpen = useRef(settingsOpen);
+  useEffect(() => {
+    if (settingsWereOpen.current && !settingsOpen) readMemberLevel();
+    settingsWereOpen.current = settingsOpen;
+  }, [settingsOpen, readMemberLevel]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -8427,6 +8433,7 @@ export function DesktopWorkspaceShell(props: {
                             notices={
                               <NoticeCenter
                                 workspaceId={workspaceId}
+                                onOpen={readMemberLevel}
                                 syncStatus={syncStatus}
                                 failedSaves={failedSaves}
                                 agentActive={agentActive}
@@ -10001,6 +10008,7 @@ export function DesktopWorkspaceShell(props: {
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}
                               onClearError={clearIdentity}
+                              onMemberLevelSaved={readMemberLevel}
                               onNotice={showSettingsNotice}
                               onWorkspaceSettingsRead={onWorkspaceSettingsRead}
                               workspaceId={workspaceId}

@@ -1454,9 +1454,16 @@ export function NoticeCenter(props: {
   // someone dismisses it.
   automationStops?: readonly AutomationStopNotice[];
   onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
+  // Notices opened, so what its rows show can be read again.
+  onOpen?: () => void;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
+  const onOpen = useRef(props.onOpen);
+  onOpen.current = props.onOpen;
+  useEffect(() => {
+    if (open) onOpen.current?.();
+  }, [open]);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
