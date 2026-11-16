@@ -1131,6 +1131,32 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it("saves the editor open on a note once its live editing is let go", async () => {
+    const settleNow = vi.fn(async () => ({
+      momentId: "moment-1",
+      path: "notes/a.md",
+      content: null,
+      sha256: "a".repeat(64),
+      materialized: true,
+      projection: {
+        contentKind: "richdoc" as const,
+        sourceStateVectorSha256: "b".repeat(64),
+        destructive: false,
+      },
+    }));
+    const h = harness(providerSession({ settleNow }));
+    const sender = new FakeSender(7);
+    await h.ipc.settleAfterLiveStop("workspace-1", "notes/a.md");
+    expect(settleNow).not.toHaveBeenCalled();
+
+    await h.ipc.open(sender, openPayload);
+    await h.ipc.settleAfterLiveStop("workspace-1", "notes/b.md");
+    expect(settleNow).not.toHaveBeenCalled();
+    await h.ipc.settleAfterLiveStop("workspace-1", "notes/a.md");
+    expect(settleNow).toHaveBeenCalledOnce();
+    await h.ipc.shutdown();
+  });
+
   it("lets each window's Try again save only that window's session for the document", async () => {
     const settleNow = vi.fn(async () => ({
       momentId: "moment-1",

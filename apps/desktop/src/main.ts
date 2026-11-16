@@ -7408,8 +7408,14 @@ const desktopEngine = createDesktopEngine({
   },
   notifyOwnerDraftsChanged: (workspaceId) => ownerPendingShare.refresh(workspaceId),
   ownerPendingPaths: (workspaceId) => ownerPendingShare.paths(workspaceId),
-  notifyOwnerLiveStopped: (workspaceId, objectId) =>
-    sendRendererActivity({ workspaceId, liveDocumentStopped: objectId }),
+  notifyOwnerLiveStopped: (workspaceId, objectId, path) => {
+    sendRendererActivity({ workspaceId, liveDocumentStopped: objectId });
+    void engineYDocSessionIpc
+      .settleAfterLiveStop(workspaceId, path)
+      .catch((error: unknown) =>
+        console.error("[desktop] save after live editing ended failed:", error),
+      );
+  },
   ownerDeliveryCredentials: () =>
     cachedCredentials?.relayUrl
       ? {

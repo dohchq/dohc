@@ -229,7 +229,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // The shared notes whose edits wait on this computer for the server, as last read.
   ownerPendingPaths?(workspaceId: string): readonly string[];
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
-  notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
+  notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -744,6 +744,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                             dependencies.notifyOwnerLiveStopped?.(
                               workspaceId,
                               row.document.objectId,
+                              row.document.currentPath,
                             );
                             if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId))
                               notifyRenderer({ workspaceId });
@@ -832,6 +833,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                             dependencies.notifyOwnerLiveStopped?.(
                               workspaceId,
                               row.document.objectId,
+                              row.document.currentPath,
                             );
                           },
                         });
