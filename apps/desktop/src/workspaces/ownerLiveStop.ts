@@ -121,8 +121,9 @@ export async function reconcileOwnerLiveStops(options: {
 /**
  * Releases each note this computer owns that the server no longer hosts and
  * retired without a Stop, as when its last link ended. Its saves through the
- * server's last one go into the file, and nothing asks the server to Stop it,
- * so sharing it again starts live editing again.
+ * server's last one go into the file, and nothing asks the server to Stop it.
+ * Once the file holds them, the Stop is cleared, so sharing the note again
+ * hosts it. A note that fails is tried again next pass; the rest go on.
  */
 export async function releaseRetiredOwnerNotes(options: {
   client: EngineClient;
@@ -140,7 +141,7 @@ export async function releaseRetiredOwnerNotes(options: {
     binding: LiveObjectBinding,
     acceptedCursor: number,
     signal: AbortSignal,
-  ): Promise<unknown>;
+  ): Promise<OwnerLiveStop>;
   assertCurrent(): void;
   onComplete?(row: OwnerLiveStop): void;
 }) {
@@ -158,7 +159,19 @@ export async function releaseRetiredOwnerNotes(options: {
   } while (after);
   for (const draft of unlisted) {
     const { binding } = draft;
-    await withOwnerLiveStopTransition(options.workspaceId, binding.currentPath, async () => {
+    try {
+      await releaseRetiredOwnerNote(draft);
+    } catch (error) {
+      options.signal.throwIfAborted();
+      options.assertCurrent();
+      console.error("[desktop] owner release of a retired note failed:", binding.objectId, error);
+    }
+  }
+  function releaseRetiredOwnerNote(
+    draft: Awaited<ReturnType<EngineClient["ownerYDocListDrafts"]>>["drafts"][number],
+  ) {
+    const { binding } = draft;
+    return withOwnerLiveStopTransition(options.workspaceId, binding.currentPath, async () => {
       options.signal.throwIfAborted();
       options.assertCurrent();
       const existing = (await options.client.ownerYDocStopList(request(), options.signal)).find(
@@ -191,7 +204,10 @@ export async function releaseRetiredOwnerNotes(options: {
           { retired: true },
         ));
       if (!stop.binding || !sameBinding(stop.binding, binding)) return;
-      await options.release(stop.binding, last, options.signal);
+      const released = await options.release(stop.binding, last, options.signal);
+      // A Stop kept for edits the file still needs keeps their notice and Try again.
+      if (released.materialized === true && !released.deferred)
+        await options.client.ownerYDocStopClear(request(), stop.document, options.signal);
       options.onComplete?.(stop);
     });
   }

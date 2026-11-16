@@ -491,8 +491,14 @@ it("brings a note whose hosting ended up to the server's last save, then release
       state: "requested",
       retirementOwed: false,
     })),
+    ownerYDocStopClear: vi.fn(async () => undefined),
   } as unknown as EngineClient;
-  const release = vi.fn(async () => undefined);
+  const release = vi.fn(async () => ({
+    ...withDocument(ended!),
+    state: "released",
+    retirementOwed: false,
+    materialized: true,
+  }));
   await releaseRetiredOwnerNotes({
     client,
     workspaceHandle: "handle",
@@ -522,6 +528,10 @@ it("brings a note whose hosting ended up to the server's last save, then release
   ]);
   expect(release).toHaveBeenCalledTimes(1);
   expect(release).toHaveBeenCalledWith(ended!.binding, 14, expect.any(AbortSignal));
+  // With the file written, no Stop is left to hold the note back when it is shared again.
+  expect(vi.mocked(client.ownerYDocStopClear).mock.calls.map((call) => call[1])).toEqual([
+    { mainVersionId: "main", objectId: "ended", currentPath: "ended.md" },
+  ]);
 });
 
 it("waits for the next pass while the server is still retiring a stopped note", async () => {
