@@ -479,21 +479,26 @@ describe("an answer the person is still writing or sending", () => {
     expect(editor.state()).toBe(visit);
     expect(editor.draft(visit)).toBe("Yes, and");
 
+    // What the field reports: its text and revision, with the caret at the end, and its clear answers.
+    let sequence = 0;
+    const field = (text: string, revision: number, cleared: number, refused: number) => {
+      sequence += 1;
+      const end = text.length;
+      return { text, revision, sequence, selectionStart: end, selectionEnd: end, cleared, refused };
+    };
     // Sent at revision 3 under token 1. The field's own clear for that request closes it.
     const request = { revision: 3, token: 1 };
-    expect(clearedBy({ text: "", revision: 4, cleared: 1, refused: 0 }, request)).toBe(true);
+    expect(clearedBy(field("", 4, 1, 0), request)).toBe(true);
     // Text typed meanwhile: the field refuses, keeps it, and the answer stays open with Send on for the new text.
-    const typed = { text: "Yes, and", revision: 5, cleared: 0, refused: 1 };
+    const typed = field("Yes, and", 5, 0, 1);
     expect(clearedBy(typed, request)).toBe(false);
     expect(clearStatus(request, typed.revision, typed.refused)).toBe("settled");
     // Text still being composed: refused unchanged, so Send stays off for the body already kept.
-    expect(clearedBy({ text: "Yes", revision: 3, cleared: 0, refused: 1 }, request)).toBe(false);
+    expect(clearedBy(field("Yes", 3, 0, 1), request)).toBe(false);
     expect(clearStatus(request, 3, 1)).toBe("refused");
     // An edit, or an earlier request's clear, closes nothing.
-    expect(clearedBy({ text: "Ye", revision: 4, cleared: 0, refused: 0 }, request)).toBe(false);
-    expect(
-      clearedBy({ text: "", revision: 4, cleared: 1, refused: 0 }, { revision: 6, token: 2 }),
-    ).toBe(false);
+    expect(clearedBy(field("Ye", 4, 0, 0), request)).toBe(false);
+    expect(clearedBy(field("", 4, 1, 0), { revision: 6, token: 2 })).toBe(false);
   });
 
   it("closes a poll's answer once the outbox keeps the choice", async () => {
