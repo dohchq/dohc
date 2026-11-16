@@ -9,6 +9,7 @@
     "./sharing": "./src/sharing.ts",
     "./documents": "./src/documents.ts",
     "./account": "./src/account.ts",
+    "./apps": "./src/apps.ts",
     "./workspace": "./src/workspace.ts"
   },
   "scripts": {
