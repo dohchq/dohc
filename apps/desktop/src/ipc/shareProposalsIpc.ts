@@ -49,6 +49,7 @@ import type {
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { createShareDirectWriteQueue } from "../workspaces/shareDirectWriteQueue";
 import { readError } from "./errorWords";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type {
   listMyShareProposals,
@@ -483,6 +484,11 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
     });
   };
 
+  // The relay refuses an account its grant doesn't name; this gives the band's words first.
+  const refuseAnotherAccount = (workspaceId: string) => {
+    if (dependencies.joinedByAnotherAccount(workspaceId))
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
+  };
   const submitShareChangesHandler: Handlers["submitShareChanges"] = async (
     _input,
     { operation },
@@ -493,6 +499,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
       requireShareViewProposalScope,
       async (operation) => {
         const beforeReconcile = operation.resolve();
+        refuseAnotherAccount(beforeReconcile.workspaceId);
         const reconciled = await withStaleSensitiveWorkspaceOperation(
           beforeReconcile.rootPath,
           (lease) =>
@@ -551,13 +558,14 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
   // window pushes them once the joined account is back.
   function pushDirectWrites(workspaceId: string): Promise<PushShareDirectWritesResult> {
     return withRecipientScope(
-      (inner) => dependencies.withWorkspaceAuthority(workspaceId, async (operation) => {
-        await warmCredentialCache();
-        operation.assertCurrent();
-        return dependencies.joinedByAnotherAccount(workspaceId)
-          ? PushShareDirectWritesResult.parse({ status: "pushed", writes: [] })
-          : inner(operation);
-      }),
+      (inner) =>
+        dependencies.withWorkspaceAuthority(workspaceId, async (operation) => {
+          await warmCredentialCache();
+          operation.assertCurrent();
+          return dependencies.joinedByAnotherAccount(workspaceId)
+            ? PushShareDirectWritesResult.parse({ status: "pushed", writes: [] })
+            : inner(operation);
+        }),
       requireShareViewProposalScope,
       async (operation) => {
         const scope = operation.resolve();
@@ -604,7 +612,9 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
             return PushShareDirectWritesResult.parse({ status: "unavailable" });
           }
           // A push that stops keeps its plan, so the Notice can say what waits.
-          const waiting = await relay.directWritesWaiting({ shareId: scope.shareId }).catch(() => null);
+          const waiting = await relay
+            .directWritesWaiting({ shareId: scope.shareId })
+            .catch(() => null);
           return PushShareDirectWritesResult.parse({
             status: "failed",
             writes,
@@ -612,9 +622,10 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
             // own message, such as "workspace operation failed", is not.
             errorMessage: readError(error).words ?? "",
             lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
-            pagesWaiting: waiting && waiting.pages > 0 && waiting.collectionWrites === 0 && !waiting.morePending
-              ? waiting.pages
-              : null,
+            pagesWaiting:
+              waiting && waiting.pages > 0 && waiting.collectionWrites === 0 && !waiting.morePending
+                ? waiting.pages
+                : null,
           });
         }
         return PushShareDirectWritesResult.parse({ status: "pushed", writes });
@@ -678,6 +689,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
       requireShareViewMembership,
       async (operation) => {
         const scope = operation.resolve();
+        refuseAnotherAccount(scope.workspaceId);
         const settled = await withdrawShareProposal({
           relay: scope.relay,
           shareId: scope.shareId,
