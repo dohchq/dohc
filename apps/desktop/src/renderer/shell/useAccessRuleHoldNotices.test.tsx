@@ -87,6 +87,7 @@ function harness(
       openMembers,
       reportShellFailure: errors.reportShellFailure,
       clearIdentity: errors.clearIdentity,
+      dropNoticeStep: errors.dropNoticeStep,
       showSuccessNotice: errors.showSuccessNotice,
     });
     return null;
@@ -155,7 +156,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")).toBeDefined();
     h.list([]);
     await waitFor(() =>
-      expect(h.errors().shellErrors.filter((error) => error.identity)).toEqual([]),
+      expect(h.errors().shellErrors.filter((error) => error.tone === "warning")).toEqual([]),
     );
   });
 
@@ -239,6 +240,30 @@ describe("useAccessRuleHoldNotices", () => {
           .at(-1),
       ).toMatchObject({ message: "team follows its earlier access rule again." }),
     );
+  });
+
+  it("drops a decision's Undo once dohc holds the folder again, and keeps it for a list from before", async () => {
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    const undo = {
+      path: "team/access.yaml",
+      text: "members: view\n",
+      expectedSha256: "b".repeat(64),
+    };
+    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() => expect(done()).toMatchObject({ action: { label: "Undo" } }));
+    // A list read before the decision landed still names the same hold.
+    h.list([{ ...WIDENED }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    expect(done()!.action).toMatchObject({ label: "Undo" });
+    h.list([]);
+    await waitFor(() => expect(h.row("team")).toBeUndefined());
+    h.list([{ ...WIDENED, observedSha256: "c".repeat(64), recordedAtMs: 2 }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    await waitFor(() => expect(done()!.action).toBeUndefined());
+    expect(done()!.message).toBe("team now follows the new access rule.");
   });
 
   it("says an Undo the engine refused points to History, with no Try again", async () => {

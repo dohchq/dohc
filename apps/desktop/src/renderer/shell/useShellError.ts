@@ -415,6 +415,19 @@ export function useShellError(
         : current,
     );
   }, []);
+  // Takes the step off the row of one identity, such as an Undo that no
+  // longer applies. The row stays.
+  const dropNoticeStep = useCallback((identity: string) => {
+    setShellErrors((current) =>
+      current.some((error) => error.identity === identity && error.action)
+        ? current.map((error) => {
+            if (error.identity !== identity || !error.action) return error;
+            const { action: _action, ...rest } = error;
+            return rest;
+          })
+        : current,
+    );
+  }, []);
   const clearKind = useCallback((...kinds: ShellErrorKind[]) => {
     setShellErrors((current) =>
       current.some((error) => error.kind !== undefined && kinds.includes(error.kind))
@@ -1206,12 +1219,14 @@ export function useShellError(
       kind?: ShellErrorKind,
       action?: ShellError["action"],
       target?: NoticeTarget,
+      identity?: string,
     ) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
+        ...(identity ? { identity } : {}),
         ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
@@ -1616,6 +1631,7 @@ export function useShellError(
     clearKind,
     clearIdentity,
     noticeOwner,
+    dropNoticeStep,
     reportOtherAccount,
     reportShellError,
     reportButtonError,

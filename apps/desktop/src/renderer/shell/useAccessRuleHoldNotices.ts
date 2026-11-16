@@ -16,9 +16,12 @@ export type MemberLevel = Extract<AccessRuleReach, "view" | "comment" | "edit"> 
 const identityOf = (hold: Pick<AccessRuleHold, "versionId" | "folder">) =>
   `access-rule:${hold.versionId}:${hold.folder}`;
 const waitsOf = (identity: string) => `${identity}:waits`;
+const decidedOf = (identity: string) => `${identity}:decided`;
 // A hold the engine judged again, such as after a decision on a rule that
 // changed since, reads as a new notice.
 const judgedKey = (hold: AccessRuleHold) => `${hold.reason}|${hold.observedSha256 ?? ""}`;
+// A hold dohc noticed again, even with the same judgment, has a new time.
+const heldKey = (hold: AccessRuleHold) => `${judgedKey(hold)}|${hold.recordedAtMs}`;
 // Outer folders first: an inner folder's decision waits for theirs.
 const depth = (folder: string) => (folder === "" ? 0 : folder.split("/").length);
 
@@ -199,18 +202,21 @@ export function useAccessRuleHoldNotices(
     openMembers: () => void;
   } & Pick<
     ReturnType<typeof useShellError>,
-    "reportShellFailure" | "clearIdentity" | "showSuccessNotice"
+    "reportShellFailure" | "clearIdentity" | "dropNoticeStep" | "showSuccessNotice"
   >,
 ) {
-  const { workspaceId, holds, reportShellFailure, clearIdentity } = input;
+  const { workspaceId, holds, reportShellFailure, clearIdentity, dropNoticeStep } = input;
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const shown = useRef(new Map<string, { judged: string; content: string }>());
   // Each row that sent a choice to an outer folder first, by the outer hold.
   const waitingOn = useRef(new Map<string, string>());
+  // Each folder's decision whose toast offers Undo, by the hold it decided.
+  const undoable = useRef(new Map<string, string>());
   useEffect(() => {
     shown.current = new Map();
     waitingOn.current = new Map();
+    undoable.current = new Map();
   }, [workspaceId]);
   const latest = useRef(input);
   latest.current = input;
@@ -433,7 +439,15 @@ export function useAccessRuleHoldNotices(
             : decision === "accept"
               ? { label: "Open History", run: latest.current.openHistory, ends: true }
               : undefined;
-          latest.current.showSuccessNotice(message, undefined, undefined, step);
+          if (decided.undo) undoable.current.set(identity, heldKey(hold));
+          latest.current.showSuccessNotice(
+            message,
+            undefined,
+            undefined,
+            step,
+            undefined,
+            decidedOf(identity),
+          );
         },
         (error: unknown) => {
           if (currentWorkspace.current !== asked) return;
@@ -485,8 +499,15 @@ export function useAccessRuleHoldNotices(
     }
     // Notices lists the newest first, so the outer folder files last.
     for (const hold of [...holds].sort((a, b) => depth(b.folder) - depth(a.folder))) {
-      if (level === undefined && usesMemberLevel(hold)) continue;
       const identity = identityOf(hold);
+      // The folder is held again, so an earlier decision's Undo would put
+      // back a rule the owner has not seen since.
+      const decided = undoable.current.get(identity);
+      if (decided !== undefined && decided !== heldKey(hold)) {
+        undoable.current.delete(identity);
+        dropNoticeStep(decidedOf(identity));
+      }
+      if (level === undefined && usesMemberLevel(hold)) continue;
       const was = shown.current.get(identity);
       const next = { judged: judgedKey(hold), content: shownContent(hold, level ?? null) };
       if (was?.judged === next.judged && was.content === next.content) continue;
@@ -500,7 +521,7 @@ export function useAccessRuleHoldNotices(
         was?.judged === next.judged,
       );
     }
-  }, [holds, level, workspaceId, reportShellFailure, clearIdentity]);
+  }, [holds, level, workspaceId, reportShellFailure, clearIdentity, dropNoticeStep]);
 
   return { readMemberLevel };
 }
