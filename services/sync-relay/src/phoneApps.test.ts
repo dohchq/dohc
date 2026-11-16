@@ -123,6 +123,7 @@ async function relay() {
     list: async () => [],
     revoke: async ({ sessionId }) => revoked.add(sessionId).size > 0,
     phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
+    read: async () => new Map(),
   };
   // The app backend as far as a launch reaches it. Like the real host, it serves only an app with a
   // dataset capability whose Collection is installed here. Like the supervisor, it waits for the

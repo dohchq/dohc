@@ -665,6 +665,7 @@ const relayApplication = createSyncRelayHandler({
   ...(resolveAccountSession ? { resolveAccountSession } : {}),
   ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
+  ownerLiveSockets: () => ownerLive,
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
   ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
@@ -1440,7 +1441,9 @@ if (namedLiveConfig) {
     // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
     ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
     storage,
-    resolveActor,
+    // The Bearer sign-in, a phone's included. A phone also needs a ticket, which only an uncached sign-in read admits.
+    resolveAccountSession: resolvePhoneCapableAccountSession!,
+    ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions, tickets } : {}),
     lookupUserDisplayName,
     hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!,

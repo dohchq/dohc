@@ -4,7 +4,12 @@ import {
   type LiveConnectionLimitCode,
 } from "@dohc/live-session-contract/live-connection";
 import { isDeepStrictEqual } from "node:util";
-import type { ResolveActor } from "@dohc/workspace-auth/session";
+import type {
+  AccountSessions,
+  ResolveAccountSession,
+  SessionKind,
+  StoredAccountSession,
+} from "@dohc/workspace-auth/session";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
@@ -12,7 +17,11 @@ import { readBoundedJson, refuseDeviceControl, type TokenBucketLimiter } from "@
 import {
   parseLiveTicketAudience,
   parseLiveTicketToken,
+  type RedeemedLiveTicket,
 } from "@dohc/live-session-contract/live-ticket";
+import { bearerAccountSession } from "./accountWorkspaceRoutes";
+import { accountIsFenced } from "./storage/accountDeletion";
+import { hiddenFile } from "./accountFeed";
 import {
   createLiveFrameSession,
   LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
@@ -162,10 +171,48 @@ type BrowserRouteOptions = LiveRouteOptions & {
 };
 type OwnerRouteOptions = LiveRouteOptions & {
   kind: "owner";
-  resolveActor: ResolveActor;
-  /** When on, the owner edits in the note's room and is sent its unsaved edits. */
+  /** The Bearer sign-in, a phone's included. A phone also presents a ticket for the page. */
+  resolveAccountSession: ResolveAccountSession;
+  /** Reads sign-ins with no cache. Without it and `tickets`, no phone connects. */
+  accountSessions?: Pick<AccountSessions, "read">;
+  tickets?: Pick<ReturnType<typeof createLiveTickets>, "redeem">;
+  /** When on, a desktop or browser owner edits in the note's room and is sent its unsaved edits. */
   rooms?: LiveRooms;
 };
+
+/** Ends owner connections when their sign-in, or a phone's access to a workspace, ends. */
+export interface OwnerLiveSockets {
+  stopSession(userId: string, sessionId: string): void;
+  stopPhoneWorkspace(userId: string, workspaceId: string): void;
+}
+
+/** How often a phone's sign-in is read again, and how long that read may take before it counts as failed. */
+export const OWNER_SESSION_CHECK_MS = 60_000;
+const OWNER_SESSION_READ_DEADLINE_MS = 30_000;
+const MAX_TIMER_MS = 2_147_483_647;
+
+interface OwnerSession {
+  readonly sessionId: string;
+  readonly clientKind: SessionKind;
+  readonly expiresAtMs: number;
+}
+interface ConnectionScope {
+  readonly userId?: string;
+  readonly workspaceId: string;
+  /** An owner's sign-in, and a check of the page it has open. */
+  readonly session?: OwnerSession;
+  readonly recheck?: () => void;
+}
+
+const sessionStands = (
+  stored: StoredAccountSession | undefined,
+  userId: string,
+  session: OwnerSession,
+) =>
+  stored !== undefined &&
+  stored.userId === userId &&
+  stored.clientKind === session.clientKind &&
+  Date.now() < Math.min(stored.expiresAtMs, session.expiresAtMs);
 /**
  * A personal agent's routes, which share-web calls over the relay exchange
  * key with the agent's bearer: `POST /sync/live/personal-tickets` and the
@@ -212,11 +259,9 @@ const personalLiveContext = (
 });
 function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | PersonalRouteOptions) {
   const options =
-    input.kind === "owner"
-      ? { ...input, resolveActor: input.resolveActor.bind(input) }
-      : input.kind === "personal"
-        ? { ...input }
-        : { ...input, sessions: { resolve: input.sessions.resolve.bind(input.sessions) } };
+    input.kind === "owner" || input.kind === "personal"
+      ? { ...input }
+      : { ...input, sessions: { resolve: input.sessions.resolve.bind(input.sessions) } };
   const limits = parseNamedLiveRouteLimits(options.limits),
     hosts = new Set(options.hosts);
   const kind = options.kind;
@@ -268,8 +313,42 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     admission = options.admission ?? createLiveConnectionAdmission();
   const buffers = admission.buffers(limits.maxBufferedBytes),
     validationBuffers = admission.validationBuffers(limits.maxBufferedBytes);
-  const connectionScopes = new Map<() => void, { userId?: string; workspaceId: string }>();
+  // Each connection's stop, under the account, sign-in, and workspace it was opened for.
+  const connectionScopes = new Map<() => void, ConnectionScope>();
   const shutdown = new AbortController();
+  const accountSessions = options.kind === "owner" ? options.accountSessions : undefined;
+  const ownerTickets = options.kind === "owner" ? options.tickets : undefined;
+  // A phone's sign-in is read again on this schedule however busy its connection is. A read that fails closes them all.
+  async function checkPhoneSessions() {
+    const phones = [...connectionScopes].flatMap(([stop, scope]) =>
+      scope.session?.clientKind === "phone" && scope.userId
+        ? [{ stop, userId: scope.userId, session: scope.session, recheck: scope.recheck }]
+        : [],
+    );
+    if (!phones.length) return;
+    let stored: Map<string, StoredAccountSession> | undefined;
+    try {
+      stored = await untilAborted(
+        accountSessions!.read([...new Set(phones.map(({ session }) => session.sessionId))]),
+        AbortSignal.timeout(OWNER_SESSION_READ_DEADLINE_MS),
+      );
+    } catch {
+      stored = undefined;
+    }
+    for (const { stop, userId, session, recheck } of phones) {
+      try {
+        if (!sessionStands(stored?.get(session.sessionId), userId, session)) throw new Error();
+        recheck?.();
+      } catch {
+        stop();
+      }
+    }
+  }
+  const sessionChecks =
+    kind === "owner"
+      ? setInterval(() => void checkPhoneSessions(), OWNER_SESSION_CHECK_MS)
+      : undefined;
+  sessionChecks?.unref();
   const storage = options.storage,
     editors = liveEditors(storage);
   const captureNative = options.captureNative.bind(options),
@@ -518,16 +597,27 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       if (kind === "owner") {
         const url = new URL(request.url ?? "", "https://owner.invalid");
         const path = /^\/sync\/workspaces\/([^/]+)\/live\/owner$/.exec(url.pathname);
+        // A desktop or browser offers only the live protocol. A phone also offers one ticket for the page.
+        const offered = (headers.get("sec-websocket-protocol") ?? "")
+          .split(",")
+          .map((value) => value.trim());
+        const ticketed = offered.filter((value) => value.startsWith("dohc-live-ticket."));
         if (
           !path ||
           request.method !== "GET" ||
           !hosts.has(headers.get("host") ?? "") ||
           (headers.has("origin") && headers.get("origin") !== origin) ||
           !/^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") ||
-          headers.get("sec-websocket-protocol") !== "dohc-live-v1" ||
+          offered.filter((value) => value === "dohc-live-v1").length !== 1 ||
+          ticketed.length > 1 ||
+          offered.length !== 1 + ticketed.length ||
           [...url.searchParams.keys()].sort().join() !== "lineageClaimId,objectId"
         )
           throw new Error();
+        if (ticketed[0] !== undefined) {
+          token = ticketed[0].slice("dohc-live-ticket.".length);
+          parseLiveTicketToken(token);
+        }
         ownerTarget = {
           workspaceId: parseLiveUpdateIdentifier(decodeURIComponent(path[1]!)),
           mainVersionId: "main",
@@ -599,6 +689,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     let unregister: (() => void) | undefined,
       personalDocument: { workspaceId: string; objectId: string } | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
+    // A phone's connection ends when its sign-in does, whether or not a frame arrives.
+    let sessionExpiry: ReturnType<typeof setTimeout> | undefined;
     async function release() {
       if (opening || !done) return;
       await session?.settled();
@@ -649,18 +741,20 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       }
       stop();
     }
+    // Marks the connection closing, which a phone's guard refuses from then on, then closes the capture before the transport.
     function stop() {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(sessionExpiry);
       lifetime.abort();
       signal.removeEventListener("abort", stop);
       host?.invalidated.removeEventListener("abort", stop);
       membership?.invalidated.removeEventListener("abort", stop);
       membership?.close();
       unregister?.();
-      session?.close();
       host?.close();
+      session?.close();
       if (ws) {
         if (!closingForLimit) ws.terminate();
       } else refuseDeviceControl(socket, limits.drainTimeoutMs);
@@ -760,20 +854,89 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       }
       if (options.kind === "owner") {
         const document = ownerTarget!;
-        const actor = await options.resolveActor(authenticated, document.workspaceId);
+        const account = await bearerAccountSession(
+          storage,
+          options.resolveAccountSession,
+          authenticated,
+        );
         signal.throwIfAborted();
         check();
-        connectionScopes.set(stop, { userId: actor.userId, workspaceId: document.workspaceId });
-        if (
-          actor.workspaceId !== document.workspaceId ||
-          !storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)
-        )
+        const actor = { userId: account.userId };
+        const phone = account.clientKind === "phone";
+        const ownerSession: OwnerSession = {
+          sessionId: account.sessionId,
+          clientKind: account.clientKind,
+          expiresAtMs: account.expiresAtMs,
+        };
+        // Registered before the ticket is spent, so a revoke or Show on phone turned off from here on ends it.
+        connectionScopes.set(stop, {
+          userId: account.userId,
+          workspaceId: document.workspaceId,
+          session: ownerSession,
+          recheck: () => host?.assertCurrent(),
+        });
+        // A phone opens only with a ticket for this page. A desktop or browser never sends one.
+        if (phone !== (token !== "") || (phone && (!accountSessions || !ownerTickets)))
           throw new Error();
+        // A sign-in that outlasts any timer ends at a periodic check instead.
+        const remainingMs = Math.max(0, account.expiresAtMs - Date.now());
+        if (phone && remainingMs <= MAX_TIMER_MS) {
+          sessionExpiry = setTimeout(stop, remainingMs);
+          sessionExpiry.unref();
+        }
+        let ticket: RedeemedLiveTicket | null = null;
+        if (phone) {
+          ticket = await ownerTickets!.redeem(
+            token,
+            {
+              kind: "owner",
+              workspaceId: document.workspaceId,
+              userId: account.userId,
+              sessionId: account.sessionId,
+              sessionExpiresAtMs: account.expiresAtMs,
+            },
+            signal,
+          );
+          signal.throwIfAborted();
+          check();
+          if (
+            !ticket ||
+            ticket.audience !== origin ||
+            ticket.authority.principalKind !== "owner" ||
+            ticket.authority.principalId !== account.userId ||
+            ticket.binding.objectId !== document.objectId ||
+            ticket.binding.lineageClaimId !== document.lineageClaimId ||
+            hiddenFile(ticket.binding.currentPath)
+          )
+            throw new Error();
+        }
+        // Checked on every admission of a phone's connection: closing, its sign-in's expiry, the
+        // account's fence and ownership, and Show on phone. A move or rename changes the binding,
+        // which the capture's own check compares, so a hidden path needs no check here.
+        const guard = phone
+          ? () => {
+              if (
+                done ||
+                Date.now() >= account.expiresAtMs ||
+                accountIsFenced(storage, account.userId) ||
+                !storage.workspaceIsOwnedBy(document.workspaceId, account.userId) ||
+                !storage.showsOnPhone(account.userId, document.workspaceId)
+              )
+                throw new Error("The phone's access ended.");
+            }
+          : undefined;
+        if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) throw new Error();
         const current = storage.resolveCurrentLiveDocumentBinding({
           document,
           actor: { kind: "owner", userId: actor.userId },
         });
         if (current.kind !== "current") throw new Error();
+        if (
+          ticket &&
+          (JSON.stringify(ticket.binding) !== JSON.stringify(current.binding) ||
+            ticket.hostEpoch !== current.host.hostEpoch)
+        )
+          throw new Error();
         reserve(
           [
             [
@@ -816,6 +979,18 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const trustedAccount = await accountSnapshot(actor.userId);
         signal.throwIfAborted();
         check();
+        if (phone) {
+          // The sign-in, read again from the table now that capture has waited.
+          const stored = await untilAborted(accountSessions!.read([account.sessionId]), signal);
+          signal.throwIfAborted();
+          check();
+          if (
+            !sessionStands(stored.get(account.sessionId), account.userId, ownerSession) ||
+            hiddenFile(current.binding.currentPath)
+          )
+            throw new Error();
+        }
+        // The capture checks the page's authority and the guard again before it returns.
         const captured = captureOwnerLiveFrameHost({
           authenticatedUserId: actor.userId,
           trustedAccount,
@@ -825,8 +1000,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           validate,
           reserveBytes,
           validationBudget,
+          ...(guard ? { guard } : {}),
         });
-        host = options.rooms ? options.rooms.join(captured, { owner: true }) : captured;
+        // A phone stays on its own capture until it reads which room rows the host has saved.
+        host = options.rooms && !phone ? options.rooms.join(captured, { owner: true }) : captured;
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
@@ -1126,9 +1303,23 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         if (scope && (scope.userId === userId || workspaceIds.includes(scope.workspaceId))) stop();
       }
     },
+    stopSession(userId: string, sessionId: string) {
+      for (const [stop, scope] of connectionScopes)
+        if (scope.userId === userId && scope.session?.sessionId === sessionId) stop();
+    },
+    stopPhoneWorkspace(userId: string, workspaceId: string) {
+      for (const [stop, scope] of connectionScopes)
+        if (
+          scope.userId === userId &&
+          scope.workspaceId === workspaceId &&
+          scope.session?.clientKind === "phone"
+        )
+          stop();
+    },
     close() {
       if (closed) return;
       closed = true;
+      clearInterval(sessionChecks);
       shutdown.abort();
       for (const stop of [...connections]) stop();
       server.close();

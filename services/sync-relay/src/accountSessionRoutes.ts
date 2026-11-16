@@ -9,6 +9,7 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { notFound, relayError } from "./errors";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { SyncRelayStorage } from "./storage";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
 
 export type AccountSessionRoute =
   | { route: "account-sessions" }
@@ -36,6 +37,7 @@ export function createAccountSessionRoutes(options: {
   resolveAccountSession: ResolveAccountSession;
   sessions: AccountSessions;
   feedWaits: Pick<AccountFeedWaits, "wakeAccount">;
+  sockets: Pick<OwnerLiveSockets, "stopSession">;
   /** Runs once a session is revoked. */
   revoked?(userId: string, sessionId: string): void;
 }) {
@@ -58,7 +60,8 @@ export function createAccountSessionRoutes(options: {
         }))
       )
         throw notFound();
-      // A feed held under the revoked session checks it now, instead of at the end of its hold.
+      // Its live connections end before the answer. A feed held under it checks it now, instead of at the end of its hold.
+      options.sockets.stopSession(caller.userId, route.sessionId);
       options.feedWaits.wakeAccount(caller.userId);
       options.revoked?.(caller.userId, route.sessionId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
