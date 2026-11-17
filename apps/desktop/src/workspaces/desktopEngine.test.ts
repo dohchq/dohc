@@ -1554,6 +1554,51 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
+  // Each pass wakes the room before it looks for idle rooms, so with no other note no pass sees it wait.
+  it("lifts the pause once the room of a workspace's only note has sent its full queue", async () => {
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    f.dependencies.ownerHasOpen = () => true;
+    let wakes = 0;
+    let sending: Promise<void> | undefined;
+    ownerDeliveryMock.pass.mockImplementation(async (options) => {
+      if (!options.lasting) return "empty";
+      for (;;) {
+        await options.lasting.landed(options.lasting.count(), options.signal);
+        wakes += 1;
+        await sending;
+      }
+    });
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() =>
+        expect(ownerDeliveryMock.pass.mock.calls.some(([options]) => options.lasting)).toBe(true),
+      );
+      let sent!: () => void;
+      sending = new Promise((resolve) => (sent = resolve));
+      const woken = wakes;
+      f.engine.noteOwnerLiveEditsPaused("owner", "notes/plan.md");
+      await vi.waitFor(() => expect(wakes).toBe(woken + 1));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("unsent-edits-limit");
+      sending = undefined;
+      sent();
+      // Passes keep coming and keep waking the room.
+      await vi.waitFor(() => {
+        f.engine.retryOwnerDelivery("owner");
+        expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
+      });
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+    } finally {
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
   it.each([true, false])(
     "follows background Stop recovery in the notices when the release writes the file: %s",
     async (materialized) => {

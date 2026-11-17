@@ -767,13 +767,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             ownerRooms.set(workspaceId, rooms.set(objectId, room));
             const ended = () => new Error("This live editing session ended.");
             const waited = () => {
+              // A room that waits for an edit has sent every one, so its note takes edits again.
+              // A pass can't see this: its turn wakes the room before it looks.
+              const unpaused =
+                room.idle &&
+                pausedOwnerDocuments.get(workspaceId)?.delete(document.binding.currentPath);
+              // The next pass sets the workspace's status without the pause.
+              if (unpaused) ownerDelivery?.retry?.(workspaceId);
+              if (!room.acknowledged && !unpaused) return;
+              notifyRenderer({ workspaceId });
               if (!room.acknowledged) return;
               room.acknowledged = false;
-              notifyRenderer({ workspaceId });
               dependencies.notifyOwnerDraftsChanged?.(workspaceId);
-              // The next pass lifts a pause on a note whose room has delivered every edit.
-              if (pausedOwnerDocuments.get(workspaceId)?.has(document.binding.currentPath))
-                ownerDelivery?.retry?.(workspaceId);
             };
             room.ended = (async () => {
               try {
