@@ -849,6 +849,59 @@ async fn an_unsent_rename_by_case_alone_is_undone_after_a_stop_before_its_wave_r
     finish(&copy).await;
 }
 
+/// The member edits `open/a.md` and doesn't send it, then changes the file
+/// again while the rebuild downloads. The plan sees the newer bytes on disk,
+/// so the stored edit is neither on disk nor in the new store: both go to the
+/// recovery folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_version_the_disk_lost_during_the_download_is_saved() {
+    let copy = edited_copy("rpc-rebuild-unsent-overwritten").await;
+    let target = copy.scratch.path().join("open/a.md");
+    copy.relay.state.lock().expect("relay state").on_share_log = Some(Box::new(move || {
+        std::fs::write(target, "my newer draft").expect("newer draft");
+    }));
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "0003 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 a.md")).expect("disk"),
+        b"my newer draft"
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0003 a.md")).expect("stored"),
+        b"my edit"
+    );
+    finish(&copy).await;
+}
+
+/// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
+async fn edited_copy(workspace_id: &str) -> ClosedCopy {
+    closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {
+        Box::pin(async move {
+            let mut id = 50;
+            call(
+                transport,
+                handle,
+                &mut id,
+                "versionedText.write",
+                json!({
+                    "versionId": "main", "objectId": "object-a", "path": "open/a.md",
+                    "text": "my edit", "momentId": "edit-a", "origin": "api", "nowMs": 3_000,
+                }),
+            )
+            .await;
+            std::fs::write(scratch.path().join("open/a.md"), "my edit").expect("edit");
+        })
+    })
+    .await
+}
+
 /// A file on disk whose bytes the new store holds is replaced in place, with
 /// those bytes as its preimage, and nothing goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

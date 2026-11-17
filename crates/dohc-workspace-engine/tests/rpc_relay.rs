@@ -125,6 +125,8 @@ struct RelayState {
     // The most ops one share log page holds. Unset, one page holds them all.
     share_page_limit: Option<usize>,
     refuse_claims: bool,
+    // Runs once, as the next share log page is read.
+    on_share_log: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct FakeRelay {
@@ -238,6 +240,9 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 "skipped": 0,
                 "currentMaxOriginSeq": current,
             }));
+        }
+        if let Some(hook) = state.on_share_log.take() {
+            hook();
         }
         let since = request.query_i64("since");
         let rows = state

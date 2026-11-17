@@ -117,7 +117,8 @@ type ChatSection = (Option<String>, String);
 struct OldRead {
     heads: Vec<RebuildHead>,
     unsent: RebuildUnsent,
-    /// The bytes of each unsent version the disk doesn't hold, by hash.
+    /// The bytes of each unsent version, by hash. The plan saves those the
+    /// disk no longer holds when it looks, after the download.
     version_bytes: BTreeMap<String, Vec<u8>>,
     /// Read markers, bookmarks, follows and feed read state.
     carried: RebuildCarried,
@@ -390,7 +391,7 @@ impl EngineService {
         let old = self
             .rebuild_open(ctx, root, workspace_id, Some(&manifest.rebuild_id), None)
             .await?;
-        let read = self.rebuild_read_old(&old, root, params).await;
+        let read = self.rebuild_read_old(&old, params).await;
         self.workspace_close(Some(old)).await?;
         let old = read?;
 
@@ -448,11 +449,11 @@ impl EngineService {
     }
 
     /// The old store's current files and the member's work the relay hasn't
-    /// taken, with the bytes of each unsent version the disk doesn't hold.
+    /// taken, with the bytes of each unsent version. The disk may change
+    /// before the plan reads it, so a version it holds now is read too.
     async fn rebuild_read_old(
         &self,
         handle: &WorkspaceHandle,
-        root: &Path,
         params: &RebuildParams,
     ) -> Result<OldRead, WireError> {
         let actor = self.rebuild_actor(handle)?;
@@ -466,9 +467,6 @@ impl EngineService {
             .map_err(map_runtime)?;
         let mut version_bytes = BTreeMap::new();
         for version in &unsent.versions {
-            if disk_sha(root, &version.path).as_deref() == Some(version.sha256.as_str()) {
-                continue;
-            }
             if let Some(bytes) = actor
                 .rebuild_blob(version.sha256.clone())
                 .await
