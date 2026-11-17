@@ -106,6 +106,9 @@ impl TestResponse {
     }
 }
 
+/// Changes the fake relay's state as a share log page is read.
+type ShareLogHook = Box<dyn FnOnce(&mut RelayState) + Send>;
+
 #[derive(Default)]
 struct RelayState {
     workspace_ops: Vec<Value>,
@@ -128,7 +131,7 @@ struct RelayState {
     share_page_limit: Option<usize>,
     refuse_claims: bool,
     // Runs once, as the next share log page is read, before the relay reads it.
-    on_share_log: Option<Box<dyn FnOnce(&mut RelayState) + Send>>,
+    on_share_log: Option<ShareLogHook>,
 }
 
 struct FakeRelay {
