@@ -1376,6 +1376,9 @@ function notifyCloudSessionChangedWithKey(
   sessionKey: string | null,
   phase: "changing" | "ready",
 ): void {
+  // Until the session is ready, no Collection opens signed out, so a page or
+  // agent never reads the last account's copy while another signs in.
+  ownerDatasetCopies.sessionChanging(phase === "changing");
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.cloudSessionChanged, { sessionKey, phase });
   }

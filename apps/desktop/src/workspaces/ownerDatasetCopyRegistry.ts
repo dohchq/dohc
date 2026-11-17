@@ -189,11 +189,14 @@ export function createOwnerDatasetCopyRegistry(options: {
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
   let ownerKey: string | null = null,
-    stopped = false;
+    stopped = false,
+    // A session is starting: main has cleared the credentials but not yet
+    // told this registry whose they are, so no copy opens signed out.
+    changing = false;
   // Signed in, the account's copies open. Signed out, only those of the
   // account signed in here last, read-only.
   const owns = (key: string) =>
-    !stopped && (ownerKey === null ? account === ownerTag(key) : ownerKey === key);
+    !stopped && (ownerKey === null ? !changing && account === ownerTag(key) : ownerKey === key);
   function close(entry: Entry): Promise<void> {
     entry.closed = true;
     entry.stop.abort();
@@ -372,7 +375,14 @@ export function createOwnerDatasetCopyRegistry(options: {
     // signed in here last, or null. Only those copies open signed out.
     async signedOutOrigin(key: string): Promise<string | null> {
       await barrier.catch(() => undefined);
+      if (changing && !stopped && ownerKey === null)
+        throw Error("Your server session is changing. Try again.");
       return !stopped && ownerKey === null && account === ownerTag(key) ? accountOrigin : null;
+    },
+    // A session change started (true) or ended, whether it worked or not
+    // (false). Main says so with each broadcast of it.
+    sessionChanging(on: boolean): void {
+      changing = on;
     },
     removeLeftover(): Promise<void> {
       barrier = barrier.catch(() => undefined).then(() => sweep([], []));

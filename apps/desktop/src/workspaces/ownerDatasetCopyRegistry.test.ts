@@ -136,6 +136,30 @@ it("keeps an account's copies through a sign-out, and opens them signed out for 
   expect(await readdir(dirname(directory))).toEqual([basename(directory)]);
   expect(mocks.open).toHaveBeenCalledTimes(2);
 });
+it("opens no copy signed out while a session starts, and opens it again if that sign-in fails", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged(null);
+  const kept = await f.registry.get({ ...f.input, lifetime: new AbortController().signal });
+  const authorize = mocks.open.mock.calls[1]![0].assertOwner as () => void;
+  // Another account starts signing in. Main has cleared the session but not
+  // yet said whose the next one is.
+  f.registry.sessionChanging(true);
+  await expect(f.registry.signedOutOrigin(f.input.ownerKey)).rejects.toThrow(
+    "Your server session is changing. Try again.",
+  );
+  await expect(
+    f.registry.get({ ...f.input, lifetime: new AbortController().signal }),
+  ).rejects.toThrow(/owner changed/);
+  // The copy already open refuses each read too.
+  expect(authorize).toThrow(/owner changed/);
+  // The sign-in fails, so no account change follows: the copy reads again.
+  f.registry.sessionChanging(false);
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  expect(authorize).not.toThrow();
+  expect(await f.registry.get({ ...f.input, lifetime: new AbortController().signal })).toBeTruthy();
+  expect(kept).toBeTruthy();
+});
 it("after a restart while signed out, opens the copies of the account signed in last", async () => {
   const f = await fixture();
   await f.registry.get(f.input);
