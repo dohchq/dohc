@@ -223,14 +223,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(
   async function follow(key: string, stop: AbortSignal): Promise<void> {
     let since = -1;
     while (!stop.aborted) {
-      // Each request reads the session again, so a new token for the same account is used at once.
-      const credentials = await dependencies.credentials().catch(() => null);
-      if (stop.aborted) return;
-      if (!credentials?.relayUrl || accountKey(credentials) !== key) {
-        void ensureFollowing();
-        return;
-      }
       try {
+        // Each request reads the session again, so a new token for the same account is used at once.
+        // A read that fails is retried below like a failed request.
+        const credentials = await dependencies.credentials();
+        if (stop.aborted) return;
+        if (!credentials?.relayUrl || accountKey(credentials) !== key) {
+          // This loop ends. Its record goes first, or a follow for an account signed in again would think it still runs.
+          if (following?.stop.signal === stop) following = null;
+          void ensureFollowing();
+          return;
+        }
         const answer = await call(
           credentials,
           `${DIRECT_ROUTES.activity}?since=${Math.max(since, 0)}&waitMs=${since < 0 ? 0 : DIRECT_ACTIVITY_MAX_WAIT_MS}`,

@@ -36,14 +36,21 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   let changes = 0;
   let listedChanges = 0;
   let held: Promise<void> | null = null;
+  let rejectNext = false;
+  const servers: string[] = [];
   const signals: Array<AbortSignal | null | undefined> = [];
   const service = createDirectMessages<Account>({
     credentials: async () => {
       await held;
+      if (rejectNext) {
+        rejectNext = false;
+        throw new Error("the keychain did not answer");
+      }
       return account;
     },
     relayResponse: async (credentials, path, init) => {
       requests.push(`${init.method ?? "GET"} ${path}`);
+      servers.push(credentials.relayUrl ?? "");
       signals.push(init.signal);
       tokens.push(credentials.token ?? "");
       if (offline) throw new TypeError("fetch failed");
@@ -65,6 +72,8 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
     service,
     routes,
     requests,
+    /** The server each request went to. */
+    servers,
     signals,
     tokens,
     /** Holds every credential read until the returned function runs. */
@@ -77,6 +86,10 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
         };
       });
       return release;
+    },
+    /** The next credential read rejects, as when the keychain fails once. */
+    rejectNextCredentials: () => {
+      rejectNext = true;
     },
     changes: () => changes,
     listedChanges: () => listedChanges,
@@ -417,6 +430,32 @@ describe("direct messages for the signed-in account", () => {
     // A listener that stays still starts following.
     const stop = h.service.listen();
     await expect.poll(() => h.requests.length).toBeGreaterThan(0);
+    stop();
+  });
+
+  it("keeps one follow going after a read of the account fails once", async () => {
+    const h = harness();
+    let polls = 0;
+    let waiting = 0;
+    h.routes.set("/sync/direct/activity", () => {
+      polls += 1;
+      if (polls === 1) return Response.json({ revision: 1 });
+      if (polls === 2) {
+        // Nothing new, so the loop pauses and reads the account again. That read fails; the next ones work.
+        h.rejectNextCredentials();
+        return Response.json({ revision: 1 });
+      }
+      waiting += 1;
+      return new Promise<Response>(() => {});
+    });
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 1, conversations: [] }),
+    );
+    const stop = h.service.listen();
+    await expect.poll(() => waiting).toBe(1);
+    // A second loop would start its own wait within a few turns.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(waiting).toBe(1);
     stop();
   });
 
