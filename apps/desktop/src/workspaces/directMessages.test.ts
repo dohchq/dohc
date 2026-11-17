@@ -37,17 +37,16 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   let changes = 0;
   let listedChanges = 0;
   let held: Promise<void> | null = null;
-  let rejectNext = false;
+  let nextRead: "reject" | "signed-out" | null = null;
   const servers: string[] = [];
   const signals: Array<AbortSignal | null | undefined> = [];
   const service = createDirectMessages<Account>({
     credentials: async () => {
       await held;
-      if (rejectNext) {
-        rejectNext = false;
-        throw new Error("the keychain did not answer");
-      }
-      return account;
+      const once = nextRead;
+      nextRead = null;
+      if (once === "reject") throw new Error("the keychain did not answer");
+      return once === "signed-out" ? null : account;
     },
     relayResponse: async (credentials, path, init) => {
       requests.push(`${init.method ?? "GET"} ${path}`);
@@ -88,9 +87,9 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
       });
       return release;
     },
-    /** The next credential read rejects, as when the keychain fails once. */
-    rejectNextCredentials: () => {
-      rejectNext = true;
+    /** The next credential read rejects, as when the keychain fails once, or finds nobody signed in. */
+    nextCredentials: (how: "reject" | "signed-out") => {
+      nextRead = how;
     },
     changes: () => changes,
     listedChanges: () => listedChanges,
@@ -571,30 +570,64 @@ describe("direct messages for the signed-in account", () => {
     stop();
   });
 
-  it("keeps one follow going after a read of the account fails once", async () => {
-    const h = harness();
-    let polls = 0;
-    let waiting = 0;
-    h.routes.set("/sync/direct/activity", () => {
-      polls += 1;
-      if (polls === 1) return Response.json({ revision: 1 });
-      if (polls === 2) {
-        // Nothing new, so the loop pauses and reads the account again. That read fails; the next ones work.
-        h.rejectNextCredentials();
-        return Response.json({ revision: 1 });
-      }
-      waiting += 1;
-      return new Promise<Response>(() => {});
-    });
-    h.routes.set("/sync/direct/conversations", () =>
-      Response.json({ revision: 1, conversations: [] }),
-    );
-    const stop = h.service.listen();
-    await expect.poll(() => waiting).toBe(1);
-    // A second loop would start its own wait within a few turns.
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(waiting).toBe(1);
-    stop();
+  it.each([
+    ["fails once", "reject"],
+    // The loop ends on that read. The follow it starts finds the same account back, so it must not think the loop still runs.
+    ["finds nobody signed in, and the same account is back on the next read", "signed-out"],
+  ] as const)("keeps one follow going after a read of the account %s", async (_, how) => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      let polls = 0;
+      let waiting = 0;
+      h.routes.set("/sync/direct/activity", () => {
+        polls += 1;
+        if (polls === 1) return Response.json({ revision: 1 });
+        if (polls === 2) {
+          // Nothing new, so the loop pauses and reads the account again.
+          h.nextCredentials(how);
+          return Response.json({ revision: 1 });
+        }
+        waiting += 1;
+        return new Promise<Response>(() => {});
+      });
+      h.routes.set("/sync/direct/conversations", () =>
+        Response.json({ revision: 1, conversations: [] }),
+      );
+      const stop = h.service.listen();
+      // A loop that is not waiting on the server always has a timer to run. Once none is left, every loop waits.
+      await vi.runAllTimersAsync();
+      expect(waiting).toBe(1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("follows once a failed read of the account gives way, and a failed read stops no follow", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      let waiting = 0;
+      h.routes.set("/sync/direct/activity", () => {
+        waiting += 1;
+        return new Promise<Response>(() => {});
+      });
+      // The read made as main starts listening fails, as when the keychain is not ready yet.
+      h.nextCredentials("reject");
+      const stop = h.service.listen();
+      await vi.runAllTimersAsync();
+      expect(waiting).toBe(1);
+      // A failed read when the account may have changed leaves the running follow to read the account itself.
+      h.nextCredentials("reject");
+      h.service.accountChanged();
+      await vi.runAllTimersAsync();
+      expect(waiting).toBe(1);
+      expect(h.signals.at(-1)?.aborted).toBe(false);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forgets the last account's list once another signs in", async () => {

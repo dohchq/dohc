@@ -132,6 +132,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(
   dependencies: Dependencies<Credentials>,
 ) {
   let following: { key: string; stop: AbortController } | null = null;
+  // A follow waits to start because the account could not be read.
+  let retrying = false;
   let listeners = 0;
   // The list for one account, from the read numbered `read`. `fresh` while nothing has changed it since the follow loop read it.
   let listed: (DirectListed & { key: string; read: number; fresh: boolean }) | null = null;
@@ -292,7 +294,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(
 
   async function ensureFollowing(): Promise<void> {
     if (listeners === 0) return;
-    const credentials = await dependencies.credentials().catch(() => null);
+    let credentials: Credentials | null;
+    try {
+      credentials = await dependencies.credentials();
+    } catch {
+      // A failed read is not a sign-out. A running follow reads the account again itself; with none, try again later.
+      if (following || retrying) return;
+      retrying = true;
+      await pause(dependencies.retryMs ?? 15_000);
+      retrying = false;
+      return ensureFollowing();
+    }
     // The last listener may have stopped while the account was read.
     if (listeners === 0) return;
     const key = credentials?.relayUrl ? accountKey(credentials) : null;
