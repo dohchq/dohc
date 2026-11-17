@@ -71,6 +71,7 @@ import {
 } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import {
+  finishRebuildDrafts,
   hasWorkspaceLiveDrafts,
   hasRetainedLiveDraft,
   listKeptTyping,
@@ -10795,14 +10796,14 @@ function registerIpcHandlers(): void {
         reach,
       );
     },
-    finish: async (workspaceId, rebuildId, savedDrafts) => {
-      await shareViewRebuildEngine("share.view.rebuildFinish", {
-        rootDir: requireWorkspace(workspaceId).rootPath,
-        rebuildId,
-      });
-      for (const recordId of savedDrafts)
-        await removeKeptTyping(join(stateDir(), "live-draft-recovery"), workspaceId, recordId);
-    },
+    finish: (workspaceId, rebuildId, savedDrafts) =>
+      finishRebuildDrafts(join(stateDir(), "live-draft-recovery"), workspaceId, async () => {
+        await shareViewRebuildEngine("share.view.rebuildFinish", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          rebuildId,
+        });
+        return savedDrafts;
+      }),
     // Stores the reach the copy was built under, and the folder that holds
     // what it saved for its notice, in the same write that opens the copy.
     install: async (workspaceId, rebuildId, result) => {
@@ -10891,18 +10892,16 @@ function registerIpcHandlers(): void {
     },
     // A retried finish has lost the rebuild's answer, so it takes the saved
     // drafts to delete from the engine's.
-    finishShareViewRebuild: async (workspaceId, rebuildId) => {
-      const finished = await shareViewRebuildEngine("share.view.rebuildFinish", {
-        rootDir: requireWorkspace(workspaceId).rootPath,
-        rebuildId,
-      });
-      const savedDrafts =
-        isRecordValue(finished) && Array.isArray(finished.savedDrafts) ? finished.savedDrafts : [];
-      for (const recordId of savedDrafts) {
-        if (typeof recordId === "string")
-          await removeKeptTyping(join(stateDir(), "live-draft-recovery"), workspaceId, recordId);
-      }
-    },
+    finishShareViewRebuild: (workspaceId, rebuildId) =>
+      finishRebuildDrafts(join(stateDir(), "live-draft-recovery"), workspaceId, async () => {
+        const finished = await shareViewRebuildEngine("share.view.rebuildFinish", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          rebuildId,
+        });
+        return isRecordValue(finished) && Array.isArray(finished.savedDrafts)
+          ? finished.savedDrafts
+          : [];
+      }),
   });
   // Rebuilds a restart stopped, and any whose id never reached the record.
   void desktopEngine.startup

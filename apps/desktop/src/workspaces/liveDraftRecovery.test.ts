@@ -9,6 +9,7 @@ import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
 import {
+  finishRebuildDrafts,
   hasRetainedLiveDraft,
   hasWorkspaceLiveDrafts,
   listKeptTyping,
@@ -63,6 +64,36 @@ it("finds retained drafts by workspace and object or path without blocking unrel
   expect(await hasRetainedLiveDraft(join(directory, "absent"), "workspace", "a.md", "object")).toBe(
     false,
   );
+});
+
+// A joined copy's rebuild saved some live drafts in its recovery folder:
+// main deletes exactly those, and only once the engine finished.
+it("deletes only the drafts a finished rebuild saved, and none when it could not finish", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-rebuild-drafts-"));
+  directories.push(directory);
+  const update = new Uint8Array([0, 0]);
+  const draft = (path: string) => ({
+    path,
+    objectId: path,
+    contentKind: "plaintext" as const,
+    text: path,
+    update,
+  });
+  await preserveLiveDraft(directory, "joined", draft("saved.md"));
+  await preserveLiveDraft(directory, "joined", draft("open.md"));
+  const paths = async () =>
+    (await listLiveDraftRecovery(directory, "joined")).map((record) => record.path).sort();
+  const saved = (await listLiveDraftRecovery(directory, "joined")).find(
+    (record) => record.path === "saved.md",
+  )!.recordId;
+  await expect(
+    finishRebuildDrafts(directory, "joined", async () => {
+      throw new Error("share-view-rebuild-unfinished");
+    }),
+  ).rejects.toThrow("share-view-rebuild-unfinished");
+  expect(await paths()).toEqual(["open.md", "saved.md"]);
+  await finishRebuildDrafts(directory, "joined", async () => [saved]);
+  expect(await paths()).toEqual(["open.md"]);
 });
 
 it("lists typing kept for workspaces no longer listed, and removes one record only for its workspace", async () => {

@@ -181,8 +181,9 @@ describe("rebuilding a joined copy", () => {
   });
 
   // The recovery folder holds each live draft the rebuild saved, so main
-  // deletes those drafts only once the engine finished.
-  it("deletes the live drafts the rebuild saved once it finished", async () => {
+  // deletes those drafts only once the engine finished. This checks the ids
+  // the runner hands main; liveDraftRecovery.test.ts checks the deletion.
+  it("hands main the live drafts the rebuild saved once it finished", async () => {
     const { state, rebuilds } = copy([
       rebuilt({ signature: "r2", visibilitySignature: "v2" }, 1, ["draft-1"]),
     ]);
