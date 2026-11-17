@@ -75,10 +75,6 @@ const READS_UNLIKE_THE_EDITOR: &[(&str, &[&str])] = &[
         "The spaces that end a list's last paragraph stay text, as they do at \
          the end of other paragraphs, where the editor drops them",
         &[
-            "item-empty-ordered-tight",
-            "r22-last-spaces-0",
-            "r22-last-spaces-1",
-            "r22-last-spaces-2",
             "r23-slow-spaces-heading-0",
             "r23-slow-spaces-nested-0",
             "r23-slow-spaces-heading-1",
@@ -159,52 +155,26 @@ const READS_UNLIKE_THE_EDITOR: &[(&str, &[&str])] = &[
         "A quote that starts with `[!note]` is a callout",
         &["fix1-spaces-callout"],
     ),
-];
-
-/// The cases whose projection does not read back as itself, because the
-/// writer does not yet write them as CommonMark reads them, so their source
-/// is not kept: #4139.
-const WRITER_GAPS: &[(&str, &[&str])] = &[
     (
-        "Neighbouring lists of one kind get one marker, so they read back as one list",
-        &["task-marker-changes", "ordered-delimiter-change"],
-    ),
-    (
-        "A heading that holds a line break is written as an ATX heading, which \
-         ends at the break",
+        "A part the writer cannot write back as it reads keeps its source, \n         where the editor reads it",
         &[
-            "item-setext-after-hash-line",
-            "item-setext-two-lines",
+            "empty-task-root",
+            "task-casing",
+            "mixed",
+            "task-marker-changes",
+            "ordered-delimiter-change",
+            "task-checkbox-tab",
             "r25-bare-reread",
         ],
     ),
-];
-
-/// The cases whose projection reads back as itself but not as the source,
-/// so their source is not kept either: #4139.
-const WRITTEN_UNLIKE_THE_SOURCE: &[(&str, &[&str])] = &[
     (
-        "The writer trims the note's end as JavaScript does, which drops the \
-         spaces or NBSP that end its last line",
-        &[
-            "item-setext-trailing-nbsp",
-            "r22-last-spaces-0",
-            "r22-last-spaces-1",
-            "r22-last-spaces-2",
-        ],
-    ),
-    (
-        "The writer drops the spaces after a line it escapes as `1&#46;`",
-        &["item-empty-ordered-tight"],
+        "A note with a part the writer cannot write back is read as the \n         writer ends it: without the white space at its end, and with an \n         empty `[X]` item at its end read as text",
+        &["empty-task-nested", "r24-end-continued-tab", "r24-end-lazy-tab"],
     ),
 ];
 
 fn listed(groups: &[(&str, &[&str])], name: &str) -> bool {
     groups.iter().any(|(_, names)| names.contains(&name))
-}
-
-fn written_unlike_the_source(name: &str) -> bool {
-    listed(WRITER_GAPS, name) || listed(WRITTEN_UNLIKE_THE_SOURCE, name)
 }
 
 /// Each word of a body's text and attributes, such as a link's address, but
@@ -277,7 +247,7 @@ fn nested_contract_case(case: &Value) {
         doc.preserve_folded_markdown_source(source).unwrap();
         assert_eq!(
             doc.preserved_markdown_source(&projection).as_deref(),
-            Some(source).filter(|_| projection != source && !written_unlike_the_source(name)),
+            Some(source),
             "{name}"
         );
     }
@@ -286,8 +256,8 @@ fn nested_contract_case(case: &Value) {
         .rewrite_content_to_markdown(ContentKind::Richdoc, &projection)
         .unwrap();
     assert_eq!(
-        again.project_richdoc().unwrap() == projection,
-        !listed(WRITER_GAPS, name),
+        again.project_richdoc().unwrap(),
+        projection,
         "{name}: a second fold writes what the first wrote"
     );
     let replay = Ydoc::wire();
@@ -330,15 +300,9 @@ fn nested_contract_file_fold_keeps_the_source_witness() {
             .expect(source);
         let projection = doc.project_richdoc().unwrap();
         doc.preserve_folded_markdown_source(source).expect(source);
-        // Production skips the witness when the fold already writes the
-        // source's bytes.
         assert_eq!(
             doc.preserved_markdown_source(&projection).as_deref(),
-            Some(source).filter(|_| {
-                projection != source
-                    && case["witnessRefuse"] != true
-                    && !written_unlike_the_source(case["name"].as_str().unwrap())
-            }),
+            Some(source).filter(|_| case["witnessRefuse"] != true),
             "{source:?}"
         );
         doc.validate_public_baseline(&doc.encode_full_state())

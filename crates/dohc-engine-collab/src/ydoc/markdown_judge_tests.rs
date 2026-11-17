@@ -1386,24 +1386,16 @@ fn a_dropped_cell_or_definition_keeps_its_words() {
         let harm: Vec<_> = fails.iter().filter(|check| HARM.contains(check)).collect();
         assert!(harm.is_empty(), "{source:?}: {harm:?}");
     }
-    // The editor ends the table at that row and reads the rest as text, and
-    // keeps each definition as a paragraph of its own.
-    let (body, _) = generated::read("| qa | qb |\n|---|---|\n| qc | qd | qhidden |\n").unwrap();
-    let blocks = body["children"].as_array().unwrap();
-    assert_eq!(blocks[0]["tag"], "table");
-    assert_eq!(blocks[0]["children"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        generated::flat(&blocks[1], 0),
-        [serde_json::json!({"insert": "| qc | qd | qhidden |"})]
-    );
-    let (body, _) = generated::read("[qx]: /qa\n[qx]: /qb \"qkept\"\n").unwrap();
-    let texts: Vec<_> = body["children"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|block| generated::flat(block, 0)[0]["insert"].clone())
-        .collect();
-    assert_eq!(texts, ["[qx]: /qa", "[qx]: /qb \"qkept\""]);
+    // A row that drops a cell, and a label's second definition, which the
+    // writer drops, keep their source.
+    for source in [
+        "| qa | qb |\n|---|---|\n| qc | qd | qhidden |",
+        "[qx]: /qa\n[qx]: /qb \"qkept\"",
+    ] {
+        let (body, _) = generated::read(&format!("{source}\n")).unwrap();
+        assert_eq!(body["children"][0]["tag"], "rawBlock");
+        assert_eq!(body["children"][0]["attrs"]["source"], source);
+    }
 }
 
 /// A link's address and title read as the editor reads them: of the
@@ -1418,22 +1410,6 @@ fn a_link_reads_references_in_its_address_and_title() {
             "/a#&ouml;",
             "t&#33;#",
         ),
-        ("[qa](<a&#35;b c>)\n", "a#b c", ""),
-        (
-            "[qa](/f&ouml; \"title \\\"&quot;\")\n",
-            "/f&ouml;",
-            "title \"&quot;",
-        ),
-        (
-            "[qa](/a&#33;b \"t&#35;&amp;#35;&#160;&#38;x\")\n",
-            "/a&#33;b",
-            "t#&#35;\u{a0}&#38;x",
-        ),
-        (
-            "[qa](/a\\&#35;b \"&#035;&#x23;\")\n",
-            "/a&#35;b",
-            "&#035;&#x23;",
-        ),
         (
             "[qa](/a&amp;b \"&#91;&#93;&#96;\")\n",
             "/a&amp;b",
@@ -1444,6 +1420,19 @@ fn a_link_reads_references_in_its_address_and_title() {
         let link = &generated::flat(&body, 0)[0]["attrs"]["link"];
         assert_eq!(link["href"], href, "{source:?}");
         assert_eq!(link["title"].as_str().unwrap_or(""), title, "{source:?}");
+    }
+    // Links the writer writes as other links keep their source: it drops the
+    // angle brackets around an address with a space, leaves a `"` in a
+    // title bare, writes `&#35;` in a title as `#`, and drops the `\` before
+    // `&#35;` in an address.
+    for source in [
+        "[qa](<a&#35;b c>)",
+        "[qa](/a\\&#35;b \"&#035;&#x23;\")",
+        "[qa](/f&ouml; \"title \\\"&quot;\")",
+        "[qa](/a&#33;b \"t&#35;&amp;#35;&#160;&#38;x\")",
+    ] {
+        let (body, _) = generated::read(&format!("{source}\n")).unwrap();
+        assert_eq!(body["children"][0]["attrs"]["source"], source);
     }
 }
 

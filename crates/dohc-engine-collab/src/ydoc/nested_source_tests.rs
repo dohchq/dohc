@@ -40,32 +40,32 @@ fn a_formula_in_a_container_reads_without_the_container_prefix() {
     }
 }
 
-/// A formula in a link or a mark is sealed with what is around it, and one
-/// in a line of text is sealed alone, so the link, the mark and the formula
-/// are all written back as they were. An image's alt keeps it as text. The
-/// editor's reader drops the formula from an alt and a link from a formula
-/// on its own line.
+/// A formula keeps its text wherever it is. Alone in a mark it reads as a
+/// formula block, which holds no mark. In a link, or in a part the writer
+/// cannot write back, the part keeps its source. An image's alt keeps it as
+/// text. The editor's reader reads `**$$x$$**` as a bold `$`, an inline
+/// formula and a bold `$`.
 #[test]
-fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_source() {
+fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
     let mut failures = Vec::new();
     for (source, kept) in [
         (
             "[$$x$$](u)\n",
-            [r#""source":"[$$x$$](u)""#, r#""rawInline""#],
+            [r#""source":"[$$x$$](u)""#, r#""rawBlock""#],
         ),
-        ("**$$x$$**\n", [r#""source":"**$$x$$**""#, r#""rawInline""#]),
+        ("**$$x$$**\n", [r#""tex":"x""#, r#""mathBlock""#]),
         ("![$$x$$](u)\n", [r#""alt":"$$x$$""#, r#""src":"u""#]),
-        ("==$$x$$==\n", [r#""source":"==$$x$$==""#, r#""rawInline""#]),
-        ("++$$x$$++\n", [r#""source":"++$$x$$++""#, r#""rawInline""#]),
-        ("# ==$$x$$==\n", [r#""source":"==$$x$$==""#, r#""heading""#]),
+        ("==$$x$$==\n", [r#""tex":"x""#, r#""mathBlock""#]),
+        ("++$$x$$++\n", [r#""tex":"x""#, r#""mathBlock""#]),
+        ("# ==$$x$$==\n", [r#""source":"$$x$$""#, r#""heading""#]),
         // A formula over lines keeps none of its containers' markers.
         (
             "> ==$$a\n> b$$==\n",
-            [r#""source":"==$$a\nb$$==""#, r#""tag":"blockquote""#],
+            [r#""tex":"a\nb""#, r#""tag":"blockquote""#],
         ),
         (
             "- **$$a\n  b$$**\n",
-            [r#""source":"**$$a\nb$$**""#, r#""tag":"listItem""#],
+            [r#""tex":"a\nb""#, r#""tag":"listItem""#],
         ),
         (
             "> a $$x\n> y$$ b\n",
@@ -73,11 +73,11 @@ fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_source() {
         ),
         (
             "> a $$x\n> y$$\n> ---\n",
-            [r#""source":"$$x\ny$$""#, r#""heading""#],
+            [r#""source":"> a $$x\n> y$$\n> ---""#, r#""rawBlock""#],
         ),
         (
             "> ![$$a\n> b$$](u)\n",
-            [r#""alt":"$$a\nb$$""#, r#""src":"u""#],
+            [r#""source":"> ![$$a\n> b$$](u)""#, r#""rawBlock""#],
         ),
     ] {
         let doc = Ydoc::wire();
@@ -145,7 +145,9 @@ fn text_in_marks_and_containers_reads_back_as_written() {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
         let first = doc.canonical_content()["body"].to_string();
-        if first.contains("\\n>") || first.contains("\\n ") {
+        // A part that keeps its source keeps its markers too.
+        let sealed = first.contains(r#""tag":"rawBlock""#);
+        if !sealed && (first.contains("\\n>") || first.contains("\\n ")) {
             failures.push(format!("{source:?} reads as {first}"));
             continue;
         }
@@ -476,28 +478,6 @@ fn every_source_seeds_both_builders_and_folds_stably() {
         .chain(flat_inline_sources())
         .map(str::to_owned)
         .chain(generated_sources());
-    // The writer writes a heading that holds a line break as an ATX heading,
-    // which ends at the break, and gives neighbouring lists of one kind one
-    // marker, so they read back as one list. These are unstable and a
-    // relation does not seed them: #4139.
-    let writer_gap = |source: &str| {
-        let mut lines = source.lines().rev().map(str::trim_start);
-        let changes_marker = match (lines.next(), lines.next()) {
-            (Some(last), Some(before)) => [
-                ("-", "*"),
-                ("*", "+"),
-                ("+", "-"),
-                ("1.", "2)"),
-                ("1)", "2."),
-            ]
-            .iter()
-            .any(|(first, next)| {
-                before == format!("{first} sibling") && last == format!("{next} changed")
-            }),
-            _ => false,
-        };
-        changes_marker || ["- a\n  b\n  ===\n  - c\n", "- a\n  b\n  --\n  - c"].contains(&source)
-    };
     // A renderer reads these lines as HTML, or hides a link definition, which
     // the document holds as text, so the source is not kept and a relation
     // does not seed it.
@@ -523,7 +503,7 @@ fn every_source_seeds_both_builders_and_folds_stably() {
             .unwrap_or_else(|error| panic!("read {source:?}: {error}"));
         let body = read.canonical_content()["body"].clone();
         let shown_unlike = html.contains(&source.as_str()) || defines_a_link(&source);
-        if writer_gap(&source) || shown_unlike {
+        if shown_unlike {
             assert!(
                 matches!(
                     Ydoc::wire().seed_collection_relation_markdown(&source),
@@ -531,9 +511,6 @@ fn every_source_seeds_both_builders_and_folds_stably() {
                 ),
                 "{source:?}"
             );
-        }
-        if writer_gap(&source) {
-            continue;
         }
         if shown_unlike {
             let doc = Ydoc::wire();

@@ -8108,8 +8108,12 @@ mod projection_tests {
                 .expect("projection")
                 .content
         };
-        // The text around the code still collapses; a `\`` opens no span.
-        let written = save("| h |\n|---|\n| `  a  `  x \\`  y  ``b  `  c`` |\n");
+        // A `\`` opens no span. The writer collapses the spaces around the
+        // code, which reads back as other text, so the table keeps its
+        // source.
+        let source = "| h |\n|---|\n| `  a  `  x \\`  y  ``b  `  c`` |\n";
+        assert_eq!(save(source), source);
+        let written = save("| h |\n|---|\n| `  a  ` x \\` y ``b  `  c`` |\n");
         assert!(
             written.contains("| `  a  ` x \\` y ``b  `  c`` |"),
             "{written}"

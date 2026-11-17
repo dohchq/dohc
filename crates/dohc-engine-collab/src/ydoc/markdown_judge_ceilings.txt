@@ -16,13 +16,16 @@ harm inline-math/1/tight/formula>tag/heading keeps-changing
 
 # doc-changes: the second reading differs from the first.
 # second-save-changes: the second save writes other bytes, then settles.
-# container-changes-text: a container reads its text unlike a paragraph.
+# container-changes-text: a container reads its text unlike a paragraph. In
+# the sample, each holds a formula alone in a mark, which a paragraph reads as
+# a math block and a container as an inline formula; both drop the mark.
+# container-sealed: a container keeps its source where a paragraph reads live,
+# as a cell that a `|` inside a mark splits.
 # punctuation-changes: a save moves a literal `*`, `=` or `$`, or makes it a
 # mark, as a literal `==` that reads as a highlight once written.
-sample container-changes-text 78
-sample doc-changes 614
-sample punctuation-changes 60
-sample second-save-changes 49
+sample container-changes-text 262
+sample container-sealed 10
+sample doc-changes 138
 full container-changes-text 2960
 full doc-changes 23006
 full punctuation-changes 2385
