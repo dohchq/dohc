@@ -1799,6 +1799,67 @@ async fn a_live_draft_and_the_displaced_folder_are_saved() {
     assert_eq!(finish(&copy).await["savedDrafts"], json!(["draft-1"]));
 }
 
+/// A file in the displaced folder that can't be synced stops the rebuild
+/// before the manifest marks the folder saved. The old store stays, and the
+/// next try syncs the folder it already moved and finishes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_displaced_file_that_cant_be_synced_stops_the_rebuild_until_it_can() {
+    use std::os::unix::fs::PermissionsExt;
+    let copy = closed_copy_with(
+        "rpc-rebuild-displaced-sync",
+        true,
+        false,
+        |_, _, scratch| {
+            Box::pin(async move {
+                let displaced = scratch.path().join(".dohc/engine/displaced");
+                std::fs::create_dir_all(&displaced).expect("displaced");
+                std::fs::write(displaced.join("kept.md"), "set aside before").expect("kept");
+            })
+        },
+    )
+    .await;
+    let root = copy.scratch.path().to_path_buf();
+    let kept = root.join(".dohc/engine/displaced/kept.md");
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).expect("lock");
+    if std::fs::File::open(&kept).is_ok() {
+        // Root opens it anyway, so this run can't make the sync fail.
+        return;
+    }
+
+    let stopped = rebuild_on(&Arc::new(EngineService::new()), &copy)
+        .await
+        .expect_err("stopped");
+    assert_eq!(stopped.message, "share-view-rebuild-recovery-unavailable");
+    let plan = manifest(&copy).expect("manifest")["plan"].clone();
+    let saved = plan["recovery"]
+        .as_array()
+        .expect("recovery")
+        .iter()
+        .find(|item| item["source"] == "displaced")
+        .cloned()
+        .expect("displaced item");
+    assert_ne!(saved["done"], true, "not marked saved: {saved}");
+    let moved = root
+        .join(plan["recoveryFolder"].as_str().expect("recovery folder"))
+        .join(saved["destination"].as_str().expect("destination"))
+        .join("kept.md");
+    assert!(moved.exists(), "the folder moved before the sync");
+    assert!(
+        root.join(".dohc").join("engine").join("engine.db").exists(),
+        "the old store stays"
+    );
+
+    std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o644)).expect("unlock");
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        std::fs::read_to_string(&moved).expect("kept"),
+        "set aside before"
+    );
+    finish(&copy).await;
+}
+
 /// Stop the rebuild at `point` as a crash would, then run it again on a new
 /// service, as after a restart. It must finish as if nothing had stopped it.
 async fn crash_then_resume(workspace_id: &str, point: &str, phase: &str) -> ClosedCopy {
