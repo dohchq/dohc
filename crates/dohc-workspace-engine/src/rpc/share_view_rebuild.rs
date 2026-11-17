@@ -1,9 +1,11 @@
 //! `share.view.rebuild`: rebuild a joined copy that closed because the relay
 //! changed which items the member sees.
 //!
-//! Afterwards the disk equals the new store. Everything of the member's the
-//! relay hasn't taken goes to a recovery folder, and their unsent deletes and
-//! moves are undone and listed in its `contents.md`.
+//! Afterwards the disk equals the new store, apart from the member's new files
+//! where the new reach gives them Edit, which stay in place for capture to
+//! record. Everything else of the member's the relay hasn't taken goes to a
+//! recovery folder, and their unsent deletes and moves are undone and listed
+//! in its `contents.md`.
 //!
 //! The manifest (`rebuild_manifest`) decides every step, so a call after a
 //! crash continues where the last one stopped:

@@ -1,7 +1,8 @@
 //! A joined copy closed for a visibility change is rebuilt by
 //! `share.view.rebuild`: a new store is built from the relay and swapped in,
 //! the files on disk converge to it, and everything of the member's the relay
-//! hasn't taken is saved in a recovery folder.
+//! hasn't taken is saved in a recovery folder, except a new file where they
+//! can still edit, which stays in place.
 
 use super::*;
 
