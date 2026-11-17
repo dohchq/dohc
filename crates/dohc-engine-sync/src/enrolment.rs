@@ -1603,6 +1603,132 @@ mod tests {
         assert_eq!(raw_bundle_ops, vec![raw_resolve, raw_shadow]);
     }
 
+    /// A conflict bundle cut between a rule's delete and the rule that
+    /// replaced it. Members pull between push batches, so they see every
+    /// prefix of the journal. The covered file was hidden from them at every
+    /// point of its history, so no prefix may show it to them.
+    #[test]
+    #[ignore = "known gap: the window before the bundle ends with the old rule deleted                 and the file journaled, before the replacement's window"]
+    fn a_bundle_cut_between_a_rule_and_its_replacement_shows_no_covered_file() {
+        use dohc_engine_files::access_rules::{access_rule_folder, parse_access_rule};
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let (view, nobody) = ("members: view\n", "people: {}\n");
+        let history: [(&str, &str, Option<&str>); 5] = [
+            ("team", "team/access.yaml", Some(view)),
+            ("old-rule", "team/private/access.yaml", Some(nobody)),
+            ("secret", "team/private/secret.md", Some("secret")),
+            ("old-rule", "team/private/access.yaml", None),
+            ("new-rule", "team/private/access.yaml", Some(nobody)),
+        ];
+        for (index, (object, path, text)) in history.into_iter().enumerate() {
+            let moment_id = format!("m-{index}");
+            let mut versioned = VersionedTextStore::new(&mut store);
+            match text {
+                Some(text) => drop(
+                    versioned
+                        .write_text(
+                            &WriteText {
+                                workspace_id: "ws".to_owned(),
+                                version_id: "main".to_owned(),
+                                object_id: object.to_owned(),
+                                path: path.to_owned(),
+                                text: text.to_owned(),
+                                moment_id,
+                                metadata_origin: "cli".to_owned(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 10,
+                                request_id: None,
+                            },
+                            &NoFaults,
+                        )
+                        .expect("write"),
+                ),
+                None => drop(
+                    versioned
+                        .delete_text_file(
+                            &dohc_engine_domain::DeleteTextFile {
+                                workspace_id: "ws".to_owned(),
+                                version_id: "main".to_owned(),
+                                path: path.to_owned(),
+                                moment_id,
+                                request_id: None,
+                                metadata_origin: "cli".to_owned(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 10,
+                            },
+                            &NoFaults,
+                        )
+                        .expect("delete"),
+                ),
+            }
+        }
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='m-3'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("the rule delete's order");
+        seed_pending_conflict_bundle(&mut store, "conflict-x", cut, &[], 20);
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let ops = local_ops(&store);
+        let mut files: std::collections::BTreeMap<String, String> = Default::default();
+        let mut steps = Vec::new();
+        for (kind, payload) in &ops {
+            let step = match (kind.as_str(), payload["operation"].as_str()) {
+                ("moment.append", Some(operation)) => {
+                    let path = payload["path"].as_str().expect("path").to_owned();
+                    if operation == "delete" {
+                        files.remove(&path);
+                    } else {
+                        let sha = payload["payloadAfterBlobSha256"].as_str().expect("sha");
+                        let text: String = store
+                            .read_with(|conn| {
+                                conn.query_row(
+                                    "SELECT text FROM blobs WHERE sha256=?1",
+                                    [sha],
+                                    |row| row.get(0),
+                                )
+                            })
+                            .expect("blob");
+                        files.insert(path.clone(), text);
+                    }
+                    format!("{operation} {path}")
+                }
+                _ => kind.clone(),
+            };
+            steps.push(step.clone());
+            // A member reaches the file only when every rule above it lets
+            // members in.
+            let reaches = files.contains_key("team/private/secret.md")
+                && ["team", "team/private"].iter().all(|folder| {
+                    files
+                        .iter()
+                        .filter(|(path, _)| {
+                            dohc_engine_files::access_rules::is_access_rule_path(path)
+                                && access_rule_folder(path) == *folder
+                        })
+                        .all(|(_, text)| {
+                            parse_access_rule(text).is_some_and(|rule| rule.members.is_some())
+                        })
+                });
+            assert!(
+                !reaches,
+                "members reach team/private/secret.md after {steps:?}"
+            );
+        }
+        assert_eq!(steps.len(), 6, "{steps:?}");
+    }
+
     #[test]
     fn malformed_pending_bundle_rolls_back_position_and_every_log_append() {
         let (_scratch, _, mut store) = open_store();
