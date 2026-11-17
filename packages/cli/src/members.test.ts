@@ -224,6 +224,7 @@ describe("dohc members", () => {
     role: "member",
     state: "active",
     name: "Sam",
+    paletteSlot: 0,
     email: null,
     invitedAtMs: 2,
     joinedAtMs: 3,
