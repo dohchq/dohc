@@ -196,18 +196,40 @@ function opensTable(header: string, delimiter: string): boolean {
 type Fence = { marker: string; length: number };
 
 /** The line index where a standalone `$$…$$` block ends, or null when the
- *  line does not open one. `dohc-markdown-extensions.ts` anchors the opener at
- *  column 0 and needs the first `$$` after it to end a line — anything else
+ *  line does not open one. `dohc-markdown-extensions.ts` allows up to three
+ *  spaces before the opener and needs the first `$$` after it to end a line — anything else
  *  is literal text, so an unclosed `$$` is not math and claims nothing. */
-function mathBlockEnd(lines: string[], start: number): number | null {
-  if (!(lines[start] ?? "").startsWith("$$")) return null;
+function mathBlockEnd(lines: string[], start: number, maxIndent = 3): number | null {
+  const first = lines[start] ?? "";
+  let open = 0;
+  while (open < maxIndent && first[open] === " ") open += 1;
+  if (!first.startsWith("$$", open)) return null;
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    const closing = line.indexOf("$$", index === start ? 2 : 0);
+    const closing = line.indexOf("$$", index === start ? open + 2 : 0);
     if (closing === -1) continue;
     return closing + 2 === line.length ? index : null;
   }
   return null;
+}
+
+// The underline and the lines a setext heading's text may not run into, from
+// marked's GFM `lheading` rule.
+const LHEADING_UNDERLINE_RE = /^ {0,3}(?:=+|-+) *$/;
+const LHEADING_STOP_RE =
+  /^(?:\s*$| {0,3}(?:[*+-]|\d{1,9}[.)]) |(?: {4}| {0,3}\t)| {0,3}(?:`{3,}|~{3,})| {0,3}>| {0,3}#{1,6}| {0,3}<[^\n>]+>$| {0,3}\|?(?:[:\- ]*\|)+[:\- ]*$)/;
+
+/** Where the paragraph run from `start` stops, and whether a setext underline
+ *  stops it. marked reads a setext heading before display math, so a `$$`
+ *  line inside an underlined run is the heading's text. The answer is the
+ *  same from any start up to `end`. */
+function setextRun(lines: string[], start: number): { end: number; underlined: boolean } {
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (LHEADING_UNDERLINE_RE.test(line)) return { end: index, underlined: true };
+    if (LHEADING_STOP_RE.test(line)) return { end: index, underlined: false };
+  }
+  return { end: lines.length, underlined: false };
 }
 
 /** The last line of a link reference definition starting at `start`, or null
@@ -357,6 +379,8 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openKind: BlockKind = "other";
   let openMarker = "";
   let openIndent = 1;
+  let openHtml = false;
+  let setext = { end: -1, underlined: false };
   let previousEndsLazy = false;
   let quoteOpen = false;
   let quoteCallout = false;
@@ -449,12 +473,33 @@ export function blockForLine(body: string, line: number): LineBlock {
     const marker = listMarker(text);
     const listOpen = openKind === "bullet" || openKind === "task" || openKind === "ordered";
     let opener = fenceOpener(text);
-    const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
     // of the same list, content indented into that item, or the next chunk of
     // an indented code block. A fence indented into a list item is one of
     // those continuations, which is why this is read before the starts below.
     const indent = leadingColumns(text);
+    // Display math opens after up to three spaces where a block can start. A
+    // line that continues a list, quote, table or HTML block keeps reading it
+    // at column 0 only.
+    const continues =
+      (listOpen && (open || indent >= openIndent)) ||
+      (openKind === "quote" && (open || quoteOpen)) ||
+      (open && (openKind === "table" || openHtml));
+    let mathClose = mathBlockEnd(lines, index, continues ? 0 : 3);
+    if (mathClose !== null && open && openKind === "other") {
+      // marked tries the heading from the paragraph's first line, so a stop
+      // above this line rules it out too, and so does a first line the rule
+      // refuses, such as `| - |` or `#tag`. `holderStart` is that line's
+      // successor, 0-based.
+      if (holderStart > setext.end) setext = setextRun(lines, holderStart);
+      if (
+        setext.underlined &&
+        setext.end > index &&
+        !LHEADING_STOP_RE.test(lines[holderStart - 1] ?? "")
+      ) {
+        mathClose = null;
+      }
+    }
     const resumes =
       (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");
@@ -523,6 +568,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       holderStart = index + 1;
       blocks += 1;
       openKind = kind;
+      openHtml = kind === "other" && HTML_BLOCK_RE.test(text);
       openMarker = marker;
       quoteOpen = false;
       quoteCallout = kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));

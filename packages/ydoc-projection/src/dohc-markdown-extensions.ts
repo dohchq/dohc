@@ -10,15 +10,87 @@ import { Paragraph } from "@tiptap/extension-paragraph";
 import { sanitizeImageSrc } from "./image-src.js";
 import { TABLE_ROW_HEIGHTS_RE, tableRowHeight, tableRowHeights } from "./table-row-heights.js";
 
-function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
-  const match = src.match(pattern);
-  return match?.index === 0 ? match : null;
+// marked reads inline text in a loop that only drops text from the front of
+// the source the loop began with. Before each text token it asks every inline
+// start where in the rest of that source a token could begin, and it tries
+// each tokenizer where the text stops. A search of the whole rest each time
+// reads a long run of punctuation once per character, so the reader records
+// each loop and the searches below go forward through its source once.
+// marked's text stops before each `[`, `<` and `\`, so a token that opens with
+// one needs no start.
+type InlineRead = {
+  lexer: object;
+  tokens: object;
+  source: string;
+  found: Map<string, { from: number; at: number }>;
+};
+const inlineReads: InlineRead[] = [];
+
+export function readInline<T>(lexer: object, tokens: object, source: string, read: () => T): T {
+  inlineReads.push({ lexer, tokens, source, found: new Map() });
+  try {
+    return read();
+  } finally {
+    inlineReads.pop();
+  }
 }
 
-function firstUnescapedIndex(src: string, pattern: RegExp): number {
-  const match = pattern.exec(src);
-  if (!match || match.index < 0) return -1;
-  return match.index + (match[1]?.length ?? 0);
+// The loop asking about `src`, which `src` ends, if the reader recorded it.
+function inlineRead(src: string, owner: unknown, key: "lexer" | "tokens"): InlineRead | undefined {
+  const read = inlineReads.at(-1);
+  return read && read[key] === owner && src.length <= read.source.length ? read : undefined;
+}
+
+// What `search` finds from `from` in the read's source. A search must find the
+// same place from any earlier point, so the last one holds until `from` passes it.
+function searchForward(
+  read: InlineRead,
+  key: string,
+  from: number,
+  search: (from: number) => number,
+): number {
+  let found = read.found.get(key);
+  if (!found || found.from > from || (found.at >= 0 && found.at < from)) {
+    found = { from, at: search(from) };
+    read.found.set(key, found);
+  }
+  return found.at;
+}
+
+// The first `character` in `src` at or after `from`, or -1.
+function indexAfter(src: string, tokens: unknown, character: string, from: number): number {
+  const read = inlineRead(src, tokens, "tokens");
+  if (!read) return src.indexOf(character, from);
+  const offset = read.source.length - src.length;
+  const at = searchForward(read, character, offset + from, (start) =>
+    read.source.indexOf(character, start),
+  );
+  return at < 0 ? -1 : at - offset;
+}
+
+// The first `marker` in `src` that `opens` accepts, given the characters before
+// and after it, or -1. Tiptap types a start's `this` as the tokenizer, but
+// marked calls it with `{ lexer }`.
+function markerStart(
+  context: unknown,
+  src: string,
+  marker: string,
+  opens: (before: string | undefined, after: string | undefined) => boolean,
+): number {
+  const search = (text: string, at: number) => {
+    for (at = text.indexOf(marker, at); at >= 0; at = text.indexOf(marker, at + 1)) {
+      if (opens(text[at - 1], text[at + marker.length])) return at;
+    }
+    return -1;
+  };
+  const read = inlineRead(src, (context as { lexer?: object } | undefined)?.lexer, "lexer");
+  if (!read) return search(src, 0);
+  const text = read.source;
+  const from = text.length - src.length;
+  if (text.startsWith(marker, from) && opens(undefined, text[from + marker.length])) return 0;
+  // A marker after `from` has the same character before it in each later ask.
+  const at = searchForward(read, marker, from + 1, (start) => search(text, start));
+  return at < 0 ? -1 : at - from;
 }
 
 // marked asks where a block may start only to cut the paragraph it is about
@@ -35,12 +107,19 @@ function paragraphRegion(src: string): string {
   return src;
 }
 
+// marked gives the block starts below the paragraph's text less its first
+// character, so that text begins mid-line, never at the start of a line. A
+// marker may follow up to three spaces, as in the engine.
 function lineMarkerStart(source: string, marker: string): number {
   const src = paragraphRegion(source);
   let markerIndex = src.indexOf(marker);
   while (markerIndex >= 0) {
-    if (markerIndex === 0 || src[markerIndex - 1] === "\n") {
-      return markerIndex <= 1 ? 0 : markerIndex;
+    let lineStart = markerIndex;
+    while (lineStart > 0 && markerIndex - lineStart < 3 && src[lineStart - 1] === " ") {
+      lineStart -= 1;
+    }
+    if (lineStart > 0 && src[lineStart - 1] === "\n") {
+      return lineStart <= 1 ? 0 : lineStart;
     }
     markerIndex = src.indexOf(marker, markerIndex + marker.length);
   }
@@ -58,7 +137,7 @@ function calloutStart(source: string): number {
       while (lineStart > 0 && quoteIndex - lineStart < 3 && src[lineStart - 1] === " ") {
         lineStart -= 1;
       }
-      if (lineStart === 0 || src[lineStart - 1] === "\n") {
+      if (lineStart > 0 && src[lineStart - 1] === "\n") {
         return lineStart <= 1 ? 0 : lineStart;
       }
     }
@@ -67,42 +146,32 @@ function calloutStart(source: string): number {
   return -1;
 }
 
-// Finds the first unescaped `[[` closed by `]]` on its line, with a non-empty
-// inner run that allows escaped characters (`\]`, `\|`, `\\`) so a label holding
-// an escaped delimiter is still found mid-line. A search from each `[[` would
-// rescan the rest of a long run of `[`. Every later `[[` inside a run that fails
-// stops at the same character, so the search resumes after it.
-function wikilinkStart(src: string): number {
-  let open = src.indexOf("[[");
-  while (open >= 0) {
-    if (open > 0 && src[open - 1] === "\\") {
-      open = src.indexOf("[[", open + 1);
+function closingWikilinkFrom(text: string, from: number): number {
+  for (let index = from; index < text.length - 1; index += 1) {
+    if (text[index] === "\\") {
+      index += 1;
       continue;
     }
-    let index = open + 2;
-    while (index < src.length && src[index] !== "]" && src[index] !== "\n") {
-      if (src[index] === "\\") {
-        // A backslash escapes any one character except a line end, as `.` matches.
-        if (!/./.test(src[index + 1] ?? "")) break;
-        index += 1;
-      }
-      index += 1;
-    }
-    if (index > open + 2 && src[index] === "]" && src[index + 1] === "]") return open;
-    open = src.indexOf("[[", index);
+    if (text[index] === "]" && text[index + 1] === "]") return index;
   }
   return -1;
 }
 
-function findClosingWikilink(src: string): number {
-  for (let index = 2; index < src.length - 1; index += 1) {
-    if (src[index] === "\\") {
-      index += 1;
-      continue;
-    }
-    if (src[index] === "]" && src[index + 1] === "]") return index;
-  }
-  return -1;
+// The first unescaped `]]` after the `[[` that opens `src`, or -1.
+function findClosingWikilink(src: string, tokens: unknown): number {
+  const read = inlineRead(src, tokens, "tokens");
+  if (!read) return closingWikilinkFrom(src, 2);
+  const text = read.source;
+  const offset = text.length - src.length;
+  // A backslash run where this search begins pairs up differently from the
+  // same run inside an earlier search. Past the first other character, each
+  // search reads every character the same way.
+  let at = offset + 2;
+  while (text[at] === "\\") at += 2;
+  if (at >= text.length - 1) return -1;
+  if (text[at] === "]" && text[at + 1] === "]") return at - offset;
+  const close = searchForward(read, "]]", at + 1, (start) => closingWikilinkFrom(text, start));
+  return close < 0 ? -1 : close - offset;
 }
 
 // A wikilink's `target`/`label` are delimited by `|` and closed by `]]`, so a
@@ -278,7 +347,8 @@ const DohcEscapedPunctuation = Node.create({
   markdownTokenizer: {
     name: "dohcEscape",
     level: "inline",
-    start: "\\",
+    // Without a start, Tiptap would run the tokenizer as one.
+    start: () => -1,
     tokenize(src) {
       const match = /^\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/.exec(src);
       if (!match) return undefined;
@@ -329,13 +399,10 @@ const DohcWikilink = Node.create({
   markdownTokenizer: {
     name: "wikilink",
     level: "inline",
-    start(src) {
-      // The authoritative bounds come from findClosingWikilink in tokenize.
-      return wikilinkStart(src);
-    },
-    tokenize(src) {
+    start: () => -1,
+    tokenize(src, tokens) {
       if (!src.startsWith("[[")) return undefined;
-      const closingIndex = findClosingWikilink(src);
+      const closingIndex = findClosingWikilink(src, tokens);
       if (closingIndex === -1) return undefined;
       const raw = src.slice(0, closingIndex + 2);
       const [target, label] = splitWikilinkInner(raw.slice(2, -2));
@@ -389,11 +456,18 @@ const DohcInlineAtom = Node.create({
   markdownTokenizer: {
     name: "inlineAtom",
     level: "inline",
-    start: "{{atom:",
-    tokenize(src) {
-      const match = firstTokenMatch(src, /^\{\{atom:([^}\s]+)([^}]*)\}\}/);
+    start(src) {
+      return markerStart(this, src, "{{atom:", () => true);
+    },
+    tokenize(src, tokens) {
+      if (!src.startsWith("{{atom:")) return undefined;
+      // Neither the id nor the params may hold `}`, so the first one ends the atom.
+      const close = indexAfter(src, tokens, "}", 7);
+      if (close < 0 || src[close + 1] !== "}") return undefined;
+      const match = /^(\S+)([\s\S]*)$/.exec(src.slice(7, close));
       if (!match) return undefined;
-      const [raw, atomId = "", params = ""] = match;
+      const raw = src.slice(0, close + 2);
+      const [, atomId = "", params = ""] = match;
       return {
         type: "inlineAtom",
         raw,
@@ -758,7 +832,13 @@ const DohcHighlight = Mark.create({
     name: "highlight",
     level: "inline",
     start(src) {
-      return firstUnescapedIndex(src, /(^|[^\\=])==(?!\s)(?!=)/);
+      return markerStart(
+        this,
+        src,
+        "==",
+        (before, after) =>
+          before !== "\\" && before !== "=" && (after === undefined || /[^\s=]/.test(after)),
+      );
     },
     tokenize(src, _tokens, helpers) {
       if (!src.startsWith("==")) return undefined;
@@ -842,7 +922,12 @@ export const DohcMathInline = Node.create({
     start(src) {
       // Opening `$` must not be preceded by `\` (escaped) or another `$` (that
       // is block/display `$$`), and must be followed by a non-space, non-`$`.
-      return firstUnescapedIndex(src, /(^|[^\\$])\$(?=[^\s$])/);
+      return markerStart(
+        this,
+        src,
+        "$",
+        (before, after) => before !== "\\" && before !== "$" && /[^\s$]/.test(after ?? "$"),
+      );
     },
     tokenize(src) {
       if (!src.startsWith("$")) return undefined;
@@ -901,8 +986,10 @@ export const DohcMathBlock = Node.create({
     level: "block",
     start: (src) => lineMarkerStart(src, "$$"),
     tokenize(src) {
-      if (!src.startsWith("$$")) return undefined;
-      const closing = src.indexOf("$$", 2);
+      let open = 0;
+      while (open < 3 && src[open] === " ") open += 1;
+      if (!src.startsWith("$$", open)) return undefined;
+      const closing = src.indexOf("$$", open + 2);
       if (closing === -1) return undefined;
       // The closing `$$` must end its line (or the document), so a mid-line
       // `$$x$$ trailing` is left as literal text instead of being sliced into
@@ -910,7 +997,7 @@ export const DohcMathBlock = Node.create({
       const afterClosing = src[closing + 2] ?? "\n";
       if (afterClosing !== "\n") return undefined;
       const raw = src.slice(0, closing + 2);
-      const tex = src.slice(2, closing);
+      const tex = src.slice(open + 2, closing);
       return { type: "mathBlock", raw, tex };
     },
   },

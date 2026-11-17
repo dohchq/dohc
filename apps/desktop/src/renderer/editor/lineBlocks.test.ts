@@ -255,8 +255,8 @@ describe("blockForLine — the index", () => {
   });
 
   it("only reads math where the tokenizer does", () => {
-    // Indented, trailing text after the closer, and unclosed all stay text.
-    expect(blockForLine("Intro\n\n  $$x$$\n\nAfter", 5).index).toBe(2);
+    // Four spaces, trailing text after the closer, and unclosed all stay text.
+    expect(blockForLine("Intro\n\n    $$x$$\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n$$x$$ trailing\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n$$x\n\nAfter", 5).index).toBe(2);
   });
@@ -378,6 +378,33 @@ describe("blockForLine — the index", () => {
     expect(small.read).toBeGreaterThan(0);
     expect(large.read, `${small.read} -> ${large.read}`).toBeLessThan(small.read * 2.2);
   });
+
+  it.each(["text", "text\n  $$x$$"])(
+    "maps a run of %j with no blank line in linear work",
+    (unit) => {
+      const { test } = RegExp.prototype;
+      const work = (pairs: number) => {
+        const body = `${Array.from({ length: pairs }, () => unit).join("\n")}\n\nAfter`;
+        let read = 0;
+        const spy = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+          this: RegExp,
+          source: string,
+        ) {
+          read += 1;
+          return Reflect.apply(test, this, [source]) as boolean;
+        });
+        try {
+          blockForLine(body, body.split("\n").length);
+        } finally {
+          spy.mockRestore();
+        }
+        return read;
+      };
+      const small = work(500);
+      const large = work(1000);
+      expect(large, `${small} -> ${large}`).toBeLessThan(small * 2.2);
+    },
+  );
 
   it("rejects a fence opener that is already four columns in", () => {
     // `\t```” reaches column four, so the parser reads indented code and the
@@ -1026,11 +1053,65 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an indented $$ is not math",
+      name: "$$ after up to three spaces is math",
       body: "Intro\n\n  $$x$$\n\nAfter",
       lands: [
-        [3, "$$x$$"],
+        [3, "x"],
         [5, "After"],
+      ],
+    },
+    {
+      name: "an HTML block keeps its indented $$",
+      body: '<div align="center">\n  $$\n  E = mc^2\n  $$\n</div>\n\nAfter',
+      lands: [
+        [3, "E = mc^2"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a setext underline takes the $$ lines above it into the heading",
+      body: "Intro\n  $$x$$\n---\nAfter",
+      lands: [
+        [2, "$$x$$"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "an underline in a later block does not reach back over math",
+      body: "Compute the energy:\n$$E=mc^2$$\n```yaml\n---\nenergy: 42\n```\n\nResults",
+      lands: [
+        [2, "E=mc^2"],
+        [8, "Results"],
+      ],
+    },
+    ...["| - | - |", "#physics"].map((first) => ({
+      name: `a first line marked refuses as heading text keeps the math: ${first}`,
+      body: `${first}\n $$x$$\nfoo\n===\n\nAfter`,
+      lands: [
+        [2, "x"],
+        [6, "After"],
+      ] as Array<[number, string]>,
+    })),
+    ...[
+      "Intro\n$$x$$\n<incomplete\n---\n\nAfter",
+      "Intro\n$$x$$\n    code\n---\n\nAfter",
+      "## Energy\nCompute the energy:\n$$E=mc^2$$\n#physics\nwhere E is energy\n===\n```yaml\nenergy: 42\n```\n\nAfter",
+      "Compute the energy:\n$$E=mc^2$$\n    E = 9e16 J\nwhere E is energy\n---\n```yaml\n---\nenergy: 42\n```\n\nAfter",
+      "Para\n$$x$$\n\tmore\nfoo\n===\n\nAfter",
+      "Para\n$$x$$\nfoo\n===\t\n\nAfter",
+      "Para\n    more\n$$x$$\nfoo\n===\n\nAfter",
+      "Para\n2. item\n$$x$$\nfoo\n===\n\nAfter",
+    ].map((body) => ({
+      name: `a setext underline reaches math over the lines marked allows: ${JSON.stringify(body)}`,
+      body,
+      lands: [[body.split("\n").length, "After"]] as Array<[number, string]>,
+    })),
+    {
+      name: "a table keeps an indented $$ as a row",
+      body: "| a | b |\n| - | - |\n| 1 | 2 |\n  $$\n  x\n  $$\n\nAfter",
+      lands: [
+        [4, "$$"],
+        [8, "After"],
       ],
     },
     {

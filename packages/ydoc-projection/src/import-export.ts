@@ -27,6 +27,7 @@ import {
   MarkdownParagraph,
   MarkdownTaskList,
   markdownListParseState,
+  readInline,
   writingTableCellTokens,
 } from "./dohc-markdown-extensions.js";
 import { assertSupportedListMarkdown } from "./list-markdown.js";
@@ -378,12 +379,9 @@ literalProbe.lexer = new Lexer({ ...getDefaults(), tokenizer: literalProbe });
 const markdownParser = new Marked({
   extensions: [
     {
+      // marked's text stops before each `[`, so this needs no start.
       name: "dohcEmptyLink",
       level: "inline",
-      start: (src) => {
-        const at = src.indexOf("[](");
-        return at < 0 ? undefined : at;
-      },
       tokenizer: (src) => {
         if (!src.startsWith("[](")) return undefined;
         const link = literalProbe.link(src);
@@ -464,7 +462,8 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
   RendererOutput
 > {
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
-    return super.inlineTokens(parseTabs.size ? restoreParseSentinels(src, parseTabs) : src, tokens);
+    const source = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src;
+    return readInline(this, tokens, source, () => super.inlineTokens(source, tokens));
   }
 }
 markdownParser.Lexer = ContentTabLexer;
