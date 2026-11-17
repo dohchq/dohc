@@ -3586,6 +3586,51 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_past_a_save_that_lacks_a_taken_edit_keeps_the_edit() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let typed = type_drafts(&mut store, &observed, &owner, 1, &["Taken head"]);
+        let (head, _) = &typed[0];
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        // A save at 6 that holds only an earlier edit.
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        feed(
+            &mut store,
+            &observed,
+            6,
+            collaborator.richdoc_append_paragraph("Saved elsewhere"),
+        );
+        committed(
+            store
+                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, true, 21))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.write_with(&NoFaults, |tx| {
+                release::release_in_tx(tx, &observed.binding, Some(6), None, 22, |_, _, _, _, _| {
+                    Ok(())
+                })
+            }),
+            Err(OwnerOutboxError::StopConflict)
+        ));
+        assert_eq!(taken_rows(&store), 1);
+    }
+
+    #[test]
     fn a_pause_after_a_restart_keeps_a_taken_edit_in_its_copy_and_frees_the_row() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);

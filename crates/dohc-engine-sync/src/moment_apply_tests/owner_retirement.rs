@@ -247,28 +247,11 @@ fn assert_retired(owner: &RestoreOwner, outbox_id: &str, checkpoint_digest: &str
 #[test]
 fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
     let mut owner = restore_owner();
-    let taken_edit = edit(&owner, "taken edit");
     let refused_edit = edit(&owner, "refused edit");
     let unsent_edit = edit(&owner, "unsent edit");
-    let taken = append_update(&mut owner, "taken", taken_edit.clone());
     let refused = append_update(&mut owner, "refused", refused_edit.clone());
     let unsent = append_update(&mut owner, "unsent", unsent_edit.clone());
     assert_eq!(refused.outbox_id, unsent.outbox_id);
-    // The relay took the first edit into its room, and no save holds it yet.
-    acknowledge_taken(
-        &mut owner.store,
-        &mut dohc_engine_collab::WriterDocCache::default(),
-        "ws",
-        &taken.outbox_id,
-        &OwnerDeliveryReceipt {
-            delivery_id: taken.delivery_id.clone(),
-            update_digest: taken.update_digest.clone(),
-            journal_cursor: owner.observed.accepted_cursor + 1,
-            accepting_host_epoch: 1,
-        },
-    )
-    .unwrap();
-    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 1);
     owner
         .store
         .write_with(&NoFaults, |tx| {
@@ -289,33 +272,25 @@ fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
     let devices = count(&owner.store, "live_device_application_bindings");
     retire(&mut owner.store).unwrap();
     assert_eq!(count(&owner.store, "ydoc_docs"), 0);
-    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 0);
-    // The refused edit is pending again and the taken edit is kept after the
-    // queue's own, so the recovery copy holds all three.
+    // The refused edit is pending again, so the recovery copy holds both.
     assert_eq!(
         pending_digests(&owner.store),
-        vec![
-            refused.update_digest.clone(),
-            unsent.update_digest.clone(),
-            taken.update_digest.clone()
-        ]
+        vec![refused.update_digest.clone(), unsent.update_digest.clone()]
     );
     assert_retired(
         &owner,
         &unsent.outbox_id,
         &owner.observed.checkpoint_digest,
-        3,
+        2,
     );
-    // The page is gone, so the queue holds the only copy of every edit.
+    // The page is gone, so the queue holds the only copy of both edits.
     let expected = Ydoc::wire();
-    for part in [&owner.checkpoint, &taken_edit, &refused_edit, &unsent_edit] {
+    for part in [&owner.checkpoint, &refused_edit, &unsent_edit] {
         expected.apply(part).unwrap();
     }
     let (updates, markdown) = recovery_copy(&owner.store, &unsent.outbox_id);
-    assert_eq!(updates, vec![refused_edit, unsent_edit, taken_edit]);
-    for text in ["taken edit", "refused edit", "unsent edit"] {
-        assert!(markdown.contains(text), "the recovery copy lacks {text}");
-    }
+    assert_eq!(updates, vec![refused_edit, unsent_edit]);
+    assert!(markdown.contains("refused edit") && markdown.contains("unsent edit"));
     assert_eq!(
         markdown,
         expected.project(YdocContentKind::Richdoc).unwrap().content
@@ -328,6 +303,45 @@ fn retiring_an_owner_bound_page_closes_its_generation_and_keeps_every_edit() {
         count(&owner.store, "live_device_application_bindings"),
         devices
     );
+}
+
+/// The relay took the owner's edit and no save holds it, so no queue entry
+/// keeps its bytes. Retirement keeps them for the recovery copy.
+#[test]
+fn retiring_a_page_keeps_an_edit_the_relay_took_but_has_not_saved() {
+    let mut owner = restore_owner();
+    let taken_edit = edit(&owner, "taken edit");
+    let taken = append_update(&mut owner, "taken", taken_edit.clone());
+    acknowledge_taken(
+        &mut owner.store,
+        &mut dohc_engine_collab::WriterDocCache::default(),
+        "ws",
+        &taken.outbox_id,
+        &OwnerDeliveryReceipt {
+            delivery_id: taken.delivery_id.clone(),
+            update_digest: taken.update_digest.clone(),
+            journal_cursor: owner.observed.accepted_cursor + 1,
+            accepting_host_epoch: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 1);
+    assert!(pending_digests(&owner.store).is_empty());
+    retire(&mut owner.store).unwrap();
+    assert_eq!(count(&owner.store, "ydoc_owner_taken_rows"), 0);
+    assert_eq!(
+        pending_digests(&owner.store),
+        vec![taken.update_digest.clone()]
+    );
+    assert_retired(
+        &owner,
+        &taken.outbox_id,
+        &owner.observed.checkpoint_digest,
+        1,
+    );
+    let (updates, markdown) = recovery_copy(&owner.store, &taken.outbox_id);
+    assert_eq!(updates, vec![taken_edit]);
+    assert!(markdown.contains("taken edit"));
 }
 
 #[test]
