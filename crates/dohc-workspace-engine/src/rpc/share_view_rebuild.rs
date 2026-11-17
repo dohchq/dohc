@@ -1732,6 +1732,8 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), Halt> {
     let folder = root.join(folder);
     link_free(root, &folder.join(CONTENTS))?;
     let temp = folder.join(format!("{CONTENTS}.tmp"));
+    // A stopped rebuild can leave this name, or something can be put there.
+    link_free(root, &temp)?;
     let written = std::fs::create_dir_all(&folder)
         .and_then(|()| write_synced(&temp, text.as_bytes()))
         .and_then(|()| std::fs::rename(&temp, folder.join(CONTENTS)));

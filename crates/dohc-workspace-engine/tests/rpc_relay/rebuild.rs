@@ -1508,6 +1508,56 @@ async fn a_staging_folder_linked_while_the_rebuild_was_stopped_stops_it() {
     .await;
 }
 
+// The list of saved files is written to a temporary name first. A link left
+// at that name while the rebuild was stopped must not take the write outside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linked_temporary_list_left_while_the_rebuild_was_stopped_stops_it() {
+    let copy = edited_copy("rpc-rebuild-linked-contents-temp").await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("recovered-2");
+    rebuild_on(&service, &copy).await.expect_err("crashed");
+    drop(service);
+    let root = copy.scratch.path();
+    let folder = manifest(&copy).expect("manifest")["plan"]["recoveryFolder"]
+        .as_str()
+        .expect("recovery folder")
+        .to_owned();
+    let elsewhere = ScratchDir::new().expect("other workspace");
+    let theirs = elsewhere.path().join("notes.md");
+    std::fs::write(&theirs, "not yours").expect("their file");
+    let temp = root.join(&folder).join("contents.md.tmp");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&theirs, &temp).expect("file link: turn on Developer Mode");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&theirs, &temp).expect("file link");
+
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    assert_eq!(std::fs::read(&theirs).expect("their file"), b"not yours");
+    assert_eq!(
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-linked-folder",
+            "path": format!("{folder}/contents.md.tmp"),
+        })
+    );
+
+    std::fs::remove_file(&temp).expect("remove link");
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        names_in(&root.join(&folder)),
+        ["0001 b.md", "0002 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(root.join(&folder).join("0002 a.md")).expect("edit"),
+        b"my edit"
+    );
+    assert_eq!(std::fs::read(&theirs).expect("their file"), b"not yours");
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
 /// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
 async fn edited_copy(workspace_id: &str) -> ClosedCopy {
     closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {
