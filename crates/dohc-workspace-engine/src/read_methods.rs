@@ -12,6 +12,7 @@ const READS: &[&str] = &[
     "versions.active",
     "versions.compareFiles",
     "versions.list",
+    "versions.ruleMergeOrder",
 ];
 
 pub(crate) fn reads_only(method: &str) -> bool {

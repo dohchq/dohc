@@ -48,8 +48,9 @@ use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::store::CAPTURE_ORIGIN;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
-    level_for_email, parse_access_rule, rule_change_narrows,
+    ACCESS_RULE_FILE, AccessRule, ReachBefore, RuleFileStep, access_rule_folder,
+    is_access_rule_path, is_rule_of, level_for_email, parse_access_rule, rule_change_narrows,
+    safe_rule_file_order,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -2489,6 +2490,124 @@ fn remove_rule(
     if removed { Ok(()) } else { Err(waits()) }
 }
 
+/// The rule files a merge writes, then deletes, in the order it does.
+pub type RuleMergeOrder = (Vec<String>, Vec<String>);
+
+/// A rule file dohc can't read as text. It hides its folder, as an
+/// unreadable rule does.
+const UNREADABLE_RULE: &[u8] = b"\xff";
+
+/// A rule file's bytes in `version`, or `None` when it has none there.
+fn version_rule_bytes(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    let state = dohc_engine_domain::select_snapshot_by_path_in_tx(conn, workspace, version, path)?;
+    Ok(match (state.snapshot, state.binary_sha256) {
+        (Some(snapshot), _) => Some(snapshot.text.into_bytes()),
+        (None, Some(_)) => Some(UNREADABLE_RULE.to_vec()),
+        (None, None) => None,
+    })
+}
+
+/// The rule files `version` holds at or under `folder`. The workspace's own
+/// rule reads every path.
+fn rule_paths_under(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    folder: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let (low, high) = folder_range(folder);
+    let mut scan = conn
+        .prepare_cached(
+            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND path>=?3 AND path<?4",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let paths = scan
+        .query_map(params![workspace, version, low, high], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(StorageError::corrupt_public)?;
+    let mut rules = Vec::new();
+    for path in paths {
+        let path = path.map_err(StorageError::corrupt_public)?;
+        if is_access_rule_path(&path) {
+            rules.push(path);
+        }
+    }
+    Ok(rules)
+}
+
+/// The order a merge from `source` into `target` writes `writes`, then
+/// deletes `deletes`, so that no single step gives any member more anywhere
+/// than `target` before and after the merge do. `None` when no such order
+/// exists. It judges the source's text of each rule it writes.
+fn merge_rule_order(
+    conn: &Connection,
+    workspace: &str,
+    source: &str,
+    target: &str,
+    writes: &[String],
+    deletes: &[String],
+) -> Result<Option<RuleMergeOrder>, RuntimeError> {
+    // Reach changes only at and under a changed folder, and there it also
+    // depends on the rules above.
+    let mut paths = BTreeSet::new();
+    let folders: BTreeSet<&str> = writes
+        .iter()
+        .chain(deletes)
+        .map(|path| access_rule_folder(path))
+        .collect();
+    for folder in folders {
+        paths.extend(rule_paths_under(conn, workspace, target, folder)?);
+        let mut above = folder;
+        while !above.is_empty() {
+            above = above.rsplit_once('/').map_or("", |(parent, _)| parent);
+            paths.extend(committed_rule_paths(conn, workspace, target, above)?);
+        }
+    }
+    let mut before = BTreeMap::new();
+    for path in paths {
+        if let Some(bytes) = version_rule_bytes(conn, workspace, target, &path)? {
+            before.insert(path, bytes);
+        }
+    }
+    let mut written = Vec::with_capacity(writes.len());
+    for path in writes {
+        written.push(
+            version_rule_bytes(conn, workspace, source, path)?
+                .unwrap_or_else(|| UNREADABLE_RULE.to_vec()),
+        );
+    }
+    let write_steps: Vec<_> = writes
+        .iter()
+        .zip(&written)
+        .map(|(path, bytes)| RuleFileStep::Write(path, bytes))
+        .collect();
+    let delete_steps: Vec<_> = deletes
+        .iter()
+        .map(|path| RuleFileStep::Delete(path))
+        .collect();
+    Ok(
+        safe_rule_file_order(&before, &write_steps, &delete_steps).map(|(write, delete)| {
+            (
+                write
+                    .into_iter()
+                    .map(|index| writes[index].clone())
+                    .collect(),
+                delete
+                    .into_iter()
+                    .map(|index| deletes[index].clone())
+                    .collect(),
+            )
+        }),
+    )
+}
+
 impl ActorHandle {
     /// What the ordering step tells capture between its passes.
     pub fn access_rule_signals(&self) -> &AccessRuleSignals {
@@ -2504,6 +2623,32 @@ impl ActorHandle {
             store
                 .read_with(|conn| access_rule_holds::list_in(conn, &workspace_id))
                 .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    /// The order a merge from `source_version_id` writes, then deletes, these
+    /// rule files in, so that no step widens anyone's reach past both the
+    /// target before and after it. `None` when no order of single writes does.
+    pub async fn access_rule_merge_order(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        writes: Vec<String>,
+        deletes: Vec<String>,
+    ) -> Result<Option<RuleMergeOrder>, RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                merge_rule_order(
+                    conn,
+                    &workspace_id,
+                    &source_version_id,
+                    &target_version_id,
+                    &writes,
+                    &deletes,
+                )
+            })
         })
         .await
     }

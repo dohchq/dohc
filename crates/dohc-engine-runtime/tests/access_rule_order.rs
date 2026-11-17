@@ -3984,3 +3984,87 @@ fn a_several_file_decision_that_lost_its_safe_order_refreshes_the_hold() {
     f.decide("team", AccessRuleDecision::Restore).unwrap();
     assert!(f.holds().is_empty());
 }
+
+fn create_version(f: &Fixture, id: &str) {
+    f.runtime
+        .block_on(f.actor.create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: id.to_owned(),
+                name: id.to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 41,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("version");
+}
+
+/// The engine reads Main's rules and the Version's new ones itself, and
+/// orders the merge's rule writes so none widens anyone midway.
+#[test]
+fn a_merge_orders_its_rule_writes_from_what_main_and_the_version_hold() {
+    let f = Fixture::new();
+    f.versioned_write(write("team/access.yaml", "members: view\n", "m-team"))
+        .expect("team");
+    let order = |version: &str, writes: &[&str]| {
+        f.runtime
+            .block_on(f.actor.access_rule_merge_order(
+                WS.to_owned(),
+                version.to_owned(),
+                "main".to_owned(),
+                writes.iter().map(|path| (*path).to_owned()).collect(),
+                Vec::new(),
+            ))
+            .expect("order")
+    };
+    // Team widens while a rule is created inside it: the inner rule first.
+    create_version(&f, "wider");
+    for (path, text, moment) in [
+        ("team/access.yaml", "members: edit\n", "m-wide"),
+        ("team/private/access.yaml", "members: view\n", "m-private"),
+    ] {
+        f.versioned_write(WriteText {
+            version_id: "wider".to_owned(),
+            ..write(path, text, moment)
+        })
+        .expect("wider");
+    }
+    assert_eq!(
+        order("wider", &["team/access.yaml", "team/private/access.yaml"]),
+        Some((
+            vec![
+                "team/private/access.yaml".to_owned(),
+                "team/access.yaml".to_owned()
+            ],
+            Vec::new()
+        ))
+    );
+    // No order works: team first gives the person Edit in team/sub, and
+    // team/sub first gives members Edit there, where they end hidden.
+    create_version(&f, "tangle");
+    for (path, text, moment) in [
+        (
+            "team/access.yaml",
+            "people:\n  p@example.com: edit\n",
+            "m-t1",
+        ),
+        (
+            "team/sub/access.yaml",
+            "members: edit\npeople:\n  p@example.com: view\n",
+            "m-t2",
+        ),
+    ] {
+        f.versioned_write(WriteText {
+            version_id: "tangle".to_owned(),
+            ..write(path, text, moment)
+        })
+        .expect("tangle");
+    }
+    assert_eq!(
+        order("tangle", &["team/access.yaml", "team/sub/access.yaml"]),
+        None
+    );
+}

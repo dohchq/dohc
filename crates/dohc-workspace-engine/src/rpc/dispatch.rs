@@ -644,6 +644,10 @@ impl EngineService {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
+            "versions.ruleMergeOrder" => {
+                self.versions_rule_merge_order(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versions.createNamed" => self.versions_create_named(&ctx, request).await?,
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
@@ -1943,6 +1947,7 @@ mod tests {
             "versions.createNamed",
             "versions.ensureMain",
             "versions.list",
+            "versions.ruleMergeOrder",
             "versions.setActive",
             "watcher.status",
             "workReferences.make",
