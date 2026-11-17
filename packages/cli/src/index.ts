@@ -20,6 +20,7 @@ import {
   type DeclaredWriteVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { MEMBERS_REFUSED } from "./members";
 import { readPassword, readStdinText } from "./stdin";
 import {
   CHAT_MESSAGE_TOO_LONG,
@@ -273,6 +274,12 @@ function buildCliRequest(
           grantId: command.grantId,
           connectionId: command.connectionId,
         },
+      };
+    case "members":
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, request: command.request },
       };
     case "accountDeletePreview":
       return {
@@ -711,7 +718,9 @@ function buildCliRequest(
 
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
-function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+function refusal(verb: string, result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  if (verb === "members")
+    return (result as CliResultByVerb["members"]).status === "refused" ? MEMBERS_REFUSED : null;
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     return result.refusal.words;
   }
@@ -722,6 +731,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
 }
 
 const REFUSING_VERBS = new Set([
+  "members",
   "heldNoteChange",
   "dataset",
   "fileDuplicate",
@@ -833,7 +843,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         });
       }
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
-      const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
+      const refused = REFUSING_VERBS.has(command.verb) ? refusal(command.verb, result) : null;
       if (refused !== null) throw new DohcCliError(refused);
       const output = command.json
         ? result === null

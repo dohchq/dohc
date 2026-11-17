@@ -16,6 +16,7 @@ import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-c
 import { createNamedRecipientChatClient } from "./namedRecipientChat";
 import { createPushClient } from "./pushClient";
 import { createNamedRecipientDocumentsClient } from "./namedRecipientDocuments";
+import { createWorkspaceJoinClient } from "./workspaceJoin";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -64,7 +65,7 @@ import { servePersonalMcp } from "./personalMcp";
 import { createPersonalAgentClient } from "./personalAgentClient";
 import { createPersonalLiveClient } from "./personalLiveClient";
 import { COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES } from "./collectionWrites";
-import { viewerPage } from "../viewer/src/pages";
+import { JOIN_PATH, viewerPage } from "../viewer/src/pages";
 import { serveWorkLinkPage } from "./workLinkPage";
 import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
@@ -1144,6 +1145,15 @@ export function createShareWebApplication({
         fetchRelay,
       })
     : undefined;
+  const workspaceJoin = namedBrowserSessionLimits
+    ? createWorkspaceJoinClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
   const push = namedBrowserSessionLimits
     ? createPushClient({
         relayUrl,
@@ -2023,6 +2033,20 @@ export function createShareWebApplication({
       if (!namedChat) return refused();
       const result = await namedChat(request);
       return response(result.body, { status: result.status, headers: result.headers });
+    }
+
+    if (pathname === "/api/members/join-preview" || pathname === "/api/members/join") {
+      mark(pathname);
+      if (!workspaceJoin) return refused();
+      const result = await workspaceJoin(request);
+      return response(result.body, { status: result.status, headers: result.headers });
+    }
+
+    // The invite link page. Its token stays after `#` and never reaches here.
+    if (request.method === "GET" && pathname === JOIN_PATH) {
+      mark(JOIN_PATH);
+      if (!workspaceJoin) return refused();
+      return serveViewer(pathname);
     }
 
     if (pathname.startsWith("/api/push/")) {

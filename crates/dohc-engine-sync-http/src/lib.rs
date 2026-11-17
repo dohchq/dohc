@@ -1538,6 +1538,9 @@ define_server_error_codes! {
     "link_discussion_paused" => |_| RelayError::Forbidden,
     "link_name_already_set" => |_| RelayError::Conflict,
     "link_read_rate_limited" => |_| RelayError::LinkReadRateLimited,
+    "member_exists" => |_| RelayError::Conflict,
+    "member_removed" => |_| RelayError::Conflict,
+    "members_forbidden" => |_| RelayError::Forbidden,
     "method_not_allowed" => |_| RelayError::MethodNotAllowed,
     "not_found" => unavailable,
     "notice_list_full" => |_| RelayError::Conflict,
@@ -1564,6 +1567,9 @@ define_server_error_codes! {
     "stream_identity_mismatch" => |_| RelayError::StreamIdentityMismatch,
     "too_many_paths" => |_| RelayError::BadRequest,
     "unknown_chat_op" => |_| RelayError::UnknownChatOperation,
+    "workspace_full" => |_| RelayError::Conflict,
+    "workspace_name_required" => |_| RelayError::BadRequest,
+    "workspace_share_managed" => |_| RelayError::Conflict,
 }
 
 fn unavailable(context: RequestContext) -> RelayError {

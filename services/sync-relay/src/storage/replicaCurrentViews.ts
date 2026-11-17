@@ -4,7 +4,7 @@ import type {
   ReplicaCurrentViewSelector,
 } from "@dohc/workspace-engine-client/daemon";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
-import { parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
+import { MAIN_VERSION_ID, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
 import { selectorTargetsBlockedChannel } from "../shareAuthorization";
 import type { ReplicaReadLease } from "../replicaReadPrincipal";
 import type { StorageContext } from "./context";
@@ -104,6 +104,9 @@ export function replicaCurrentViewSelectors(
     .all(workspace)
     .flatMap((row) => {
       const selector = parseStoredAnyShareSelectorJson(String(row.selector_json));
+      // A workspace share reads every tracked path in main.
+      if (selector && "kind" in selector && selector.kind === "workspace")
+        return [{ versionId: MAIN_VERSION_ID, paths: [] }];
       if (
         !selector ||
         ("kind" in selector && selector.kind === "chat") ||

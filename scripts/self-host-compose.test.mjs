@@ -290,6 +290,13 @@ test("sign-up stays open by default and asks the relay about invites on the inte
     api.BETTER_AUTH_SECRET,
     compose.services["sync-relay"].environment.BETTER_AUTH_SECRET,
   );
+
+  assert.equal(settings().DOHC_INVITE_LINK_SIGN_UP, "on");
+  // Only an unset value means on. An empty one reaches the relay, which refuses to start.
+  assert.equal(
+    compose.services["sync-relay"].environment.DOHC_INVITE_LINK_SIGN_UP,
+    "${DOHC_INVITE_LINK_SIGN_UP-on}",
+  );
 });
 
 test("private mode selects the private-only gateway overlay and the real env file", () => {

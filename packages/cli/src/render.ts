@@ -7,6 +7,7 @@ import {
   renderThreadMarkdown,
 } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
+import { MEMBERS_REFUSED } from "./members";
 import { formatStoredBytes } from "./account";
 
 type GroupsResult = CliResultByVerb["groups"];
@@ -415,6 +416,53 @@ function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
   ].join("\n");
 }
 
+const LEVEL_WORDS = { view: "view", comment: "comment", edit: "edit" } as const;
+const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
+
+// The Members page as lines: who is in the workspace, then invites and
+// removed accounts, each with the id the other verbs take.
+function renderMembers(result: CliResultByVerb["members"]): string {
+  if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
+  if (result.status === "done") return "You left this workspace.";
+  const { view } = result;
+  const row = (person: (typeof view.people)[number]) =>
+    [
+      person.memberId,
+      person.state === "invited"
+        ? "Invited"
+        : person.state === "removed"
+          ? "Removed"
+          : ROLE_WORDS[person.role],
+      person.name === null ? null : lineSafe(person.name),
+      person.email === null ? null : lineSafe(person.email),
+    ]
+      .filter((part) => part !== null)
+      .join(" · ");
+  const active = view.people.filter((person) => person.state === "active");
+  const invited = view.people.filter((person) => person.state === "invited");
+  const removed = view.people.filter((person) => person.state === "removed");
+  return [
+    `${lineSafe(view.workspaceName) || "This workspace"}: members can ${LEVEL_WORDS[view.memberLevel]}.`,
+    ...(view.inviteLink === null
+      ? []
+      : [
+          view.inviteLink.enabled && view.inviteLink.url
+            ? `Invite link: ${view.inviteLink.url}`
+            : "Invite link: off",
+        ]),
+    "",
+    ...active.map(row),
+    ...(invited.length
+      ? [
+          "",
+          "Invites (dohc sends no email; each joins when they sign in with that address)",
+          ...invited.map(row),
+        ]
+      : []),
+    ...(removed.length ? ["", "Removed (dohc members let-back-in <id>)", ...removed.map(row)] : []),
+  ].join("\n");
+}
+
 const LIVE_REASON_WORDS = {
   "document-unavailable": "file moved or removed",
   "workspace-changed": "workspace changed",
@@ -498,6 +546,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return JSON.stringify(result, null, 2);
     case "shareAgents":
       return renderLinkAgents(result as CliResultByVerb["shareAgents"]);
+    case "members":
+      return renderMembers(result as CliResultByVerb["members"]);
     case "shareDisconnect":
       return `Disconnected ${(result as CliResultByVerb["shareDisconnect"]).connectionId}`;
     case "automationList":

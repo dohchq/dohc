@@ -26,6 +26,7 @@ const Selector = z.union([
     versionId: z.null(),
   }),
   z.object({ kind: z.literal("chat"), channelWireId: Id }),
+  z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]) }),
 ]);
 const Base = {
   shareId: Id,
@@ -48,7 +49,7 @@ const Row = z.union([
       damaged: z.never().optional(),
     })
     .refine((row) =>
-      row.selector.kind === undefined
+      row.selector.kind === undefined || row.selector.kind === "workspace"
         ? ["view", "comment", "edit"].includes(row.access)
         : ["read-only", "read-write"].includes(row.access),
     )

@@ -393,7 +393,8 @@
     "desktop:write-collection-automations",
     "desktop:write-workspace-asset",
     "desktop:write-workspace-text",
-    "desktop:outside-changes"
+    "desktop:outside-changes",
+    "desktop:workspace-members"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",

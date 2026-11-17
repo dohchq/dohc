@@ -134,7 +134,7 @@ it.each([
   [
     401,
     "INVALID_EMAIL_OR_PASSWORD",
-    "dohc could not sign you in. Check your email and password, then retry.",
+    "dohc could not sign you in. Check your email and password, then try again.",
   ],
 ])("explains upstream sign-in refusal %s %s and keeps the form", async (status, code, message) => {
   const origin = "https://share.example.test";

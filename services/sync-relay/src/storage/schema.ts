@@ -66,6 +66,7 @@ import {
 import { initializeLiveRoomSchema } from "./liveRoomEdits";
 import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
 import { initializePhoneAppSchema } from "./phoneApps";
+import { initializeWorkspaceMemberSchema } from "./workspaceMembers";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1684,6 +1685,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializePersonalAgentSchema(db);
   initializeWorkspaceDisplayName(db);
   initializePersonalAgentActivity(db);
+  initializeWorkspaceMemberSchema(db);
   initializeLiveRoomSchema(db);
   initializeLiveRoomPauseSchema(db);
   initializePhoneAppSchema(db);

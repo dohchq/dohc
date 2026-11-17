@@ -475,6 +475,22 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
+  it("leaves Members out of a shared view's nav and search", async () => {
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        sharedView
+        workspaceId="ws-1"
+        workspacePath="/shared/trip"
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByTestId("settings-sidebar");
+    expect(screen.queryByTestId("settings-nav-members")).toBeNull();
+    fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
+    expect(screen.queryByTestId("settings-nav-members")).toBeNull();
+  });
+
   describe("an edit in place", () => {
     const renderAgents = (onClose: () => void) => {
       bridge.getUserSettings.mockResolvedValueOnce({
