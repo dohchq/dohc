@@ -117,8 +117,9 @@ interface Admission {
   channelWireId: string | null | undefined;
   // In a joined workspace, whether the target is in a Group or on a file. A
   // thread's place, a channel's kind and its wire id never change, so
-  // admission decides it once.
+  // admission decides it once. Its level can change, so commit reads it again.
   inReach: boolean;
+  place: TargetPlace;
   generation: number;
   authorUserId: string | undefined;
   actorCredentials: Pick<CloudCredentials, "serverUrl" | "userId"> | null;
@@ -126,6 +127,10 @@ interface Admission {
 }
 
 const SESSION_CHANGED = "Your server session changed. Try again.";
+
+// Where a member writes in a joined workspace: a Group, or a file's thread,
+// which takes the level at the path the file sits at when it is written.
+type TargetPlace = "group" | { objectId: string } | null;
 
 type ChatAttachments = NonNullable<Parameters<LinkedChatStore["sendMessage"]>[0]["attachments"]>;
 
@@ -218,7 +223,7 @@ export function createChatWrites(dependencies: {
   // A joined workspace at Comment or Edit in its Groups or on some file posts
   // in its Groups and comments on its files, which the relay's append lane
   // admits. Each target
-  // then needs its own level (`targetInReach`). Every other received share is read-only for
+  // then needs its own level (`takesPostsAt`). Every other received share is read-only for
   // chat, whatever its cached relay capability: there is no durable per-row
   // relay receipt yet.
   function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
@@ -257,28 +262,24 @@ export function createChatWrites(dependencies: {
     return workspace;
   }
 
-  // Whether a target in a joined workspace is one a member writes to: a Group,
-  // which is an ordinary channel and never General, a direct message or an
-  // agent's chat; or a file's thread.
-  //
-  // The level decides too. A Group takes the member level until Group rules
-  // exist. A file's thread takes the level at the file's current path, by
-  // the rule every gate asks (`shareViewWriteLevel`).
-  async function targetInReach(
+  // The place a target in a joined workspace is, if a member writes there: a
+  // Group, which is an ordinary channel and never General, a direct message
+  // or an agent's chat; or a file's thread.
+  async function targetPlaceOf(
     place: ChatWritePlace,
     target: ChatRelayIdentityTarget,
     wire: string | null,
-  ): Promise<boolean> {
+  ): Promise<TargetPlace> {
     if (wire === null) {
-      if ("channelId" in target) return false;
+      if ("channelId" in target) return null;
       const { thread } = await place.store.getThread({
         workspaceId: place.workspaceId,
         threadId: target.threadId,
       });
-      if (thread.linkedFile === undefined || thread.channelId !== undefined) return false;
-      return await fileTakesComments(place.workspaceId, thread.linkedFile.objectId);
+      if (thread.linkedFile === undefined || thread.channelId !== undefined) return null;
+      return { objectId: thread.linkedFile.objectId };
     }
-    if (wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null) return false;
+    if (wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null) return null;
     const channelId =
       "channelId" in target
         ? target.channelId
@@ -286,24 +287,35 @@ export function createChatWrites(dependencies: {
             workspaceId: place.workspaceId,
             threadId: target.threadId,
           });
-    if (!channelId) return false;
+    if (!channelId) return null;
     const channels = await place.store.listChannels({ workspaceId: place.workspaceId });
-    return (
-      takesPosts(levelOf(place.workspaceId, "group")) &&
-      channels.some((channel) => channel.id === channelId && channel.kind === "channel")
-    );
+    return channels.some((channel) => channel.id === channelId && channel.kind === "channel")
+      ? "group"
+      : null;
   }
+
+  // Where a place's level is read: the Group, or the path its file sits at now.
+  async function levelPlaceOf(
+    workspaceId: string,
+    target: TargetPlace,
+  ): Promise<ShareViewWritePlace | null> {
+    if (target === null || target === "group") return target;
+    const path = await currentPathOf(workspaceId, target.objectId);
+    return path === null ? null : { path };
+  }
+
+  // The level decides. A Group takes the member level until Group rules
+  // exist. A file's thread takes the level at the file's current path, by
+  // the rule every gate asks (`shareViewWriteLevel`). Synchronous, so a
+  // caller reads it in the same block as its write.
+  const takesPostsAt = (workspaceId: string, at: ShareViewWritePlace | null) =>
+    at !== null && takesPosts(levelOf(workspaceId, at));
 
   const takesPosts = (level: string | null) => level === "comment" || level === "edit";
   const levelOf = (workspaceId: string, place: ShareViewWritePlace) => {
     const scope = shareViewWriteScopeOf(findWorkspace(workspaceId)?.shareView, null);
     return scope === null ? null : shareViewWriteLevel(scope, place);
   };
-
-  async function fileTakesComments(workspaceId: string, objectId: string): Promise<boolean> {
-    const path = await currentPathOf(workspaceId, objectId);
-    return path !== null && takesPosts(levelOf(workspaceId, { path }));
-  }
 
   function hasJoinedChannels(workspaceId: string): boolean {
     return (findWorkspace(workspaceId)?.sharedChannels?.length ?? 0) > 0;
@@ -408,7 +420,11 @@ export function createChatWrites(dependencies: {
       joinedWorkspace || hasJoinedChannels(place.workspaceId)
         ? await lookUpWireId(place, target)
         : undefined;
-    const inReach = joinedWorkspace && (await targetInReach(place, target, channelWireId ?? null));
+    const targetPlace = joinedWorkspace
+      ? await targetPlaceOf(place, target, channelWireId ?? null)
+      : null;
+    const at = await levelPlaceOf(place.workspaceId, targetPlace);
+    const inReach = joinedWorkspace && takesPostsAt(place.workspaceId, at);
     const authorUserId = check(place, channelWireId, generation, inReach);
     const credentials = currentCredentials();
     const actorCredentials =
@@ -422,6 +438,7 @@ export function createChatWrites(dependencies: {
       target,
       channelWireId,
       inReach,
+      place: targetPlace,
       generation,
       authorUserId,
       actorCredentials,
@@ -445,9 +462,11 @@ export function createChatWrites(dependencies: {
     if (admission.channelWireId === undefined && hasJoinedChannels(place.workspaceId)) {
       admission.channelWireId = await lookUpWireId(place, admission.target);
     }
+    // Where the file sits now. Its level is read below, with the check.
+    const at = admission.inReach ? await levelPlaceOf(place.workspaceId, admission.place) : null;
+    const inReach = admission.inReach && takesPostsAt(place.workspaceId, at);
     if (
-      check(place, admission.channelWireId, admission.generation, admission.inReach) !==
-      expected.authorUserId
+      check(place, admission.channelWireId, admission.generation, inReach) !== expected.authorUserId
     ) {
       throw new Error(SESSION_CHANGED);
     }
@@ -642,11 +661,14 @@ export function createChatWrites(dependencies: {
         : writableWorkspace(place.workspaceId, false);
     admitted();
     const linkedFile = await input.linkedFile();
-    // A joined workspace comments on a file where its path takes Comment or Edit.
-    if (joinedWorkspace && !(await fileTakesComments(place.workspaceId, linkedFile.objectId))) {
+    const at = joinedWorkspace
+      ? await levelPlaceOf(place.workspaceId, { objectId: linkedFile.objectId })
+      : null;
+    // A joined workspace comments on a file where its path takes Comment or
+    // Edit. That, the recheck and the store call share one synchronous block.
+    if (joinedWorkspace && !takesPostsAt(place.workspaceId, at)) {
       throw new SharedFileReadOnlyError("Only people who can comment post here.");
     }
-    // The recheck and the store call share one synchronous block.
     admitted();
     const thread = await place.store.createThread({
       workspaceId: place.workspaceId,

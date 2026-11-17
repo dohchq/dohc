@@ -1034,6 +1034,45 @@ describe("chat writes", () => {
       expect(group.store.sendMessage).toHaveBeenCalledOnce();
     });
 
+    // The level is read again where the row is written: a file that moved
+    // into a View folder, or a Group lowered to View, while the write waited
+    // for its attachments takes no comment, though another place still does.
+    it.each([
+      "nothing changes",
+      "the file moves into a View folder",
+      "the Group is lowered to View",
+    ] as const)("checks the level again at the write when %s during it", async (change) => {
+      const test = member("comment");
+      Object.assign(test.row.shareView!, {
+        reach: {
+          signature: "r1",
+          visibilitySignature: "v1",
+          rootLevel: "comment",
+          folders: [{ path: "archive", level: "view" }],
+        },
+      });
+      if (change !== "the Group is lowered to View") onFile(test);
+      const hold = test.holdAt("attachments");
+      const sent = test.writeEach.send();
+      await hold.entered.promise;
+      if (change === "the file moves into a View folder")
+        test.currentPathOf.mockResolvedValue("archive/day-1.md");
+      if (change === "the Group is lowered to View") {
+        test.row.shareView = {
+          ...test.row.shareView!,
+          grantedSelector: { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+        };
+      }
+      hold.held.resolve();
+      if (change === "nothing changes") {
+        await sent;
+        expect(test.store.sendMessage).toHaveBeenCalledOnce();
+      } else {
+        await expect(sent).rejects.toThrow(JOINED_REACH);
+        expectNothingWritten(test);
+      }
+    });
+
     // File rules don't lower the Group level: a Comment member under a root
     // `members: view` rule posts in Groups but comments on no file.
     it("posts in a Group at Comment when every folder is at View", async () => {
