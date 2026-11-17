@@ -539,7 +539,10 @@ export function useAccessRuleHoldNotices(
           }
           const place = placeOf(hold.folder);
           const refused = refusalWords(error);
+          // It shares the outcome's identity, so a later choice that works
+          // replaces it.
           latest.current.reportShellFailure({
+            identity: decidedOf(identity),
             title:
               decision === "restore"
                 ? `dohc could not restore ${ruleOfLower(hold.folder)}`

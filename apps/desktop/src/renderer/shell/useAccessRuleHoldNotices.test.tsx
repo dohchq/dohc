@@ -625,6 +625,14 @@ describe("useAccessRuleHoldNotices", () => {
         retry: expect.any(Function),
       }),
     );
+
+    // A later press on the row that works takes the failure's place, so no
+    // stale Try again stays beside the result.
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    await waitFor(() =>
+      expect(h.errors().shellErrors.find((error) => error.tone === "success")).toBeDefined(),
+    );
+    expect(failed()).toBeUndefined();
   });
 
   // The shell's status can trail the decision, so the row stops reading as
