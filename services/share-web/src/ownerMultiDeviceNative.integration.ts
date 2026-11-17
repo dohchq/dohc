@@ -823,6 +823,12 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       );
       if (discovered.status !== "observed" || !discovered.draft.outboxId)
         throw new Error("Divergent enrollment failed to retain a real outbox.");
+      const settledPending = await recovered.outbox.readPending(discovered.draft.outboxId);
+      expect(settledPending.entries).toHaveLength(0);
+      results.stage = "observe accepted owner delivery in open provider";
+      await expectProviderText(yDocToMarkdown(local), () => first.pass());
+      // The pass ended at the relay's receipt. Publication waits for the accepted state.
+      expect(await recovered.pass()).toBe("empty");
       const releasedPush = await recovered.rpc("sync.push", { workspaceId: "workspace" });
       expect(releasedPush.ownerAdmissionPending).toEqual([]);
       const relayRead = new DatabaseSync(join(root, "relay", "relay.sqlite"), { readOnly: true });
@@ -838,10 +844,6 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       } finally {
         relayRead.close();
       }
-      const settledPending = await recovered.outbox.readPending(discovered.draft.outboxId);
-      expect(settledPending.entries).toHaveLength(0);
-      results.stage = "observe accepted owner delivery in open provider";
-      await expectProviderText(yDocToMarkdown(local), () => first.pass());
       const a = await first.openDraft();
       const b = await recovered.openDraft();
       const render = (bytes: Uint8Array) => {
