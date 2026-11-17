@@ -151,7 +151,7 @@ export function accessRuleHoldWords(
       title: `${ruleOf(hold.folder)} was removed outside dohc`,
       message: hold.canAccept
         ? `${until} Without it, ${without}`
-        : `Without it, ${without} dohc can't remove these files one at a time without briefly giving members more access. To remove the rule, restore it. Edit one file so it gives no one more access than the list above. Then delete the files and choose Remove rule.`,
+        : `Without it, ${without} dohc can't remove these files one at a time without briefly giving members more access. To remove the rule, restore it. Edit one file so it gives members View and names no one else. Delete all the files at once. Then choose Remove rule.`,
       rows,
       openMembers,
       accept: hold.canAccept ? { label: "Remove rule", busy: "Removing…" } : null,

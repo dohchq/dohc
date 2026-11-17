@@ -3620,12 +3620,27 @@ fn putting_back_the_recorded_pair_ends_its_hold() {
     assert_eq!(f.journal(), before);
 }
 
+// The removal row's steps: restore, edit one file to give members View,
+// delete all the files at once, then Remove rule. With no root rule the
+// members' level comes from settings, which may be Edit, so only View is
+// sure to record.
 #[test]
 fn removing_three_hidden_edit_files_never_widens_past_inherited_view() {
+    remove_three_hidden_edit_files(true);
+}
+
+#[test]
+fn removing_three_hidden_edit_files_works_without_a_root_rule() {
+    remove_three_hidden_edit_files(false);
+}
+
+fn remove_three_hidden_edit_files(root_rule: bool) {
     let f = ruled_team();
-    f.put("access.yaml", VIEW);
-    f.settle();
-    f.capture_ok(&["access.yaml"]);
+    if root_rule {
+        f.put("access.yaml", VIEW);
+        f.settle();
+        f.capture_ok(&["access.yaml"]);
+    }
     let paths = [
         "team/access.yaml",
         "team/\u{FF41}ccess.yaml",
@@ -3673,13 +3688,12 @@ fn removing_three_hidden_edit_files_never_widens_past_inherited_view() {
                 .is_none()
         );
     }
+    let root = dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", "access.yaml")
+        .unwrap()
+        .snapshot;
     assert_eq!(
-        dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", "access.yaml")
-            .unwrap()
-            .snapshot
-            .unwrap()
-            .text,
-        VIEW
+        root.map(|root| root.text),
+        root_rule.then(|| VIEW.to_owned())
     );
 }
 
