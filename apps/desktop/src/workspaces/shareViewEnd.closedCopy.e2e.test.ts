@@ -26,7 +26,14 @@ it.skipIf(engine.missing)(
       if (request.method === "GET" && request.url?.startsWith(`/sync/shares/${SHARE_ID}/log`)) {
         response.writeHead(200, { "content-type": "application/json", connection: "close" });
         response.end(
-          JSON.stringify({ ok: true, ops: [], nextCursor: 1, hasMore: false, reach: reach("r2") }),
+          JSON.stringify({
+            ok: true,
+            ops: [],
+            nextCursor: 1,
+            hasMore: false,
+            reach: reach("r2"),
+            logHead: 1,
+          }),
         );
         return;
       }
