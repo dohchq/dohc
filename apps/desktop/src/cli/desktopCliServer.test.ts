@@ -445,6 +445,36 @@ describe("desktop CLI workspace context", () => {
     );
     expect(publish).toHaveBeenCalledOnce();
   });
+  // A joined copy the engine closed for its access answers the CLI in words,
+  // not with the engine's refusal code.
+  it.each([
+    [
+      "is updating",
+      undefined,
+      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+    ],
+    [
+      "stopped and waits for Try again",
+      { reason: "failed" as const, detail: "dohc could not update access." },
+      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+    ],
+    [
+      "belongs to a membership that ended",
+      {
+        reason: "ended" as const,
+        detail: "Your membership ended. What arrived stays in this folder.",
+      },
+      "Your membership of this workspace ended. What arrived stays in its folder.",
+    ],
+  ])("refuses a closed copy that %s before activity admission", async (_state, stopped, words) => {
+    const f = fixture();
+    f.workspace.shareView = {
+      rebuild: { rebuildId: "rebuild-1", ...(stopped ? { stopped } : {}) },
+    } as unknown as RegistryEntry["shareView"];
+    await expect(f.create().openCliWorkspace(f.workspace)).rejects.toThrow(words);
+    expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
+  });
+
 
   it("stops showing history the workspace's current policy no longer tracks, to the CLI and the MCP", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-history-"));

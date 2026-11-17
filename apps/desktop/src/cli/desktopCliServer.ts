@@ -382,6 +382,20 @@ interface DesktopCliServerDependencies<State> {
   rememberPendingCliRunMessageLink(link: CliRunMessageLink, pending: boolean): void;
 }
 
+/**
+ * A joined copy the engine closed for its access refuses every request, so the
+ * CLI says why instead of passing on the engine's refusal code.
+ */
+function refuseClosedCopy(workspace: RegistryEntry): void {
+  const rebuild = workspace.shareView?.rebuild;
+  if (!rebuild) return;
+  throw new Error(
+    rebuild.stopped?.reason === "ended"
+      ? "Your membership of this workspace ended. What arrived stays in its folder."
+      : "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+  );
+}
+
 export function createDesktopCliServer<State>(dependencies: DesktopCliServerDependencies<State>) {
   const {
     findWorkspace,
@@ -439,6 +453,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
       throw new Error("dohc: not inside a dohc workspace");
     }
+    refuseClosedCopy(workspace);
     await openWorkspaceActivity(workspace);
     // A share view has no capture. Its files resolve through the view's own
     // engine session, and its History is what its share imported.
@@ -1387,6 +1402,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     withPhysicalWorkspaceOperation(requested.workspaceId, (operation) => {
       if (resolve(operation.workspace.rootPath) !== resolve(requested.rootPath))
         throw new Error("The workspace attachment changed.");
+      refuseClosedCopy(operation.workspace);
       return run(operation.workspace);
     });
 
