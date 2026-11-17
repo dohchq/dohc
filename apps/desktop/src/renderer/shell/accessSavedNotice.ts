@@ -4,6 +4,7 @@ import { bridge } from "../bridge";
 export type AccessSavedReport = (notice: {
   message: string;
   identity: string;
+  tone?: "warning";
   retry?: () => void;
   cause?: unknown;
   action?: { label: string; run: () => void; reads: true };
@@ -30,12 +31,14 @@ export function useAccessSavedNotice(
       void bridge()
         .revealWorkspaceFolder({ workspaceId, accessSaved: true })
         .catch((error: unknown) =>
+          // It takes the notice's row, so dismissing it still forgets the folder.
           report({
             message: "dohc could not open the recovery folder.",
             cause: error,
             retry: open,
             identity,
             action: { label: "Open folder", run: open, reads: true },
+            onDismiss: dismiss,
           }),
         );
     };
@@ -58,6 +61,8 @@ export function useAccessSavedNotice(
           ? `Your access changed. dohc moved ${items} into a recovery folder.`
           : "Your access changed. dohc undid changes that weren't sent. The recovery folder lists them.",
       identity,
+      // Nothing failed: dohc kept the member's work where they can find it.
+      tone: "warning",
       action: { label: "Open folder", run: open, reads: true },
       onDismiss: dismiss,
     });

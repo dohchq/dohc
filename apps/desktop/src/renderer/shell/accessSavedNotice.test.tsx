@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { useAccessSavedNotice, type AccessSavedReport } from "./accessSavedNotice";
+import { useShellError } from "./useShellError";
 
 afterEach(() => {
   cleanup();
@@ -94,5 +95,49 @@ describe("the notice for items an access change saved", () => {
       message: "dohc could not open the recovery folder.",
       retry: expect.any(Function),
     });
+  });
+
+  // Through the shell's own report, as the shell files it.
+  function filed(
+    reveal: (payload: unknown) => Promise<void>,
+    dismiss: (payload: unknown) => Promise<void>,
+  ) {
+    stubReveal(reveal, dismiss);
+    return renderHook(() => {
+      const shell = useShellError("w");
+      useAccessSavedNotice("w", { folder, count: 1 }, shell.reportShellFailure);
+      return shell;
+    });
+  }
+
+  it("is a notice, not a failure: nothing failed", () => {
+    const { result } = filed(
+      async () => undefined,
+      async () => undefined,
+    );
+    expect(result.current.shellErrors).toEqual([
+      expect.objectContaining({
+        message: "Your access changed. dohc moved 1 item into a recovery folder.",
+        tone: "warning",
+      }),
+    ]);
+  });
+
+  it("still forgets the folder when the row is dismissed after it could not open", async () => {
+    const dismiss = vi.fn(async (_payload: unknown) => undefined);
+    const { result } = filed(async () => {
+      throw new Error("dohc could not find the folder.");
+    }, dismiss);
+    act(() => result.current.shellErrors[0]!.action!.run());
+    await vi.waitFor(() =>
+      expect(result.current.shellErrors[0]?.message).toBe(
+        "dohc could not open the recovery folder.",
+      ),
+    );
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    await vi.waitFor(() =>
+      expect(dismiss).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", folder }),
+    );
+    expect(result.current.shellErrors).toEqual([]);
   });
 });
