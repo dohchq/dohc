@@ -4613,8 +4613,12 @@ const RelayShareReadableState = z.object({
 
 // A membership this account holds: the whole workspace, at the role the
 // relay states. Only a received row carries it.
+export const RelayShareMembershipSelector = z.object({
+  kind: z.literal("workspace"),
+  role: z.enum(["admin", "member"]),
+});
 const RelayShareMembershipState = z.object({
-  selector: z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]) }),
+  selector: RelayShareMembershipSelector,
   access: SHARE_ACCESS,
   damaged: z.never().optional(),
 });

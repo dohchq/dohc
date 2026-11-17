@@ -1179,6 +1179,31 @@ describe("registered account share handlers", () => {
     await expect(pending).rejects.toThrow("session changed");
   });
 
+  it.each(["admin", "member"])(
+    "keeps a %s membership readable in listings and exact lookups",
+    async (role) => {
+      const h = harness();
+      const row = {
+        shareId: "membership",
+        grantId: "membership-grant",
+        generation: 1,
+        createdAtMs: 1,
+        selector: { kind: "workspace", role },
+        access: "comment",
+        granterEmail: "owner@example.com",
+        genericChatWritable: false,
+      };
+      h.accountRequest.mockResolvedValueOnce({ granted: [], received: [row] });
+      await expect(h.invoke(relayShareOperations.listRelayShares.channel)).resolves.toMatchObject({
+        received: [{ selector: row.selector }],
+      });
+      h.request.mockResolvedValueOnce({ kind: "success", body: row });
+      await expect(
+        h.invoke(relayShareOperations.getRelayReceivedShare.channel, { shareId: row.shareId }),
+      ).resolves.toMatchObject({ found: true, share: { selector: row.selector } });
+    },
+  );
+
   it("shows a share whose version id the relay would refuse as damaged, and keeps the others", async () => {
     const h = harness();
     const row = (shareId: string, versionId: string) => ({
