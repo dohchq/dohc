@@ -1,3 +1,4 @@
+import { parseListedReach, type ListedReach } from "@dohc/security-contract/listed-reach";
 import { normalizeRootPath } from "@dohc/workspace-core";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -7,6 +8,7 @@ import { ShareSkippedOpsSummary } from "../ipc/bridgeContract";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { RegistryEntry, ShareSkippedOps, ShareViewIdentity } from "./registryStore";
 import type { ShareViewSelector } from "./shareViewInfo";
+import { storedShareViewReach } from "./shareViewReach";
 import { recordedShareSelector } from "./shareViewRecords";
 import { receivedReferencePin, type ReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import { folderIdentity } from "./workspaceTrust";
@@ -42,6 +44,10 @@ interface ForgottenShareView {
   // A copy forgotten while the engine held it closed for a rebuild opens
   // closed, and the rebuild resumes.
   rebuildId?: string;
+  // The reach a membership's copy was built under. A refresh compares the
+  // listed reach with it, and rebuilds the copy if the visible items changed
+  // while it was forgotten.
+  reach?: ListedReach;
 }
 
 const filled = (value: unknown): value is string => typeof value === "string" && value.length > 0;
@@ -63,6 +69,7 @@ function parseRecord(value: unknown): ForgottenShareView | null {
   const receivedIdentity =
     raw.receivedIdentity === undefined ? undefined : receivedReferencePin(raw.receivedIdentity);
   const skippedOps = skipRecord(raw.skippedOps);
+  const reach = raw.reach === undefined ? undefined : parseListedReach(raw.reach);
   if (
     !filled(raw.workspaceId) ||
     !filled(raw.rootPath) ||
@@ -74,7 +81,9 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     (raw.granterUserId !== undefined && !filled(raw.granterUserId)) ||
     (raw.receivedIdentity !== undefined && receivedIdentity === undefined) ||
     (raw.ended !== undefined && raw.ended !== true) ||
-    (raw.rebuildId !== undefined && (!filled(raw.rebuildId) || raw.rebuildId.length > 200))
+    (raw.rebuildId !== undefined && (!filled(raw.rebuildId) || raw.rebuildId.length > 200)) ||
+    reach === null ||
+    (reach !== undefined && grantedSelector.wholeWorkspace !== true)
   ) {
     return null;
   }
@@ -91,6 +100,7 @@ function parseRecord(value: unknown): ForgottenShareView | null {
     ...(raw.ended === true ? { ended: true } : {}),
     ...(skippedOps !== undefined ? { skippedOps } : {}),
     ...(filled(raw.rebuildId) ? { rebuildId: raw.rebuildId } : {}),
+    ...(reach ? { reach } : {}),
   };
 }
 
@@ -179,6 +189,7 @@ export function createForgottenShareViews(dependencies: {
     const grantedSelector = recordedShareSelector(shareView.grantedSelector);
     const receivedIdentity = receivedReferencePin(shareView.receivedIdentity);
     const skippedOps = skipRecord(shareView.skippedOps);
+    const reach = storedShareViewReach(shareView);
     if (
       !filled(shareId) ||
       !filled(recipientUserId) ||
@@ -205,6 +216,7 @@ export function createForgottenShareViews(dependencies: {
       ...(shareView.ended === true ? { ended: true } : {}),
       ...(skippedOps !== undefined ? { skippedOps } : {}),
       ...(filled(shareView.rebuild?.rebuildId) ? { rebuildId: shareView.rebuild.rebuildId } : {}),
+      ...(reach ? { reach } : {}),
     };
   }
 
@@ -270,6 +282,7 @@ export function createForgottenShareViews(dependencies: {
             ...(record.ended ? { ended: true } : {}),
             ...(record.skippedOps ? { skippedOps: record.skippedOps } : {}),
             ...(record.rebuildId ? { rebuild: { rebuildId: record.rebuildId } } : {}),
+            ...(record.reach ? { reach: record.reach } : {}),
           },
         };
         register(entry);
