@@ -53,7 +53,8 @@ pub struct RebuildUnsent {
     /// path and the hash of its bytes.
     pub versions: Vec<RebuildHead>,
     /// The object ids among `versions` that only the member's own moments
-    /// wrote: a file they made, which the relay never served.
+    /// wrote and the relay never accepted a write of: a file they made that
+    /// the relay has neither served nor taken.
     pub created: BTreeSet<String>,
     /// Own deletes and moves that are each file's newest moment.
     pub removals: Vec<RebuildRemoval>,
@@ -207,6 +208,9 @@ impl ActorHandle {
                          COALESCE(m.before_path, m.payload_before_path), \
                          NOT EXISTS (SELECT 1 FROM moments x WHERE x.workspace_id = ?1 \
                            AND x.object_id = m.object_id AND NOT ({own_x})) \
+                         AND NOT EXISTS (SELECT 1 FROM share_direct_write_marks k \
+                           WHERE k.workspace_id = ?1 AND k.share_id = ?2 \
+                           AND k.object_id = m.object_id AND k.delivered_through > -1) \
                          FROM moments m WHERE m.workspace_id = ?1 AND {own_m} \
                          AND m.moment_order = (SELECT MAX(o.moment_order) FROM moments o \
                            WHERE o.workspace_id = ?1 AND o.object_id = m.object_id) \
@@ -216,7 +220,7 @@ impl ActorHandle {
                     ))
                     .map_err(corrupt)?;
                 let rows = statement
-                    .query_map([&workspace_id], |row| {
+                    .query_map(params![workspace_id, share_id], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,

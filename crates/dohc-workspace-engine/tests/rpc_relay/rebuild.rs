@@ -2,7 +2,7 @@
 //! `share.view.rebuild`: a new store is built from the relay and swapped in,
 //! the files on disk converge to it, and everything of the member's the relay
 //! hasn't taken is saved in a recovery folder, except a new file where they
-//! can still edit, which stays in place.
+//! can still edit and the relay never took, which stays in place.
 
 use super::*;
 
@@ -716,7 +716,12 @@ async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
 
 /// A grant whose reach hides the root and gives Edit in each of `edit`.
 fn edit_in(edit: &[&str]) -> Value {
-    let mut granted = grant("r2", "v2");
+    edit_in_under("r2", "v2", edit)
+}
+
+/// `edit_in`, under the reach `signature` and `visibility` name.
+fn edit_in_under(signature: &str, visibility: &str, edit: &[&str]) -> Value {
+    let mut granted = grant(signature, visibility);
     granted["access"] = json!("edit");
     granted["reach"]["rootLevel"] = Value::Null;
     granted["reach"]["folders"] = edit
@@ -870,6 +875,126 @@ async fn a_member_s_new_files_stay_where_they_can_still_edit() {
 {written:?}"
         );
     }
+    close(&transport, &handle, &mut id).await;
+}
+
+/// A file the member made and the relay already took is no longer theirs
+/// alone. The first narrowing keeps `open/new.md` where they edit, and the
+/// reopened copy sends it. When a later narrowing's log leaves it out, the
+/// rebuild moves it to recovery rather than keep it, and the copy has nothing
+/// of it to send again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_s_new_file_the_relay_took_goes_to_recovery() {
+    let copy = closed_copy_with("rpc-rebuild-keeps-taken", true, false, |_, _, scratch| {
+        Box::pin(async move {
+            std::fs::write(scratch.path().join("open/new.md"), "my new file").expect("new");
+        })
+    })
+    .await;
+    let granted = edit_in(&["open"]);
+    let result = rebuild_under(&copy, &granted).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    finish(&copy).await;
+    let root = copy.scratch.path();
+    assert_eq!(
+        std::fs::read_to_string(root.join("open/new.md")).expect("kept"),
+        "my new file"
+    );
+
+    let (transport, handle) = reopen(&copy).await;
+    let mut id = 10;
+    flush_capture(&transport, &handle, &mut id).await;
+    let send =
+        json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": granted });
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.direct.push",
+        send.clone(),
+    )
+    .await;
+    let taken = |relay: &FakeRelay| {
+        relay
+            .state
+            .lock()
+            .expect("relay state")
+            .share_written
+            .iter()
+            .filter(|change| change["afterPath"] == "open/new.md")
+            .count()
+    };
+    assert_eq!(taken(&copy.relay), 1, "the relay takes the new file");
+    // The relay narrows again, and its log holds no `open/new.md`.
+    serve(&copy.relay, "r3", "v3", false);
+    let closed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": granted }),
+    )
+    .await;
+    let again = closed["rebuildId"].as_str().expect("closed").to_owned();
+    close(&transport, &handle, &mut id).await;
+
+    let narrowed = edit_in_under("r3", "v3", &["open"]);
+    let mut params = rebuild_params(&copy);
+    params["rebuildId"] = json!(again);
+    params["grantedSelector"] = narrowed.clone();
+    let result = InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(92, "share.view.rebuild", None, params),
+        )
+        .await
+        .expect("rebuild")
+        .result;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert!(
+        !root.join("open/new.md").exists(),
+        "{:?}",
+        names_in(&root.join("open"))
+    );
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    let saved = names_in(&recovery)
+        .into_iter()
+        .find(|name| name.ends_with(" new.md"))
+        .unwrap_or_else(|| panic!("{:?}", names_in(&recovery)));
+    assert_eq!(
+        std::fs::read(recovery.join(&saved)).expect("new"),
+        b"my new file"
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains(&format!("| {saved} | open/new.md |")),
+        "{contents}"
+    );
+    InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(
+                93,
+                "share.view.rebuildFinish",
+                None,
+                json!({ "rootDir": root.to_string_lossy(), "rebuildId": again }),
+            ),
+        )
+        .await
+        .expect("finish");
+
+    let (transport, handle) = reopen(&copy).await;
+    let mut id = 10;
+    flush_capture(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.direct.push",
+        json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": narrowed }),
+    )
+    .await;
+    assert_eq!(taken(&copy.relay), 1, "nothing of the file goes out again");
     close(&transport, &handle, &mut id).await;
 }
 
