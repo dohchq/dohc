@@ -140,8 +140,7 @@ export function createNamedShareTransportRoutes(
         half,
         ["user", actor.userId],
       );
-      // The selector that filtered the page being returned. A held read
-      // refilters with the grant's level at each wake.
+      // The selector that filtered the page being returned.
       let pageSelector = readSelector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
@@ -149,6 +148,7 @@ export function createNamedShareTransportRoutes(
         let scanSince = since;
         const readPage = (): typeof page => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
+          // A changed level or role ends the hold now; the final check below would refuse its page anyway.
           if (
             fresh.share.workspaceId !== share.workspaceId ||
             JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)

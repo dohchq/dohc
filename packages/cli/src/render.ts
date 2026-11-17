@@ -463,7 +463,6 @@ function renderMembers(result: CliResultByVerb["members"]): string {
   ].join("\n");
 }
 
-// The words Live documents shows for each row's state.
 const LIVE_REASON_WORDS = {
   "document-unavailable": "file moved or removed",
   "workspace-changed": "workspace changed",

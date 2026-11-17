@@ -150,6 +150,7 @@
     "liveKeptEdits",
     "liveResume",
     "liveStop",
+    "members",
     "moment",
     "moments",
     "notices",
@@ -174,8 +175,7 @@
     "versionMerge",
     "versionResolve",
     "versionSwitch",
-    "watch",
-    "members"
+    "watch"
   ],
   "publicGroups": [
     "links",
