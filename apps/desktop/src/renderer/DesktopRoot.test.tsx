@@ -234,7 +234,7 @@ describe("workspace summary changes", () => {
     await screen.findByTestId("workspace-shell");
     const title = "dohc could not update access";
     const detail =
-      "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.";
+      "The file or folder at projects/site is a link. Put what it links to in its place, then choose Try again.";
     const shareView = {
       shareId: "share",
       granterEmail: null,

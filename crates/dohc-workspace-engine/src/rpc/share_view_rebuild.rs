@@ -147,6 +147,19 @@ fn failed(code: &'static str) -> WireError {
     WireError::new(ErrorCode::Conflict, code)
 }
 
+/// Why a step stopped. A wire error's message carries no path, so a stop at
+/// a path the member can put right answers `stopped` with that path.
+enum Halt {
+    Error(WireError),
+    At { code: &'static str, path: String },
+}
+
+impl From<WireError> for Halt {
+    fn from(error: WireError) -> Self {
+        Self::Error(error)
+    }
+}
+
 fn local(root: &Path) -> PathBuf {
     root.join(LOCAL_STATE_RELATIVE_PATH)
 }
@@ -192,13 +205,82 @@ fn job_id(rebuild_id: &str, wave: u8, path: &str) -> String {
 
 /// Refuse a path that reaches through a link below the root, as the
 /// materializer does: the rebuild reads and moves only this copy's files.
-fn link_free(root: &Path, path: &Path) -> Result<(), WireError> {
-    match dohc_engine_files::ensure_target_symlink_free(root, path) {
-        Ok(()) => Ok(()),
-        Err(dohc_engine_files::MaterializeError::SymlinkTarget) => {
-            Err(failed("share-view-rebuild-linked-folder"))
+/// The stop names the link or unreadable folder, not a file below it.
+fn link_free(root: &Path, path: &Path) -> Result<(), Halt> {
+    let Err(error) = dohc_engine_files::ensure_target_symlink_free(root, path) else {
+        return Ok(());
+    };
+    let code = match error {
+        dohc_engine_files::MaterializeError::SymlinkTarget => "share-view-rebuild-linked-folder",
+        _ => "share-view-rebuild-disk-unreadable",
+    };
+    let mut at = root.to_path_buf();
+    let mut parts = Vec::new();
+    for part in path.strip_prefix(root).unwrap_or(path).components() {
+        at.push(part);
+        parts.push(part.as_os_str().to_string_lossy().into_owned());
+        if dohc_engine_files::ensure_target_symlink_free(root, &at).is_err() {
+            break;
         }
-        Err(_) => Err(failed("share-view-rebuild-disk-unreadable")),
+    }
+    Err(Halt::At {
+        code,
+        path: parts.join("/"),
+    })
+}
+
+/// Whether `.dohc/files.toml` keeps every path below `folder` out of dohc: a
+/// rule drops all of them, and no later rule tracks any of them. The secret
+/// floor isn't consulted.
+fn policy_excludes_folder(
+    policy: &Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
+    folder: &str,
+) -> bool {
+    let Some(rules) = policy else {
+        return false;
+    };
+    let parts: Vec<&str> = folder.split('/').collect();
+    let agrees = |pattern: &[&str]| {
+        pattern.iter().zip(&parts).all(|(pattern, part)| {
+            dohc_engine_files::search_policy::policy_glob_matches(pattern, part)
+        })
+    };
+    let mut excluded = false;
+    for rule in rules {
+        let mut pattern: Vec<&str> = rule.path.split('/').collect();
+        // A final `**` matches every deeper path.
+        let open = pattern.last() == Some(&"**");
+        if open {
+            pattern.pop();
+        }
+        match rule.tracked {
+            Some(false) if open && pattern.len() <= parts.len() && agrees(&pattern) => {
+                excluded = true;
+            }
+            Some(true) if (open || pattern.len() > parts.len()) && agrees(&pattern) => {
+                excluded = false;
+            }
+            _ => {}
+        }
+    }
+    excluded
+}
+
+/// Whether the rebuild would leave a path the scan couldn't read in place
+/// anyway: `.dohc/files.toml` keeps the file, or everything in the folder,
+/// out of dohc. A path that can't be told apart must pass both.
+fn unread_path_excluded(
+    root: &Path,
+    policy: &Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
+    path: &str,
+) -> bool {
+    match std::fs::symlink_metadata(root.join(path)) {
+        Ok(metadata) if metadata.is_dir() => policy_excludes_folder(policy, path),
+        Ok(_) => crate::capture_driver::policy_excludes(policy, path),
+        Err(_) => {
+            crate::capture_driver::policy_excludes(policy, path)
+                && policy_excludes_folder(policy, path)
+        }
     }
 }
 
@@ -224,7 +306,7 @@ fn case_twins<'a>(paths: impl Iterator<Item = &'a str>) -> HashSet<String> {
 /// that ignores case, a path among `twins` whose file the disk names as
 /// another of them is not at `path`: the member renamed the file or a folder
 /// above it, and the plan must not take it for a second file.
-fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<String>, WireError> {
+fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<String>, Halt> {
     link_free(root, &root.join(path))?;
     let Ok(bytes) = std::fs::read(root.join(path)) else {
         return Ok(None);
@@ -246,26 +328,47 @@ fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<S
 /// isn't downloaded.
 ///
 /// A path the scan couldn't read may be the member's own file that no store
-/// recorded, so the rebuild stops with the copy closed until it can read
-/// every path: Try again then saves it. A file over the size cap is never
-/// sent, so it stays where it is.
+/// recorded, so the rebuild stops with the copy closed and names the first
+/// one until it can read every path: Try again then saves it. A file over the
+/// size cap is never sent, so it stays where it is, as does one
+/// `.dohc/files.toml` keeps out of dohc. Answers that policy too.
 async fn files_on_disk(
     root: &Path,
     seed: &dohc_engine_files::ScanManifest,
-) -> Result<HashMap<String, String>, WireError> {
-    let root = root.to_path_buf();
+) -> Result<
+    (
+        HashMap<String, String>,
+        Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
+    ),
+    Halt,
+> {
+    let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
+    let scan_root = root.to_path_buf();
     let prior = seed.clone();
     let scanned = tokio::task::spawn_blocking(move || {
         let scanner = dohc_engine_files::Scanner::new(dohc_engine_files::ScanBounds::default())?;
-        scanner.scan_with_prior(&root, &prior, &dohc_engine_files::CancellationToken::new())
+        scanner.scan_with_prior(
+            &scan_root,
+            &prior,
+            &dohc_engine_files::CancellationToken::new(),
+        )
     })
     .await;
-    let listing = match scanned {
-        Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) if !listing.degraded() => {
-            listing
-        }
-        _ => return Err(failed("share-view-rebuild-disk-unreadable")),
+    let Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) = scanned else {
+        return Err(failed("share-view-rebuild-disk-unreadable").into());
     };
+    if let Some(path) = listing
+        .failed
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| !unread_path_excluded(root, &policy, path))
+        .min()
+    {
+        return Err(Halt::At {
+            code: "share-view-rebuild-disk-unreadable",
+            path: path.to_owned(),
+        });
+    }
     let evicted = listing.skipped.into_iter().filter_map(|skipped| {
         let captured = seed.get(&skipped.path)?;
         // A seed can carry a marker in place of a hash; that file is read.
@@ -274,12 +377,13 @@ async fn files_on_disk(
             && captured.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| (skipped.path, captured.sha256.clone()))
     });
-    Ok(listing
+    let files = listing
         .files
         .into_iter()
         .map(|file| (file.path, file.sha256))
         .chain(evicted)
-        .collect())
+        .collect();
+    Ok((files, policy))
 }
 
 impl EngineService {
@@ -317,18 +421,35 @@ impl EngineService {
         if lock(&self.handles).values().any(|open| open.root == root) {
             return Err(failed("share-view-rebuild-root-open"));
         }
+        match self.rebuild_steps(ctx, &root, &params).await {
+            Ok(answer) => Ok(answer),
+            Err(Halt::Error(error)) => Err(error),
+            Err(Halt::At { code, path }) => Ok(json!({
+                "state": "stopped",
+                "code": code,
+                "path": path,
+            })),
+        }
+    }
+
+    async fn rebuild_steps(
+        &self,
+        ctx: &RequestContext,
+        root: &Path,
+        params: &RebuildParams,
+    ) -> Result<Value, Halt> {
         loop {
-            let manifest = self.rebuild_manifest(&root, &params.rebuild_id)?;
+            let manifest = self.rebuild_manifest(root, &params.rebuild_id)?;
             match manifest.phase {
                 RebuildPhase::Closed => {
-                    if let Some(answer) = self.rebuild_plan(ctx, &root, &params, manifest).await? {
+                    if let Some(answer) = self.rebuild_plan(ctx, root, params, manifest).await? {
                         return Ok(answer);
                     }
                 }
-                RebuildPhase::Planned => self.rebuild_save(&root, manifest)?,
-                RebuildPhase::Swapping => self.rebuild_swap(&root, manifest).await?,
+                RebuildPhase::Planned => self.rebuild_save(root, manifest)?,
+                RebuildPhase::Swapping => self.rebuild_swap(root, manifest).await?,
                 RebuildPhase::Swapped => {
-                    self.rebuild_converge(ctx, &root, &params.workspace_id, manifest)
+                    self.rebuild_converge(ctx, root, &params.workspace_id, manifest)
                         .await?;
                 }
                 RebuildPhase::Converged => {
@@ -340,7 +461,7 @@ impl EngineService {
                         "recoveryFolder": plan.and_then(|plan| plan.recovery_folder.clone()),
                         "recovered": plan.map_or(0, |plan| plan.recovery.len()),
                         "savedDrafts": plan.map(|plan| plan.saved_drafts.clone()).unwrap_or_default(),
-                        "asideLeft": aside(&root).exists(),
+                        "asideLeft": aside(root).exists(),
                     }));
                 }
             }
@@ -451,7 +572,7 @@ impl EngineService {
         root: &Path,
         params: &RebuildParams,
         manifest: RebuildManifest,
-    ) -> Result<Option<Value>, WireError> {
+    ) -> Result<Option<Value>, Halt> {
         let workspace_id = params.workspace_id.as_str();
         // A build a crash stopped starts again.
         remove_folder(&staging_root(root))
@@ -476,7 +597,7 @@ impl EngineService {
             })
             .map_err(|_| failed("share-view-rebuild-filesystem-unreadable"))?;
         if !same {
-            return Err(failed("share-view-rebuild-filesystems-differ"));
+            return Err(failed("share-view-rebuild-filesystems-differ").into());
         }
 
         let staging = self
@@ -609,7 +730,7 @@ impl EngineService {
         root: &Path,
         params: &RebuildParams,
         old: &OldRead,
-    ) -> Result<Result<NewRead, Value>, WireError> {
+    ) -> Result<Result<NewRead, Value>, Halt> {
         let open = self.open(Some(handle))?;
         Box::pin(self.versions_ensure_main(
             ctx,
@@ -638,10 +759,7 @@ impl EngineService {
                 )
                 .await?;
             let RelayOperationOutcome::ShareViewPulled(pulled) = pulled else {
-                return Err(WireError::new(
-                    ErrorCode::Internal,
-                    "unexpected pull outcome",
-                ));
+                return Err(WireError::new(ErrorCode::Internal, "unexpected pull outcome").into());
             };
             if let Some(served) = pulled.reach_changed {
                 return Ok(Err(json!({
@@ -699,7 +817,7 @@ impl EngineService {
             .chain(&heads)
             .map(|head| head.path.as_str())
             .collect();
-        let mut scanned = files_on_disk(root, &old.scan_seed).await?;
+        let (mut scanned, policy) = files_on_disk(root, &old.scan_seed).await?;
         let twins = case_twins(
             stored
                 .iter()
@@ -722,7 +840,6 @@ impl EngineService {
         // A file neither store holds is the member's, which the old store
         // never recorded because the copy closed first. A file
         // `.dohc/files.toml` keeps out of dohc is never sent, so it stays.
-        let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
         disk.extend(
             scanned
                 .into_iter()
@@ -738,7 +855,7 @@ impl EngineService {
 
     /// `planned`: move the saved copies and the displaced folder into the
     /// recovery folder, then get the swap ready.
-    fn rebuild_save(&self, root: &Path, mut manifest: RebuildManifest) -> Result<(), WireError> {
+    fn rebuild_save(&self, root: &Path, mut manifest: RebuildManifest) -> Result<(), Halt> {
         if let Some(plan) = manifest.plan.as_mut()
             && let Some(folder) = plan.recovery_folder.as_deref()
         {
@@ -763,14 +880,14 @@ impl EngineService {
             .and_then(|()| std::fs::create_dir(&aside))
             .map_err(|_| failed("share-view-rebuild-aside-unavailable"))?;
         let existed = local(root).join(SHARE_REFRESH).exists();
-        write_manifest(
+        Ok(write_manifest(
             root,
             &RebuildManifest {
                 phase: RebuildPhase::Swapping,
                 share_refresh_existed: Some(existed),
                 ..manifest
             },
-        )
+        )?)
     }
 
     /// `swapping`: finish the renames the folders on disk say are left.
@@ -810,7 +927,7 @@ impl EngineService {
         root: &Path,
         workspace_id: &str,
         mut manifest: RebuildManifest,
-    ) -> Result<(), WireError> {
+    ) -> Result<(), Halt> {
         self.rebuild_crash_point("swapped")?;
         // The aside store still holds the hidden History. A delete that
         // fails is tried again by finish, and the answer says it is left.
@@ -826,7 +943,7 @@ impl EngineService {
         converged?;
         manifest.phase = RebuildPhase::Converged;
         write_contents(root, &manifest)?;
-        write_manifest(root, &manifest)
+        Ok(write_manifest(root, &manifest)?)
     }
 
     async fn rebuild_waves(
@@ -835,7 +952,7 @@ impl EngineService {
         root: &Path,
         workspace_id: &str,
         manifest: &mut RebuildManifest,
-    ) -> Result<(), WireError> {
+    ) -> Result<(), Halt> {
         let actor = self.rebuild_actor(handle)?;
         let waves_done = manifest.plan.as_ref().map_or(3, |plan| plan.waves_done);
         if waves_done < 1 {
@@ -1453,7 +1570,7 @@ fn numbered_name(number: u32, name: &str) -> String {
 /// Move a file or folder to its recovery destination without replacing
 /// anything. Answers whether there was one to move. A destination that
 /// exists is a move already done.
-fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, WireError> {
+fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, Halt> {
     link_free(root, source)?;
     link_free(root, destination)?;
     if destination.exists() {
@@ -1510,7 +1627,7 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Write the recovery folder's `contents.md` from the manifest.
-fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireError> {
+fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), Halt> {
     let Some(plan) = manifest.plan.as_ref() else {
         return Ok(());
     };
@@ -1563,7 +1680,7 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
     let written = std::fs::create_dir_all(&folder)
         .and_then(|()| write_synced(&temp, text.as_bytes()))
         .and_then(|()| std::fs::rename(&temp, folder.join(CONTENTS)));
-    written.map_err(|_| failed("share-view-rebuild-recovery-unavailable"))
+    Ok(written.map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?)
 }
 
 /// Whether another program's open file may be what stopped a move. Windows
@@ -1599,6 +1716,36 @@ async fn rename_retrying(from: &Path, to: &Path) -> Result<(), WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_excluded_only_when_no_later_rule_tracks_a_path_in_it() {
+        let rule = |path: &str, tracked: bool| dohc_engine_runtime::search::FilesPolicyRule {
+            path: path.to_owned(),
+            tracked: Some(tracked),
+            searchable: None,
+        };
+        let policy = |rules: Vec<_>| Some(rules);
+        let dropped = policy(vec![rule("private/**", false)]);
+        assert!(policy_excludes_folder(&dropped, "private"));
+        assert!(policy_excludes_folder(&dropped, "private/vm"));
+        assert!(!policy_excludes_folder(&dropped, "open"));
+        assert!(!policy_excludes_folder(
+            &policy(vec![rule("private/*.vhdx", false)]),
+            "private"
+        ));
+        assert!(!policy_excludes_folder(
+            &policy(vec![
+                rule("private/**", false),
+                rule("private/notes/*.md", true)
+            ]),
+            "private"
+        ));
+        assert!(policy_excludes_folder(
+            &policy(vec![rule("private/notes/*.md", true), rule("*/**", false)]),
+            "private"
+        ));
+        assert!(!policy_excludes_folder(&None, "private"));
+    }
 
     #[test]
     fn a_stamp_names_the_utc_minute() {

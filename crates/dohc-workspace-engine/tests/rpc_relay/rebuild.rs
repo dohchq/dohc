@@ -721,6 +721,45 @@ async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
     finish(&copy).await;
 }
 
+/// A file `.dohc/files.toml` keeps out of dohc can't be read when the rebuild
+/// looks. The rebuild would leave it in place anyway, so it doesn't stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_file_dohc_does_not_track_stays_in_place() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-unreadable-untracked",
+        true,
+        false,
+        |_, _, scratch| {
+            Box::pin(async move {
+                let root = scratch.path();
+                std::fs::write(
+                    root.join(".dohc/files.toml"),
+                    "[[rule]]\npath = \"private/**\"\ntracked = false\n",
+                )
+                .expect("policy");
+                std::fs::create_dir_all(root.join("private")).expect("private");
+                std::fs::write(root.join("private/vm.vhdx"), "a disk image").expect("image");
+            })
+        },
+    )
+    .await;
+    let root = copy.scratch.path();
+    let Some(held) = hold_unreadable(&root.join("private/vm.vhdx")) else {
+        return;
+    };
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    drop(held);
+    let result = outcome.expect("rebuild");
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        std::fs::read(root.join("private/vm.vhdx")).expect("image"),
+        b"a disk image"
+    );
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(names_in(&recovery), ["0001 b.md", "contents.md"]);
+    finish(&copy).await;
+}
+
 /// `.dohc/files.toml` keeps a folder out of dohc, so no store holds its files
 /// and dohc never sends them. The rebuild leaves them where they are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -795,8 +834,8 @@ fn hold_unreadable(path: &std::path::Path) -> Option<Unreadable> {
 }
 
 /// The member's unrecorded file can't be read when the rebuild looks, so the
-/// disk listing is incomplete. The rebuild stops with the copy closed and
-/// moves nothing. Once the file can be read, Try again saves it.
+/// disk listing is incomplete. The rebuild stops with the copy closed, names
+/// the file and moves nothing. Once the file can be read, Try again saves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unreadable_file_stops_the_rebuild_until_it_can_be_read() {
     let copy = closed_copy_with("rpc-rebuild-unreadable", true, false, |_, _, scratch| {
@@ -811,10 +850,13 @@ async fn an_unreadable_file_stops_the_rebuild_until_it_can_be_read() {
     };
     let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
     drop(held);
-    let refused = outcome.expect_err("refused");
     assert_eq!(
-        (refused.code, refused.message.as_str()),
-        (ErrorCode::Conflict, "share-view-rebuild-disk-unreadable")
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-disk-unreadable",
+            "path": "hidden/ideas.md",
+        })
     );
     assert_eq!(manifest(&copy).expect("manifest")["phase"], "closed");
     assert_eq!(
@@ -1252,10 +1294,14 @@ async fn a_folder_linked_elsewhere_stops_the_rebuild_and_moves_nothing() {
     );
     assert_eq!(names_in(elsewhere.path()), ["a.md"]);
     assert!(!root.join(".dohc/local/recovery").exists());
-    let refused = outcome.expect_err("refused");
+    // It names the link, not the file below it.
     assert_eq!(
-        (refused.code, refused.message.as_str()),
-        (ErrorCode::Conflict, "share-view-rebuild-linked-folder")
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-linked-folder",
+            "path": "open",
+        })
     );
 
     remove_link(&root.join("open"));

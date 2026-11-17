@@ -287,10 +287,22 @@ export function classifyShareViewRebuildError(
   return "other";
 }
 
+/** The engine stopped a rebuild at a path in the workspace the person can put right. */
+export class ShareViewRebuildStoppedError extends Error {
+  constructor(
+    readonly code: string,
+    readonly path: string,
+  ) {
+    super(`The rebuild stopped at ${path}: ${code}`);
+    this.name = "ShareViewRebuildStoppedError";
+  }
+}
+
 /**
  * The engine's `share.view.rebuild` answer. A rebuilt copy keeps the reach
  * main read when the engine built under the same signatures, and otherwise
- * takes the reach the engine's plan names.
+ * takes the reach the engine's plan names. A rebuild stopped at a path
+ * throws, as a refusal does.
  */
 export function parseShareViewRebuildAnswer(
   value: unknown,
@@ -298,6 +310,13 @@ export function parseShareViewRebuildAnswer(
 ): ShareViewRebuildAnswer<ListedReach> {
   if (!isRecord(value)) throw new Error("dohc could not read the engine's rebuild answer.");
   if (value.state === "reachMoved") return { state: "reachMoved" };
+  if (
+    value.state === "stopped" &&
+    typeof value.code === "string" &&
+    typeof value.path === "string"
+  ) {
+    throw new ShareViewRebuildStoppedError(value.code, value.path);
+  }
   const savedDrafts = value.savedDrafts;
   if (
     value.state === "rebuilt" &&
@@ -335,7 +354,7 @@ const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   "share-view-rebuild-file-held":
     "Another program may have a file in this workspace open. Close it, then choose Try again.",
   "share-view-rebuild-linked-folder":
-    "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
+    "A file or folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
   "share-view-rebuild-rename-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-move-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-unavailable": CHANGE_FAILED,
@@ -359,6 +378,32 @@ const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   "share-view-rebuild-root-open": "This workspace was still open.",
 };
 
+// The same stops, when the engine names the path. A path is never the
+// first word of a sentence.
+const REBUILD_STOPS_AT: Partial<Record<string, (path: string) => string>> = {
+  "share-view-rebuild-linked-folder": (path) =>
+    `The file or folder at ${path} is a link. Put what it links to in its place, then choose Try again.`,
+  "share-view-rebuild-disk-unreadable": (path) =>
+    `dohc could not read ${path}. If another program has it open, close it, then choose Try again.`,
+};
+
+// A stop's words fit the view's bound with room to spare.
+const STOP_PATH_MAX = 300;
+
+/** A long path as its first folder, "…", and as many of its last parts as fit. */
+function stopPath(path: string): string {
+  if (path.length <= STOP_PATH_MAX) return path;
+  const parts = path.split("/");
+  let tail = parts.pop()!;
+  while (
+    parts.length > 1 &&
+    parts[0]!.length + tail.length + parts.at(-1)!.length + 3 <= STOP_PATH_MAX
+  ) {
+    tail = `${parts.pop()!}/${tail}`;
+  }
+  return parts.length === 0 ? tail : `${parts[0]!}/…/${tail}`;
+}
+
 /** The code an engine refusal carries, through the errors that wrap it. */
 function engineRefusalCode(error: unknown): string | null {
   for (let at = error, depth = 0; at instanceof Error && depth < 4; at = at.cause, depth += 1) {
@@ -380,6 +425,18 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
     case "failed": {
       if (notice.error instanceof LivePageUnkeptError)
         return { reason: "failed", detail: notice.error.message };
+      if (notice.error instanceof ShareViewRebuildStoppedError) {
+        const { code, path } = notice.error;
+        const why = REBUILD_STOPS_AT[code];
+        return why === undefined
+          ? { reason: "failed", detail: "dohc could not update access.", cause: code }
+          : {
+              reason: "failed",
+              title: "dohc could not update access",
+              detail: why(stopPath(path)),
+              cause: code,
+            };
+      }
       const code = engineRefusalCode(notice.error);
       if (code !== null) {
         const why = REBUILD_REFUSALS[code];

@@ -19,6 +19,7 @@ import {
   holdShareViewCopy,
   isClosedCopyRefusal,
   LivePageUnkeptError,
+  parseShareViewRebuildAnswer,
   shareViewRebuildStop,
   type ShareViewRebuildAnswer,
   type ShareViewRebuildNotice,
@@ -406,7 +407,7 @@ describe("the words for a stopped rebuild", () => {
     ],
     [
       "share-view-rebuild-linked-folder",
-      "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
+      "A file or folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
     ],
     ["share-view-rebuild-rename-failed", UNCHANGED],
     ["share-view-rebuild-recovery-move-failed", UNCHANGED],
@@ -436,6 +437,44 @@ describe("the words for a stopped rebuild", () => {
       detail,
       cause: code,
     });
+  });
+
+  // The engine answers a stop at a path, since a refusal's message carries none.
+  const stoppedAt = (code: string, path: string) => {
+    const read = { signature: "s", visibilitySignature: "v", rootLevel: null, folders: [] };
+    try {
+      parseShareViewRebuildAnswer({ state: "stopped", code, path }, read);
+    } catch (error) {
+      return shareViewRebuildStop({ kind: "failed", error });
+    }
+    throw new Error("the answer was taken as a result");
+  };
+
+  it.each([
+    [
+      "share-view-rebuild-disk-unreadable",
+      "private/vm.vhdx",
+      "dohc could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.",
+    ],
+    [
+      "share-view-rebuild-linked-folder",
+      "projects/site",
+      "The file or folder at projects/site is a link. Put what it links to in its place, then choose Try again.",
+    ],
+  ])("names the path of %s", (code, path, detail) => {
+    expect(stoppedAt(code, path)).toEqual({
+      reason: "failed",
+      title: "dohc could not update access",
+      detail,
+      cause: code,
+    });
+  });
+
+  it("shortens a long path to its first folder and its name", () => {
+    const path = `notes/${"deep/".repeat(500)}vm.vhdx`;
+    const stop = stoppedAt("share-view-rebuild-disk-unreadable", path);
+    expect(stop?.detail).toMatch(/^dohc could not read notes\/…\/(deep\/)+vm\.vhdx\. If another/u);
+    expect(stop!.detail.length).toBeLessThan(400);
   });
 
   it("keeps an engine code it has no words for, for Copy details", () => {
