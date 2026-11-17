@@ -1084,6 +1084,28 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
         [8, "Results"],
       ],
     },
+    ...["| - | - |", "#physics"].map((first) => ({
+      name: `a first line marked refuses as heading text keeps the math: ${first}`,
+      body: `${first}\n $$x$$\nfoo\n===\n\nAfter`,
+      lands: [
+        [2, "x"],
+        [6, "After"],
+      ] as Array<[number, string]>,
+    })),
+    ...[
+      "Intro\n$$x$$\n<incomplete\n---\n\nAfter",
+      "Intro\n$$x$$\n    code\n---\n\nAfter",
+      "## Energy\nCompute the energy:\n$$E=mc^2$$\n#physics\nwhere E is energy\n===\n```yaml\nenergy: 42\n```\n\nAfter",
+      "Compute the energy:\n$$E=mc^2$$\n    E = 9e16 J\nwhere E is energy\n---\n```yaml\n---\nenergy: 42\n```\n\nAfter",
+      "Para\n$$x$$\n\tmore\nfoo\n===\n\nAfter",
+      "Para\n$$x$$\nfoo\n===\t\n\nAfter",
+      "Para\n    more\n$$x$$\nfoo\n===\n\nAfter",
+      "Para\n2. item\n$$x$$\nfoo\n===\n\nAfter",
+    ].map((body) => ({
+      name: `a setext underline reaches math over the lines marked allows: ${JSON.stringify(body)}`,
+      body,
+      lands: [[body.split("\n").length, "After"]] as Array<[number, string]>,
+    })),
     {
       name: "a table keeps an indented $$ as a row",
       body: "| a | b |\n| - | - |\n| 1 | 2 |\n  $$\n  x\n  $$\n\nAfter",

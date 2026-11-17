@@ -213,28 +213,21 @@ function mathBlockEnd(lines: string[], start: number, maxIndent = 3): number | n
   return null;
 }
 
+// The underline and the lines a setext heading's text may not run into, from
+// marked's GFM `lheading` rule.
+const LHEADING_UNDERLINE_RE = /^ {0,3}(?:=+|-+) *$/;
+const LHEADING_STOP_RE =
+  /^(?:\s*$| {0,3}(?:[*+-]|\d{1,9}[.)]) |(?: {4}| {0,3}\t)| {0,3}(?:`{3,}|~{3,})| {0,3}>| {0,3}#{1,6}| {0,3}<[^\n>]+>$| {0,3}\|?(?:[:\- ]*\|)+[:\- ]*$)/;
+
 /** Where the paragraph run from `start` stops, and whether a setext underline
  *  stops it. marked reads a setext heading before display math, so a `$$`
  *  line inside an underlined run is the heading's text. The answer is the
- *  same from any line before `end`. */
+ *  same from any start up to `end`. */
 function setextRun(lines: string[], start: number): { end: number; underlined: boolean } {
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    if (BLANK_RE.test(line)) return { end: index, underlined: false };
-    if (SETEXT_RE.test(line)) return { end: index, underlined: true };
-    const kind = blockKind(line);
-    if (
-      kind === "bullet" ||
-      kind === "task" ||
-      kind === "ordered" ||
-      kind === "quote" ||
-      kind === "heading" ||
-      kind === "break" ||
-      fenceOpener(line) ||
-      HTML_BLOCK_RE.test(line)
-    ) {
-      return { end: index, underlined: false };
-    }
+    if (LHEADING_UNDERLINE_RE.test(line)) return { end: index, underlined: true };
+    if (LHEADING_STOP_RE.test(line)) return { end: index, underlined: false };
   }
   return { end: lines.length, underlined: false };
 }
@@ -494,8 +487,18 @@ export function blockForLine(body: string, line: number): LineBlock {
       (open && (openKind === "table" || openHtml));
     let mathClose = mathBlockEnd(lines, index, continues ? 0 : 3);
     if (mathClose !== null && open && openKind === "other") {
-      if (index + 1 > setext.end) setext = setextRun(lines, index + 1);
-      if (setext.underlined) mathClose = null;
+      // marked tries the heading from the paragraph's first line, so a stop
+      // above this line rules it out too, and so does a first line the rule
+      // refuses, such as `| - |` or `#tag`. `holderStart` is that line's
+      // successor, 0-based.
+      if (holderStart > setext.end) setext = setextRun(lines, holderStart);
+      if (
+        setext.underlined &&
+        setext.end > index &&
+        !LHEADING_STOP_RE.test(lines[holderStart - 1] ?? "")
+      ) {
+        mathClose = null;
+      }
     }
     const resumes =
       (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
