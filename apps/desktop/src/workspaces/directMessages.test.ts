@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { DIRECT_INACTIVE_MESSAGE } from "../ipc/directMessageOperations";
 import { ipcWireError, readError } from "../ipc/errorWords";
+import { CredentialSessionCache } from "./credentialSessionCache";
 import { createDirectMessages, DirectMessageError, directScope } from "./directMessages";
 
 interface Account {
@@ -25,7 +26,13 @@ const conversation = (last: DirectMessage, unread = 1): DirectConversation => ({
   unread,
 });
 
-function harness(options: { account?: Account | null; retryMs?: number } = {}) {
+function harness(
+  options: {
+    account?: Account | null;
+    retryMs?: number;
+    credentials?: () => Promise<Account | null>;
+  } = {},
+) {
   let account: Account | null =
     options.account === undefined
       ? { relayUrl: "https://relay.test", userId: "ann" }
@@ -41,13 +48,15 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   const servers: string[] = [];
   const signals: Array<AbortSignal | null | undefined> = [];
   const service = createDirectMessages<Account>({
-    credentials: async () => {
-      await held;
-      const once = nextRead;
-      nextRead = null;
-      if (once === "reject") throw new Error("the keychain did not answer");
-      return once === "signed-out" ? null : account;
-    },
+    credentials:
+      options.credentials ??
+      (async () => {
+        await held;
+        const once = nextRead;
+        nextRead = null;
+        if (once === "reject") throw new Error("the keychain did not answer");
+        return once === "signed-out" ? null : account;
+      }),
     relayResponse: async (credentials, path, init) => {
       requests.push(`${init.method ?? "GET"} ${path}`);
       servers.push(credentials.relayUrl ?? "");
@@ -111,6 +120,7 @@ const viewer = (userId: string, relayUrl = "https://relay.test") => ({
   scope: directScope({ relayUrl, userId }),
 });
 const ANN = viewer("ann");
+const ANN_ACCOUNT = { relayUrl: "https://relay.test", userId: "ann" };
 
 describe("direct messages for the signed-in account", () => {
   it("fails plainly while the server is unreachable, with nothing kept on this computer", async () => {
@@ -405,9 +415,11 @@ describe("direct messages for the signed-in account", () => {
     const stop = h.service.listen();
     await expect.poll(() => h.changes()).toBe(1);
     expect(h.listedChanges()).toBe(1);
-    expect(h.service.listed("ann")?.conversations[0]?.unread).toBe(1);
+    expect(h.service.listed(ANN_ACCOUNT)?.conversations[0]?.unread).toBe(1);
     // Another account's Notices never see Ann's list.
-    expect(h.service.listed("cat")).toBeNull();
+    expect(h.service.listed({ relayUrl: "https://relay.test", userId: "cat" })).toBeNull();
+    // The same user id on another server is another account.
+    expect(h.service.listed({ relayUrl: "https://other.test", userId: "ann" })).toBeNull();
     // A window's read right after is served from that read.
     await h.service.list();
     expect(lists).toBe(1);
@@ -416,7 +428,7 @@ describe("direct messages for the signed-in account", () => {
     await h.service.read(ANN, "c1", 2);
     expect((await h.service.list()).conversations[0]?.unread).toBe(0);
     expect(lists).toBe(2);
-    expect(h.service.listed("ann")?.conversations[0]?.unread).toBe(0);
+    expect(h.service.listed(ANN_ACCOUNT)?.conversations[0]?.unread).toBe(0);
     stop();
   });
 
@@ -440,7 +452,7 @@ describe("direct messages for the signed-in account", () => {
     expect((await windowRead).conversations[0]!.unread).toBe(0);
     answers[0]!(Response.json({ revision: 1, conversations: [conversation(message(2), 1)] }));
     await vi.waitFor(() => expect(h.changes()).toBe(1));
-    expect(h.service.listed("ann")?.conversations[0]!.unread).toBe(0);
+    expect(h.service.listed(ANN_ACCOUNT)?.conversations[0]!.unread).toBe(0);
     stop();
   });
 
@@ -630,6 +642,35 @@ describe("direct messages for the signed-in account", () => {
     }
   });
 
+  it("follows once main's first read of the stored account fails and the next succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      // Main reads the account through its credential cache.
+      const cache = new CredentialSessionCache<Account>();
+      let loads = 0;
+      const load = async () => {
+        loads += 1;
+        if (loads === 1) throw new Error("the keychain did not answer");
+        return { relayUrl: "https://relay.test", userId: "ann" };
+      };
+      const h = harness({
+        credentials: () => cache.read(load),
+      });
+      let waiting = 0;
+      h.routes.set("/sync/direct/activity", () => {
+        waiting += 1;
+        return new Promise<Response>(() => {});
+      });
+      const stop = h.service.listen();
+      await vi.runAllTimersAsync();
+      expect(loads).toBe(2);
+      expect(waiting).toBe(1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("forgets the last account's list once another signs in", async () => {
     const h = harness();
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
@@ -637,10 +678,10 @@ describe("direct messages for the signed-in account", () => {
       Response.json({ revision: 1, conversations: [conversation(message(1))] }),
     );
     const stop = h.service.listen();
-    await expect.poll(() => h.service.listed("ann")).not.toBeNull();
+    await expect.poll(() => h.service.listed(ANN_ACCOUNT)).not.toBeNull();
     h.signInAs({ relayUrl: "https://relay.test", userId: "cat" });
     h.service.accountChanged();
-    await expect.poll(() => h.service.listed("ann")).toBeNull();
+    await expect.poll(() => h.service.listed(ANN_ACCOUNT)).toBeNull();
     stop();
   });
 });

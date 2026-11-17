@@ -338,9 +338,9 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     accountChanged(): void {
       void ensureFollowing();
     },
-    /** The list the follow loop read last, for `userId` only. Nothing is read from the server. */
-    listed(userId: string): DirectListed | null {
-      return listed && listed.viewerId === userId && following?.key === listed.key
+    /** The list the follow loop read last, for `account` only. Nothing is read from the server. */
+    listed(account: DirectAccount): DirectListed | null {
+      return listed && listed.key === accountKey(account) && following?.key === listed.key
         ? toListed(listed)
         : null;
     },

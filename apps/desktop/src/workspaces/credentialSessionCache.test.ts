@@ -88,6 +88,20 @@ describe("CredentialSessionCache", () => {
     });
   });
 
+  it("reads the credentials, and rejects while the store can't be read so a caller doesn't take it as a sign-out", async () => {
+    const cache = new CredentialSessionCache<string>();
+    let attempts = 0;
+    const load = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary read failure");
+      return "current-session";
+    };
+
+    await expect(cache.read(load)).rejects.toThrow("temporary read failure");
+    await expect(cache.read(load)).resolves.toBe("current-session");
+    expect(attempts).toBe(2);
+  });
+
   it("tells each warm caller why the load it waited on failed, even after a later load starts", async () => {
     const cache = new CredentialSessionCache<string>();
     const unreadable = new Error("EACCES: credentials.json");

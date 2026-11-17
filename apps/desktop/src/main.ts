@@ -1493,9 +1493,11 @@ const namedDatasetPages = createNamedDatasetCacheRegistry({
 // the account's activity for as long as the app runs and tells every window.
 // A message not read yet shows in Notices, from the same list.
 const directMessages = createDirectMessages<CloudSessionCredentials>({
+  // An unreadable store rejects, so the follow tries again rather than stopping as signed out.
   credentials: async () => {
-    await warmCredentialCache();
-    return cachedCredentials;
+    const credentials = await credentialSessionCache.read(() => cloudLogin().credentials());
+    if (!credentials) await namedDatasetPages.credentialsChanged(null);
+    return credentials;
   },
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),
@@ -11304,11 +11306,11 @@ function registerIpcHandlers(): void {
       listNotices: async () => {
         const listed = await noticeStore().list();
         // Direct messages not read yet, for the account this list shows.
-        const viewer =
+        const account =
           cachedCredentials && chatShareSessionKey(cachedCredentials) === listed.account
-            ? cachedCredentials.userId
+            ? cachedCredentials
             : null;
-        const direct = viewer === null ? null : directMessages.listed(viewer);
+        const direct = account === null ? null : directMessages.listed(account);
         if (!direct?.conversations.length) return listed;
         const notices = [
           ...listed.notices,
