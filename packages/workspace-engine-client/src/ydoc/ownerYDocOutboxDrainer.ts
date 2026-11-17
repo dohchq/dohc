@@ -176,7 +176,10 @@ export class OwnerYDocOutboxDrainer {
   }
 
   async drainOnce(): Promise<OwnerYDocDrainResult> {
-    if (this.disposed || !this.refusals.hold(this.outboxId)) return "retry";
+    if (this.disposed || !this.refusals.hold(this.outboxId)) {
+      console.error("[desktop] diag drain retry:", this.disposed ? "disposed" : "outbox held by another attempt");
+      return "retry";
+    }
     try {
       return await this.drainHeld();
     } finally {
@@ -192,6 +195,7 @@ export class OwnerYDocOutboxDrainer {
       } catch (error) {
         // The queue changed while it was read, as it does while its owner types: read the newer head.
         if (!(error instanceof OwnerYDocOutboxReadChangedError)) throw error;
+        console.error("[desktop] diag drain read again: head read changed");
         if (this.disposed) return "retry";
       }
     }
@@ -201,6 +205,7 @@ export class OwnerYDocOutboxDrainer {
       // A refusal already received completes; it never reaches admission again.
       if (refusalOutstanding(pending, known)) {
         await this.record(known);
+        console.error("[desktop] diag drain retry:", "known refusal outstanding");
         return "retry";
       }
       this.refusals.recorded(this.outboxId, known);
@@ -216,7 +221,10 @@ export class OwnerYDocOutboxDrainer {
 
     const authority = await this.delivery.freshOwnerAuthority(pending.binding);
     if (this.disposed) return "retry";
-    if (authority.kind === "retry") return "retry";
+    if (authority.kind === "retry") {
+      console.error("[desktop] diag drain retry:", "no fresh authority");
+      return "retry";
+    }
     if (authority.kind === "quarantine") {
       await this.outbox.quarantine({
         outboxId: pending.outboxId,
@@ -243,7 +251,10 @@ export class OwnerYDocOutboxDrainer {
     }
     if (this.disposed) return "retry";
     if (result.kind === "not-accepted") return "not-accepted";
-    if (result.kind === "retry") return "retry";
+    if (result.kind === "retry") {
+      console.error("[desktop] diag drain retry:", "delivery answered retry");
+      return "retry";
+    }
     if (this.taken) await this.outbox.acknowledgeTaken(pending.outboxId, result.receipt);
     else await this.outbox.acknowledge(pending.outboxId, [result.receipt]);
     return "acknowledged";

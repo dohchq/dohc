@@ -251,7 +251,10 @@ export async function runNativeOwnerDeliveryPass(
           lasting.acknowledged();
           continue;
         }
-        if (result !== "empty") return result;
+        if (result !== "empty") {
+          console.error("[desktop] diag owner room drain ended:", result);
+          return result;
+        }
       }
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();
@@ -277,6 +280,7 @@ export async function runNativeOwnerDeliveryPass(
         await lasting.landed(seen, AbortSignal.any([signal, route.closed]));
       } catch (error) {
         if (signal.aborted || !route.closed.aborted) throw error;
+        console.error("[desktop] diag owner room route closed");
         return "retry";
       }
     }

@@ -187,6 +187,13 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     if (!this.current(attempt)) throw new Error("Owner attempt replaced.");
   }
   private stop(attempt: Attempt, result: OwnerYDocDeliveryResult = { kind: "retry" }): void {
+    if (!attempt.abort.signal.aborted)
+      console.error(
+        "[desktop] diag owner attempt stopped:",
+        result.kind,
+        { active: this.active === attempt, open: attempt.open, envelope: !!attempt.envelope, submitted: attempt.submitted, aborted: this.options.signal.aborted },
+        new Error().stack?.split("\n").slice(2, 6).map((frame) => frame.trim()).join(" < "),
+      );
     if (this.active === attempt) this.active = undefined;
     clearTimeout(attempt.stopTimer);
     attempt.protocol.close();
@@ -315,7 +322,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       this.grant(attempt, this.options.frames.maxQueuedBytes, this.options.frames.maxQueuedFrames);
       void this.pump(attempt);
       return await attempt.ready.promise;
-    } catch {
+    } catch (error) {
+      console.error("[desktop] diag owner route open failed:", error);
       this.stop(attempt);
       return { kind: "retry" };
     }
@@ -332,8 +340,15 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       attempt.authority !== authority ||
       attempt.envelope ||
       !isDeepStrictEqual(attempt.binding, envelopeValue.binding)
-    )
+    ) {
+      console.error("[desktop] diag deliver refused:", {
+        attempt: !!attempt,
+        current: !!attempt && this.current(attempt),
+        sameAuthority: attempt?.authority === authority,
+        envelope: !!attempt?.envelope,
+      });
       return { kind: "retry" };
+    }
     if (
       envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes ||
       digest(envelopeValue.update) !== envelopeValue.updateDigest
@@ -489,7 +504,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
           lease.release();
         }
       }
-    } catch {
+    } catch (error) {
+      console.error("[desktop] diag owner route send failed:", error);
       this.stop(attempt);
     } finally {
       attempt.pumping = false;
@@ -651,7 +667,10 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
           void this.pump(attempt);
         }
       })
-      .catch(() => this.stop(attempt))
+      .catch((error) => {
+        console.error("[desktop] diag owner route receive failed:", error);
+        this.stop(attempt);
+      })
       .finally(() => {
         attempt.incomingBytes -= owned.length;
         attempt.incomingFrames--;

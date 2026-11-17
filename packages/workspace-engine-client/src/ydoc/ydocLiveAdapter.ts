@@ -914,6 +914,7 @@ export class YdocAdapterSession {
         return value;
       },
       (error: unknown) => {
+        console.error("[desktop] diag record refused:", error);
         // Transient refusals leave the originals queued for another attempt.
         if (
           !isTransientEngineRefusal(error) &&
