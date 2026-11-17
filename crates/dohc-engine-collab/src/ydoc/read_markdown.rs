@@ -133,67 +133,42 @@ pub(super) enum Unreadable {
     QuoteTooDeep,
 }
 
-/// Throwaway counts: notes read, notes that failed the whole check, blocks
-/// kept as source, and notes kept whole as source.
-pub(super) static NET_COUNTS: [std::sync::atomic::AtomicUsize; 4] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 4];
+/// The longest run of text in one paragraph, heading or table cell that the
+/// reader parses, in bytes. pulldown-cmark scans a link title that runs over
+/// many lines in time that grows with the square of the paragraph's length,
+/// so a longer paragraph is kept as written. A limit, not a Markdown rule.
+pub(super) const MAX_PARAGRAPH: usize = 16 * 1024;
 
-fn count(index: usize, source: &str, reason: &str) {
-    NET_COUNTS[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let (Some(path), true) = (std::env::var_os("DOHC_NET_LOG"), index >= 2) {
-        use std::io::Write as _;
-        // One line for each shape: the source with each word as `w`.
-        static SHAPES: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
-            std::sync::Mutex::new(None);
-        let shape: String = {
-            let mut out = String::new();
-            let mut word = false;
-            for character in source.chars() {
-                if character.is_ascii_alphanumeric() {
-                    if !word {
-                        out.push('w');
-                    }
-                    word = true;
-                } else {
-                    out.push(character);
-                    word = false;
-                }
-            }
-            format!("{index}{out}")
-        };
-        let mut shapes = SHAPES.lock().expect("the shapes");
-        let shapes = shapes.get_or_insert_with(Default::default);
-        if shapes.len() > 500_000 || !shapes.insert(shape) {
-            return;
-        }
-        let kind = if index == 2 { "block" } else { "note" };
-        let line = format!(
-            "{}\n",
-            serde_json::json!({ "kind": kind, "reason": reason, "source": source })
-        );
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = file.write_all(line.as_bytes());
-        }
-    }
-}
-
-/// The body's blocks as the editor reads them. A reading is kept only if
-/// the writer writes it back to the same reading and keeps every word of
-/// the source. Otherwise each top-level block that fails that check keeps
-/// its source, written back exactly, and if the note still fails, the whole
-/// note does.
+/// The body's blocks as the editor reads them, checked by writing them and
+/// reading them back. A part of the note that would lose a word or read back
+/// differently keeps its source, which the writer writes back exactly. If
+/// the note with those parts kept still fails the check, the whole note
+/// keeps its source.
 pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
-    if std::env::var_os("DOHC_NET_OFF").is_some() {
-        return read_blocks(body, 0, 0, &HashMap::new());
+    let mut reading = sealed(body)?;
+    if reading.whole {
+        return Ok(reading.blocks);
     }
-    count(0, body, "");
-    match checked(body)? {
-        Ok(blocks) => Ok(blocks),
-        Err(reason) => {
-            count(3, body, reason);
-            Ok(vec![raw_block(body)])
+    // A part that keeps its source is written byte for byte, but the writer
+    // trims the white space that ends the note. Read as the writer leaves
+    // it, a part at the end keeps the bytes the next read sees.
+    let trimmed = super::trim_js_end(body);
+    if trimmed.len() < body.len() {
+        reading = sealed(trimmed)?;
+        if reading.whole {
+            return Ok(reading.blocks);
         }
     }
+    let body = trimmed;
+    let kept = super::write_blocks(&reading.blocks, true).is_some_and(|written| {
+        keeps_words(&written, body)
+            && sealed(&written).is_ok_and(|again| alike(&reading.blocks, &again.blocks))
+    });
+    Ok(if kept {
+        reading.blocks
+    } else {
+        vec![raw_block(body)]
+    })
 }
 
 fn raw_block(source: &str) -> Element {
@@ -201,97 +176,73 @@ fn raw_block(source: &str) -> Element {
     element("rawBlock", vec![("source", Any::from(source))], Vec::new())
 }
 
-/// The note's reading, with the blocks that fail the check kept as their
-/// source, or why that reading too fails it.
-fn checked(body: &str) -> Result<Result<Vec<Element>, &'static str>, Unreadable> {
-    let (blocks, whole) = sealed(body, true)?;
-    if whole {
-        return Ok(Ok(blocks));
+struct Reading {
+    blocks: Vec<Element>,
+    /// Whether the whole note read back, so no part keeps its source.
+    whole: bool,
+}
+
+/// The note's reading if the whole note reads back. Otherwise each part
+/// that fails the check alone keeps its source, and so does each pair of
+/// neighbours that pass alone but fail together: the writer can join two
+/// neighbours into one, such as a `-` list and a `+` list.
+fn sealed(body: &str) -> Result<Reading, Unreadable> {
+    let Parts {
+        mut blocks,
+        parts,
+        definitions,
+        held,
+    } = read_parts(body, 0, 0, &HashMap::new())?;
+    if held.is_empty() && reads_back(&blocks, body, &HashMap::new(), true) {
+        return Ok(Reading {
+            blocks,
+            whole: true,
+        });
     }
-    let Some(written) = super::write_blocks(&blocks, true) else {
-        return Ok(Err("the writer refused"));
+    let passes = |first: &Part, last: &Part| {
+        let source = first.source.start..last.source.end;
+        !held
+            .iter()
+            .any(|held| held.start < source.end && source.start < held.end)
+            && reads_back(
+                &blocks[first.blocks.start..last.blocks.end],
+                &body[source],
+                &definitions,
+                false,
+            )
     };
-    Ok(if !keeps_words(&written, body) {
-        Err("a word of the source is not written")
-    } else if !sealed(&written, false).is_ok_and(|(again, _)| alike(&blocks, &again)) {
-        Err("the written note reads differently")
-    } else {
-        Ok(blocks)
+    let mut keep: Vec<bool> = parts.iter().map(|part| !passes(part, part)).collect();
+    for at in 1..parts.len() {
+        if !keep[at - 1] && !keep[at] && !passes(&parts[at - 1], &parts[at]) {
+            keep[at - 1] = true;
+            keep[at] = true;
+        }
+    }
+    for (at, part) in parts.iter().enumerate().rev().filter(|(at, _)| keep[*at]) {
+        // The writer writes nothing for blank lines that start the note, so
+        // the first part keeps them, or a `---` line could start the file.
+        let (blocks_at, source_at) = match at {
+            0 => (0, 0),
+            _ => (part.blocks.start, part.source.start),
+        };
+        blocks.splice(
+            blocks_at..part.blocks.end,
+            [raw_block(&body[source_at..part.source.end])],
+        );
+    }
+    Ok(Reading {
+        blocks,
+        whole: false,
     })
 }
 
-/// The note's reading where the whole note reads back, or else with each
-/// failing part kept as its source. A part is a top-level block with the
-/// text before it that no block holds, such as a definition read as nothing.
-/// Also says whether the whole note read back.
-fn sealed(body: &str, first: bool) -> Result<(Vec<Element>, bool), Unreadable> {
-    let Parts {
-        mut blocks,
-        groups,
-        end,
-        definitions,
-    } = read_parts(body, 0, 0, &HashMap::new())?;
-    match reads_back(&blocks, body, &HashMap::new(), true) {
-        Ok(()) => return Ok((blocks, true)),
-        Err(reason) if first => count(1, body, reason),
-        Err(_) => {}
-    }
-    let mut parts = Vec::new();
-    let (mut block_at, mut source_at) = (0, 0);
-    for (range, source) in groups.into_iter().chain([(end..end, body.len()..body.len())]) {
-        let (range, source) = (range.start.max(block_at)..range.end, source.start.max(source_at)..source.end);
-        let gap = &body[source_at..source.start];
-        let mut line = source_at;
-        let text = gap.split('\n').find_map(|text| {
-            let start = line;
-            line += text.len() + 1;
-            (!text.trim().is_empty()).then_some(start)
-        });
-        let part = match text {
-            Some(start) => {
-                let empties = blocks[block_at..range.start]
-                    .iter()
-                    .take_while(|block| block.tag == "paragraph" && block.children.is_empty())
-                    .count();
-                (block_at + empties..range.end, start..source.end)
-            }
-            None => (range.clone(), source.clone()),
-        };
-        if !part.0.is_empty() || !body[part.1.clone()].trim().is_empty() {
-            parts.push(part);
-        }
-        block_at = range.end;
-        source_at = source.end;
-    }
-    for (range, source) in parts.into_iter().rev() {
-        let source = &body[source];
-        if let Err(reason) = reads_back(&blocks[range.clone()], source, &definitions, false) {
-            if first {
-                count(2, source, reason);
-            }
-            blocks.splice(range, [raw_block(source)]);
-        }
-    }
-    Ok((blocks, false))
-}
-
 /// Whether the writer writes `blocks` to text that keeps each word of
-/// `source` and reads back to the same blocks, or why not.
-fn reads_back(
-    blocks: &[Element],
-    source: &str,
-    definitions: &Definitions,
-    note: bool,
-) -> Result<(), &'static str> {
-    let written = super::write_blocks(blocks, note).ok_or("the writer refused")?;
-    if !keeps_words(&written, source) {
-        return Err("a word of the source is not written");
-    }
-    match read_blocks(&written, 0, 0, definitions) {
-        Ok(again) if alike(blocks, &again) => Ok(()),
-        Ok(_) => Err("the written text reads differently"),
-        Err(_) => Err("the written text is refused"),
-    }
+/// `source` and reads back to the same blocks.
+fn reads_back(blocks: &[Element], source: &str, definitions: &Definitions, note: bool) -> bool {
+    super::write_blocks(blocks, note).is_some_and(|written| {
+        keeps_words(&written, source)
+            && read_blocks(&written, 0, 0, definitions).is_ok_and(|again| alike(blocks, &again))
+    })
 }
 
 /// Whether two readings build the same document. Empty paragraphs at the
@@ -310,46 +261,117 @@ fn alike(a: &[Element], b: &[Element]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_reading(a, b))
 }
 
-/// Whether two elements build the same document: runs join where their
-/// written marks match, as `insert_element` joins them.
+/// Whether two elements show the same document. Runs join where their
+/// written marks match, as `insert_element` joins them, and an escaped
+/// character counts as the character it shows: the writer escapes a `[` in
+/// text, which reads back as an escape and writes the same `\[` from then on.
 fn same_reading(a: &Element, b: &Element) -> bool {
-    fn runs(runs: &[(String, Marks)]) -> Vec<(String, &Marks)> {
-        let mut out: Vec<(String, &Marks)> = Vec::new();
-        for (text, marks) in runs {
-            match out.last_mut() {
-                Some((last, last_marks)) if last_marks.writes_as(marks) => last.push_str(text),
-                _ => out.push((text.clone(), marks)),
+    a.tag == b.tag && a.attrs == b.attrs && {
+        let (a, b) = (shown(&a.children), shown(&b.children));
+        a.len() == b.len()
+            && a.iter().zip(&b).all(|pair| match pair {
+                (Shown::Element(a), Shown::Element(b)) => same_reading(a, b),
+                (Shown::Text(a), Shown::Text(b)) => {
+                    a.len() == b.len()
+                        && a.iter()
+                            .zip(b)
+                            .all(|((x, xm), (y, ym))| x == y && xm.writes_as(ym))
+                }
+                _ => false,
+            })
+    }
+}
+
+enum Shown<'a> {
+    Element(&'a Element),
+    Text(Vec<(String, &'a Marks)>),
+}
+
+/// `children` as they show: an escaped character as text, and runs joined
+/// where their written marks match.
+fn shown(children: &[Child]) -> Vec<Shown<'_>> {
+    static PLAIN: Marks = Marks {
+        bold: false,
+        italic: false,
+        strike: false,
+        code: false,
+        underline: false,
+        highlight: false,
+        link: None,
+        raw: false,
+    };
+    let mut out: Vec<Shown<'_>> = Vec::new();
+    for child in children {
+        let runs: Vec<(&str, &Marks)> = match child {
+            Child::Element(element) if element.tag == "escapedPunctuation" => element
+                .attrs
+                .iter()
+                .filter_map(|(name, value)| match value {
+                    Any::String(text) if *name == "value" => Some((text.as_ref(), &PLAIN)),
+                    _ => None,
+                })
+                .collect(),
+            Child::Element(element) => {
+                out.push(Shown::Element(element));
+                continue;
+            }
+            Child::Text(runs) => runs.iter().map(|(text, marks)| (text.as_str(), marks)).collect(),
+        };
+        if !matches!(out.last(), Some(Shown::Text(_))) {
+            out.push(Shown::Text(Vec::new()));
+        }
+        let Some(Shown::Text(last)) = out.last_mut() else {
+            unreachable!("a text was just pushed");
+        };
+        for (text, marks) in runs.into_iter().filter(|(text, _)| !text.is_empty()) {
+            match last.last_mut() {
+                Some((before, before_marks)) if before_marks.writes_as(marks) => before.push_str(text),
+                _ => last.push((text.to_owned(), marks)),
             }
         }
-        out.retain(|(text, _)| !text.is_empty());
-        out
     }
-    a.tag == b.tag
-        && a.attrs == b.attrs
-        && a.children.len() == b.children.len()
-        && a.children.iter().zip(&b.children).all(|pair| match pair {
-            (Child::Element(a), Child::Element(b)) => same_reading(a, b),
-            (Child::Text(a), Child::Text(b)) => {
-                let (a, b) = (runs(a), runs(b));
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(&b)
-                        .all(|((x, xm), (y, ym))| x == y && xm.writes_as(ym))
-            }
-            _ => false,
-        })
+    out.retain(|child| !matches!(child, Shown::Text(runs) if runs.is_empty()));
+    out
 }
 
 /// Whether `written` holds each word of `source` as often as the source
-/// does. The judge's word check: not the name in an entity (`&quot;`), the
-/// label of a full reference (`[a][label]`), or an inline link's address
-/// and title a second time. A word is a run of ASCII letters and digits
-/// that holds a letter, so a list's renumbered markers don't count.
+/// does.
 fn keeps_words(written: &str, source: &str) -> bool {
+    holds_words(words(written), words(&wanted_text(source)))
+}
+
+/// Whether `found` holds each word of `wanted` as often as `wanted` does, so
+/// a dropped repeat or two words joined into one count as lost.
+pub(super) fn holds_words<'a>(
+    found: impl IntoIterator<Item = &'a str>,
+    wanted: impl IntoIterator<Item = &'a str>,
+) -> bool {
     let mut left: HashMap<&str, usize> = HashMap::new();
-    for word in words(written) {
+    for word in found {
         *left.entry(word).or_default() += 1;
     }
+    wanted.into_iter().all(|word| match left.get_mut(word) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+/// A word: a run of ASCII letters and digits that holds a letter, so a
+/// list's renumbered markers don't count.
+pub(super) fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| word.bytes().any(|byte| byte.is_ascii_alphabetic()))
+}
+
+/// `source` with what a reading need not keep as a space: the name in an
+/// entity (`&quot;`), the label of a full reference (`[a][label]`), and an
+/// inline link's address and title a second time. The document keeps a
+/// reference's target, not its label, and joins two runs with the same link
+/// into one.
+pub(super) fn wanted_text(source: &str) -> String {
     // The next place of each needle at or after a point that only moves
     // forward, so a long line is searched once, not once a character.
     fn next(found: &mut Option<usize>, text: &str, needle: &str, from: usize) -> usize {
@@ -405,19 +427,7 @@ fn keeps_words(written: &str, source: &str) -> bool {
             }
         }
     }
-    let kept_all = words(&kept).all(|word| match left.get_mut(word) {
-        Some(count) if *count > 0 => {
-            *count -= 1;
-            true
-        }
-        _ => false,
-    });
-    kept_all
-}
-
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| word.bytes().any(|byte| byte.is_ascii_alphabetic()))
+    kept
 }
 
 /// Whether a source shows what its projection shows: the same elements, with
@@ -550,12 +560,99 @@ fn read_blocks(
 
 struct Parts {
     blocks: Vec<Element>,
-    /// Each top-level block's elements, as a range of `blocks`, and its
-    /// source from its first line's start.
-    groups: Vec<(Range<usize>, Range<usize>)>,
-    /// The block count before the empty paragraphs that end the note.
-    end: usize,
+    /// The note cut where it can be kept as source one piece at a time.
+    parts: Vec<Part>,
     definitions: Definitions,
+    /// The runs of text longer than [`MAX_PARAGRAPH`], read as `a`s.
+    held: Vec<Range<usize>>,
+}
+
+/// A top-level block with the text before it that no block holds, such as a
+/// definition. It starts at its first line that is not blank, so its blocks
+/// leave out the empty paragraphs that blank lines before it read as.
+struct Part {
+    blocks: Range<usize>,
+    source: Range<usize>,
+}
+
+/// The runs of text in `src` longer than [`MAX_PARAGRAPH`], and `src` with
+/// each byte of them but a line break as `a`. A run is the text of one
+/// paragraph, heading or table cell. Each masked line reads as a paragraph's
+/// continuation, so the blocks around a run read as they did.
+fn held_back(src: &str) -> (Vec<Range<usize>>, Option<String>) {
+    // A run holds no blank line, so a note whose lines between blank lines
+    // are all short holds none.
+    let (mut start, mut at, mut long) = (0, 0, false);
+    for line in src.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            start = at + line.len();
+        }
+        at += line.len();
+        long |= at - start > MAX_PARAGRAPH;
+    }
+    if !long {
+        return (Vec::new(), None);
+    }
+    // Found with no inline link, whose title scan is what takes the time.
+    // `]{` reads as text where `](` might start one, and changes no block.
+    let survey = src.replace("](", "]{");
+    let mut held = Vec::new();
+    let (mut run, mut verbatim): (Option<Range<usize>>, usize) = (None, 0);
+    for (event, range) in Parser::new_ext(&survey, options()).into_offset_iter() {
+        let text = match &event {
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::MetadataBlock(_)) => {
+                verbatim += 1;
+                false
+            }
+            Event::End(TagEnd::CodeBlock | TagEnd::HtmlBlock | TagEnd::MetadataBlock(_)) => {
+                verbatim -= 1;
+                false
+            }
+            Event::Start(tag) => matches!(
+                tag,
+                Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Strikethrough
+                    | Tag::Superscript
+                    | Tag::Subscript
+                    | Tag::Link { .. }
+                    | Tag::Image { .. }
+            ),
+            Event::End(tag) => matches!(
+                tag,
+                TagEnd::Emphasis
+                    | TagEnd::Strong
+                    | TagEnd::Strikethrough
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript
+                    | TagEnd::Link
+                    | TagEnd::Image
+            ),
+            Event::Rule | Event::Html(_) => false,
+            _ => true,
+        };
+        if text && verbatim == 0 {
+            run = Some(run.map_or(range.clone(), |run| {
+                run.start.min(range.start)..run.end.max(range.end)
+            }));
+        } else if let Some(run) = run.take() {
+            held.extend((run.len() > MAX_PARAGRAPH).then_some(run));
+        }
+    }
+    held.extend(run.filter(|run| run.len() > MAX_PARAGRAPH));
+    if held.is_empty() {
+        return (held, None);
+    }
+    let mut bytes = src.as_bytes().to_vec();
+    for run in &held {
+        for byte in &mut bytes[run.clone()] {
+            if *byte != b'\n' {
+                *byte = b'a';
+            }
+        }
+    }
+    let masked = String::from_utf8(bytes).expect("whole characters replaced by ASCII");
+    (held, Some(masked))
 }
 
 fn read_parts(
@@ -564,6 +661,8 @@ fn read_parts(
     quotes: usize,
     outer: &Definitions,
 ) -> Result<Parts, Unreadable> {
+    let (held, masked) = held_back(src);
+    let src = masked.as_deref().unwrap_or(src);
     let mut resolve = |link: BrokenLink<'_>| {
         outer
             .get(&label_key(&link.reference))
@@ -633,11 +732,49 @@ fn read_parts(
     let trailing = reader.separators(body.last_end.unwrap_or(0), src.len(), true);
     body.blocks
         .extend((0..trailing).map(|_| paragraph(Vec::new())));
+    // Text after the last block, such as a definition, is a part of its own.
+    groups.push((end..end, src.len()..src.len()));
+    let mut parts = Vec::new();
+    let (mut block_at, mut source_at) = (0, 0);
+    for (blocks, source) in groups {
+        // A table's group takes the rows its paragraph read before it.
+        let (blocks, source) = (
+            blocks.start.max(block_at)..blocks.end,
+            source.start.max(source_at)..source.end,
+        );
+        let mut line = source_at;
+        let text = src[source_at..source.start].split('\n').find_map(|text| {
+            let start = line;
+            line += text.len() + 1;
+            (!text.trim().is_empty()).then_some(start)
+        });
+        let part = match text {
+            Some(start) => {
+                let empties = body.blocks[block_at..blocks.start]
+                    .iter()
+                    .take_while(|block| block.tag == "paragraph" && block.children.is_empty())
+                    .count();
+                Part {
+                    blocks: block_at + empties..blocks.end,
+                    source: start..source.end,
+                }
+            }
+            None => Part {
+                blocks: blocks.clone(),
+                source: source.clone(),
+            },
+        };
+        if !part.blocks.is_empty() || !src[part.source.clone()].trim().is_empty() {
+            parts.push(part);
+        }
+        block_at = blocks.end;
+        source_at = source.end;
+    }
     Ok(Parts {
         blocks: body.blocks,
-        groups,
-        end,
+        parts,
         definitions: reader.definitions,
+        held,
     })
 }
 

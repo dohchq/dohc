@@ -256,24 +256,13 @@ mod generated {
         out.into_iter().skip(skip).collect()
     }
 
+    /// The reader's words that the cases write: each starts with `q`, so the
+    /// syntax around them, such as a node's name, does not count.
     fn tokens(text: &str) -> Vec<String> {
-        let mut found = Vec::new();
-        let bytes = text.as_bytes();
-        let mut at = 0;
-        while at < bytes.len() {
-            if (bytes[at] == b'q' || bytes[at] == b'Q')
-                && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric())
-            {
-                let end = (at + 1..bytes.len())
-                    .find(|&i| !bytes[i].is_ascii_alphanumeric())
-                    .unwrap_or(bytes.len());
-                found.push(text[at..end].to_owned());
-                at = end;
-            } else {
-                at += 1;
-            }
-        }
-        found
+        read_markdown::words(text)
+            .filter(|word| word.starts_with(['q', 'Q']))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// What a reading shows.
@@ -384,20 +373,8 @@ mod generated {
         assert_eq!(flat(&nested, 1), flat(&alone, 0));
     }
 
-    /// Whether `found` holds each word of `wanted` as often as `wanted` does,
-    /// so a dropped repeat or two words joined into one count as lost.
     fn keeps(found: &[String], wanted: &[String]) -> bool {
-        let mut left: HashMap<&str, usize> = HashMap::new();
-        for word in found {
-            *left.entry(word.as_str()).or_default() += 1;
-        }
-        wanted.iter().all(|word| match left.get_mut(word.as_str()) {
-            Some(count) if *count > 0 => {
-                *count -= 1;
-                true
-            }
-            _ => false,
-        })
+        read_markdown::holds_words(found.iter().map(String::as_str), wanted.iter().map(String::as_str))
     }
 
     pub(super) fn check(
@@ -685,50 +662,10 @@ mod generated {
             .map_err(|_| ())
         }
 
-        /// The source's words that a reading must keep. Not the name in an
-        /// entity (`&quot;`), the label of a full reference (`[a][label]`),
-        /// or an inline link's address and title a second time: the
-        /// document keeps a reference's target, not its label, and joins two
-        /// runs with the same link into one.
+        /// The source's words that a reading must keep, as the reader's own
+        /// check counts them.
         pub(super) fn wanted(source: &str) -> Vec<String> {
-            let bytes = source.as_bytes();
-            let mut kept = String::with_capacity(source.len());
-            let mut targets = std::collections::HashSet::new();
-            let mut at = 0;
-            while at < bytes.len() {
-                let rest = &source[at..];
-                let line_end = rest.find('\n').unwrap_or(rest.len());
-                let skip = if bytes[at] == b'&' {
-                    let name = rest[1..line_end.max(1)]
-                        .bytes()
-                        .take(32)
-                        .position(|b| !(b.is_ascii_alphanumeric() || b == b'#'))
-                        .map(|end| end + 1);
-                    name.filter(|&end| end > 1 && rest.as_bytes().get(end) == Some(&b';'))
-                        .map(|end| end + 1)
-                } else if rest.starts_with("][") {
-                    rest[2..line_end.max(2)].find(']').map(|end| end + 3)
-                } else if rest.starts_with("](") {
-                    rest[2..line_end.max(2)]
-                        .find(')')
-                        .filter(|&end| !targets.insert(&rest[2..2 + end]))
-                        .map(|end| end + 3)
-                } else {
-                    None
-                };
-                match skip {
-                    Some(len) => {
-                        kept.push(' ');
-                        at += len;
-                    }
-                    None => {
-                        let character = rest.chars().next().expect("a character");
-                        kept.push(character);
-                        at += character.len_utf8();
-                    }
-                }
-            }
-            tokens(&kept)
+            tokens(&read_markdown::wanted_text(source))
         }
 
         fn in_runs(content: &Value) -> Vec<String> {
@@ -1191,10 +1128,6 @@ mod generated {
             let report = serde_json::json!({
                 "seed": base, "seconds": seconds, "threads": threads,
                 "judged": judged.load(std::sync::atomic::Ordering::Relaxed),
-                "net": crate::ydoc::read_markdown::NET_COUNTS
-                    .iter()
-                    .map(|count| count.load(std::sync::atomic::Ordering::Relaxed))
-                    .collect::<Vec<_>>(),
                 "shapes": summary,
                 "found": found.values().map(|item| serde_json::json!({
                     "kind": format!("{:?}", item.kind), "shape": item.shape, "example": item.example,
