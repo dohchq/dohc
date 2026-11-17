@@ -1400,30 +1400,17 @@ fn rename_access_rule_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<RenameResult, RuntimeError> {
-    let source = store.read_with(|conn| {
-        dohc_engine_domain::select_snapshot_by_path_in_tx(
-            conn,
-            &input.workspace_id,
-            &input.version_id,
-            &input.from_path,
-        )
-    })?;
-    let Some(source) = source.snapshot else {
-        return Err(DomainError::FileNotFound.into());
-    };
     let suffixed = |id: &str, side: &str| format!("{id}-{side}");
-    // Like any rename, never onto another file; a retry finds its own write.
     let to_request = input.request_id.as_deref().map(|id| suffixed(id, "to"));
-    let occupied = store.read_with(|conn| {
-        let target = dohc_engine_domain::select_snapshot_by_path_in_tx(
-            conn,
-            &input.workspace_id,
-            &input.version_id,
-            &input.to_path,
-        )?;
-        if target.snapshot.is_none() && target.binary_sha256.is_none() {
-            return Ok::<_, RuntimeError>(false);
-        }
+    let (source, target, retried) = store.read_with(|conn| {
+        let snapshot_at = |path: &str| {
+            dohc_engine_domain::select_snapshot_by_path_in_tx(
+                conn,
+                &input.workspace_id,
+                &input.version_id,
+                path,
+            )
+        };
         let retried = match &to_request {
             Some(id) => conn
                 .query_row(
@@ -1434,11 +1421,23 @@ fn rename_access_rule_on_store(
                 .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
             None => false,
         };
-        Ok(!retried)
+        Ok::<_, RuntimeError>((
+            snapshot_at(&input.from_path)?,
+            snapshot_at(&input.to_path)?,
+            retried,
+        ))
     })?;
-    if occupied {
+    // Like any rename, never onto another file; a retry finds its own write.
+    if !retried && (target.snapshot.is_some() || target.binary_sha256.is_some()) {
         return Err(DomainError::TargetPathExists.into());
     }
+    // A retry whose first try finished finds its source gone: its write
+    // carried the text that is now at the destination, so both halves replay.
+    let text = match (source.snapshot, target.snapshot) {
+        (Some(source), _) => source.text,
+        (None, Some(written)) if retried => written.text,
+        (None, _) => return Err(DomainError::FileNotFound.into()),
+    };
     let written = versioned_text_write_on_store(
         store,
         &WriteText {
@@ -1450,7 +1449,7 @@ fn rename_access_rule_on_store(
                 &input.to_path,
             ),
             path: input.to_path.clone(),
-            text: source.text,
+            text,
             moment_id: suffixed(&input.moment_id, "to"),
             metadata_origin: input.metadata_origin.clone(),
             metadata_summary: input.metadata_summary.clone(),

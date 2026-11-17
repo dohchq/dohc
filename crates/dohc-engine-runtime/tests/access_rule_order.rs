@@ -1278,6 +1278,42 @@ fn a_rule_rename_journals_a_create_then_a_delete() {
     );
 }
 
+/// A rule rename tried again after its first try finished, as when its answer
+/// was lost, replays both halves instead of finding its source gone.
+#[test]
+fn a_finished_rule_rename_tried_again_replays() {
+    let f = Fixture::new();
+    f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
+        .expect("write rule");
+    let rename = || {
+        f.runtime.block_on(f.actor.versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "team/access.yaml".to_owned(),
+                to_path: "crew/access.yaml".to_owned(),
+                moment_id: "m-move".to_owned(),
+                request_id: Some("r-move".to_owned()),
+                metadata_origin: "cli".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+            },
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+    };
+    let first = rename().expect("rename rule");
+    let journal = f.journal();
+    let again = rename().expect("the same rename tried again");
+    assert!(again.deduped, "{again:?}");
+    assert_eq!(again.moment.moment_id, first.moment.moment_id);
+    assert_eq!(f.journal(), journal);
+}
+
 /// A rule rename onto another folder's rule is refused, as any rename onto
 /// an existing file is, before either rule changes.
 #[test]
