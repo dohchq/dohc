@@ -144,18 +144,16 @@ export function AccountProvider({ children }: { children: ReactNode }) {
             list,
             cache,
             onMessages: (workspaceId, messages) => outbox.handoff(signIn, workspaceId, messages),
+            // A workspace that stops being the open one, here or from another device, ends its apps and live pages
+            // before its store stops.
+            beforeSwitch: teardown.open,
           })
         : null,
-    [signIn, list, cache, outbox],
+    [signIn, list, cache, outbox, teardown],
   );
   const { currentWorkspaceId, data } = useSyncExternalStore(
     (open ?? noOpen).subscribe,
     (open ?? noOpen).state,
-  );
-  // A workspace that stops being the open one, here or from another device, ends its app as the open store changes.
-  useEffect(
-    () => open?.subscribe(() => teardown.open(open.state().currentWorkspaceId)),
-    [open, teardown],
   );
   const apps = useMemo(
     () =>
@@ -242,10 +240,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       runner,
       apps,
       livePages,
-      chooseWorkspace: (workspaceId) => {
-        teardown.open(workspaceId);
-        open?.choose(workspaceId);
-      },
+      chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {
         if (!showOnPhone) teardown.hide(workspaceId);

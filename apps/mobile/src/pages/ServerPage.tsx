@@ -24,13 +24,8 @@ import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
-import {
-  createPageLive,
-  holdsUnsent,
-  liveMark,
-  type PageLive,
-  type PageLiveState,
-} from "./pageLive";
+import { createPageHost } from "./pageHost";
+import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
 import {
   explanationOf,
   labelOf,
@@ -61,7 +56,13 @@ function ElsewherePage() {
 }
 
 const noSession = () => () => undefined;
-const NO_STATE: PageLiveState = { phase: "ended", reason: null, facts: null };
+const NO_STATE: PageLiveState = {
+  phase: "ended",
+  reason: null,
+  facts: null,
+  unsent: false,
+  shown: false,
+};
 /** A failed open's cause, as the server's other failures say it; null for a lost connection. */
 const openProblem = (reason: string): ServerProblemKind | null =>
   reason === "not-found"
@@ -99,7 +100,11 @@ function PageScreen({ path }: { path: string }) {
   const [uri, setUri] = useState<string | null>(null);
   const [lostPage, setLostPage] = useState<false | "failed" | "noSpace">(false);
   const [attempt, setAttempt] = useState(0);
-  const [painted, setPainted] = useState(false);
+  const [host] = useState(() =>
+    createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
+  );
+  const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
+  useEffect(() => () => host.gone(), [host]);
   useEffect(() => {
     let current = true;
     editorHtmlUri().then(
@@ -115,59 +120,29 @@ function PageScreen({ path }: { path: string }) {
     };
   }, [attempt]);
 
-  // With phone writes on, the page opens live once its web view has drawn the text read. The session ends with the web
-  // view, and with the sign-in or workspace (appTeardown), which closes its socket before anything else.
-  const editsLive = phoneWrites && state.value?.kind === "page" && data !== null;
-  const [live, setLive] = useState<PageLive | null>(null);
-  useEffect(() => {
-    if (!editsLive || !painted || live || !data) return;
-    setLive(
-      createPageLive({
-        client: signIn.client,
-        workspaceId: data.workspaceId,
-        path,
-        post: (message) =>
-          web.current?.injectJavaScript(`window.__dohcLive?.(${JSON.stringify(message)}); true;`),
-      }),
-    );
-  }, [editsLive, painted, live, data, signIn, path]);
-  useEffect(() => {
-    if (!live || !data) return;
-    const remove = livePages.add({ signIn, workspaceId: data.workspaceId }, live);
-    live.start();
-    return () => {
-      remove();
-      live.end();
-    };
-    // Registered once, for the sign-in and workspace it opened in: a change of either ends it (appTeardown).
-  }, [live]);
+  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A session that the
+  // sign-in or workspace ended (appTeardown) leaves the page read-only.
+  const editsLive = phoneWrites && state.value?.kind === "page" && data !== null && !stopped;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
   );
-  // The page keeps its web view while it holds a provider, or may get one, so text the server read later never
-  // replaces the live document or edits it hasn't applied.
-  const holding =
-    live !== null &&
-    liveState.phase !== "ended" &&
-    !(liveState.phase === "refused" && liveState.facts === null);
+  const holding = live !== null && holdsPage(liveState);
 
   // Text that changes after the first mounts a fresh editor, which covers itself with the loading lines until it paints.
-  const [revision, setRevision] = useState(0);
   const shown = useRef(markdown);
   useEffect(() => {
     if (holding || shown.current === markdown) return;
     const first = shown.current === null;
     shown.current = markdown;
     if (first || markdown === null) return;
-    setPainted(false);
-    setRevision((value) => value + 1);
+    host.remount();
   }, [markdown, holding]);
   const reopen = () => {
     setLostPage(false);
-    setPainted(false);
     setUri(null);
     setAttempt((value) => value + 1);
+    host.remount();
   };
 
   const markKey: MarkKey = deleted
@@ -187,12 +162,17 @@ function PageScreen({ path }: { path: string }) {
     }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
     if (data.kind === "live") live?.receive(data);
-    if (data.kind === "painted") setPainted(true);
+    if (data.kind === "painted") host.painted();
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
-    if (data.kind === "markdown" && "markdown" in data && typeof data.markdown === "string")
-      copied.current(data.markdown);
-    if (data.kind === "markdownUnavailable" && markdown !== null) copied.current(markdown);
+    // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
+    if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
+      const done = copying.current;
+      copying.current = null;
+      const text =
+        "markdown" in data && typeof data.markdown === "string" ? data.markdown : markdown;
+      if (text !== null) done?.(text);
+    }
   };
   const injected =
     markdown === null
@@ -207,18 +187,19 @@ function PageScreen({ path }: { path: string }) {
           textScale: PixelRatio.getFontScale(),
         })}; true;`;
 
-  // Copy as Markdown copies the page as the web view holds it, edits included; a page without one, as it was read.
-  const copied = useRef((text: string) => copyText(text));
+  // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
+  const copying = useRef<((text: string) => void) | null>(null);
   const copyMarkdown = (then?: () => void) => {
-    copied.current = (text) => {
+    const done = (text: string) => {
       copyText(text);
       then?.();
     };
-    if (web.current)
+    if (web.current && live && liveState.phase !== "ended" && liveState.shown) {
+      copying.current = done;
       web.current.injectJavaScript(
         `(window.__dohcCopyMarkdown ?? (() => window.ReactNativeWebView?.postMessage('{"kind":"markdownUnavailable"}')))(); true;`,
       );
-    else if (markdown !== null) copied.current(markdown);
+    } else if (markdown !== null) done(markdown);
   };
   // Leaving with edits the server hasn't applied asks first: only this web view's memory holds them. The way out runs
   // once the next render has let the page go.
@@ -265,11 +246,25 @@ function PageScreen({ path }: { path: string }) {
       onRetry={reopen}
     />
   ) : null;
-  // A session whose web view is gone has no provider left: it ends, and a new web view opens the page again.
+  // A session whose web view is gone has no provider left: it ends, and the next web view to draw opens the page again.
   const webShown = failure === null && uri !== null && injected !== undefined;
   useEffect(() => {
-    if (!webShown) setLive(null);
+    if (!webShown) host.gone();
   }, [webShown]);
+  useEffect(() => {
+    if (!editsLive || !webShown || !data) return;
+    const scope = { signIn, workspaceId: data.workspaceId };
+    host.open((post) => {
+      const made = createPageLive({
+        client: signIn.client,
+        workspaceId: data.workspaceId,
+        path,
+        post,
+      });
+      livePages.add(scope, made);
+      return made;
+    });
+  }, [editsLive, webShown, painted, live, data, signIn, path]);
 
   // What stopped editing, under the header, with Try again when another open may work.
   const lostReason = liveState.phase === "lost" ? liveState.reason : null;
@@ -354,12 +349,7 @@ function PageScreen({ path }: { path: string }) {
           ) : null}
           {liveStrip}
           {webShown ? (
-            <PageScrollTop
-              key={`${attempt}:${revision}`}
-              active={focused}
-              ready={painted}
-              style={styles.web}
-            >
+            <PageScrollTop key={mount} active={focused} ready={painted} style={styles.web}>
               <WebView
                 ref={web}
                 originWhitelist={["file://*"]}

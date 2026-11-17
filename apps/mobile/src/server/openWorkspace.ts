@@ -31,8 +31,10 @@ export function createOpenWorkspace(options: {
   readonly cache: ReadCache;
   /** A read of a workspace showed these messages, for the outbox's handoff. */
   readonly onMessages?: (workspaceId: string, messages: readonly ChatMessage[]) => void;
+  /** The open workspace becomes `workspaceId`, before the open store stops (appTeardown). */
+  readonly beforeSwitch?: (workspaceId: string | null) => void;
 }): OpenWorkspace {
-  const { signIn, list, cache, onMessages } = options;
+  const { signIn, list, cache, onMessages, beforeSwitch } = options;
   const listeners = new Set<() => void>();
   let chosen: string | null = null;
   let active = false;
@@ -57,6 +59,7 @@ export function createOpenWorkspace(options: {
 
   /** Opens `workspaceId`, or none, in a new store, and stops the last one. */
   function show(workspaceId: string | null) {
+    if (state.data) beforeSwitch?.(workspaceId);
     state.data?.stop();
     const data = workspaceId === null ? null : open(workspaceId);
     if (active) data?.resume();

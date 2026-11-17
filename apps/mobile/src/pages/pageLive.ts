@@ -1,6 +1,7 @@
+import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-limits";
 import { segment } from "../server/api";
 import { ServerError, type LiveSocket, type ServerClient } from "../server/client";
-import { openPage } from "../server/pageOpen";
+import { openPage, type PageOpen } from "../server/pageOpen";
 import {
   frameWindow,
   fromBase64,
@@ -15,22 +16,22 @@ import {
 } from "./liveBridge";
 import type { MarkKey } from "./pageParts";
 
-// A page edited live from the phone. The app opens the page (openPage), then its owner connection with the sign-in's
-// token and the page's one-use ticket, and passes protocol frames to and from the page's web view, which runs the
-// provider. Neither the token nor the ticket reaches the web view: the token stays in the server client, the ticket in
-// `connect` below.
-//
-// A lost connection keeps the provider, so Try again opens the page again and reconnects it with its waiting edits'
-// IDs. A provider that quarantined, or a page the server refused, never reconnects. Unconfirmed text lives only in the
-// web view's memory.
+// A page edited live from the phone. The app opens the page, then its owner connection, and passes protocol frames to
+// and from the web view, which runs the provider. The token stays in the server client and the ticket in `connect`.
+// A lost connection keeps the provider, so Try again reconnects it with its waiting edits' IDs; a quarantined provider
+// or a refused page never reconnects.
 
 export interface PageLiveState {
-  /** `lost`: the connection ended or the open failed, and Try again may work. `ended`: the session ended for good. */
+  /** `lost`: Try again may work. `ended`: the session ended for good. */
   readonly phase: "opening" | "open" | "lost" | "refused" | "ended";
-  /** Why it's lost (a server problem or `connection`) or refused (the server's or the provider's reason). */
+  /** A server problem or `connection` when lost; the server's or the provider's reason when refused. */
   readonly reason: string | null;
-  /** The provider's last report, or null before the page made one. */
+  /** The provider's last report on the current connection; null until it makes one. */
   readonly facts: LiveFacts | null;
+  /** The provider's last report said it holds edits the server hasn't applied. Outlives the connection. */
+  readonly unsent: boolean;
+  /** The page shows the live document, not the text the app read. */
+  readonly shown: boolean;
 }
 
 export interface PageLive {
@@ -38,11 +39,11 @@ export interface PageLive {
   subscribe(listener: () => void): () => void;
   /** Opens the page and connects. Call once the web view can take messages. */
   start(): void;
-  /** Opens the page again after a lost connection. Does nothing once refused or ended. */
+  /** Opens the page again after a lost connection. */
   retry(): void;
   /** A message the web view posted. */
   receive(message: unknown): void;
-  /** Closes the socket and ignores every later message. */
+  /** Closes the socket, stops the page's editing, and ignores every later message. */
   end(): void;
 }
 
@@ -68,9 +69,14 @@ export function createPageLive(options: {
 }): PageLive {
   const sleep = options.sleep ?? wait;
   const listeners = new Set<() => void>();
-  let state: PageLiveState = { phase: "opening", reason: null, facts: null };
+  let state: PageLiveState = {
+    phase: "opening",
+    reason: null,
+    facts: null,
+    unsent: false,
+    shown: false,
+  };
   let gen = 0;
-  // The current open: its abort, its timer and its socket.
   let open: {
     readonly controller: AbortController;
     socket?: LiveSocket;
@@ -78,12 +84,13 @@ export function createPageLive(options: {
     connected?: boolean;
     timer?: ReturnType<typeof setTimeout>;
   } | null = null;
-  // The last connection's messages, both ways. They outlive its socket, so the page's reports after a loss still
-  // arrive, until the next connection replaces them.
+  // The last connection's messages both ways. They outlive its socket, so the page's reports after a loss arrive, until
+  // the next open retires them.
   let stream: {
     readonly toPage: (body: Body<ToPage>) => void;
     readonly check: (message: FromPage) => "next" | "stale" | "broken";
     readonly window: ReturnType<typeof frameWindow>;
+    readonly limits: NamedLiveBrowserLimits;
   } | null = null;
 
   const set = (next: Partial<PageLiveState>) => {
@@ -91,32 +98,28 @@ export function createPageLive(options: {
     for (const listener of listeners) listener();
   };
 
-  /** Ends the current open: its requests, its timer, and its socket. */
+  /** Ends the current open, and tells a connected page so its provider stops taking edits. */
   function close() {
     if (!open) return;
-    open.controller.abort();
-    clearTimeout(open.timer);
-    const socket = open.socket;
+    const { controller, timer, socket, connected } = open;
     open = null;
+    controller.abort();
+    clearTimeout(timer);
     if (socket) {
       socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
       socket.close();
     }
+    if (connected) stream?.toPage({ type: "lost" });
   }
 
-  /** The connection ended. The page hears it, so its provider stops and keeps its waiting edits. */
   function lose(reason: string) {
     if (state.phase === "ended" || state.phase === "refused") return;
-    const connected = open?.connected === true;
     close();
-    if (connected) stream?.toPage({ type: "lost" });
     set({ phase: "lost", reason });
   }
 
   function refuse(reason: string) {
-    const connected = open?.connected === true;
     close();
-    if (connected) stream?.toPage({ type: "lost" });
     set({ phase: "refused", reason });
   }
 
@@ -124,7 +127,9 @@ export function createPageLive(options: {
     close();
     const held = { controller: new AbortController() };
     open = held;
-    set({ phase: "opening", reason: null });
+    // The last connection's reports say nothing of this one.
+    stream = null;
+    set({ phase: "opening", reason: null, facts: null });
     const current = () => open === held;
     let delay = FIRST_RETRY_MS;
     try {
@@ -138,7 +143,6 @@ export function createPageLive(options: {
         if (!current()) return;
         if (answer.status === "refused") return refuse(answer.reason);
         if (answer.status === "ready") return connect(answer);
-        // The live host is still waking the page.
         await sleep(delay, held.controller.signal);
         if (!current()) return;
         delay = Math.min(LONGEST_RETRY_MS, delay * 2);
@@ -149,7 +153,7 @@ export function createPageLive(options: {
     }
   }
 
-  function connect(answer: Extract<Awaited<ReturnType<typeof openPage>>, { status: "ready" }>) {
+  function connect(answer: Extract<PageOpen, { status: "ready" }>) {
     const held = open!;
     const query = `objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
     const socket = options.client.liveSocket(
@@ -159,17 +163,16 @@ export function createPageLive(options: {
     held.socket = socket;
     socket.binaryType = "arraybuffer";
     const frames = answer.limits.provider.frames;
-    // Each connection numbers its messages afresh; the page drops an earlier one's.
     const next = {
       toPage: outgoing<ToPage>(++gen, options.post),
       check: incoming(gen),
       window: frameWindow(frames.maxQueuedFrames, frames.maxQueuedBytes),
+      limits: answer.limits,
     };
     held.timer = setTimeout(() => lose("connection"), answer.limits.connectTimeoutMs);
     socket.onopen = () => {
       if (open !== held) return;
       clearTimeout(held.timer);
-      // The server selects exactly the live protocol; anything else isn't the page's connection.
       if (socket.protocol !== "dohc-live-v1") return refuse("invalid-socket-protocol");
       stream = next;
       held.connected = true;
@@ -203,12 +206,21 @@ export function createPageLive(options: {
     if (order === "broken") return lose("bridge-order");
     const socket = open?.socket;
     switch (message.type) {
-      case "frame":
+      case "frame": {
         // A frame the provider sent before it heard of the loss has nowhere to go.
         if (state.phase !== "open" || socket?.readyState !== 1) return;
-        socket.send(fromBase64(message.data).buffer);
+        let bytes: Uint8Array<ArrayBuffer>;
+        try {
+          bytes = fromBase64(message.data);
+        } catch {
+          return lose("bridge-order");
+        }
+        if (bytes.length > held.limits.provider.frames.receive.maxFrameBytes)
+          return lose("bridge-order");
+        socket.send(bytes.buffer);
         held.toPage({ type: "sent" });
         return;
+      }
       case "took":
         if (!held.window.release()) lose("bridge-order");
         return;
@@ -216,13 +228,12 @@ export function createPageLive(options: {
         // Only the open connection's: a late one must not end the open Try again started.
         if (state.phase === "open") lose("connection");
         return;
-      case "state":
+      case "state": {
+        const facts = message.facts;
+        set({ facts, unsent: facts.unsent, shown: state.shown || facts.status === "live" });
         // A quarantined provider never reconnects; its edits stay on screen to copy.
-        if (message.facts.status === "quarantined") {
-          set({ facts: message.facts });
-          return refuse(message.facts.reason ?? "quarantined");
-        }
-        set({ facts: message.facts });
+        if (facts.status === "quarantined") refuse(facts.reason ?? "quarantined");
+      }
     }
   }
 
@@ -241,14 +252,15 @@ export function createPageLive(options: {
     receive,
     end() {
       close();
+      stream = null;
       if (state.phase !== "ended") set({ phase: "ended" });
     },
   };
 }
 
 /**
- * The header's mark for a live page. Saved needs the provider live with no waiting update: each local update leaves
- * the provider only on the server's ACK that its host applied it. A socket send or a paint proves nothing.
+ * The header's mark for a live page. Saved needs the current connection's provider live with no waiting update: each
+ * local update leaves the provider only on the server's ACK that its host applied it.
  */
 export function liveMark(state: PageLiveState): MarkKey {
   const facts = state.facts;
@@ -256,14 +268,14 @@ export function liveMark(state: PageLiveState): MarkKey {
     case "opening":
     case "open":
       if (facts?.status === "live") return facts.pendingUpdates > 0 ? "saving" : "saved";
-      return facts && facts.pendingUpdates > 0 ? "saving" : "opening";
+      return state.unsent ? "saving" : "opening";
     case "lost":
       // The server answered the open, but not with the page; any other loss is the connection's.
       return ["server-busy", "refused", "invalid", "not-found"].includes(state.reason ?? "")
         ? "readOnlyRefused"
         : "readOnlyOffline";
     case "refused":
-      return facts?.unsent
+      return state.unsent
         ? "readOnlySetAside"
         : state.reason === "live-document-without-lineage"
           ? "readOnlyNeedsComputer"
@@ -274,8 +286,13 @@ export function liveMark(state: PageLiveState): MarkKey {
 }
 
 /** Whether leaving the page would lose text the server hasn't applied. */
-export const holdsUnsent = (state: PageLiveState) =>
-  state.phase !== "ended" && state.facts !== null && state.facts.unsent;
+export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && state.unsent;
+
+/**
+ * Whether the web view must stay: it shows the live document, or may yet. Text the app reads later never replaces it.
+ */
+export const holdsPage = (state: PageLiveState) =>
+  state.phase !== "ended" && (state.phase !== "refused" || state.shown || state.unsent);
 
 /** One sign-in's and workspace's live pages, which the account ends with its apps (appTeardown). */
 export interface PageScope {
@@ -283,19 +300,19 @@ export interface PageScope {
   readonly workspaceId: string;
 }
 export function createLivePages() {
-  const open = new Map<{ readonly end: () => void }, PageScope>();
+  const open = new Map<PageLive, PageScope>();
   return {
-    /** Returns the removal. */
-    add(scope: PageScope, live: { readonly end: () => void }) {
+    /** Holds `live` until it ends. */
+    add(scope: PageScope, live: PageLive) {
       open.set(live, scope);
-      return () => void open.delete(live);
+      const stop = live.subscribe(() => {
+        if (live.state().phase !== "ended") return;
+        open.delete(live);
+        stop();
+      });
     },
     end(match: (scope: PageScope) => boolean = () => true) {
-      for (const [live, scope] of [...open]) {
-        if (!match(scope)) continue;
-        open.delete(live);
-        live.end();
-      }
+      for (const [live, scope] of [...open]) if (match(scope)) live.end();
     },
   };
 }

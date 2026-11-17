@@ -155,6 +155,7 @@ export interface LiveSocket {
   onerror: (() => void) | null;
   send(data: ArrayBuffer): void;
   close(): void;
+  addEventListener(type: "close", listener: () => void): void;
 }
 /** React Native's WebSocket takes headers as a third argument, which the DOM's type leaves out. */
 export type OpenSocket = (
@@ -215,7 +216,9 @@ export function createServerClient(options: {
         protocols,
         { headers: { authorization: `Bearer ${options.token}` } },
       );
-      options.signal.addEventListener("abort", () => socket.close(), { once: true });
+      const abort = () => socket.close();
+      options.signal.addEventListener("abort", abort, { once: true });
+      socket.addEventListener("close", () => options.signal.removeEventListener("abort", abort));
       return socket;
     },
     async send(method, path, read, body, request) {

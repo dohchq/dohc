@@ -1,19 +1,14 @@
-// The messages between a page's web view, which runs the live provider and the editor, and the app, which owns the
-// page's socket. Both sides bundle this file, so it imports nothing.
-//
-// Each message names the open it belongs to (`gen`) and its place in that open's stream (`seq`, from 1 in each
-// direction). A side ignores a message of an earlier open, and closes the connection on a gap or a repeat, so a frame is
-// never lost or applied twice without the connection ending. A frame is one protocol frame, base64. Each side holds
-// at most a window of frames the other hasn't taken, and closes the connection when a frame would pass it.
+import {
+  parseNamedLiveBrowserLimits,
+  type NamedLiveBrowserLimits,
+} from "@dohc/ydoc-projection/named-live-browser-limits";
 
-/** The editor limits the server sent with the page's ticket. The page checks them in full when it makes the provider. */
-export interface LiveLimits {
-  readonly provider: {
-    readonly frames: { readonly maxQueuedBytes: number; readonly maxQueuedFrames: number };
-  };
-  readonly maxSocketBufferedBytes: number;
-  readonly connectTimeoutMs: number;
-}
+// The messages between a page's web view, which runs the live provider and the editor, and the app, which owns the
+// page's socket. Both sides bundle this file.
+//
+// Each message names its open (`gen`) and its place in that open's stream (`seq`, from 1 in each direction). A side
+// ignores an earlier open's message, and closes the connection on a gap or a repeat. A frame is one protocol frame,
+// in base64.
 
 /** What the page tells the app about its provider. */
 export interface LiveFacts {
@@ -29,12 +24,12 @@ type Stamp = {
   readonly gen: number;
   readonly seq: number;
 };
-/** To the page. `connect` starts an open; `sent` says the app sent one frame; `lost` says the socket ended. */
+/** To the page. `sent` says the app sent the page's frame; `lost` says the socket ended. */
 export type ToPage = Stamp &
   (
     | {
         readonly type: "connect";
-        readonly limits: LiveLimits;
+        readonly limits: NamedLiveBrowserLimits;
         readonly workspaceId: string;
         readonly objectId: string;
       }
@@ -66,16 +61,13 @@ const count = (value: unknown, min = 0): value is number =>
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 
-/** The positive whole numbers the app reads, or null when any is missing. */
-export function readLimits(value: unknown): LiveLimits | null {
-  if (!record(value) || !record(value.provider) || !record(value.provider.frames)) return null;
-  const { maxQueuedBytes, maxQueuedFrames } = value.provider.frames;
-  return count(maxQueuedBytes, 1) &&
-    count(maxQueuedFrames, 1) &&
-    count(value.maxSocketBufferedBytes, 1) &&
-    count(value.connectTimeoutMs, 1)
-    ? (value as unknown as LiveLimits)
-    : null;
+/** The server's limits, or null when they aren't ones the provider can use. */
+export function readLimits(value: unknown): NamedLiveBrowserLimits | null {
+  try {
+    return parseNamedLiveBrowserLimits(value);
+  } catch {
+    return null;
+  }
 }
 
 function stamped(value: unknown): value is Record<string, unknown> & Stamp {
@@ -85,10 +77,12 @@ function stamped(value: unknown): value is Record<string, unknown> & Stamp {
 export function readToPage(value: unknown): ToPage | null {
   if (!stamped(value)) return null;
   switch (value.type) {
-    case "connect":
-      return readLimits(value.limits) && id(value.workspaceId) && id(value.objectId)
-        ? (value as unknown as ToPage)
+    case "connect": {
+      const limits = readLimits(value.limits);
+      return limits && id(value.workspaceId) && id(value.objectId)
+        ? ({ ...value, limits } as unknown as ToPage)
         : null;
+    }
     case "frame":
       return typeof value.data === "string" ? (value as unknown as ToPage) : null;
     case "sent":
@@ -129,10 +123,7 @@ export function outgoing<M extends Stamp>(gen: number, post: (message: M) => voi
   return (body: Body<M>) => post({ ...body, kind: "live", gen, seq: ++seq } as unknown as M);
 }
 
-/**
- * Checks one open's messages in one direction: `stale` for an earlier open's, which the side ignores, `broken` for a
- * gap or a repeat, which closes the connection.
- */
+/** Checks one open's messages in one direction: `stale` for an earlier open's, `broken` for a gap or a repeat. */
 export function incoming(gen: number) {
   let seq = 0;
   return (message: Stamp): "next" | "stale" | "broken" => {

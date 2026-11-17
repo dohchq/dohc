@@ -1,4 +1,5 @@
-import { readLimits, type LiveLimits } from "../pages/liveBridge";
+import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-limits";
+import { readLimits } from "../pages/liveBridge";
 import { isFields, okAnswer, segment, text } from "./api";
 import type { ServerClient } from "./client";
 
@@ -11,7 +12,7 @@ export type PageOpen =
       readonly objectId: string;
       readonly lineageClaimId: string;
       readonly ticket: string;
-      readonly limits: LiveLimits;
+      readonly limits: NamedLiveBrowserLimits;
     }
   | { readonly status: "preparing" }
   | { readonly status: "refused"; readonly reason: string };
@@ -50,8 +51,6 @@ export function openPage(
     `/sync/${segment(workspaceId)}/ops/openPage`,
     readOpen,
     { path },
-    {
-      signal,
-    },
+    { signal },
   );
 }
