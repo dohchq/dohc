@@ -730,8 +730,6 @@ function recoverLiveDrafts(
   recover();
 }
 
-// One row in Notices for failed reads of the Collections list; a read that works removes it.
-
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
