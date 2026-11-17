@@ -144,8 +144,39 @@ export interface SendOptions {
   readonly timeoutMs?: number;
 }
 
+/** What the phone uses of React Native's WebSocket. */
+export interface LiveSocket {
+  binaryType: string;
+  readonly protocol: string;
+  readonly readyState: number;
+  onopen: (() => void) | null;
+  onmessage: ((event: { readonly data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+  onerror: (() => void) | null;
+  send(data: ArrayBuffer): void;
+  close(): void;
+  addEventListener(type: "close", listener: () => void): void;
+}
+/** React Native's WebSocket takes headers as a third argument, which the DOM's type leaves out. */
+export type OpenSocket = (
+  url: string,
+  protocols: readonly string[],
+  options: { readonly headers: Readonly<Record<string, string>> },
+) => LiveSocket;
+const openNativeSocket: OpenSocket = (url, protocols, options) =>
+  new (WebSocket as unknown as new (
+    url: string,
+    protocols: string[],
+    options: { headers: Record<string, string> },
+  ) => LiveSocket)(url, [...protocols], { headers: { ...options.headers } });
+
 export interface ServerClient {
   readonly origin: string;
+  /**
+   * Opens a WebSocket to `path` on the server with the sign-in's token in its Authorization header, so the token stays
+   * in this client. The socket closes when the sign-in ends.
+   */
+  liveSocket(path: string, protocols: readonly string[]): LiveSocket;
   /**
    * Sends a request with the sign-in's token, and resolves its answer as `read` validates it. `read` returns null
    * for an answer it can't use. A 401 ends the sign-in.
@@ -174,9 +205,22 @@ export function createServerClient(options: {
   /** Called on a 401 from this sign-in. */
   readonly onSignedOut?: () => void;
   readonly timeoutMs?: number;
+  readonly openSocket?: OpenSocket;
 }): ServerClient {
   return {
     origin: options.origin,
+    liveSocket(path, protocols) {
+      if (options.signal.aborted) throw new ServerError("cancelled");
+      const socket = (options.openSocket ?? openNativeSocket)(
+        `${options.origin.replace(/^http/, "ws")}${path}`,
+        protocols,
+        { headers: { authorization: `Bearer ${options.token}` } },
+      );
+      const abort = () => socket.close();
+      options.signal.addEventListener("abort", abort, { once: true });
+      socket.addEventListener("close", () => options.signal.removeEventListener("abort", abort));
+      return socket;
+    },
     async send(method, path, read, body, request) {
       // The request ends when the sign-in does, or when its own signal aborts.
       const ending = new AbortController();

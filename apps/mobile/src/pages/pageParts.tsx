@@ -9,7 +9,7 @@ import type { Theme } from "../theme";
 // What the sample's page and the server's draw alike: the state mark, the loading lines, and a strip over the text.
 
 export type MarkKey = keyof typeof documentWords.mark | "opening";
-type MarkShape = "held" | "attention" | "working";
+type MarkShape = "held" | "attention" | "working" | "calm";
 
 export function labelOf(key: MarkKey): string {
   return key === "opening" ? documentWords.opening : documentWords.mark[key].label;
@@ -20,14 +20,18 @@ export function explanationOf(key: MarkKey): string {
 function shapeOf(key: MarkKey): MarkShape {
   return key === "opening"
     ? "working"
-    : key === "deleted" || key === "couldntSave"
-      ? "attention"
-      : "held";
+    : key === "saved" || key === "saving"
+      ? "calm"
+      : key === "deleted" || key === "couldntSave"
+        ? "attention"
+        : "held";
 }
 
-// The desktop's StateMark: a lock for held, a triangle for attention, a ring for working; the label beside it.
+// The desktop's StateMark: a lock for held, a triangle for attention, a ring for working; the label beside it. Saved
+// and Saving draw nothing, and the title's label and explanation still say which it is.
 export function Mark({ markKey, theme }: { markKey: MarkKey; theme: Theme }) {
   const shape = shapeOf(markKey);
+  if (shape === "calm") return null;
   const color = shape === "attention" ? theme.danger : theme.muted;
   const icon: ReactNode =
     shape === "held" ? (

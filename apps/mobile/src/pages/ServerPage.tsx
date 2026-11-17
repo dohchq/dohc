@@ -1,18 +1,31 @@
+import type { ServerProblemKind } from "@dohc/interface-words/account";
+import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
-import { Stack, useIsFocused, useLocalSearchParams } from "expo-router";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { Stack, useIsFocused, useLocalSearchParams, usePreventRemove } from "expo-router";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ComponentRef,
+} from "react";
+import { Alert, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { useKeyboardState } from "react-native-keyboard-controller";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
 import { PageScrollTop } from "../../modules/page-scroll-top";
-import { useAccount } from "../account/AccountProvider";
+import { useAccount, useSignIn } from "../account/AccountProvider";
 import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
+import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
+import { createPageHost } from "./pageHost";
+import { createPageLive, holdsPage, holdsUnsent, liveMark, type PageLiveState } from "./pageLive";
 import {
   explanationOf,
   labelOf,
@@ -42,6 +55,25 @@ function ElsewherePage() {
   );
 }
 
+const noSession = () => () => undefined;
+const NO_STATE: PageLiveState = {
+  phase: "ended",
+  reason: null,
+  facts: null,
+  unsent: false,
+  shown: false,
+};
+/** A failed open's cause, as the server's other failures say it; null for a lost connection. */
+const openProblem = (reason: string): ServerProblemKind | null =>
+  reason === "not-found"
+    ? "refused"
+    : reason === "offline" ||
+        reason === "server-busy" ||
+        reason === "refused" ||
+        reason === "invalid"
+      ? reason
+      : null;
+
 function PageScreen({ path }: { path: string }) {
   const theme = useTheme();
   const name = path.split("/").pop() ?? path;
@@ -51,10 +83,13 @@ function PageScreen({ path }: { path: string }) {
   const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
   const focused = useIsFocused();
+  const { data, livePages } = useAccount();
+  const signIn = useSignIn();
+  const web = useRef<ComponentRef<typeof WebView>>(null);
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
-  const markdown =
+  const read =
     state.value?.kind === "page"
       ? state.value.markdown
       : state.value?.kind === "missing"
@@ -65,7 +100,16 @@ function PageScreen({ path }: { path: string }) {
   const [uri, setUri] = useState<string | null>(null);
   const [lostPage, setLostPage] = useState<false | "failed" | "noSpace">(false);
   const [attempt, setAttempt] = useState(0);
-  const [painted, setPainted] = useState(false);
+  const [host] = useState(() =>
+    createPageHost({ inject: (script) => web.current?.injectJavaScript(script) }),
+  );
+  const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
+  useEffect(() => () => host.gone(), [host]);
+  // The account's teardown reaches the page from the start, before any session opens.
+  const workspaceId = data?.workspaceId;
+  useEffect(() => {
+    if (workspaceId !== undefined) return livePages.add({ signIn, workspaceId }, host);
+  }, [livePages, signIn, workspaceId, host]);
   useEffect(() => {
     let current = true;
     editorHtmlUri().then(
@@ -80,27 +124,44 @@ function PageScreen({ path }: { path: string }) {
       current = false;
     };
   }, [attempt]);
+
+  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
+  // or workspace ended (appTeardown) stays read-only.
+  const editsLive = phoneWrites && state.value?.kind === "page" && data !== null && !stopped;
+  const liveState = useSyncExternalStore(
+    live?.subscribe ?? noSession,
+    live?.state ?? (() => NO_STATE),
+  );
+  const holding = live !== null && holdsPage(liveState);
+
   // Text that changes after the first mounts a fresh editor, which covers itself with the loading lines until it paints.
-  const [revision, setRevision] = useState(0);
-  const shown = useRef(markdown);
+  const shown = useRef(read);
   useEffect(() => {
-    if (shown.current === markdown) return;
+    if (holding || shown.current === read) return;
     const first = shown.current === null;
-    shown.current = markdown;
-    if (first || markdown === null) return;
-    setPainted(false);
-    setRevision((value) => value + 1);
-  }, [markdown]);
+    shown.current = read;
+    if (first || read === null) return;
+    host.gone();
+  }, [read, holding]);
+  // A page a live session holds keeps the text its editor mounted with. A later read the phone can't show (too large,
+  // missing) never takes the editor away, with edits only its provider has.
+  const markdown = holding ? shown.current : read;
   const reopen = () => {
     setLostPage(false);
-    setPainted(false);
     setUri(null);
     setAttempt((value) => value + 1);
+    host.gone();
   };
 
-  const markKey: MarkKey = deleted ? "deleted" : "readOnlyPhone";
+  const markKey: MarkKey = deleted
+    ? "deleted"
+    : live
+      ? liveMark(liveState)
+      : editsLive
+        ? "opening"
+        : "readOnlyPhone";
   const [explaining, setExplaining] = useState(false);
-  const handleMessage = (raw: string) => {
+  const handleMessage = (raw: string, from: number) => {
     let data: unknown;
     try {
       data = JSON.parse(raw);
@@ -108,9 +169,18 @@ function PageScreen({ path }: { path: string }) {
       return;
     }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
-    if (data.kind === "painted") setPainted(true);
+    if (data.kind === "live") live?.receive(data);
+    if (data.kind === "painted") host.painted(from);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
+    // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
+    if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
+      const done = copying.current;
+      copying.current = null;
+      const text =
+        "markdown" in data && typeof data.markdown === "string" ? data.markdown : markdown;
+      if (text !== null) done?.(text);
+    }
   };
   const injected =
     markdown === null
@@ -121,16 +191,53 @@ function PageScreen({ path }: { path: string }) {
           markdown,
           large: false,
           editable: false,
+          live: editsLive,
           textScale: PixelRatio.getFontScale(),
         })}; true;`;
+
+  // Copy as Markdown copies the live document once the page shows it, edits included; otherwise the text as it was read.
+  const copying = useRef<((text: string) => void) | null>(null);
+  const copyMarkdown = (then?: () => void) => {
+    const done = (text: string) => {
+      copyText(text);
+      then?.();
+    };
+    if (web.current && live && liveState.phase !== "ended" && liveState.shown) {
+      copying.current = done;
+      web.current.injectJavaScript(
+        `(window.__dohcCopyMarkdown ?? (() => window.ReactNativeWebView?.postMessage('{"kind":"markdownUnavailable"}')))(); true;`,
+      );
+    } else if (markdown !== null) done(markdown);
+  };
+  // Leaving with edits the server hasn't applied asks first: only this web view's memory holds them. The way out runs
+  // once the next render has let the page go.
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  usePreventRemove(holdsUnsent(liveState) && !leaving, ({ repeat }) => {
+    const leave = () => setLeaving(() => repeat);
+    Alert.alert(documentWords.unsentTitle, documentWords.unsentBody, [
+      { text: confirmWords.cancel, style: "cancel" },
+      { text: documentWords.copyAsMarkdown, onPress: () => copyMarkdown(leave) },
+      { text: documentWords.discardEdits, style: "destructive", onPress: leave },
+    ]);
+  });
+  useEffect(() => leaving?.(), [leaving]);
+
+  // "Done" is the system's word for closing the keyboard (a platform difference): it shows only while typing. The page
+  // hears how much the keyboard covers and keeps the caret above it.
+  const typing = useKeyboardState((keyboard) => keyboard.isVisible);
+  const keyboardHeight = useKeyboardState((keyboard) => (keyboard.isVisible ? keyboard.height : 0));
+  useEffect(() => {
+    web.current?.injectJavaScript(`window.__dohcKeyboard?.(${keyboardHeight}); true;`);
+  }, [keyboardHeight]);
+  const endEditing = () => web.current?.injectJavaScript("window.__dohcEndEditing?.(); true;");
 
   // No workspace open, as when another device hid the last one: the page says why, as Home and Chats do.
   const gap = useWorkspaceGap();
   const failure = gap ? (
     <NoWorkspace />
-  ) : state.value?.kind === "missing" && !deleted ? (
+  ) : state.value?.kind === "missing" && !deleted && !holding ? (
     <ScreenFailure text={documentWords.noLongerAvailable} />
-  ) : state.value?.kind === "too-large" ? (
+  ) : state.value?.kind === "too-large" && !holding ? (
     <ScreenFailure text={documentWords.tooLargeToOpen} />
   ) : markdown === null && state.problem === "restoring" ? (
     <ScreenFailure text={documentWords.restoring} onRetry={retry} />
@@ -147,6 +254,34 @@ function PageScreen({ path }: { path: string }) {
       onRetry={reopen}
     />
   ) : null;
+  // A session whose web view is gone has no provider left: it ends, and the next web view to draw opens the page again.
+  const webShown = failure === null && uri !== null && injected !== undefined;
+  useEffect(() => {
+    if (!webShown) host.gone();
+  }, [webShown]);
+  useEffect(() => {
+    if (!editsLive || !webShown || !data) return;
+    host.open((post) =>
+      createPageLive({ client: signIn.client, workspaceId: data.workspaceId, path, post }),
+    );
+  }, [editsLive, webShown, painted, live, data, signIn, path]);
+
+  // What stopped editing, under the header, with Try again when another open may work.
+  const lostReason = liveState.phase === "lost" ? liveState.reason : null;
+  const liveStrip =
+    liveState.phase === "refused" ? (
+      <Strip theme={theme} icon="lock" text={explanationOf(markKey)} />
+    ) : lostReason !== null ? (
+      <Strip
+        theme={theme}
+        icon="lock"
+        text={((problem) => (problem ? problemText(problem) : explanationOf(markKey)))(
+          openProblem(lostReason),
+        )}
+        action={documentWords.tryAgain}
+        onAction={() => live?.retry()}
+      />
+    ) : null;
 
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -184,8 +319,17 @@ function PageScreen({ path }: { path: string }) {
       />
       {markdown === null ? null : (
         <Stack.Toolbar placement="right">
-          <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel={documentWords.documentActions}>
-            <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => copyText(markdown)}>
+          {typing ? (
+            <Stack.Toolbar.Button variant="done" onPress={endEditing}>
+              Done
+            </Stack.Toolbar.Button>
+          ) : null}
+          <Stack.Toolbar.Menu
+            hidden={typing}
+            icon="ellipsis"
+            accessibilityLabel={documentWords.documentActions}
+          >
+            <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => copyMarkdown()}>
               {documentWords.copyAsMarkdown}
             </Stack.Toolbar.MenuAction>
           </Stack.Toolbar.Menu>
@@ -194,7 +338,7 @@ function PageScreen({ path }: { path: string }) {
       {failure ?? (
         <>
           {/* What's shown stays while a refresh that failed, or a failing feed, waits for Try again. */}
-          {kept && markdown !== null ? (
+          {kept && markdown !== null && !holding ? (
             <Strip
               theme={theme}
               icon="failed"
@@ -203,24 +347,24 @@ function PageScreen({ path }: { path: string }) {
               onAction={kept.retry}
             />
           ) : null}
-          {uri && injected ? (
-            <PageScrollTop
-              key={`${attempt}:${revision}`}
-              active={focused}
-              ready={painted}
-              style={styles.web}
-            >
+          {liveStrip}
+          {webShown ? (
+            <PageScrollTop key={mount} active={focused} ready={painted} style={styles.web}>
               <WebView
+                ref={web}
                 originWhitelist={["file://*"]}
                 source={{ uri }}
                 // Read access to the editor's folder only: the page never reads the rest of the app's files.
                 allowingReadAccessToURL={editorFolderUri}
                 allowFileAccess
                 injectedJavaScriptBeforeContentLoaded={injected}
-                onMessage={(event) => handleMessage(event.nativeEvent.data)}
+                onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
                 onError={() => setLostPage("failed")}
                 onContentProcessDidTerminate={() => setLostPage("failed")}
+                keyboardDisplayRequiresUserAction={false}
+                // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
                 hideKeyboardAccessoryView
+                removeIosKeyboardObserver
                 scrollEnabled={false}
                 style={[styles.web, { backgroundColor: theme.bg }]}
               />

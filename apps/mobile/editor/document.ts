@@ -4,6 +4,7 @@ import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";
+import { followLive } from "./live";
 
 export interface PageProperty {
   readonly name: string;
@@ -18,6 +19,8 @@ export interface PageConfig {
   /** Over the 2 MiB limit: the start shows as plain text, read-only. */
   readonly large: boolean;
   readonly editable: boolean;
+  /** The app opens the page live: the text shows read-only until the live document replaces it (live.ts). */
+  readonly live?: boolean;
   /** Dynamic Type, as it is when the page opens. */
   readonly textScale: number;
   /** Design review only: type a sentence and report keystroke-to-paint. */
@@ -60,6 +63,10 @@ export function mountDocument(page: PageConfig) {
   root.append(body);
   let editable = page.editable;
   let typed: readonly number[] = [];
+  const endEditing = () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    window.getSelection()?.removeAllRanges();
+  };
   if (page.large) {
     body.append(element("pre", "source", page.markdown));
   } else {
@@ -92,6 +99,7 @@ export function mountDocument(page: PageConfig) {
         return true;
       },
     });
+    if (page.live) followLive({ body, readOnly: editor, label: page.title, endEditing });
     // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
     if (page.autotype) autotype(body, samples);
     typed = samples;
@@ -105,8 +113,7 @@ export function mountDocument(page: PageConfig) {
   }
   // "Done" in the app's header ends editing: the caret goes, and with it the keyboard.
   (window as Window & { __dohcEndEditing?: () => void }).__dohcEndEditing = () => {
-    (document.activeElement as HTMLElement | null)?.blur();
-    window.getSelection()?.removeAllRanges();
+    endEditing();
     // Typing done through the keyboard reports its keystroke-to-paint times when editing ends.
     if (typed.length > 0) post("typing", typingSummary(typed));
   };

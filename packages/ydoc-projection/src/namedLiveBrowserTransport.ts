@@ -4,14 +4,18 @@ import {
 } from "@dohc/live-session-contract/live-connection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
-import { createLiveFrameSession } from "@dohc/live-session-contract/live-frame";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import { isNamedLiveStopped } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveProvider,
-  type NamedLiveProviderLimits,
   type NamedLiveProviderState,
 } from "@dohc/ydoc-projection/named-live-provider";
+import {
+  parseNamedLiveBrowserLimits,
+  type NamedLiveBrowserLimits,
+} from "@dohc/ydoc-projection/named-live-browser-limits";
+
+export { parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits };
 
 /** Account ID is a stale-selection guard, never an authentication credential. */
 export interface NamedLiveSelection {
@@ -20,14 +24,6 @@ export interface NamedLiveSelection {
   workspaceId: string;
   grantId: string;
   objectId: string;
-}
-export interface NamedLiveBrowserLimits {
-  provider: NamedLiveProviderLimits;
-  maxHttpResponseBytes: number;
-  maxSocketBufferedBytes: number;
-  connectTimeoutMs: number;
-  sendTimeoutMs: number;
-  drainPollMs: number;
 }
 export interface NamedLiveBrowserState extends Omit<NamedLiveProviderState, "status"> {
   status: NamedLiveProviderState["status"] | "authorizing" | "refused";
@@ -98,40 +94,6 @@ class SessionSpent extends Error {}
 // this long, unless the invitation itself says the access ended. Then it stops, so a page that
 // can never open doesn't keep asking the server.
 const PASSING_REFUSAL_MS = 5 * 60_000;
-
-export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
-  if (
-    !exact(
-      value,
-      "connectTimeoutMs,drainPollMs,maxHttpResponseBytes,maxSocketBufferedBytes,provider,sendTimeoutMs",
-    ) ||
-    !exact(value.provider, "frames,maxDeliveryAttempts,maxPendingUpdateBytes,maxPendingUpdates")
-  )
-    throw new TypeError("Invalid browser transport limits.");
-  const limits = structuredClone(value) as unknown as NamedLiveBrowserLimits;
-  for (const number of [
-    limits.maxHttpResponseBytes,
-    limits.maxSocketBufferedBytes,
-    limits.connectTimeoutMs,
-    limits.sendTimeoutMs,
-    limits.drainPollMs,
-  ]) {
-    if (!Number.isSafeInteger(number) || number < 1 || number > 2_147_483_647)
-      throw new TypeError("Invalid browser transport limits.");
-  }
-  for (const number of [
-    limits.provider.maxPendingUpdateBytes,
-    limits.provider.maxPendingUpdates,
-    limits.provider.maxDeliveryAttempts,
-  ]) {
-    if (!Number.isSafeInteger(number) || number < 1)
-      throw new TypeError("Invalid browser transport limits.");
-  }
-  createLiveFrameSession("client", limits.provider.frames).close();
-  if (limits.maxSocketBufferedBytes < limits.provider.frames.receive.maxFrameBytes)
-    throw new TypeError("Socket capacity cannot hold a frame.");
-  return limits;
-}
 
 /** One current selection. Retired handles retain only their in-memory draft for caller-owned recovery. */
 export function createNamedLiveBrowserTransport<

@@ -53,7 +53,13 @@ function setup(...lists: Answer[]) {
   };
   const list = createWorkspaceList(signIn);
   const cache = createReadCache();
-  const open = createOpenWorkspace({ signIn, list, cache });
+  const switched: ((workspaceId: string | null) => void)[] = [];
+  const open = createOpenWorkspace({
+    signIn,
+    list,
+    cache,
+    beforeSwitch: (workspaceId) => switched.forEach((hear) => hear(workspaceId)),
+  });
   open.subscribe(() => {});
   open.resume();
   list.reload();
@@ -64,6 +70,8 @@ function setup(...lists: Answer[]) {
     cache,
     open,
     gap,
+    switched,
+    list,
     scope: (workspaceId: string) => cacheScope(signIn, workspaceId),
   };
 }
@@ -167,6 +175,23 @@ describe("a workspace the server can't open yet", () => {
     expect(alone.open.state()).toEqual({ currentWorkspaceId: null, data: null });
     expect(alone.gap()).toEqual({ kind: "none-synced" });
     expect(alone.server.paths().some((path) => path.startsWith("POST /sync/ws-a/"))).toBe(false);
+  });
+});
+
+describe("a switch of the open workspace", () => {
+  it("tells the account before the open store stops, so its live pages end first", async () => {
+    const context = setup(listed(A, B), listed(B));
+    context.server.on("GET", feedPath("ws-a"), held);
+    context.server.on("GET", feedPath("ws-b"), held);
+    const a = await readA(context);
+    const stop = vi.spyOn(a, "stop");
+    const heard: [string | null, number][] = [];
+    context.switched.push((workspaceId) => heard.push([workspaceId, stop.mock.calls.length]));
+    // Learned from the list, as when another device hid the open workspace.
+    context.list.reload();
+    await vi.waitFor(() => expect(context.open.state().currentWorkspaceId).toBe("ws-b"));
+    expect(heard).toEqual([["ws-b", 0]]);
+    expect(stop).toHaveBeenCalledOnce();
   });
 });
 
