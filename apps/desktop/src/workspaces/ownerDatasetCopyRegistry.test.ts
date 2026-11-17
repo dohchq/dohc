@@ -19,11 +19,20 @@ import { openedLocalState } from "../testing/preparedLocalState";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
-const files = vi.hoisted(() => ({ removed: [] as string[], busy: new Set<string>() }));
+const files = vi.hoisted(() => ({
+  removed: [] as string[],
+  busy: new Set<string>(),
+  unreadable: new Set<string>(),
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (files.unreadable.has(String(args[0])))
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       if (files.busy.has(String(args[0]))) {
         throw Object.assign(
@@ -39,6 +48,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   files.busy.clear();
+  files.unreadable.clear();
   for (const close of cleanups.splice(0).reverse()) await close();
   vi.clearAllMocks();
 });
@@ -315,6 +325,26 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     expect(await next.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
   },
 );
+it("removes every other account's copies when one signs in while the record cannot be read", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  const { directory } = mocks.open.mock.calls[0]![0];
+  await f.registry.credentialsChanged(null);
+  await f.registry.closeAll();
+  files.unreadable.add(f.record);
+  const next = restart(f.record, [f.input.rootPath]);
+  await next.credentialsChanged(other, "https://relay").catch(() => undefined);
+  expect(await readdir(dirname(directory))).toEqual([]);
+  // The record still names the first account, whose copies are gone.
+  await next.credentialsChanged(null).catch(() => undefined);
+  files.unreadable.clear();
+  const after = restart(f.record, [f.input.rootPath]);
+  // As the app does: whose copies open signed out, then the copy.
+  expect(await after.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
+  await expect(after.get({ ...f.input, lifetime: new AbortController().signal })).rejects.toThrow(
+    "Sign in to your server first.",
+  );
+});
 it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),
     copy = await f.registry.get(f.input),

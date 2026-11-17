@@ -91,13 +91,20 @@ const tagOf = (name: string) => (name.length === 33 ? name.slice(0, 16) : null);
 async function foldersOf(
   path: string,
   departed: ReadonlySet<string>,
+  keep: string | null,
 ): Promise<string[] | "missing"> {
   if (placeOf(path)!.inside !== COPIES) return [path];
   const found = await realFolder(path);
   if (found === "missing") return found;
   if (!found?.real) return [];
   return (await readdir(found.folder))
-    .filter((name) => KEY.test(name) && (tagOf(name) === null || departed.has(tagOf(name)!)))
+    .filter(
+      (name) =>
+        KEY.test(name) &&
+        (tagOf(name) === null ||
+          departed.has(tagOf(name)!) ||
+          (keep !== null && tagOf(name) !== keep)),
+    )
     .map((name) => join(found.folder, name));
 }
 
@@ -278,6 +285,9 @@ export function createOwnerDatasetCopyRegistry(options: {
     if (!loaded) await load();
     const leaving = arriving && account && account !== arriving.tag ? account : null;
     if (leaving) departed.add(leaving);
+    // A sign-in while the record cannot be read: the account before is
+    // unknown, so the copies of every other account go.
+    const keep = arriving && account === undefined ? arriving.tag : null;
     if (arriving) {
       signedIn(arriving.tag);
       account = arriving.tag;
@@ -286,7 +296,7 @@ export function createOwnerDatasetCopyRegistry(options: {
     // Leaving an account removes its copies in every registered workspace,
     // including ones from earlier runs.
     let listing: PromiseRejectedResult | undefined;
-    if (leaving || owed) {
+    if (leaving || keep || owed) {
       try {
         roots = [...new Set([...roots, ...options.workspaces()])];
         owed = false;
@@ -306,7 +316,7 @@ export function createOwnerDatasetCopyRegistry(options: {
       if (entry.directory && rejected(closed[index])) held.add(entry.directory);
     });
     const paths = [...left.keys()],
-      found = await Promise.allSettled(paths.map((path) => foldersOf(path, departed)));
+      found = await Promise.allSettled(paths.map((path) => foldersOf(path, departed, keep)));
     const next = new Map<string, boolean>([...held].map((path) => [path, true])),
       folders = new Set<string>();
     paths.forEach((path, index) => {
@@ -382,9 +392,9 @@ export function createOwnerDatasetCopyRegistry(options: {
     }): SavedCollectionsList {
       const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, "list", new URL(input.origin).origin, input.ownerKey]).slice(0, 16)}`;
       const file = async () => {
+        await barrier.catch(() => undefined);
         if (!owns(input.ownerKey))
           throw Error("The Collection owner changed. Reopen the workspace.");
-        await barrier.catch(() => undefined);
         requested.add(input.rootPath);
         const folder = await localDatasetFolder(
           {
