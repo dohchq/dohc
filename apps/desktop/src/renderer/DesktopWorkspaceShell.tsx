@@ -8598,6 +8598,14 @@ export function DesktopWorkspaceShell(props: {
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
                                   onOpenShare: openReceivedShare,
+                                  onShowSharing: (target) => {
+                                    setSharingFocus(target);
+                                    mutateWb((state) => ({
+                                      ...state,
+                                      activeView: SHARING_VIEW_ID,
+                                      sidebarVisible: true,
+                                    }));
+                                  },
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                 }}
                                 selectedAppRoot={selectedAppRoot}

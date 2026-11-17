@@ -69,7 +69,12 @@ export type ShareMount = NonNullable<WorkspaceSummary["shareMounts"]>[number];
 export type ShareGroup = { shareId: string; rows: AccessShareRow[] };
 export type WaitingChanges = { count: number; senders: string[]; oldestProposalId: string };
 // A row, or a lane's heading when no share is named, to focus on opening.
-export type SharingFocus = { lane: SharingLane; shareId: string | null };
+export type SharingFocus = {
+  lane: SharingLane;
+  shareId: string | null;
+  // Open this share once shown, as a failed Open's Try again asked.
+  open?: { workspaceId: string; name: string };
+};
 export type CopyWhat = "code" | "invitation";
 // Whether a mount's skipped changes show, against what its record says:
 // shown on request, or hidden up to the generation a Dismiss covered.
@@ -1109,6 +1114,8 @@ export function SharingView(props: {
   notSentWhileOpen?: readonly string[];
   // Hands a membership the relay still states to the shell, which asks for a folder.
   onOpenShare: (share: RelayShareReceivedRow) => void;
+  // Shows this view on a row, after it closed too.
+  onShowSharing: (target: SharingFocus) => void;
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
@@ -1149,7 +1156,12 @@ export function SharingView(props: {
       return found.share;
     },
   });
-  const { onOpenShare, reportError } = props;
+  // Try again outlives the view, so it shows the view again to open the share.
+  useEffect(() => {
+    if (!focus?.open || focus.shareId === null || focus.open.workspaceId !== workspaceId) return;
+    setOpenTarget({ workspaceId, shareId: focus.shareId, name: focus.open.name });
+  }, [focus, workspaceId]);
+  const { onOpenShare, onShowSharing, reportError } = props;
   useEffect(() => {
     if (!openTarget || openTarget.workspaceId !== workspaceId) return;
     if (opening.value) {
@@ -1158,10 +1170,22 @@ export function SharingView(props: {
     } else if (opening.error !== null) {
       setOpenTarget(null);
       reportError(`dohc could not open ${openTarget.name}.`, opening.error, () =>
-        setOpenTarget(openTarget),
+        onShowSharing({
+          lane: "received",
+          shareId: openTarget.shareId,
+          open: { workspaceId: openTarget.workspaceId, name: openTarget.name },
+        }),
       );
     }
-  }, [onOpenShare, openTarget, opening.error, opening.value, reportError, workspaceId]);
+  }, [
+    onOpenShare,
+    onShowSharing,
+    openTarget,
+    opening.error,
+    opening.value,
+    reportError,
+    workspaceId,
+  ]);
   const [skipView, setSkipView] = useState<SkipView>(new Map());
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useMemo, useReducer } from "react";
+import { useMemo, useReducer, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -43,6 +43,7 @@ const callbacks = {
   onReviewChanges: vi.fn(),
   onMountsChanged: vi.fn(),
   onOpenShare: vi.fn(),
+  onShowSharing: vi.fn(),
   onFocused: vi.fn(),
   onUnmount: vi.fn(async (_path: string) => undefined),
   reportError: vi.fn(),
@@ -179,6 +180,16 @@ function View(props: {
   notSentWhileOpen?: string[];
 }) {
   const [sharesRevision, sharesChanged] = useReducer((revision: number) => revision + 1, 0);
+  // The shell: showing Sharing on a row sets its focus until the view has used it.
+  const [shown, setShown] = useState<SharingFocus | null>(null);
+  const showSharing = (target: SharingFocus) => {
+    callbacks.onShowSharing(target);
+    setShown(target);
+  };
+  const focused = () => {
+    callbacks.onFocused();
+    setShown(null);
+  };
   const removals = useMemo(
     () => ({
       removed: (removal: Parameters<typeof shareRemovals.removed>[0]) => {
@@ -208,10 +219,11 @@ function View(props: {
         onUnmount={callbacks.onUnmount}
         shareRemovals={removals}
         reportError={callbacks.reportError}
-        focus={props.focus ?? null}
-        onFocused={callbacks.onFocused}
+        focus={shown ?? props.focus ?? null}
+        onFocused={focused}
         notSentWhileOpen={props.notSentWhileOpen ?? []}
         onOpenShare={callbacks.onOpenShare}
+        onShowSharing={showSharing}
       />
     </WorkspaceSessionProvider>
   );
@@ -576,6 +588,34 @@ describe("the actions Settings offers on a share", () => {
     bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share });
     act(() => callbacks.reportError.mock.calls[0]![2]());
     await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledWith(share));
+  });
+
+  it("shows Sharing again and opens the share when Try again comes after Sharing closed", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [
+          received({
+            shareId: "member",
+            subjectName: "Community",
+            selector: { kind: "workspace", role: "member" },
+          }),
+        ],
+      }),
+    });
+    bridgeMock.getRelayReceivedShare.mockRejectedValueOnce(new Error("The server is unavailable."));
+    const { rerender } = render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Open" }));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    // The side panel shows another view; the Notices row keeps Try again.
+    rerender(<View open={false} />);
+    const share = { shareId: "member", shareCode: "member-code" };
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share });
+    act(() => callbacks.reportError.mock.calls[0]![2]());
+    expect(callbacks.onShowSharing).toHaveBeenCalledOnce();
+    rerender(<View />);
+    await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledWith(share));
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
   });
 
   it.each(["success", "failure"])(
