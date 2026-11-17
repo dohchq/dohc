@@ -760,6 +760,55 @@ async fn an_unreadable_file_dohc_does_not_track_stays_in_place() {
     finish(&copy).await;
 }
 
+/// `.dohc/files.toml` can't be read, so the rebuild can't tell which files
+/// dohc keeps out. It stops with the copy closed, names the policy file and
+/// moves nothing. Once the file can be read, Try again leaves those files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_files_toml_stops_the_rebuild_until_it_can_be_read() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-unreadable-policy",
+        true,
+        false,
+        |_, _, scratch| {
+            Box::pin(async move {
+                let root = scratch.path();
+                std::fs::write(
+                    root.join(".dohc/files.toml"),
+                    "[[rule]]\npath = \"private/**\"\ntracked = false\n",
+                )
+                .expect("policy");
+                std::fs::create_dir_all(root.join("private")).expect("private");
+                std::fs::write(root.join("private/vm.vhdx"), "a disk image").expect("image");
+            })
+        },
+    )
+    .await;
+    let root = copy.scratch.path();
+    let Some(held) = hold_unreadable(&root.join(".dohc/files.toml")) else {
+        return;
+    };
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    drop(held);
+    assert_eq!(
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-disk-unreadable",
+            "path": ".dohc/files.toml",
+        })
+    );
+    assert_eq!(manifest(&copy).expect("manifest")["phase"], "closed");
+    assert!(!root.join(".dohc/local/recovery").exists());
+
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        std::fs::read(root.join("private/vm.vhdx")).expect("image"),
+        b"a disk image"
+    );
+    finish(&copy).await;
+}
+
 /// `.dohc/files.toml` keeps a folder out of dohc, so no store holds its files
 /// and dohc never sends them. The rebuild leaves them where they are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

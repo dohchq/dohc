@@ -331,7 +331,9 @@ fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<S
 /// recorded, so the rebuild stops with the copy closed and names the first
 /// one until it can read every path: Try again then saves it. A file over the
 /// size cap is never sent, so it stays where it is, as does one
-/// `.dohc/files.toml` keeps out of dohc. Answers that policy too.
+/// `.dohc/files.toml` keeps out of dohc. Answers that policy too. While the
+/// policy can't be read, the rebuild can't tell those files apart, so it
+/// stops and names it.
 async fn files_on_disk(
     root: &Path,
     seed: &dohc_engine_files::ScanManifest,
@@ -342,7 +344,14 @@ async fn files_on_disk(
     ),
     Halt,
 > {
-    let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
+    let policy = dohc_engine_runtime::search::read_engine_search_policy(root);
+    if policy.holds_file_capture() {
+        return Err(Halt::At {
+            code: "share-view-rebuild-disk-unreadable",
+            path: ".dohc/files.toml".to_owned(),
+        });
+    }
+    let policy = policy.files_policy;
     let scan_root = root.to_path_buf();
     let prior = seed.clone();
     let scanned = tokio::task::spawn_blocking(move || {
