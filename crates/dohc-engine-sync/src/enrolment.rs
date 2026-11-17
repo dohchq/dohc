@@ -1608,7 +1608,7 @@ mod tests {
     /// prefix of the journal. The covered file was hidden from them at every
     /// point of its history, so no prefix may show it to them.
     #[test]
-    #[ignore = "known gap: the window before the bundle ends with the old rule deleted                 and the file journaled, before the replacement's window"]
+    #[ignore = "known gap: a window cut before the replacement rule shows the covered file"]
     fn a_bundle_cut_between_a_rule_and_its_replacement_shows_no_covered_file() {
         use dohc_engine_files::access_rules::{access_rule_folder, parse_access_rule};
         let (_scratch, _, mut store) = open_store();
