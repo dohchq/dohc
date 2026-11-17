@@ -251,12 +251,15 @@ impl EngineService {
         &self,
         cancellation: &OperationCancellation,
     ) -> Result<Arc<dyn Send + Sync>, WireError> {
-        let admission = self
+        let (host, admission) = self
             .ordinary_live_host
             .get()
-            .and_then(|host| host.owner_delivery_admission.clone())
+            .and_then(|host| Some((host, host.owner_delivery_admission.clone()?)))
             .ok_or_else(|| WireError::new(ErrorCode::Overloaded, "owner delivery capacity"))?;
-        admission.reserve(&cancellation.token).await
+        host.claim(super::ordinary_live_host::LiveRole::Owner)?;
+        admission
+            .reserve(&cancellation.token, cancellation.has_deadline)
+            .await
     }
 
     /// An owner upload arrives holding only its body. It adds the owner

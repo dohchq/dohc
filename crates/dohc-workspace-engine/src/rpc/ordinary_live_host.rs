@@ -46,7 +46,18 @@ impl OrdinaryLiveHostConfig {
     }
 }
 
+/// A host receives `liveApplication.apply` and restore uploads, which hold
+/// room in the live budget while they wait for the session serial. An owner
+/// call holds the serial while it waits for that room. So one engine takes
+/// one role, and whichever comes second is refused.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveRole {
+    Host,
+    Owner,
+}
+
 pub(crate) struct OrdinaryHost {
+    pub role: std::sync::OnceLock<LiveRole>,
     pub service: std::sync::Weak<EngineService>,
     pub owner_delivery_admission: Option<crate::live_application_ingress::OwnerAdmission>,
     pub sync: Option<(
@@ -60,6 +71,25 @@ pub(crate) struct OrdinaryHost {
     pub connection: dohc_engine_protocol::transport::ConnectionHandle,
     pub settlement: (usize, crate::live_application_ingress::SettlementAdmission),
     pub restore: Option<crate::live_application_ingress::RestoreConfig>,
+}
+
+impl OrdinaryHost {
+    pub(crate) fn claim(&self, role: LiveRole) -> Result<(), WireError> {
+        if *self.role.get_or_init(|| role) == role {
+            return Ok(());
+        }
+        Err(WireError::new(
+            ErrorCode::Forbidden,
+            match role {
+                LiveRole::Host => {
+                    "this engine runs owner calls, so it cannot also host live editing"
+                }
+                LiveRole::Owner => {
+                    "this engine hosts live editing, so it cannot also run owner calls"
+                }
+            },
+        ))
+    }
 }
 
 impl EngineService {
@@ -114,6 +144,7 @@ impl EngineService {
         );
         let owner = ConnectionOwner::authenticated();
         let _ = service.ordinary_live_host.set(OrdinaryHost {
+            role: std::sync::OnceLock::new(),
             service: Arc::downgrade(&service),
             owner_delivery_admission: ingress.owner_admission().ok(),
             max_registrations: config.max_registrations,

@@ -309,6 +309,69 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
     assert_eq!(copy.response.result, json!({"status":"empty","stop":null}));
 }
 
+/// One engine hosts live editing or runs owner calls, never both, so a
+/// host's uploads never hold room that an owner call holding the session
+/// serial waits for. Whichever role comes second is refused.
+#[tokio::test]
+async fn an_engine_hosts_live_editing_or_runs_owner_calls_not_both() {
+    for host_first in [true, false] {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let config = serde_json::from_value(json!({
+            "ingress":{"aggregateBytes":1_000_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+            "maxRegistrations":2,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
+            "maxApplicationsPerSettlement":100,
+            "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+            "sync":{"policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,"maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},"workingReserveBytes":4_000_000}
+        })).unwrap();
+        let (service, connection, _ingress) = EngineService::ordinary_live_host(config).unwrap();
+        let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"workspace","captureMode":"none"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(connection.handle());
+        let provision = || {
+            service.provision_live_application(
+                connection.handle(),
+                crate::LiveApplicationHostConfig {
+                    workspace: handle.clone(),
+                    namespace: "relay-history".into(),
+                    coordinate: serde_json::from_value(json!({
+                        "hostId": "host", "hostEpoch": 1,
+                        "instanceId": "instance", "connectionId": "connection",
+                    }))
+                    .unwrap(),
+                    max_registrations: 2,
+                },
+            )
+        };
+        let list = || {
+            service.owner_delivery_list_drafts(
+                ctx.clone(),
+                request(
+                    1,
+                    "ydoc.ownerDelivery.listDrafts",
+                    &handle,
+                    json!({"limit":10}),
+                ),
+            )
+        };
+        let refused = if host_first {
+            provision().await.unwrap();
+            list().await.err()
+        } else {
+            list().await.unwrap();
+            provision().await.err()
+        };
+        assert_eq!(
+            refused.expect("the second role was refused").code,
+            ErrorCode::Forbidden
+        );
+    }
+}
+
 /// An owner call that fits the budget waits while other work holds the room
 /// it needs, and runs once that room is released.
 #[tokio::test]

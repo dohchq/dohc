@@ -310,39 +310,50 @@ pub(crate) struct OwnerAdmission {
     released: Arc<Notify>,
     turn: Arc<tokio::sync::Mutex<()>>,
     bytes: u32,
+    longest_wait: std::time::Duration,
 }
 
 impl OwnerAdmission {
     /// Takes no upload slot: an owner upload holds one while it waits here.
-    /// The wait ends only when the call is cancelled or reaches its deadline.
+    /// The wait ends when the call is cancelled or reaches its deadline. A
+    /// call with no deadline of its own waits no longer than an upload may.
     pub(crate) async fn reserve(
         &self,
         cancelled: &dohc_engine_runtime::CancellationToken,
+        has_deadline: bool,
     ) -> Result<Arc<dyn Send + Sync>, WireError> {
         let refused = || WireError::new(ErrorCode::Overloaded, "live-settlement-capacity");
-        let _turn = tokio::select! {
-            biased;
-            () = cancelled.cancelled() => return Err(refused()),
-            turn = self.turn.lock() => turn,
-        };
-        loop {
-            let released = self.released.notified();
-            tokio::pin!(released);
-            // Registered before the attempt, so a release between them still wakes this call.
-            released.as_mut().enable();
-            if let Ok(bytes) = self.budget.clone().try_acquire_many_owned(self.bytes) {
-                return Ok(Arc::new(Reservation {
-                    bytes: Some(bytes),
-                    slot: None,
-                    released: self.released.clone(),
-                }));
-            }
-            tokio::select! {
+        let wait = async {
+            let _turn = tokio::select! {
                 biased;
                 () = cancelled.cancelled() => return Err(refused()),
-                () = &mut released => {}
+                turn = self.turn.lock() => turn,
+            };
+            loop {
+                let released = self.released.notified();
+                tokio::pin!(released);
+                // Registered before the attempt, so a release between them still wakes this call.
+                released.as_mut().enable();
+                if let Ok(bytes) = self.budget.clone().try_acquire_many_owned(self.bytes) {
+                    return Ok(Arc::new(Reservation {
+                        bytes: Some(bytes),
+                        slot: None,
+                        released: self.released.clone(),
+                    }) as Arc<dyn Send + Sync>);
+                }
+                tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => return Err(refused()),
+                    () = &mut released => {}
+                }
             }
+        };
+        if has_deadline {
+            return wait.await;
         }
+        tokio::time::timeout(self.longest_wait, wait)
+            .await
+            .unwrap_or_else(|_| Err(refused()))
     }
 }
 
@@ -384,6 +395,7 @@ impl LiveApplicationIngress {
             released: self.released.clone(),
             turn: self.owner_turn.clone(),
             bytes: u32::try_from(bytes).map_err(|_| overloaded())?,
+            longest_wait: self.config.upload_deadline,
         })
     }
     pub(crate) fn sync_admission(
@@ -1106,8 +1118,8 @@ pub(crate) mod tests {
             LiveApplicationIngress::new(Arc::new(EngineService::new()), config()).unwrap();
         let owner = ingress.owner_admission().unwrap();
         let never = dohc_engine_runtime::CancellationToken::new();
-        let first = owner.reserve(&never).await.unwrap();
-        let second = owner.reserve(&never);
+        let first = owner.reserve(&never, true).await.unwrap();
+        let second = owner.reserve(&never, true);
         tokio::pin!(second);
         tokio::select! {
             biased;
@@ -1117,6 +1129,19 @@ pub(crate) mod tests {
         let settlement = ingress.settlement_admission(4).unwrap().reserve().unwrap();
         drop((settlement, first));
         second.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_work_without_a_deadline_waits_at_most_an_upload_deadline() {
+        let ingress =
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config()).unwrap();
+        let owner = ingress.owner_admission().unwrap();
+        let never = dohc_engine_runtime::CancellationToken::new();
+        let _held = owner.reserve(&never, false).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let refused = owner.reserve(&never, false).await.err().unwrap();
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert!(started.elapsed() >= config().upload_deadline);
     }
 
     #[test]
