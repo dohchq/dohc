@@ -3412,10 +3412,7 @@ fn hiding_two_new_edit_spellings_cannot_publish_a_widening_prefix() {
     );
     assert_rule_prefixes_at_most_view(&f);
     assert!(
-        matches!(
-            result,
-            Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
-        ),
+        matches!(result, Err(RuntimeError::AccessRuleChanged { .. })),
         "{result:?}"
     );
     assert_eq!(f.journal(), before);
@@ -3470,10 +3467,7 @@ fn removing_a_hidden_edit_pair_cannot_publish_a_widening_prefix() {
         "no single EDIT rule may remain: {result:?}"
     );
     assert!(
-        matches!(
-            result,
-            Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
-        ),
+        matches!(result, Err(RuntimeError::AccessRuleChanged { .. })),
         "{result:?}"
     );
     assert_eq!(f.journal(), before);
@@ -3648,4 +3642,41 @@ fn removing_a_hidden_pair_can_continue_one_file_at_a_time() {
             .text,
         VIEW
     );
+}
+
+#[test]
+fn a_several_file_decision_that_lost_its_safe_order_refreshes_the_hold() {
+    let f = Fixture::new();
+    f.put("access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.put("team/\u{FF41}ccess.yaml", VIEW);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(f.hold_views()[0].can_accept);
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.settle();
+    let before = f.journal();
+    let result = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "widened",
+        99,
+        Arc::new(NoFaults),
+    );
+    assert!(
+        matches!(&result, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
+        "{result:?}"
+    );
+    assert_eq!(f.journal(), before);
+    let views = f.hold_views();
+    assert_eq!(views.len(), 1);
+    assert!(!views[0].can_accept);
+    f.decide("team", AccessRuleDecision::Restore).unwrap();
+    assert!(f.holds().is_empty());
 }

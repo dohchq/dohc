@@ -2147,11 +2147,22 @@ fn decide_on_store(
     let mut decided = AccessRuleDecided::default();
     match decision {
         AccessRuleDecision::Accept => {
-            let changes = store.read_with(|conn| decision_rule_changes(
-                conn, order.workspace_id, order.version_id, folder, committed.as_ref(), &disk,
-            ))?.ok_or(DomainError::InvalidInput {
-                reason: "the access rule cannot be recorded without temporarily widening access",
-            })?;
+            let Some(changes) = store.read_with(|conn| {
+                decision_rule_changes(
+                    conn,
+                    order.workspace_id,
+                    order.version_id,
+                    folder,
+                    committed.as_ref(),
+                    &disk,
+                )
+            })?
+            else {
+                judge_one(store, order, folder, &[], false, &[])?;
+                return Err(RuntimeError::AccessRuleChanged {
+                    folder: folder.to_owned(),
+                });
+            };
             commit_rule_changes(store, order, folder, changes)?;
         }
         AccessRuleDecision::Restore => {
