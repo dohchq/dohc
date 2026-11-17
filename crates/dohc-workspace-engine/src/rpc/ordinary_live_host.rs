@@ -48,7 +48,7 @@ impl OrdinaryLiveHostConfig {
 
 pub(crate) struct OrdinaryHost {
     pub service: std::sync::Weak<EngineService>,
-    pub owner_delivery_admission: Option<crate::live_application_ingress::SettlementAdmission>,
+    pub owner_delivery_admission: Option<crate::live_application_ingress::OwnerAdmission>,
     pub sync: Option<(
         dohc_engine_collab::live_update_application::AppliedSyncPolicy,
         crate::live_application_ingress::SettlementAdmission,

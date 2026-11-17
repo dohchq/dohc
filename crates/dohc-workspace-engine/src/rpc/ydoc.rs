@@ -687,7 +687,7 @@ impl EngineService {
         let Some(descriptor) = descriptor else {
             return Ok((None, None));
         };
-        let reservation = self.reserve_owner_delivery()?;
+        let reservation = self.reserve_owner_delivery(cancellation).await?;
         let draft = open
             .actor
             .owner_ydoc_open_draft(
@@ -1936,7 +1936,7 @@ impl EngineService {
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
             let token = cancellation.token();
-            let reservation = self.reserve_owner_delivery()?;
+            let reservation = self.reserve_owner_delivery(&cancellation).await?;
             let append = tokio::spawn(async move {
                 let _serial = serial;
                 actor

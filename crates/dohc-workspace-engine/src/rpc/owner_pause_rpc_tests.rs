@@ -186,7 +186,7 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         )
         .unwrap(),
         bytes: row,
-        reservation: service.reserve_owner_delivery().unwrap(),
+        reservation: std::sync::Arc::new(()),
     }
     };
     let put_request = request(5, "ydoc.ownerDelivery.putCommittedRow", &handle, json!({}));
