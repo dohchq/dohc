@@ -1497,6 +1497,52 @@ fn restore_keeps_a_rule_saved_over_the_one_it_removes() {
     );
 }
 
+/// Restore numbers its placement by the time of day, which is far past any
+/// moment's order and can go back when the clock is set back. A Restore
+/// decided at an earlier time than the last one at that path still puts the
+/// rule back or removes it, and a rule written through dohc afterwards still
+/// reaches disk.
+#[test]
+fn a_restore_places_its_rule_whatever_the_time_of_day() {
+    const NOW: i64 = 1_800_000_000_000;
+    for (folder, restored) in [("team", Some(VIEW)), ("team/sub", None)] {
+        let f = ruled_team();
+        let path = format!("{folder}/access.yaml");
+        let on_disk = || std::fs::read_to_string(f.root().join(&path)).ok();
+        f.put("team/sub/b.md", "beta");
+        for now_ms in [NOW, NOW - 60_000] {
+            f.put(&path, EDIT);
+            f.settle();
+            assert!(held(&f.capture(&["team/sub/b.md"])[0], folder));
+            let (_, reason) = f.holds().remove(0);
+            f.decided_at(
+                folder,
+                AccessRuleDecision::Restore,
+                Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+                &reason,
+                now_ms,
+                Arc::new(NoFaults),
+            )
+            .unwrap_or_else(|error| panic!("restore {path} at {now_ms}: {error:?}"));
+            assert_eq!(on_disk().as_deref(), restored, "{path} at {now_ms}");
+        }
+        let written = f
+            .runtime
+            .block_on(f.actor.versioned_text_publish(
+                write(&path, NOBODY, "after-restore"),
+                f.root().to_path_buf(),
+                dohc_engine_runtime::WriteConditions::default(),
+                None,
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .expect("write");
+        assert!(written.materialized, "{path}");
+        assert_eq!(on_disk().as_deref(), Some(NOBODY), "{path}");
+    }
+}
+
 /// A rule dohc is still placing on disk goes unjudged only while capture
 /// reads the bytes being placed. A widening saved over the placement holds.
 #[test]

@@ -1187,10 +1187,13 @@ fn materialize_one_inner(
     // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    // Version switches and access-rule placements number their jobs by time,
+    // not moment order, so they neither fence nor are fenced.
     // A keyed write's request records the supersession first, so a complete
     // job with no recorded outcome always reached disk.
     if !conflict_only
         && !job.job_id.starts_with("version-switch-")
+        && !job.job_id.starts_with("access-rule-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
