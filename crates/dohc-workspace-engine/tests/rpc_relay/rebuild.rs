@@ -2677,6 +2677,105 @@ async fn a_move_marked_after_a_first_pulls_first_page_closes_the_copy() {
     close(&transport, &handle, &mut id).await;
 }
 
+/// The departure form of the test above. The owner moves `open/a.md`, which
+/// the first page brought in, out of the member's reach while the first pull
+/// is still paging. The page that marks the move closes the copy, and the
+/// rebuild leaves nothing of the file in the store: no History, path, object
+/// or bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_departure_marked_after_a_first_pulls_first_page_leaves_nothing_after_the_rebuild() {
+    let workspace_id = "rpc-relay-first-pull-departed-later";
+    let (relay, scratch, transport, handle, pull) = paged_copy(workspace_id).await;
+    let mut id = 10;
+    // The first page, seq 1 and 2, names the head at 3.
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert!(first.get("rebuildId").is_none(), "{first}");
+    assert_eq!(first["hasMore"], json!(true), "{first}");
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": first["pendingCursor"] }),
+    )
+    .await;
+    // Main writes a share view's files itself.
+    std::fs::create_dir_all(scratch.path().join("open")).expect("folder");
+    for (path, bytes) in [("open/a.md", A_BYTES), ("open/c.md", C_BYTES)] {
+        std::fs::write(scratch.path().join(path), bytes).expect("file");
+    }
+    move_a_out(&mut relay.state.lock().expect("relay state"));
+    // The second page holds seq 3 and the move at 5.
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert_closed_at_the_move(&closed, &scratch);
+    close(&transport, &handle, &mut id).await;
+
+    let copy = ClosedCopy {
+        relay,
+        scratch,
+        workspace_id: workspace_id.to_owned(),
+        rebuild_id: closed["rebuildId"].as_str().expect("closed").to_owned(),
+        live_drafts: json!([]),
+    };
+    // A move leaves the reach's signatures as they were.
+    let result = rebuild_under(&copy, &grant("r1", "v1")).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert!(!root.join("open/a.md").exists());
+    assert_eq!(std::fs::read(root.join("open/c.md")).expect("c"), C_BYTES);
+    assert_eq!(std::fs::read(root.join("open/d.md")).expect("d"), D_BYTES);
+    // Its bytes on disk leave for the recovery folder, as a hidden file's do.
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(names_in(&recovery), ["0001 a.md", "contents.md"]);
+    assert_eq!(
+        std::fs::read(recovery.join("0001 a.md")).expect("a"),
+        A_BYTES
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("| 0001 a.md | open/a.md | No longer shared with you. |"),
+        "{contents}"
+    );
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+    for needle in ["open/a.md", "moment-a", "object-a", &hex_sha256(A_BYTES)] {
+        assert_eq!(
+            store_mentions(&copy.scratch, needle),
+            Vec::<String>::new(),
+            "{needle}"
+        );
+    }
+    let (transport, handle) = reopen(&copy).await;
+    let mut id = 10;
+    let moments = call(
+        &transport,
+        &handle,
+        &mut id,
+        "moments.list",
+        json!({ "versionId": "main", "limit": 10 }),
+    )
+    .await;
+    let paths: Vec<&str> = moments["moments"]
+        .as_array()
+        .expect("moments")
+        .iter()
+        .filter_map(|moment| moment["path"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        ["open/d.md", "open/c.md"],
+        "History holds only shared files"
+    );
+    close(&transport, &handle, &mut id).await;
+}
+
 /// The owner's move of `path` out of the member's reach, marked at `seq`.
 fn departure(seq: i64, path: &str) -> Value {
     let mut row = share_row(
