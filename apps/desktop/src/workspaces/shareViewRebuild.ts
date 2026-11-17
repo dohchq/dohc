@@ -234,8 +234,8 @@ export async function holdShareViewCopy(
     // The activity's last file reads go through the copy's session, which
     // the hold and the engine both refuse. What they would have recorded
     // stays on disk, where the rebuild's plan reads it. A close already under
-    // way runs without the filter, and the hold joins it, so its refusal is
-    // dropped here too.
+    // way may run without the filter, and the hold joins it, so its refusal
+    // is dropped here too.
     await parts.closeActivity(isClosedCopyRefusal).catch((error: unknown) => {
       if (!isClosedCopyRefusal(error)) throw error;
     });
@@ -245,6 +245,22 @@ export async function holdShareViewCopy(
     parts.sessions.releaseRebuildHold(workspaceId);
     throw error;
   }
+}
+
+/**
+ * What a close of a workspace's activity may ignore: what its caller names,
+ * and, while a rebuild holds the copy, the refusal the closed copy answers
+ * with. A close the hold joins then finishes, and its own caller still runs
+ * what follows it.
+ */
+export function closeCopyIgnoring(
+  workspaceId: string,
+  sessions: { isHeldForRebuild(workspaceId: string): boolean } | null,
+  ignoreFailure?: (error: unknown) => boolean,
+): (error: unknown) => boolean {
+  return (error) =>
+    ignoreFailure?.(error) === true ||
+    (sessions?.isHeldForRebuild(workspaceId) === true && isClosedCopyRefusal(error));
 }
 
 /**

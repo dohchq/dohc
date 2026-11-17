@@ -232,6 +232,7 @@ import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import {
   classifyShareViewRebuildError,
+  closeCopyIgnoring,
   closeLivePages,
   createShareViewRebuilds,
   holdShareViewCopy,
@@ -4661,7 +4662,11 @@ async function closeDispatchRunActivity(
               expectedRootPath: current.rootPath,
               preserveStatus: true,
               notify: options.notifyRenderer,
-              ...(options.ignoreFailure ? { ignoreFailure: options.ignoreFailure } : {}),
+              ignoreFailure: closeCopyIgnoring(
+                current.workspaceId,
+                desktopEngine.sessions,
+                options.ignoreFailure,
+              ),
             });
           },
           ...(relayCloseTarget

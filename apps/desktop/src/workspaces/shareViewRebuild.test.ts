@@ -14,6 +14,7 @@ import { closeActivity, type ActivityUse } from "./activityRelease";
 import type { EngineYDocSessionReleaseOutcome } from "./engineYDocSessionOwner";
 import {
   classifyShareViewRebuildError,
+  closeCopyIgnoring,
   closeLivePages,
   createShareViewRebuilds,
   holdShareViewCopy,
@@ -561,7 +562,8 @@ describe("holding a copy for its rebuild", () => {
   });
 
   // A window or a background run started closing the copy first, without the
-  // hold's filter, and the hold joins that close.
+  // hold's filter, and the hold joins that close. As in main, each close
+  // ignores what `closeCopyIgnoring` names when its reads fail.
   it("holds the copy though it joins a close whose reads were refused", async () => {
     const use: ActivityUse = { retainedActivity: false, backgroundHolds: 0, activityClosing: null };
     const { workspace, sessions, hold } = await heldCopy(async (read) => {
@@ -572,16 +574,29 @@ describe("holding a copy for its rebuild", () => {
     const reading = deferred();
     const earlier = closeActivity(use, async () => {
       await reading.promise;
-      await sessions.run(workspace, async () => undefined);
+      await sessions
+        .run(workspace, async () => undefined)
+        .catch((error: unknown) => {
+          if (!closeCopyIgnoring("w", sessions)(error)) throw error;
+        });
     });
     const held = hold();
     reading.resolve();
     await expect(held).resolves.toBeUndefined();
-    // The earlier closer still gets its refusal.
-    await expect(earlier?.catch((error: unknown) => isClosedCopyRefusal(error))).resolves.toBe(
-      true,
-    );
+    // The earlier closer's close finishes too, so it runs what follows it.
+    await expect(earlier).resolves.toBeUndefined();
     await sessions.closeAll();
+  });
+
+  it("ignores a closed copy's refusal in a close only while a rebuild holds the copy", async () => {
+    const refusal = new EngineWorkspaceRebuildingError("w");
+    const holds = new Set<string>();
+    const ignoring = closeCopyIgnoring("w", { isHeldForRebuild: (id) => holds.has(id) });
+    expect(ignoring(refusal)).toBe(false);
+    holds.add("w");
+    expect(ignoring(refusal)).toBe(true);
+    expect(ignoring(new Error("ENOSPC: the disk is full"))).toBe(false);
+    expect(closeCopyIgnoring("w", null, (error) => error === refusal)(refusal)).toBe(true);
   });
 
   it("stops on another failure of the close, and opens the sessions again", async () => {

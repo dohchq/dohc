@@ -1128,6 +1128,10 @@ export class EngineWorkspaceSessions {
     this.rebuildHolds.delete(workspaceId);
   }
 
+  isHeldForRebuild(workspaceId: string): boolean {
+    return this.rebuildHolds.has(workspaceId);
+  }
+
   private isRebuilding(key: string | symbol, workspaceId: string): boolean {
     return this.rebuildingWorkspaces.has(key) || this.rebuildHolds.has(workspaceId);
   }
