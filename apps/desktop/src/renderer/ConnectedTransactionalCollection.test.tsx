@@ -1074,6 +1074,52 @@ it("drops a signed-out copy when an account signs in, reads nothing meanwhile, a
   await waitFor(() => expect(onError).toHaveBeenCalled());
   expect(screen.queryByLabelText("Collection view state")).toBeNull();
 });
+it("shows no signed-out copy from a first read that answers after a session starts", async () => {
+  const session: Array<
+    (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
+  > = [];
+  backend.onCloudSessionChanged.mockImplementation(((listener: (typeof session)[number]) => {
+    session.push(listener);
+    return () => session.splice(session.indexOf(listener), 1);
+  }) as never);
+  let answer!: (value: unknown) => void;
+  backend.dataset.mockImplementationOnce(
+    () => new Promise((resolve) => (answer = resolve)) as never,
+  );
+  const onError = vi.fn();
+  render(
+    <ConnectedTransactionalCollection
+      workspaceId="workspace-a"
+      datasetPath="data/dataset.json"
+      tableId={id(2)}
+      onError={onError}
+      onFormCreated={vi.fn()}
+      onOpenFile={vi.fn()}
+      onOpenScheduleSettings={vi.fn()}
+    />,
+  );
+  await waitFor(() => expect(backend.dataset).toHaveBeenCalledTimes(1));
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "changing" });
+  });
+  // The first read, which main answered from the account signed in last, arrives now.
+  await act(async () => {
+    answer({
+      kind: "description",
+      dataset,
+      copy: { offline: true, signedOut: true, host: "sync.example.test" },
+    });
+    await Promise.resolve();
+  });
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  backend.dataset.mockRejectedValue(new Error("The other account can't read this."));
+  act(() => {
+    for (const listener of [...session]) listener({ sessionKey: "b", phase: "ready" });
+  });
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(backend.dataset).toHaveBeenCalledTimes(2);
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+});
 it("shows a slow quiet read's answer when another change arrives during it", async () => {
   const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
   backend.onCollectionCopyChanged.mockImplementation((listener) => {
