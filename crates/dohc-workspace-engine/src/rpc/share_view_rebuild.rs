@@ -1150,6 +1150,8 @@ fn empty_plan() -> RebuildPlan {
 /// the new store's file, `n`:
 ///
 /// - `d` equals `n`: no step.
+/// - no `n`, and `d` is the member's new file where the new reach gives them
+///   Edit: no step, as `keeps` says.
 /// - the new store holds `d`'s bytes: write `n`, or delete, where `d` is.
 /// - otherwise `d` moves to the recovery folder, then `n` is written where
 ///   no file is.
@@ -1219,6 +1221,44 @@ fn plan(
             && new.held.contains(d)
             && !own_on_disk.contains(&(path, d.as_str()))
     };
+    // Each path the new store writes, file or folder, by what a disk that
+    // ignores case or Unicode form takes it for.
+    let mut written: HashMap<String, Vec<(&str, bool)>> = HashMap::new();
+    for head in &new.heads {
+        let mut at = head.path.as_str();
+        let mut file = true;
+        loop {
+            written
+                .entry(dohc_engine_files::floor::path_collision_key(at))
+                .or_default()
+                .push((at, file));
+            let Some((parent, _)) = at.rsplit_once('/') else {
+                break;
+            };
+            (at, file) = (parent, false);
+        }
+    }
+    // The member's new file stays where the new reach lets them edit, for
+    // capture to record and their lane to send: one no store recorded, or one
+    // only their own moments wrote. Not where the new store writes a file, or
+    // a folder spelled otherwise, that the disk would take for it or a folder
+    // above it.
+    let grant = share_grant(parse(params.granted_selector.clone())?)?;
+    let keeps = |path: &str| {
+        let mut at = path;
+        let mut clear = !written.contains_key(&dohc_engine_files::floor::path_collision_key(at));
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            clear &= written
+                .get(&dohc_engine_files::floor::path_collision_key(parent))
+                .is_none_or(|names| names.iter().all(|&(name, file)| !file && name == parent));
+            at = parent;
+        }
+        clear
+            && grant.level_at(path) == Some(dohc_engine_sync::ShareAccess::Edit)
+            && old_heads
+                .get(path)
+                .is_none_or(|head| old.unsent.created.contains(&head.object_id))
+    };
     let paths: BTreeSet<&str> = old_heads
         .keys()
         .chain(new_heads.keys())
@@ -1245,6 +1285,7 @@ fn plan(
             (Some(d), Some(n)) if replaceable(path, d) => {
                 jobs.push(write(path, &n.sha256, Some(d)));
             }
+            (Some(_), None) if keeps(path) => {}
             (Some(d), None) if replaceable(path, d) => jobs.push(PlannedJob {
                 wave: 1,
                 path: path.to_owned(),

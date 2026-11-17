@@ -52,6 +52,9 @@ pub struct RebuildUnsent {
     /// Each file whose newest moment is the member's own and writes it: its
     /// path and the hash of its bytes.
     pub versions: Vec<RebuildHead>,
+    /// The object ids among `versions` that only the member's own moments
+    /// wrote: a file they made, which the relay never served.
+    pub created: BTreeSet<String>,
     /// Own deletes and moves that are each file's newest moment.
     pub removals: Vec<RebuildRemoval>,
 }
@@ -115,14 +118,19 @@ const OWN_CHAT: &str = "SELECT r.op_kind, r.payload_json FROM replication_log r 
        WHERE p.workspace_id = ?1 AND p.share_id = ?2), -1) \
      ORDER BY r.origin_seq";
 
-/// A moment the relay never served back: a share view's pull records each
-/// served write as `moment-share-<key>` (`replay_share_write`), and a pull
-/// into an ordinary replica logs it as imported.
-const OWN_MOMENT: &str = "m.moment_id NOT LIKE 'moment-share-%' \
-     AND m.moment_id NOT IN (SELECT json_extract(r.payload_json, '$.momentId') \
-       FROM replication_log r WHERE r.workspace_id = ?1 AND r.imported = 1 \
-       AND r.op_kind = 'moment.append' \
-       AND json_extract(r.payload_json, '$.momentId') IS NOT NULL)";
+/// Whether the moment under alias `moment` is one the relay never served
+/// back: a share view's pull records each served write as
+/// `moment-share-<key>` (`replay_share_write`), and a pull into an ordinary
+/// replica logs it as imported.
+fn own_moment(moment: &str) -> String {
+    format!(
+        "{moment}.moment_id NOT LIKE 'moment-share-%' \
+         AND {moment}.moment_id NOT IN (SELECT json_extract(r.payload_json, '$.momentId') \
+           FROM replication_log r WHERE r.workspace_id = ?1 AND r.imported = 1 \
+           AND r.op_kind = 'moment.append' \
+           AND json_extract(r.payload_json, '$.momentId') IS NOT NULL)"
+    )
+}
 
 impl ActorHandle {
     /// The member's work the relay hasn't taken: unsent chat for the share,
@@ -196,11 +204,15 @@ impl ActorHandle {
                     .prepare(&format!(
                         "SELECT m.object_id, m.path, m.operation, \
                          COALESCE(m.after_blob_sha256, m.after_binary_sha256), \
-                         COALESCE(m.before_path, m.payload_before_path) \
-                         FROM moments m WHERE m.workspace_id = ?1 AND {OWN_MOMENT} \
+                         COALESCE(m.before_path, m.payload_before_path), \
+                         NOT EXISTS (SELECT 1 FROM moments x WHERE x.workspace_id = ?1 \
+                           AND x.object_id = m.object_id AND NOT ({own_x})) \
+                         FROM moments m WHERE m.workspace_id = ?1 AND {own_m} \
                          AND m.moment_order = (SELECT MAX(o.moment_order) FROM moments o \
                            WHERE o.workspace_id = ?1 AND o.object_id = m.object_id) \
-                         ORDER BY m.path"
+                         ORDER BY m.path",
+                        own_x = own_moment("x"),
+                        own_m = own_moment("m"),
                     ))
                     .map_err(corrupt)?;
                 let rows = statement
@@ -211,11 +223,13 @@ impl ActorHandle {
                             row.get::<_, String>(2)?,
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<String>>(4)?,
+                            row.get::<_, bool>(5)?,
                         ))
                     })
                     .map_err(corrupt)?;
                 for row in rows {
-                    let (object_id, path, operation, sha256, before_path) = row.map_err(corrupt)?;
+                    let (object_id, path, operation, sha256, before_path, created) =
+                        row.map_err(corrupt)?;
                     if operation == "delete" {
                         unsent.removals.push(RebuildRemoval {
                             path,
@@ -230,6 +244,9 @@ impl ActorHandle {
                         });
                     }
                     if let Some(sha256) = sha256 {
+                        if created {
+                            unsent.created.insert(object_id.clone());
+                        }
                         unsent.versions.push(RebuildHead {
                             path,
                             object_id,

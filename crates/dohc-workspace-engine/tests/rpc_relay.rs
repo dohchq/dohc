@@ -116,6 +116,8 @@ struct RelayState {
     pushed_workspace_ops: Vec<Value>,
     local_origin_id: Option<String>,
     share_posts: HashMap<String, usize>,
+    // Every change a share's direct writes sent, in order.
+    share_written: Vec<Value>,
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
@@ -218,12 +220,31 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
     if let Some(rest) = path.strip_prefix("/sync/shares/") {
         let (share_id, suffix) = rest.split_once('/').expect("share route");
         if let Some(sha256) = suffix.strip_prefix("blobs/") {
+            if method == "PUT" {
+                state
+                    .share_blobs
+                    .insert((share_id.to_owned(), sha256.to_owned()), request.body);
+                return TestResponse::json(json!({ "ok": true }));
+            }
             let bytes = state
                 .share_blobs
                 .get(&(share_id.to_owned(), sha256.to_owned()))
                 .cloned()
                 .expect("share blob");
             return TestResponse::bytes(bytes);
+        }
+        if suffix == "collection-writes" {
+            let changes = request.json()["changes"]
+                .as_array()
+                .cloned()
+                .expect("changes");
+            let paths: Vec<Value> = changes
+                .iter()
+                .filter_map(|change| change["afterPath"].as_str())
+                .map(Value::from)
+                .collect();
+            state.share_written.extend(changes);
+            return TestResponse::json(json!({ "paths": paths }));
         }
         assert_eq!(suffix, "log");
         if method == "POST" {

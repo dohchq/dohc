@@ -313,7 +313,15 @@ async fn reopen(copy: &ClosedCopy) -> (InProcessTransport<EngineService>, Worksp
                 1,
                 "workspace.open",
                 None,
-                json!({ "rootDir": copy.scratch.path().to_string_lossy(), "workspaceId": copy.workspace_id }),
+                json!({
+                    "rootDir": copy.scratch.path().to_string_lossy(),
+                    "workspaceId": copy.workspace_id,
+                    "relay": {
+                        "baseUrl": copy.relay.base_url,
+                        "bearerToken": BEARER,
+                        "allowInsecureLoopbackForTests": true,
+                    },
+                }),
             ),
         )
         .await
@@ -484,29 +492,7 @@ async fn an_editor_s_rebuilt_copy_sends_collection_changes_when_it_opens() {
     assert_eq!(rebuilt["state"], "rebuilt", "{rebuilt}");
     finish(&copy).await;
 
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": copy.scratch.path().to_string_lossy(),
-                    "workspaceId": copy.workspace_id,
-                    "relay": {
-                        "baseUrl": copy.relay.base_url,
-                        "bearerToken": BEARER,
-                        "allowInsecureLoopbackForTests": true,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("reopen");
-    let handle: WorkspaceHandle =
-        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let (transport, handle) = reopen(&copy).await;
     let pushed = transport
         .call(
             RequestContext::unbounded(),
@@ -723,6 +709,285 @@ async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
     assert!(
         contents.contains("| 0002 ideas.md | hidden/ideas.md | Not sent. |"),
         "{contents}"
+    );
+    finish(&copy).await;
+}
+
+/// A grant whose reach hides the root and gives Edit in each of `edit`.
+fn edit_in(edit: &[&str]) -> Value {
+    let mut granted = grant("r2", "v2");
+    granted["access"] = json!("edit");
+    granted["reach"]["rootLevel"] = Value::Null;
+    granted["reach"]["folders"] = edit
+        .iter()
+        .map(|path| json!({ "path": path, "level": "edit" }))
+        .collect();
+    granted
+}
+
+/// `rebuild`, under `granted` rather than the View grant.
+async fn rebuild_under(copy: &ClosedCopy, granted: &Value) -> Value {
+    let mut params = rebuild_params(copy);
+    params["grantedSelector"] = granted.clone();
+    InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(90, "share.view.rebuild", None, params),
+        )
+        .await
+        .expect("rebuild")
+        .result
+}
+
+/// Narrowing a copy where the member still edits `open` and `hidden/mine`:
+/// their new files there stay in place, whether the engine recorded them as
+/// unsent or never saw them, and capture then records them and their lane
+/// sends them. Their edit to a shared file, and a new file in the folder
+/// they no longer reach, go to recovery as before. The hidden folder keeps
+/// the folder below it that still holds a file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_s_new_files_stay_where_they_can_still_edit() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-keeps-new",
+        true,
+        false,
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                let root = scratch.path();
+                for (object, path, text) in [
+                    ("object-a", "open/a.md", "my edit"),
+                    ("mine", "open/new.md", "my new file"),
+                    ("mine-copy", "open/copy.md", "open file body"),
+                ] {
+                    call(
+                        transport,
+                        handle,
+                        &mut id,
+                        "versionedText.write",
+                        json!({
+                            "versionId": "main", "objectId": object, "path": path,
+                            "text": text, "momentId": format!("write-{object}"), "origin": "api",
+                            "nowMs": 3_000,
+                        }),
+                    )
+                    .await;
+                    std::fs::write(root.join(path), text).expect("write");
+                }
+                std::fs::create_dir_all(root.join("hidden/mine")).expect("mine");
+                for (path, text) in [
+                    ("open/ideas.md", "a rain barrel"),
+                    ("hidden/ideas.md", "a hidden idea"),
+                    ("hidden/mine/notes.md", "my notes"),
+                ] {
+                    std::fs::write(root.join(path), text).expect("unrecorded");
+                }
+            })
+        },
+    )
+    .await;
+    let granted = edit_in(&["open", "hidden/mine"]);
+    let result = rebuild_under(&copy, &granted).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    for (path, text) in [
+        ("open/new.md", "my new file"),
+        ("open/copy.md", "open file body"),
+        ("open/ideas.md", "a rain barrel"),
+        ("hidden/mine/notes.md", "my notes"),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(root.join(path)).expect("kept"),
+            text,
+            "{path}"
+        );
+    }
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A_BYTES);
+    assert_eq!(names_in(&root.join("hidden")), ["mine"]);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 ideas.md", "0003 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 ideas.md")).expect("hidden idea"),
+        b"a hidden idea"
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    for line in [
+        "| 0001 b.md | hidden/b.md | No longer shared with you. |",
+        "| 0002 ideas.md | hidden/ideas.md | Not sent. |",
+        "| 0003 a.md | open/a.md | Your change wasn't sent.",
+    ] {
+        assert!(contents.contains(line), "{line}\n{contents}");
+    }
+    for kept in ["open/new.md", "open/copy.md", "open/ideas.md", "notes.md"] {
+        assert!(!contents.contains(kept), "{kept}\n{contents}");
+    }
+    finish(&copy).await;
+
+    let (transport, handle) = reopen(&copy).await;
+    let mut id = 10;
+    flush_capture(&transport, &handle, &mut id).await;
+    for (path, text) in [
+        ("open/new.md", "my new file"),
+        ("open/ideas.md", "a rain barrel"),
+        ("hidden/mine/notes.md", "my notes"),
+    ] {
+        let read = call(
+            &transport,
+            &handle,
+            &mut id,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": path }),
+        )
+        .await;
+        assert_eq!(read["text"], text, "{path}: {read}");
+    }
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.direct.push",
+        json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": granted }),
+    )
+    .await;
+    // Each goes out as a file the member created.
+    let written = copy
+        .relay
+        .state
+        .lock()
+        .expect("relay state")
+        .share_written
+        .clone();
+    for path in ["open/new.md", "open/ideas.md", "hidden/mine/notes.md"] {
+        assert!(
+            written.iter().any(|change| change["afterPath"] == path
+                && change["basedOnPath"].is_null()
+                && change["operation"] == "write"),
+            "{path}
+{written:?}"
+        );
+    }
+    close(&transport, &handle, &mut id).await;
+}
+
+/// A new file of the member's stays only where no file of the new store's,
+/// or folder spelled otherwise, takes its place on a disk that ignores case.
+/// The new store now holds `hidden/b.md`; the member's `Hidden/B.md` and
+/// `Hidden/notes.md` go to recovery, and their folder with them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_s_new_file_a_shared_file_would_take_goes_to_recovery() {
+    let copy = closed_copy_with("rpc-rebuild-keeps-twin", false, true, |_, _, scratch| {
+        Box::pin(async move {
+            let root = scratch.path();
+            std::fs::create_dir_all(root.join("Hidden")).expect("folder");
+            std::fs::write(root.join("Hidden/B.md"), "my b").expect("twin");
+            std::fs::write(root.join("Hidden/notes.md"), "my notes").expect("notes");
+            std::fs::write(root.join("open/ideas.md"), "a rain barrel").expect("ideas");
+        })
+    })
+    .await;
+    let mut granted = edit_in(&[]);
+    granted["reach"]["rootLevel"] = json!("edit");
+    let result = rebuild_under(&copy, &granted).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(
+        std::fs::read_to_string(root.join("open/ideas.md")).expect("kept"),
+        "a rain barrel"
+    );
+    assert!(
+        names_in(root).contains(&"hidden".to_owned()),
+        "{:?}",
+        names_in(root)
+    );
+    assert!(
+        !names_in(root).contains(&"Hidden".to_owned()),
+        "{:?}",
+        names_in(root)
+    );
+    assert_eq!(names_in(&root.join("hidden")), ["b.md"]);
+    assert_eq!(std::fs::read(root.join("hidden/b.md")).expect("b"), B_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 B.md", "0002 notes.md", "contents.md"]
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    for line in [
+        "| 0001 B.md | Hidden/B.md | Not sent. |",
+        "| 0002 notes.md | Hidden/notes.md | Not sent. |",
+    ] {
+        assert!(contents.contains(line), "{line}\n{contents}");
+    }
+    finish(&copy).await;
+}
+
+/// A new file the member may keep is still read through no link: a folder
+/// replaced by a link elsewhere stops the rebuild, and nothing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_s_new_file_behind_a_link_stops_the_rebuild() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-keeps-linked",
+        true,
+        false,
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                std::fs::create_dir_all(scratch.path().join("mine")).expect("mine");
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "objectId": "mine", "path": "mine/new.md",
+                        "text": "my new file", "momentId": "new-file", "origin": "api",
+                        "nowMs": 3_000,
+                    }),
+                )
+                .await;
+                std::fs::write(scratch.path().join("mine/new.md"), "my new file").expect("new");
+            })
+        },
+    )
+    .await;
+    let elsewhere = ScratchDir::new().expect("other workspace");
+    std::fs::write(elsewhere.path().join("new.md"), "another workspace's file").expect("theirs");
+    let root = copy.scratch.path();
+    std::fs::rename(root.join("mine"), root.join("mine-before")).expect("set aside");
+    link_folder(&root.join("mine"), elsewhere.path());
+
+    let granted = edit_in(&["open", "mine"]);
+    let mut params = rebuild_params(&copy);
+    params["grantedSelector"] = granted.clone();
+    let stopped = InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(90, "share.view.rebuild", None, params),
+        )
+        .await
+        .expect("stopped")
+        .result;
+    assert_eq!(
+        stopped,
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-linked-folder",
+            "path": "mine",
+        })
+    );
+    assert_eq!(names_in(elsewhere.path()), ["new.md"]);
+    assert!(!root.join(".dohc/local/recovery").exists());
+
+    remove_link(&root.join("mine"));
+    std::fs::rename(root.join("mine-before"), root.join("mine")).expect("restore");
+    let result = rebuild_under(&copy, &granted).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("mine/new.md")).expect("kept"),
+        "my new file"
     );
     finish(&copy).await;
 }
