@@ -125,7 +125,7 @@ export function accessRuleHoldWords(
   message: string;
   rows: string[];
   openMembers: boolean;
-  // Null while dohc can't read the rule on disk, so there is nothing to accept.
+  // Null when the rule cannot be read or safely published.
   accept: { label: string; busy: string } | null;
 } {
   const place = placeOf(hold.folder);
@@ -152,7 +152,7 @@ export function accessRuleHoldWords(
       message: `${until} Without it, ${without}${recordedUnread}`,
       rows,
       openMembers,
-      accept: { label: "Remove rule", busy: "Removing…" },
+      accept: hold.canAccept ? { label: "Remove rule", busy: "Removing…" } : null,
     };
   }
   // Several readable spellings record as one rule members can't read, so
@@ -160,11 +160,16 @@ export function accessRuleHoldWords(
   // dohc as a copy, so it loses nothing.
   if (hold.unreadable === "several-files") {
     return {
-      title: `${placeOpening(hold.folder)} has more than one access rule file`,
-      message: `${until} Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.`,
+      title: hold.folder
+        ? `More than one access rule file in ${hold.folder}`
+        : "This workspace has more than one access rule file",
+      message:
+        hold.recordedRule === null
+          ? `${until} Restoring removes these access rule files and keeps them as copies.`
+          : `${until} Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.`,
       rows,
       openMembers,
-      accept: { label: "Hide from members", busy: "Hiding…" },
+      accept: hold.canAccept ? { label: "Hide from members", busy: "Hiding…" } : null,
     };
   }
   const title = `Access to ${place} was widened outside dohc`;
@@ -177,7 +182,7 @@ export function accessRuleHoldWords(
     message: `${until} Restoring keeps the rule from outside dohc as a copy.${recordedUnread}`,
     rows,
     openMembers,
-    accept: { label: "Allow new access", busy: "Allowing…" },
+    accept: hold.canAccept ? { label: "Allow new access", busy: "Allowing…" } : null,
   };
 }
 
@@ -490,7 +495,7 @@ export function useAccessRuleHoldNotices(
             latest.current.reportShellFailure({
               identity: decidedOf(identity),
               tone: "warning",
-              message: `dohc didn't apply your choice because ${ruleOfLower(hold.folder)} no longer waits for it in the open Version.`,
+              message: `dohc didn't apply your choice because ${ruleOfLower(hold.folder)} no longer waits for it in the version you have open.`,
               retry: null,
               action: { label: "Open History", run: latest.current.openHistory, ends: true },
             });

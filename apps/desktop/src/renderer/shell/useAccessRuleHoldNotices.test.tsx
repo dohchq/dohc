@@ -221,7 +221,7 @@ describe("useAccessRuleHoldNotices", () => {
     const h = harness([several, { ...several, folder: "" }]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
     expect(h.row("team")).toMatchObject({
-      title: "team has more than one access rule file",
+      title: "More than one access rule file in team",
       message:
         "Until you choose, dohc doesn't record or share changes in team. Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.",
     });
@@ -250,6 +250,7 @@ describe("useAccessRuleHoldNotices", () => {
       {
         ...WIDENED,
         canAccept: false,
+        recordedRule: null,
         observedSha256: null,
         changes: [],
         unreadable: "several-files" as const,
@@ -260,6 +261,11 @@ describe("useAccessRuleHoldNotices", () => {
       const h = harness([hold]);
       await waitFor(() => expect(h.row(hold.folder)).toBeDefined());
       expect(h.row(hold.folder)!.action).toMatchObject({ label: "Restore rule", additional: [] });
+      if (hold.unreadable === "several-files") {
+        expect(h.row(hold.folder)!.message).toContain(
+          "Restoring removes these access rule files and keeps them as copies.",
+        );
+      }
     }
   });
 
@@ -428,7 +434,7 @@ describe("useAccessRuleHoldNotices", () => {
       expect(said()).toMatchObject({
         tone: "warning",
         message:
-          "dohc didn't apply your choice because the access rule for team no longer waits for it in the open Version.",
+          "dohc didn't apply your choice because the access rule for team no longer waits for it in the version you have open.",
         retry: null,
         action: { label: "Open History", ends: true },
       }),
