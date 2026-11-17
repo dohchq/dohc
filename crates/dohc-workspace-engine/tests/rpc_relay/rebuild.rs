@@ -1191,7 +1191,7 @@ async fn an_unsent_folder_rename_by_case_alone_is_undone() {
 async fn an_unsent_version_the_disk_lost_during_the_download_is_saved() {
     let copy = edited_copy("rpc-rebuild-unsent-overwritten").await;
     let target = copy.scratch.path().join("open/a.md");
-    copy.relay.state.lock().expect("relay state").on_share_log = Some(Box::new(move || {
+    copy.relay.state.lock().expect("relay state").on_share_log = Some(Box::new(move |_| {
         std::fs::write(target, "my newer draft").expect("newer draft");
     }));
     let result = rebuild(&copy).await;
@@ -2230,6 +2230,121 @@ async fn a_first_pull_over_several_pages_applies_a_marked_later_page() {
     let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
     assert!(closed["rebuildId"].is_string(), "{closed}");
     close(&transport, &handle, &mut id).await;
+}
+
+/// The owner moves a file across the member's edge while a copy's first pull
+/// is still paging. The first page named the log's head before that move, so
+/// the copy may hold History an earlier page brought in and the relay now
+/// withholds: the page that marks it closes the copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_marked_after_a_first_pulls_first_page_closes_the_copy() {
+    let workspace_id = "rpc-relay-first-pull-moved-later";
+    let relay = FakeRelay::start(RelayState {
+        share_page_limit: Some(2),
+        ..RelayState::default()
+    });
+    serve(&relay, "r1", "v1", false);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r1", "v1") });
+    // The first page, seq 1 and 2, names the head at 3.
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert!(first.get("rebuildId").is_none(), "{first}");
+    assert_eq!(first["hasMore"], json!(true), "{first}");
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": first["pendingCursor"] }),
+    )
+    .await;
+    {
+        let mut state = relay.state.lock().expect("relay state");
+        let mut arrived = moment(5, "moment-e", "object-e", "open/e.md", B_BYTES);
+        arrived["reachMove"] = json!("arrival");
+        state.share_ops.get_mut(SHARE).expect("ops").push(arrived);
+    }
+    // The second page holds seq 3 and the move at 5.
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert_eq!(
+        closed["reachChanged"],
+        json!({ "signature": "r1", "visibilitySignature": "v1" }),
+        "{closed}"
+    );
+    assert!(closed["rebuildId"].is_string(), "{closed}");
+    close(&transport, &handle, &mut id).await;
+}
+
+/// A rebuild's own pull reads every page from the start, and the relay
+/// selects each under the reach the member has now. A move the owner marked
+/// before the build began is at or below its first page's head, so the build
+/// applies it and finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebuild_over_several_pages_applies_a_move_marked_before_it_began() {
+    let mut arrived = moment(5, "moment-e", "object-e", "open/e.md", B_BYTES);
+    arrived["reachMove"] = json!("arrival");
+    let copy = closed_copy_serving(
+        "rpc-rebuild-moved-before",
+        false,
+        false,
+        &[(arrived, B_BYTES)],
+        |_, _, _| Box::pin(async {}),
+    )
+    .await;
+    // Two pages: seq 1 and 2, then seq 3 and the marked seq 5.
+    copy.relay
+        .state
+        .lock()
+        .expect("relay state")
+        .share_page_limit = Some(2);
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    finish(&copy).await;
+    assert_eq!(
+        std::fs::read(copy.scratch.path().join("open/e.md")).expect("the moved file"),
+        B_BYTES
+    );
+}
+
+/// The owner moves a file across the member's edge while the rebuild's own
+/// pull is still paging. The build may hold History an earlier page brought
+/// in, so it stops and answers `reachMoved`, and the runner builds again. The
+/// next build's first page names the head past the move, and it finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_marked_during_a_rebuilds_own_pull_builds_again() {
+    let copy = closed_copy("rpc-rebuild-moved-during", false, false).await;
+    {
+        let mut state = copy.relay.state.lock().expect("relay state");
+        state.share_page_limit = Some(2);
+        // The move lands as the build reads its second page.
+        state.on_share_log = Some(Box::new(|state: &mut RelayState| {
+            state.on_share_log = Some(Box::new(|state: &mut RelayState| {
+                let mut arrived = moment(6, "moment-e", "object-e", "open/e.md", B_BYTES);
+                arrived["reachMove"] = json!("arrival");
+                state.share_ops.get_mut(SHARE).expect("ops").push(arrived);
+            }));
+        }));
+    }
+    let moved = rebuild(&copy).await;
+    assert_eq!(moved["state"], "reachMoved", "{moved}");
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    finish(&copy).await;
+    assert_eq!(
+        std::fs::read(copy.scratch.path().join("open/e.md")).expect("the moved file"),
+        B_BYTES
+    );
 }
 
 /// Two file threads the relay serves with the files: one on `open/a.md`, and

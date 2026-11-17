@@ -125,8 +125,8 @@ struct RelayState {
     // The most ops one share log page holds. Unset, one page holds them all.
     share_page_limit: Option<usize>,
     refuse_claims: bool,
-    // Runs once, as the next share log page is read.
-    on_share_log: Option<Box<dyn FnOnce() + Send>>,
+    // Runs once, as the next share log page is read, before the relay reads it.
+    on_share_log: Option<Box<dyn FnOnce(&mut RelayState) + Send>>,
 }
 
 struct FakeRelay {
@@ -242,7 +242,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             }));
         }
         if let Some(hook) = state.on_share_log.take() {
-            hook();
+            hook(&mut state);
         }
         let since = request.query_i64("since");
         let rows = state
@@ -270,6 +270,17 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             page["reach"] = json!({
                 "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [],
             });
+            // This fake's log holds only the share's ops.
+            page["logHead"] = json!(
+                state
+                    .share_ops
+                    .get(share_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["relaySeq"].as_i64())
+                    .max()
+                    .unwrap_or(0)
+            );
         }
         return TestResponse::json(page);
     }

@@ -130,6 +130,7 @@ export function createNamedShareTransportRoutes(
     | "appendBrowserChatBatch"
     | "putBlob"
     | "listWorkReferences"
+    | "shareLogHead"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string, signal?: AbortSignal, maxAgeMs?: number) => Promise<void>,
@@ -218,12 +219,17 @@ export function createNamedShareTransportRoutes(
       // accountless route applies a narrower metadata boundary afterward.
       // A member's page, a Group pull's included, lists their reach as the
       // page's own transaction read it: its levels, and keyed signatures that
-      // tell the member when the levels, or what they reach, changed.
+      // tell the member when the levels, or what they reach, changed. It names
+      // the log's head as that transaction read it too: an engine's first pull
+      // reads moves marked at or below its first page's head, which the reach
+      // already placed, and rebuilds for a later one.
       let reach: MemberReach | undefined;
-      const signed = () => (reach ? { reach: reach.listed(reachKey) } : {});
+      let logHead = 0;
+      const signed = () => (reach ? { reach: reach.listed(reachKey), logHead } : {});
       const authorizeRead = () => {
         const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;
         reach = isWorkspaceSelector(selector) ? selector.reach : undefined;
+        if (reach) logHead = storage.shareLogHead(share.workspaceId);
         return pullSelector(selector);
       };
       let page = filteredLogPage(

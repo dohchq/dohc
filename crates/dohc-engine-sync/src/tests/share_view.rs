@@ -4262,7 +4262,8 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
             crate::ShareReachSignatures {
                 signature: signature.to_owned(),
                 visibility_signature: visibility_signature.to_owned(),
-                moved_across: false,
+                log_head: 0,
+                newest_move: None,
             }
         }),
         work_references: Vec::new(),
@@ -4302,7 +4303,8 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
             Some(crate::ShareReachSignatures {
                 signature: signature.to_owned(),
                 visibility_signature: visibility_signature.to_owned(),
-                moved_across: false,
+                log_head: 0,
+                newest_move: None,
             }),
             "{signature}/{visibility_signature}: the caller is not told to read the reach again"
         );
@@ -4339,17 +4341,24 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
 /// A membership page that marks an owner's move across the edge of the
 /// member's reach applies nothing once the copy holds earlier pages: the copy
 /// may hold History the relay no longer serves, so it closes for a rebuild.
-/// A new copy's first page applies it, and so does each page a rebuild pulls,
-/// because both start from what the reach serves now.
+/// A new copy's first page applies it. So does each later page of a pull that
+/// began at the start of the share, a rebuild's or a copy's first, for a move
+/// marked at or below the log's head that its first page named: the relay
+/// already selected that page under the moved reach. A move marked after that
+/// head stops it too.
 #[test]
 fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages() {
-    let body = b"Day one\n".to_vec();
+    let body = b"Day one
+"
+    .to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
-    let page = |seq: i64, path: &str, moved_across: bool| ShareViewResponse {
+    // One marked op at `seq`, on a page whose read saw the log's head at `head`.
+    let page = |seq: i64, path: &str, head: i64| ShareViewResponse {
         reach_signatures: Some(crate::ShareReachSignatures {
             signature: "r1".to_owned(),
             visibility_signature: "v1".to_owned(),
-            moved_across,
+            log_head: head,
+            newest_move: Some(seq),
         }),
         work_references: Vec::new(),
         next_reference_after: None,
@@ -4358,33 +4367,42 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
         next_cursor: seq + 1,
         has_more: false,
     };
-    // Two pages, both marked; answers what each pull applied.
-    let pulls = |rebuild: bool| {
+    // The first page's read saw the head at 4. The second page's move is
+    // marked at `second`. Answers what each pull applied.
+    let pulls = |first_pull: bool, second: i64| {
         let (scratch, path, mut engine) = open_store();
         let client = RelaySyncClient::new(
             PagedShareRelay::new(
                 [],
                 [
-                    (0, page(0, "plans/a.md", true)),
-                    (1, page(1, "plans/b.md", true)),
+                    (0, page(0, "plans/a.md", 4)),
+                    (1, page(second, "plans/b.md", second.max(4))),
                 ],
             )
             .with_view_blobs([(sha.clone(), body.clone())]),
         );
         let grant = reach_grant("r1", "v1");
+        let mut first_head = None;
         let mut answers = Vec::new();
         for _ in 0..2 {
-            let pull = if rebuild {
-                client.pull_share_view_through_moves(&mut engine, "ws", "share", &grant, &NoFaults)
-            } else {
-                client.pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            let pull = match first_head.filter(|_| first_pull) {
+                Some(head) => client.pull_share_view_through_moves(
+                    &mut engine,
+                    "ws",
+                    "share",
+                    &grant,
+                    head,
+                    &NoFaults,
+                ),
+                None => client.pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults),
             }
             .expect("a marked page is an answer");
+            first_head = first_head.or(pull.first_head);
             answers.push((
                 pull.applied,
                 pull.reach_changed
                     .as_ref()
-                    .map(|served| served.moved_across),
+                    .and_then(|served| served.newest_move),
                 pull.pending_cursor.cursor,
             ));
             client
@@ -4392,16 +4410,26 @@ fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages(
                 .expect("commit");
         }
         drop((scratch, path));
-        answers
+        (first_head, answers)
     };
     assert_eq!(
-        pulls(false),
-        vec![(1, None, 1), (0, Some(true), 1)],
+        pulls(false, 3),
+        (Some(4), vec![(1, None, 1), (0, Some(3), 1)]),
         "the first page applies; a later marked one stops where the copy was"
     );
     assert_eq!(
-        pulls(true),
-        vec![(1, None, 1), (1, None, 2)],
-        "a rebuild applies every marked page"
+        pulls(true, 3),
+        (Some(4), vec![(1, None, 1), (1, None, 4)]),
+        "a first pull applies a move marked at or below its first head"
+    );
+    assert_eq!(
+        pulls(true, 4),
+        (Some(4), vec![(1, None, 1), (1, None, 5)]),
+        "the head itself is a move the first page saw"
+    );
+    assert_eq!(
+        pulls(true, 5),
+        (Some(4), vec![(1, None, 1), (0, Some(5), 1)]),
+        "a move marked after the first page's head stops the pull"
     );
 }

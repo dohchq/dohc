@@ -2441,7 +2441,7 @@ impl EngineService {
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let share_id = params.share_id.clone();
-        let first_pull = lock(&self.first_pull_roots).contains(&open.root);
+        let first_pull = lock(&self.first_pull_roots).get(&open.root).copied();
         let outcome = self
             .relay_execute(
                 ctx,
@@ -2456,17 +2456,17 @@ impl EngineService {
                 "share.view.pull",
             )
             .await?;
-        // A copy's first pull reads on through marked moves until it has read
-        // every page.
+        // A copy's first pull reads on through moves marked by its first
+        // page's head until it has read every page.
         if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome {
             let mut roots = lock(&self.first_pull_roots);
-            if pulled.reach_changed.is_none()
-                && pulled.has_more
-                && (first_pull || pulled.from_start)
-            {
-                roots.insert(open.root.clone());
-            } else {
-                roots.remove(&open.root);
+            match first_pull.or(pulled.first_head) {
+                Some(head) if pulled.reach_changed.is_none() && pulled.has_more => {
+                    roots.insert(open.root.clone(), head);
+                }
+                _ => {
+                    roots.remove(&open.root);
+                }
             }
         }
         // The relay now selects other items for this member, or moved one
@@ -2476,7 +2476,7 @@ impl EngineService {
         if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome
             && let Some(served) = &pulled.reach_changed
             && let Some(stored) = stored_visibility
-            && (served.visibility_signature != stored || served.moved_across)
+            && (served.visibility_signature != stored || served.newest_move.is_some())
         {
             let manifest = crate::rebuild_manifest::RebuildManifest {
                 rebuild_id: crate::rebuild_manifest::new_rebuild_id().map_err(|_| {

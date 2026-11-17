@@ -1142,23 +1142,30 @@ impl RelayTransport for HttpRelayTransport {
                 ("includeReferences", req.include_work_references.to_string()),
             ],
         )?;
-        let mut moved_across = false;
+        let mut newest_move = None;
         for op in &page.ops {
             match op.reach_move.as_deref() {
                 None => {}
-                Some("departure" | "arrival") => moved_across = true,
+                Some("departure" | "arrival") => {
+                    let seq = op.relay_seq.ok_or(RelayError::InvalidResponse)?;
+                    newest_move = newest_move.max(Some(seq));
+                }
                 Some(_) => return Err(RelayError::InvalidResponse),
             }
         }
-        // Only a membership's pages list a reach, and only theirs mark moves.
-        let reach_signatures = match page.reach {
-            Some(reach) => Some(ShareReachSignatures {
-                signature: reach.signature,
-                visibility_signature: reach.visibility_signature,
-                moved_across,
-            }),
-            None if moved_across => return Err(RelayError::InvalidResponse),
-            None => None,
+        // Only a membership's pages list a reach and the log's head, and only
+        // theirs mark moves. Every op on the page is at or below that head.
+        let reach_signatures = match (page.reach, page.log_head) {
+            (Some(reach), Some(log_head)) if newest_move.is_none_or(|seq| seq <= log_head) => {
+                Some(ShareReachSignatures {
+                    signature: reach.signature,
+                    visibility_signature: reach.visibility_signature,
+                    log_head,
+                    newest_move,
+                })
+            }
+            (None, None) if newest_move.is_none() => None,
+            _ => return Err(RelayError::InvalidResponse),
         };
         Ok(ShareViewResponse {
             reach_signatures,
@@ -1800,6 +1807,10 @@ struct WireLogPage {
     // desktop reads its levels; the engine needs only the signatures.
     #[serde(default)]
     reach: Option<WireListedReach>,
+    // The relay log's newest seq as the page's own read saw it, beside a
+    // listed reach.
+    #[serde(default)]
+    log_head: Option<i64>,
 }
 
 #[derive(Deserialize)]

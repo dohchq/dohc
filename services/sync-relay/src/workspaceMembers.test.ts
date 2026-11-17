@@ -768,6 +768,45 @@ describe("what a member reaches", () => {
     expect(await json(ended)).toMatchObject({ levelChanged: true, reach: last });
   });
 
+  it("names the log's head on each member page, past the ops the page holds", async () => {
+    const { h, storage } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "docs/a.md", "a");
+    await ownerWrite(h, "docs/b.md", "b");
+    // The member never sees this write, but the head counts it.
+    await ownerWrite(h, "closed/access.yaml", "");
+    await ownerWrite(h, "closed/c.md", "c");
+    const context = storage as StorageContext;
+    const head = () =>
+      Number(
+        context.db
+          .prepare("SELECT MAX(relay_seq) AS head FROM sync_relay_log WHERE workspace_id = ?")
+          .get(WORKSPACE)!.head,
+      );
+    const page = async (query: string, channelWireId?: string) => {
+      const wire = channelWireId === undefined ? "" : `&channelWireId=${channelWireId}`;
+      const response = await h(request("ana", `/sync/shares/${shareId}/log?${query}${wire}`));
+      expect(response.status, await response.clone().text()).toBe(200);
+      return (await json(response)) as {
+        logHead: number;
+        nextCursor: number;
+        hasMore: boolean;
+        ops: Array<{ relaySeq: number }>;
+      };
+    };
+    const first = await page("since=0&limit=1");
+    expect(first.hasMore).toBe(true);
+    expect(first.logHead).toBe(head());
+    expect(first.ops.every((op) => op.relaySeq <= first.logHead)).toBe(true);
+    expect(first.nextCursor).toBeLessThan(first.logHead);
+    expect((await page("since=0&limit=1", GROUP)).logHead).toBe(head());
+    const before = head();
+    await ownerWrite(h, "closed/d.md", "d");
+    expect(head()).toBeGreaterThan(before);
+    expect((await page(`since=${first.nextCursor}&limit=500`)).logHead).toBe(head());
+  });
+
   it("lists the ruled folders where a member's level differs from its parent's, and no hidden one", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
