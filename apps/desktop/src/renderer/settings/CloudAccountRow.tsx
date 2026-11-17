@@ -15,7 +15,7 @@ import { SettingRow } from "./SettingRow";
 export const PRIVATE_NETWORK_EXPLANATION =
   "Everyone you share with needs access to this private network, from every device they use.";
 export const DISCONNECT_EXPLANATION =
-  "Stops sync for every workspace on this machine. Your files stay where they are.";
+  "Stops sync for every workspace on this machine. Your files stay where they are. Offline copies of your Collections stay readable here until another account connects.";
 
 // Sign-ins this window has heard of, counted by one listener for the life of
 // the window. Main announces a logout with no session, and every sign-in

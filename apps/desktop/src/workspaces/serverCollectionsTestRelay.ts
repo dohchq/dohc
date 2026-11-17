@@ -8,7 +8,7 @@ import { fixture, limits } from "../../../../services/sync-relay/src/datasetTest
 import { compileDatasetOperations } from "../../../../services/sync-relay/src/datasetCompiler";
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
-import { createServerHomeData } from "./collectionsHome";
+import { createServerHomeData, signedOutServer } from "./collectionsHome";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import { createRemoteDatasetData, type OwnerDatasetData } from "./remoteDataset";
 import { createRemoteDatasetReplicaSource } from "./remoteDatasetReplica";
@@ -224,7 +224,8 @@ export async function startTestRelay() {
           return value;
         },
       }) as OwnerDatasetData;
-      const copies = new Map<string, ReturnType<typeof keptCopy>>();
+      const copies = new Map<string, ReturnType<typeof keptCopy>>(),
+        open: Array<{ close(): Promise<void> }> = [];
       const keptCopy = async (datasetId: string) => {
         const copyDirectory = join(home, `copy-${datasetId}`);
         await mkdir(copyDirectory, { recursive: true });
@@ -240,6 +241,7 @@ export async function startTestRelay() {
           ...(options.firstOpenMs ? { firstOpenMs: options.firstOpenMs } : {}),
         });
         computers.push(() => copy.close());
+        open.push(copy);
         const source = createRemoteDatasetReplicaSource({
           workspaceId: "w",
           datasetId,
@@ -255,6 +257,10 @@ export async function startTestRelay() {
         return copy.data(remote, source, signal);
       };
       const savedList = join(home, "list.json");
+      const saved = {
+        read: async () => JSON.parse(await readFile(savedList, "utf8")) as unknown,
+        write: (value: unknown) => writeFile(savedList, JSON.stringify(value)),
+      };
       const data = createServerHomeData({
         host: new URL(origin).host,
         list: (page) => remote.list(page),
@@ -263,16 +269,62 @@ export async function startTestRelay() {
           if (!copy) copies.set(datasetId, (copy = keptCopy(datasetId)));
           return copy;
         },
-        saved: {
-          read: async () => JSON.parse(await readFile(savedList, "utf8")) as unknown,
-          write: (value) => writeFile(savedList, JSON.stringify(value)),
-        },
+        saved,
         changed: () => changed("list"),
       });
       return {
         data,
         trips,
         heard,
+        /**
+         * This computer once no one is signed in: its copies close, as an
+         * account change closes them, and its kept files open signed out.
+         */
+        async signOut() {
+          for (const copy of open.splice(0)) await copy.close();
+          const server = signedOutServer(),
+            kept = new Map<string, Promise<OwnerDatasetData>>();
+          const signedOut = createServerHomeData({
+            host: new URL(origin).host,
+            list: server.list,
+            copy: (datasetId) => {
+              let data = kept.get(datasetId);
+              if (!data) {
+                data = createOwnerDatasetCopy({
+                  directory: join(home, `copy-${datasetId}`),
+                  scope: { workspaceId: "w", datasetId },
+                  ownerKey: "owner",
+                  origin,
+                  assertOwner() {},
+                  signedOut: true,
+                }).then((copy) => {
+                  computers.push(() => copy.close());
+                  return copy.data(server, server, signal);
+                });
+                kept.set(datasetId, data);
+              }
+              return data;
+            },
+            saved,
+          });
+          return {
+            data: signedOut,
+            read: () =>
+              signedOut.invoke({
+                ...pinned,
+                operationId: id(6),
+                input: {},
+                idempotencyKey: "read",
+              } as never),
+            write: (operationId: string, input: Record<string, unknown>) =>
+              signedOut.invoke({
+                ...pinned,
+                operationId,
+                input,
+                idempotencyKey: `change-${crypto.randomUUID()}`,
+              } as never),
+          };
+        },
         intercept(hook: Intercept) {
           intercept = hook;
         },

@@ -1,3 +1,4 @@
+import type { DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
 import { parseDatasetDescription, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { CollectionServerUnreachableError } from "../ipc/errorWords";
 import type { RegistryEntry, RemoteIdentity } from "./registryStore";
@@ -20,6 +21,52 @@ export function collectionsServer(
 export interface SavedCollectionsList {
   read(): Promise<unknown>;
   write(value: DatasetDescription[]): Promise<void>;
+}
+
+/**
+ * The server as a signed-out read meets it: every request is refused before
+ * it is sent, as any request without a session is. The kept copy answers
+ * what it can in front of it.
+ */
+export function signedOutServer(): OwnerDatasetData & DatasetReplicaSource {
+  const refuse = async (): Promise<never> => {
+    throw new Error("Sign in to your server first.");
+  };
+  // A Record, so a request the server gains is refused here too.
+  const names: Record<keyof OwnerDatasetData | keyof DatasetReplicaSource, true> = {
+    prepareMigrationCandidate: true,
+    approveMigrationCandidate: true,
+    migrationPreviewPage: true,
+    discardMigrationCandidate: true,
+    inspect: true,
+    historyRevision: true,
+    history: true,
+    list: true,
+    describe: true,
+    lifecycle: true,
+    deletionStatus: true,
+    deletePreview: true,
+    deleteDataset: true,
+    archive: true,
+    restore: true,
+    pendingAttempts: true,
+    reconcileAttempt: true,
+    cancelAttempt: true,
+    approvedArtifacts: true,
+    invoke: true,
+    upload: true,
+    file: true,
+    permissions: true,
+    setGrant: true,
+    press: true,
+    capture: true,
+    page: true,
+    blob: true,
+  };
+  return Object.fromEntries(Object.keys(names).map((name) => [name, refuse])) as Record<
+    keyof typeof names,
+    typeof refuse
+  >;
 }
 
 /**

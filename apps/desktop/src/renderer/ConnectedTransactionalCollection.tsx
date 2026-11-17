@@ -183,6 +183,9 @@ function ScopedCollection({
   const request = useRef(0);
   // Rises each time a quiet read shows its answer.
   const quietShown = useRef(0);
+  // A session is starting while the page shows a signed-out copy: the page
+  // reads nothing until it is ready.
+  const sessionChanging = useRef(false);
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
   useEffect(() => {
@@ -193,6 +196,7 @@ function ScopedCollection({
   }, []);
   // Says whether this read showed the Collection, failed, or gave way to a newer read.
   const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
+    if (sessionChanging.current) return "failed";
     const sequence = ++request.current,
       shown = quietShown.current;
     setLoading(true);
@@ -398,6 +402,7 @@ function ScopedCollection({
     quietAgain = useRef(false);
   const readQuietly = useCallback(
     function read(records: boolean) {
+      if (sessionChanging.current) return;
       if (records) quietRecords.current = true;
       if (quietBusy.current) {
         quietAgain.current = true;
@@ -423,6 +428,24 @@ function ScopedCollection({
       }),
     [workspaceId, readQuietly],
   );
+  // A signed-out copy belongs to the account signed in last. When a session
+  // starts, the page drops any read under way, including its first, reads
+  // nothing until the session is ready, and then reads once. A signed-out
+  // copy it shows goes at once, so another account never sees it.
+  const signedOutCopy = useRef(false);
+  signedOutCopy.current = copy?.signedOut === true;
+  useEffect(() => {
+    const stop = bridge().onCloudSessionChanged(({ phase }) => {
+      request.current++;
+      sessionChanging.current = phase === "changing";
+      if (signedOutCopy.current) setDataset(null);
+      if (phase === "ready") void refresh();
+    });
+    return () => {
+      stop();
+      sessionChanging.current = false;
+    };
+  }, [refresh]);
   // Each read brings this computer's copy up to date from the server
   // afterwards, so an open page that shows a copy reads again now and then.
   const showsCopy = owner && copy !== undefined;
@@ -622,7 +645,9 @@ function ScopedCollection({
           {copy?.offline && (
             <p role="status" className="m-0 text-[12px] text-muted">
               Offline copy ·{" "}
-              {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}
+              {copy.host && !copy.signedOut
+                ? `Restoring needs ${copy.host}`
+                : "Connect to restore this Collection."}
             </p>
           )}
           {owner && (

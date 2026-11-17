@@ -648,6 +648,8 @@ export const DatasetCopyStatus = z
     coverage: z.literal("saved-pages").optional(),
     /** The server that holds an owner's Collection, which it needs to change. */
     host: z.string().min(1).max(260).optional(),
+    /** No one is signed in: the owner's copy is read-only until someone signs in. */
+    signedOut: z.literal(true).optional(),
   })
   .strict();
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;

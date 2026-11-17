@@ -91,13 +91,20 @@ const tagOf = (name: string) => (name.length === 33 ? name.slice(0, 16) : null);
 async function foldersOf(
   path: string,
   departed: ReadonlySet<string>,
+  keep: string | null,
 ): Promise<string[] | "missing"> {
   if (placeOf(path)!.inside !== COPIES) return [path];
   const found = await realFolder(path);
   if (found === "missing") return found;
   if (!found?.real) return [];
   return (await readdir(found.folder))
-    .filter((name) => KEY.test(name) && (tagOf(name) === null || departed.has(tagOf(name)!)))
+    .filter(
+      (name) =>
+        KEY.test(name) &&
+        (tagOf(name) === null ||
+          departed.has(tagOf(name)!) ||
+          (keep !== null && tagOf(name) !== keep)),
+    )
     .map((name) => join(found.folder, name));
 }
 
@@ -123,6 +130,8 @@ const Saved = z.object({
     .string()
     .regex(/^[0-9a-f]{16}$/)
     .optional(),
+  // The server origin of that account's copies, which a signed-out read opens.
+  origin: z.string().url().optional(),
 });
 const rejected = (
   result: PromiseSettledResult<unknown> | undefined,
@@ -133,13 +142,16 @@ const settled = (work: Promise<unknown>) =>
     (reason: unknown): PromiseRejectedResult => ({ status: "rejected", reason }),
   );
 
-/** Owns replica locks across workspace lifetimes and removes copies when the account changes. */
+/**
+ * Owns replica locks across workspace lifetimes. An account's copies stay
+ * through a sign-out, read-only, and go when a different account signs in.
+ */
 export function createOwnerDatasetCopyRegistry(options: {
   // This installation's record of the folders an account change has not
   // removed yet, of the accounts that left, and of the account signed in
   // last, outside every workspace. The next start removes those folders first.
   record: string;
-  // The registered workspaces. Leaving an account removes the copies in each.
+  // The registered workspaces. An account that leaves has its copies removed from each.
   workspaces(): string[];
   // Hears that what `leftover` answers changed.
   onLeftover?(): void;
@@ -165,18 +177,26 @@ export function createOwnerDatasetCopyRegistry(options: {
   // lists them.
   let owed = false;
   // The tags of accounts that left, kept so any later look in a workspace
-  // removes their copies. One short tag per account that signed out here. An
-  // account that signs in again is no longer one.
+  // removes their copies. One short tag per account a different one replaced
+  // here. An account that signs in again is no longer one.
   const departed = new Set<string>();
-  // The tag of the account signed in here last, kept across a restart. Its
-  // sign-in can be cleared outside dohc, so it never signs out here, and the
-  // next account to sign in removes its copies. Undefined until the record
-  // or an account change says.
-  let account: string | null | undefined;
+  // The tag of the account signed in here last, and its copies' server
+  // origin, kept across a sign-out and a restart. Signed out, its copies read
+  // here. The next different account to sign in removes them. Undefined until
+  // the record or an account change says.
+  let account: string | null | undefined,
+    accountOrigin: string | null = null;
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
   let ownerKey: string | null = null,
-    stopped = false;
+    stopped = false,
+    // A session is starting: main has cleared the credentials but not yet
+    // told this registry whose they are, so no copy opens signed out.
+    changing = false;
+  // Signed in, the account's copies open. Signed out, only those of the
+  // account signed in here last, read-only.
+  const owns = (key: string) =>
+    !stopped && (ownerKey === null ? !changing && account === ownerTag(key) : ownerKey === key);
   function close(entry: Entry): Promise<void> {
     entry.closed = true;
     entry.stop.abort();
@@ -216,13 +236,17 @@ export function createOwnerDatasetCopyRegistry(options: {
     for (const tag of saved.departed ?? []) departed.add(tag);
     // A record read after an account signed in can name the account before it.
     const last = saved.account ?? null;
-    if (account === undefined) account = last;
-    else if (last !== null && last !== account) {
+    if (account === undefined) {
+      account = last;
+      accountOrigin = saved.origin ?? null;
+    } else if (last !== null && last !== account) {
       departed.add(last);
       owed = true;
     }
-    // A record read late can name the signed-in account, whose copies are open.
+    // A record read late can name the signed-in account, whose copies are
+    // open, or, signed out, the account signed in last, whose copies stay.
     if (ownerKey !== null) signedIn(ownerTag(ownerKey));
+    else if (account) signedIn(account);
   }
   // An account signed in has not left, and the folders it left are its own
   // again. Every copy it opens carries its tag.
@@ -240,6 +264,7 @@ export function createOwnerDatasetCopyRegistry(options: {
             ...(owed ? { sweepPending: true } : {}),
             ...(departed.size ? { departed: [...departed].sort() } : {}),
             ...(account ? { account } : {}),
+            ...(account && accountOrigin ? { origin: accountOrigin } : {}),
           })
         : null;
     if (text === recorded) return;
@@ -258,18 +283,23 @@ export function createOwnerDatasetCopyRegistry(options: {
   async function sweep(
     prior: Entry[],
     roots: string[],
-    leaving: string | null = null,
-    arriving: string | null = null,
+    arriving: { tag: string; origin: string | null } | null = null,
   ) {
     if (!loaded) await load();
-    if (arriving && account && account !== arriving) leaving ??= account;
+    const leaving = arriving && account && account !== arriving.tag ? account : null;
     if (leaving) departed.add(leaving);
-    if (arriving) signedIn(arriving);
-    if (leaving || arriving) account = arriving;
+    // A sign-in while the record cannot be read: the account before is
+    // unknown, so the copies of every other account go.
+    const keep = arriving && account === undefined ? arriving.tag : null;
+    if (arriving) {
+      signedIn(arriving.tag);
+      account = arriving.tag;
+      accountOrigin = arriving.origin;
+    }
     // Leaving an account removes its copies in every registered workspace,
     // including ones from earlier runs.
     let listing: PromiseRejectedResult | undefined;
-    if (leaving || owed) {
+    if (leaving || keep || owed) {
       try {
         roots = [...new Set([...roots, ...options.workspaces()])];
         owed = false;
@@ -289,7 +319,7 @@ export function createOwnerDatasetCopyRegistry(options: {
       if (entry.directory && rejected(closed[index])) held.add(entry.directory);
     });
     const paths = [...left.keys()],
-      found = await Promise.allSettled(paths.map((path) => foldersOf(path, departed)));
+      found = await Promise.allSettled(paths.map((path) => foldersOf(path, departed, keep)));
     const next = new Map<string, boolean>([...held].map((path) => [path, true])),
       folders = new Set<string>();
     paths.forEach((path, index) => {
@@ -320,12 +350,12 @@ export function createOwnerDatasetCopyRegistry(options: {
   // The folders the last run did not remove go before any copy opens.
   let barrier: Promise<void> = sweep([], []);
   return {
-    credentialsChanged(nextOwner: string | null): Promise<void> {
+    // `origin` is the server origin the signed-in account's copies use.
+    credentialsChanged(nextOwner: string | null, origin: string | null = null): Promise<void> {
       if (ownerKey === nextOwner) return barrier;
-      // Signing in after no account removes only the copies of the account
-      // signed in here before, if it differs, so copies last across a restart.
-      const leaving = ownerKey === null ? null : ownerTag(ownerKey),
-        arriving = nextOwner === null ? null : ownerTag(nextOwner);
+      // Signing out removes nothing. Signing in removes the copies of the
+      // account signed in here before, if it differs.
+      const arriving = nextOwner === null ? null : { tag: ownerTag(nextOwner), origin };
       ownerKey = nextOwner;
       const prior = [...entries.values(), ...failed],
         roots = [...requested];
@@ -338,8 +368,21 @@ export function createOwnerDatasetCopyRegistry(options: {
       failed.clear();
       requested.clear();
       // A cleanup that failed does not stop this one, which tries its folders again.
-      barrier = barrier.catch(() => undefined).then(() => sweep(prior, roots, leaving, arriving));
+      barrier = barrier.catch(() => undefined).then(() => sweep(prior, roots, arriving));
       return barrier;
+    },
+    // Signed out, the server origin of `key`'s copies when that account
+    // signed in here last, or null. Only those copies open signed out.
+    async signedOutOrigin(key: string): Promise<string | null> {
+      await barrier.catch(() => undefined);
+      if (changing && !stopped && ownerKey === null)
+        throw Error("Your server session is changing. Try again.");
+      return !stopped && ownerKey === null && account === ownerTag(key) ? accountOrigin : null;
+    },
+    // A session change started (true) or ended, whether it worked or not
+    // (false). Main says so with each broadcast of it.
+    sessionChanging(on: boolean): void {
+      changing = on;
     },
     removeLeftover(): Promise<void> {
       barrier = barrier.catch(() => undefined).then(() => sweep([], []));
@@ -358,10 +401,13 @@ export function createOwnerDatasetCopyRegistry(options: {
       ownerKey: string;
     }): SavedCollectionsList {
       const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, "list", new URL(input.origin).origin, input.ownerKey]).slice(0, 16)}`;
-      const file = async () => {
-        if (stopped || ownerKey !== input.ownerKey)
+      const mine = () => {
+        if (!owns(input.ownerKey))
           throw Error("The Collection owner changed. Reopen the workspace.");
+      };
+      const file = async () => {
         await barrier.catch(() => undefined);
+        mine();
         requested.add(input.rootPath);
         const folder = await localDatasetFolder(
           {
@@ -375,7 +421,11 @@ export function createOwnerDatasetCopyRegistry(options: {
         return join(resolve(await realpath(folder)), "list.json");
       };
       return {
-        read: async () => JSON.parse(await readFile(await file(), "utf8")) as unknown,
+        read: async () => {
+          const text = await readFile(await file(), "utf8");
+          mine();
+          return JSON.parse(text) as unknown;
+        },
         write: async (value) => atomicWriteFile(await file(), JSON.stringify(value)),
       };
     },
@@ -406,7 +456,7 @@ export function createOwnerDatasetCopyRegistry(options: {
       const current = () => {
         input.lifetime.throwIfAborted();
         input.assertOwner();
-        if (stopped || ownerKey !== input.ownerKey)
+        if (!owns(input.ownerKey))
           throw Error("The Collection owner changed. Reopen the workspace.");
       };
       // A copy's folder is named for its account, so a folder a failed
@@ -433,21 +483,24 @@ export function createOwnerDatasetCopyRegistry(options: {
         const abort = () => {
           void close(next).catch(() => undefined);
         };
+        // An account change closes every copy, so this one stays signed in or out.
+        const signedOut = ownerKey === null;
         const opening = Promise.resolve().then(async () => {
           authorize();
+          const workspace = {
+            workspaceId: input.workspaceId,
+            rootPath: input.rootPath,
+            attachmentId: input.attachmentId,
+          };
+          // Signed out, only a copy already kept here opens.
+          if (
+            signedOut &&
+            !(await orMissing(lstat(join(await localDatasetFolder(workspace, "copies"), key))))
+          )
+            throw Error("Sign in to your server first.");
           // This computer's copy, in `.dohc/local`, which only the engine's open prepares.
           const directory = resolve(
-            await realpath(
-              await localDatasetFolder(
-                {
-                  workspaceId: input.workspaceId,
-                  rootPath: input.rootPath,
-                  attachmentId: input.attachmentId,
-                },
-                "copies",
-                key,
-              ),
-            ),
+            await realpath(await localDatasetFolder(workspace, "copies", key)),
           );
           next.directory = directory;
           authorize();
@@ -458,6 +511,7 @@ export function createOwnerDatasetCopyRegistry(options: {
             ownerKey: input.ownerKey,
             origin: origin.origin,
             assertOwner: authorize,
+            signedOut,
             runtime: input.runtime,
             ...(input.onChanged ? { onChanged: input.onChanged } : {}),
           });
