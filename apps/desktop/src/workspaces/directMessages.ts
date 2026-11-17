@@ -32,6 +32,8 @@ export type DirectFailure = "signed-out" | "unreachable" | "refused";
 export interface DirectPick {
   person: DirectMemberPick;
   admitted: DirectAccount;
+  /** Throws once the window no longer shows that workspace. Checked again just before the request leaves. */
+  assertCurrent(): void;
 }
 
 export class DirectMessageError extends Error {
@@ -123,6 +125,15 @@ export function createDirectMessages<Credentials extends DirectAccount>(
   let listed: (DirectListed & { key: string; read: number; fresh: boolean }) | null = null;
   // Numbers each list read as it starts. A server's revision can go backwards after a reset, so it can't order reads.
   let reads = 0;
+  // The conversations each account's server named here. A window learns a conversation only from these answers,
+  // so its calls go only to that server, never to another where the same account signed in.
+  const given = new Map<string, Set<string>>();
+  const give = (credentials: Credentials, conversationId: string) => {
+    const key = accountKey(credentials);
+    const ids = given.get(key) ?? new Set<string>();
+    ids.add(conversationId);
+    given.set(key, ids);
+  };
 
   const setListed = (next: typeof listed) => {
     const before = listed;
@@ -145,6 +156,18 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     const credentials = await signedIn();
     if (credentials.userId !== viewerId) throw new DirectMessageError("refused", OTHER_ACCOUNT);
     if (admitted && accountKey(admitted) !== accountKey(credentials))
+      throw new DirectMessageError("refused", OTHER_ACCOUNT);
+    return credentials;
+  };
+  // The window may leave the pick's workspace while the account is read, so its check runs after that read.
+  const asPicked = async (viewerId: string, pick: DirectPick): Promise<Credentials> => {
+    const credentials = await as(viewerId, pick.admitted);
+    pick.assertCurrent();
+    return credentials;
+  };
+  const asIn = async (viewerId: string, conversationId: string): Promise<Credentials> => {
+    const credentials = await as(viewerId);
+    if (!given.get(accountKey(credentials))?.has(conversationId))
       throw new DirectMessageError("refused", OTHER_ACCOUNT);
     return credentials;
   };
@@ -197,6 +220,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(
         null,
         true,
       );
+    for (const conversation of answer.conversations) give(credentials, conversation.conversationId);
     const next = {
       key: accountKey(credentials),
       viewerId: credentials.userId,
@@ -325,7 +349,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       conversationId: string,
       before?: number,
     ): Promise<DirectMessagePage> {
-      const credentials = await as(viewerId);
+      const credentials = await asIn(viewerId, conversationId);
       const query = before === undefined ? "" : `?before=${before}`;
       const page = parseDirectMessagePage(
         await call(
@@ -345,10 +369,9 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     },
 
     async resolve(viewerId: string, pick: DirectPick): Promise<DirectResolution> {
+      const credentials = await asPicked(viewerId, pick);
       const resolved = parseDirectResolution(
-        await post(await as(viewerId, pick.admitted), DIRECT_ROUTES.resolve, {
-          person: pick.person,
-        }),
+        await post(credentials, DIRECT_ROUTES.resolve, { person: pick.person }),
       );
       if (!resolved)
         throw new DirectMessageError(
@@ -358,6 +381,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(
           null,
           true,
         );
+      if (resolved.conversationId !== null) give(credentials, resolved.conversationId);
       return resolved;
     },
 
@@ -373,35 +397,36 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       if (extractChatFileReferences(input.body).length > 0)
         throw new DirectMessageError("refused", "Files can't be linked in a direct message.");
       const { messageId, body } = input;
-      const result = parseDirectSendResult(
+      const [credentials, to] =
         "pick" in input
-          ? await post(await as(viewerId, input.pick.admitted), DIRECT_ROUTES.send, {
-              messageId,
-              body,
-              person: input.pick.person,
-            })
-          : await post(await as(viewerId), DIRECT_ROUTES.send, {
-              messageId,
-              body,
-              conversationId: input.conversationId,
-            }),
+          ? [await asPicked(viewerId, input.pick), { person: input.pick.person }]
+          : [await asIn(viewerId, input.conversationId), { conversationId: input.conversationId }];
+      const result = parseDirectSendResult(
+        await post(credentials, DIRECT_ROUTES.send, { messageId, body, ...to }),
       );
       if (!result)
         throw new DirectMessageError(
           "refused",
           "Your server answered in a way dohc could not read. Check the conversation before sending again.",
         );
+      give(credentials, result.conversationId);
       return result;
     },
 
     async read(viewerId: string, conversationId: string, seq: number): Promise<void> {
-      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.read, conversationId), { seq });
+      await post(
+        await asIn(viewerId, conversationId),
+        conversationPath(DIRECT_ROUTES.read, conversationId),
+        { seq },
+      );
     },
 
     async block(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
-      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.block, conversationId), {
-        blocked,
-      });
+      await post(
+        await asIn(viewerId, conversationId),
+        conversationPath(DIRECT_ROUTES.block, conversationId),
+        { blocked },
+      );
     },
   };
 }

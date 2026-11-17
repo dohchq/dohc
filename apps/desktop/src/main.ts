@@ -9066,7 +9066,11 @@ function registerIpcHandlers(): void {
   // both accounts are in that workspace; here main only checks the window's
   // workspace belongs to the signed-in account, and names that account so the
   // request goes nowhere else.
-  const directPick = async (workspace: RegistryEntry, memberId: string): Promise<DirectPick> => {
+  const directPick = async (
+    workspace: RegistryEntry,
+    memberId: string,
+    assertCurrent: () => void,
+  ): Promise<DirectPick> => {
     const place = membersPlace(workspace);
     if (place === null || place === "joined-unknown")
       throw new DirectMessageError(
@@ -9079,9 +9083,9 @@ function registerIpcHandlers(): void {
       const admitted = cachedCredentials;
       if (!admitted || !joinedByAccount(workspace.shareView, admitted))
         throw new DirectMessageError("refused", JOINED_BY_ANOTHER_ACCOUNT);
-      return { person, admitted };
+      return { person, admitted, assertCurrent };
     }
-    return { person, admitted: (await remoteForWorkspace(workspace)).credentials };
+    return { person, admitted: (await remoteForWorkspace(workspace)).credentials, assertCurrent };
   };
   registerOperations(operationBoundary, directMessageOperations, {
     directConversations: async () => {
@@ -9092,12 +9096,15 @@ function registerIpcHandlers(): void {
     directHistory: ({ viewerId, conversationId, before }) =>
       directMessages.history(viewerId, conversationId, before),
     directResolve: async ({ viewerId, memberId }, { operation }) =>
-      directMessages.resolve(viewerId, await directPick(operation.workspace, memberId)),
+      directMessages.resolve(
+        viewerId,
+        await directPick(operation.workspace, memberId, () => operation.assertCurrent()),
+      ),
     directStart: async ({ viewerId, memberId, messageId, body }, { operation }) =>
       directMessages.send(viewerId, {
         messageId,
         body,
-        pick: await directPick(operation.workspace, memberId),
+        pick: await directPick(operation.workspace, memberId, () => operation.assertCurrent()),
       }),
     directSend: ({ viewerId, conversationId, messageId, body }) =>
       directMessages.send(viewerId, { conversationId, messageId, body }),
