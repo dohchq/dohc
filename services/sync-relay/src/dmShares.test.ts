@@ -691,10 +691,14 @@ describe("DM grants over the relay", () => {
     ).toBe(absentLog);
     expect(await denialBytes(await memberAppend(h, shareId, [memberMessage(1)]))).toBe(removed);
 
+    // Received names no ended old direct message either.
     const listing = await json(await h(request(MEMBER, "/sync/shares")));
     expect(
       (listing.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
     ).toBeUndefined();
+    expect(listing.removed).toEqual([]);
+    const page = await json(await h(request(MEMBER, "/sync/shares?received=true")));
+    expect(page.removed).toEqual([]);
   });
 
   it("refuses appends through a read-only chat grant and through a PATH grant", async () => {
