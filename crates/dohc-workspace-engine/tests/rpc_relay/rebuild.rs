@@ -718,6 +718,87 @@ async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
     finish(&copy).await;
 }
 
+/// A file no other program can read until this drops: on Windows a handle
+/// open on it that shares nothing, elsewhere a file with no permissions.
+#[cfg(windows)]
+struct Unreadable {
+    _held: std::fs::File,
+}
+#[cfg(unix)]
+struct Unreadable {
+    path: std::path::PathBuf,
+}
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// None when this process can read the file anyway (root on Unix).
+fn hold_unreadable(path: &std::path::Path) -> Option<Unreadable> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("hold");
+        Some(Unreadable { _held: held })
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let guard = Unreadable {
+            path: path.to_path_buf(),
+        };
+        std::fs::read(path).is_err().then_some(guard)
+    }
+}
+
+/// The member's unrecorded file can't be read when the rebuild looks, so the
+/// disk listing is incomplete. The rebuild stops with the copy closed and
+/// moves nothing. Once the file can be read, Try again saves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_file_stops_the_rebuild_until_it_can_be_read() {
+    let copy = closed_copy_with("rpc-rebuild-unreadable", true, false, |_, _, scratch| {
+        Box::pin(async move {
+            std::fs::write(scratch.path().join("hidden/ideas.md"), "a rain barrel").expect("ideas");
+        })
+    })
+    .await;
+    let root = copy.scratch.path();
+    let Some(held) = hold_unreadable(&root.join("hidden/ideas.md")) else {
+        return;
+    };
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    drop(held);
+    let refused = outcome.expect_err("refused");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::Conflict, "share-view-rebuild-disk-unreadable")
+    );
+    assert_eq!(manifest(&copy).expect("manifest")["phase"], "closed");
+    assert_eq!(
+        std::fs::read(root.join("hidden/ideas.md")).expect("ideas"),
+        b"a rain barrel"
+    );
+    assert!(!root.join(".dohc/local/recovery").exists());
+
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert!(!root.join("hidden").exists());
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        std::fs::read(recovery.join("0002 ideas.md")).expect("ideas"),
+        b"a rain barrel"
+    );
+    finish(&copy).await;
+}
+
 /// The member restores an older version of a shared file and doesn't send it.
 /// The new store holds that version in History, but the restore is the
 /// member's: it goes to the recovery folder before the shared version returns.

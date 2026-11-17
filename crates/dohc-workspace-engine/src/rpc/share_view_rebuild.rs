@@ -231,7 +231,11 @@ fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<S
     Ok(Some(dohc_engine_storage::hex_sha256(&bytes)))
 }
 
-/// Every file the engine tracks on disk, with its hash.
+/// Every file the engine tracks on disk, with its hash. A path the scan
+/// couldn't read may be the member's own file that no store recorded, so the
+/// rebuild stops with the copy closed until it can read every path: Try again
+/// then saves it. A file over the size cap is never sent, so it stays where
+/// it is.
 async fn files_on_disk(root: &Path) -> Result<Vec<(String, String)>, WireError> {
     let root = root.to_path_buf();
     let scanned = tokio::task::spawn_blocking(move || {
@@ -240,11 +244,13 @@ async fn files_on_disk(root: &Path) -> Result<Vec<(String, String)>, WireError> 
     })
     .await;
     match scanned {
-        Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) => Ok(listing
-            .files
-            .into_iter()
-            .map(|file| (file.path, file.sha256))
-            .collect()),
+        Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) if !listing.degraded() => {
+            Ok(listing
+                .files
+                .into_iter()
+                .map(|file| (file.path, file.sha256))
+                .collect())
+        }
         _ => Err(failed("share-view-rebuild-disk-unreadable")),
     }
 }
