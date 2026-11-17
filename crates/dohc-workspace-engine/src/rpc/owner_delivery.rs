@@ -210,6 +210,8 @@ impl OutputGuard for OwnerOutputGuard {
     fn release(&self) {
         crate::lock(&self.reservation).take();
     }
+}
+impl OwnerOutputGuard {
     fn hold(&self, reservation: Arc<dyn Send + Sync>) {
         *crate::lock(&self.reservation) = Some(reservation);
     }

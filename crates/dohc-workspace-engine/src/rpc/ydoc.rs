@@ -677,6 +677,7 @@ impl EngineService {
         open: &Arc<OpenWorkspace>,
         key: &DocKey,
         cancellation: &OperationCancellation,
+        room: &OperationCancellation,
     ) -> Result<EditorDraftRead, WireError> {
         let descriptor = open
             .actor
@@ -687,7 +688,7 @@ impl EngineService {
         let Some(descriptor) = descriptor else {
             return Ok((None, None));
         };
-        let reservation = self.reserve_owner_delivery(cancellation).await?;
+        let reservation = self.reserve_owner_delivery(room).await?;
         let draft = open
             .actor
             .owner_ydoc_open_draft(
@@ -1686,8 +1687,14 @@ impl EngineService {
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
+        // The landed open has no deadline, so its wait for owner room ends
+        // when the blob's budget does.
+        let room = OperationCancellation::new(&RequestContext {
+            deadline: Some(budget_until.into_std()),
+            ..ctx.clone()
+        });
         let (draft, _draft_reservation) = self
-            .ydoc_editor_draft(&open, &state.key, &cancellation)
+            .ydoc_editor_draft(&open, &state.key, &cancellation, &room)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != params.path
@@ -2180,7 +2187,7 @@ impl EngineService {
             ));
         }
         let (draft, reservation) = self
-            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .ydoc_editor_draft(&open, &session.key, &cancellation, &cancellation)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != session.path
@@ -2706,7 +2713,7 @@ impl EngineService {
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let (draft, _draft_reservation) = self
-            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .ydoc_editor_draft(&open, &session.key, &cancellation, &cancellation)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != session.path
