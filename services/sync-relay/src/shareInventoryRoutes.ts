@@ -118,7 +118,12 @@ export function createShareInventoryRoutes(
       if (!currentFallback) return [];
       const selector = parseStoredAnyShareSelectorJson(currentFallback.share.selectorJson);
       return selector &&
-        selectorTargetsBlockedChannel(storage, currentFallback.share.workspaceId, selector)
+        selectorTargetsBlockedChannel(
+          storage,
+          currentFallback.share.workspaceId,
+          selector,
+          "received",
+        )
         ? []
         : [
             receivedShareSummary(

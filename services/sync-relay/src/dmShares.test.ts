@@ -345,7 +345,7 @@ describe("DM grants over the relay", () => {
     resetOpSeq();
   });
 
-  it("creates an email-addressed chat grant and lists it on both sides", async () => {
+  it("creates an email-addressed chat grant and lists it only for its owner", async () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
@@ -412,20 +412,18 @@ describe("DM grants over the relay", () => {
       generation: 1,
     });
 
+    // Direct messages are relay conversations now. Its recipient's Received
+    // list and share detail leave an old one out, so it can't pass for a Group invitation.
     const received = await json(await h(request(MEMBER, "/sync/shares")));
-    const receivedRow = (received.received as Array<Record<string, unknown>>).find(
-      (row) => row.shareId === shareId,
-    );
-    expect(receivedRow?.selector).toEqual({
-      kind: "chat",
-      channelWireId: DM_WIRE,
-    });
-    expect(receivedRow).toMatchObject({
-      access: "read-write",
-      grantId: expect.any(String),
-      generation: 1,
-    });
-    expect(receivedRow?.workspaceId).toBeUndefined();
+    expect(
+      (received.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
+    ).toBeUndefined();
+    const page = await json(await h(request(MEMBER, "/sync/shares?received=true")));
+    expect(
+      (page.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
+    ).toBeUndefined();
+    const absent = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absent);
   });
 
   it("serves a participant a DM stream BYTE-IDENTICALLY to a MU-C4 channel stream — no DM-only field", async () => {

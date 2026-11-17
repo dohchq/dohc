@@ -106,6 +106,7 @@ export function selectorTargetsBlockedChannel(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
   workspaceId: string,
   selector: StoredAnyShareSelector,
+  use: "received" | "stream" = "stream",
 ): boolean {
   // A workspace share names no channel. Its Groups are checked one by one
   // (`workspaceGroupReachable`).
@@ -116,6 +117,10 @@ export function selectorTargetsBlockedChannel(
   // message has no folder, and a grant minted before the log named the
   // channel must not follow it into one.
   if (selector.kind === "group") return channelKind !== "channel";
+  // Direct messages are relay conversations now, and no app opens an old
+  // engine one. Received leaves it out so it can't pass for a Group
+  // invitation; its stream stays until the old direct messages are removed.
+  if (use === "received" && channelKind === "dm") return true;
   return channelKind === "agent" || channelKind === null;
 }
 
@@ -163,7 +168,7 @@ export function resolveReceivedShareAuthority(
     });
     if (!current) continue;
     fallback ??= current;
-    const validated = validateCurrentShareGrant(input.storage, current);
+    const validated = validateCurrentShareGrant(input.storage, current, "received");
     if (!validated.ok) continue;
     if (
       readable === null ||
@@ -228,6 +233,7 @@ function validateShareGrant(
 function validateCurrentShareGrant(
   storage: ShareGrantAuthorizationInput["storage"],
   current: SyncRelayShareWithGrantRow,
+  use: "received" | "stream" = "stream",
 ): ShareAuthorizationResult {
   const { share, grant } = current;
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -244,7 +250,7 @@ function validateCurrentShareGrant(
     return { ok: false, reason: "gauntlet" };
   }
 
-  if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector)) {
+  if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector, use)) {
     return { ok: false, reason: "gauntlet" };
   }
   const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
