@@ -341,7 +341,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")).toMatchObject({ seen: true });
   });
 
-  it("says why nothing ran when the hold was decided or judged again already, and its row goes with the list", async () => {
+  it("says why nothing ran when the hold was decided already, with Open History, and its row goes with the list", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));
     h.bridge.decideAccessRule.mockRejectedValueOnce(
@@ -356,14 +356,18 @@ describe("useAccessRuleHoldNotices", () => {
       expect(said()).toMatchObject({
         tone: "warning",
         message:
-          "The access rule for team no longer waits for your choice, so dohc didn't apply it.",
+          "dohc didn't apply your choice because it already recorded the access rule for team.",
         retry: null,
+        action: { label: "Open History", ends: true },
       }),
     );
     expect(h.row("team")!.action?.busy).toBeUndefined();
     h.list([]);
     await waitFor(() => expect(h.row("team")).toBeUndefined());
     expect(said()).toBeDefined();
+    // History shows what dohc recorded.
+    act(() => h.errors().runShellErrorAction(said()!.id));
+    expect(h.openHistory).toHaveBeenCalledOnce();
   });
 
   it("shows the rule as it is now when it changed since the owner saw it", async () => {
