@@ -2158,7 +2158,9 @@ fn decide_on_store(
                 )
             })?
             else {
-                judge_one(store, order, folder, &[], false, &[])?;
+                if !disk.is_empty() {
+                    judge_one(store, order, folder, &[], false, &[])?;
+                }
                 return Err(RuntimeError::AccessRuleChanged {
                     folder: folder.to_owned(),
                 });

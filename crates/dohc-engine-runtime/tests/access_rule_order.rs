@@ -3581,6 +3581,26 @@ fn capture_cannot_expose_a_hidden_rule_while_removing_an_empty_folder() {
     );
     assert_rule_prefixes_at_most_view(&f);
     assert_eq!(recorded_reach(&f, "members"), None);
+    let before = f.journal();
+    let held_at = f.hold_views()[0].hold.recorded_at_ms;
+    let result = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "removed",
+        99,
+        Arc::new(NoFaults),
+    );
+    assert!(
+        matches!(&result, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
+        "{result:?}"
+    );
+    assert_eq!(f.journal(), before);
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+    let views = f.hold_views();
+    assert_eq!(views.len(), 1);
+    assert!(!views[0].can_accept);
+    assert_eq!(views[0].hold.recorded_at_ms, held_at);
 }
 
 #[test]
