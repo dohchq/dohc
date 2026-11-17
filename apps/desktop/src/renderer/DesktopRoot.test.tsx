@@ -209,7 +209,7 @@ describe("workspace summary changes", () => {
     await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
     const panel = screen.getByTestId("workspace-updating-access");
     expect(within(panel).getByText(detail)).toBeTruthy();
-    expect(within(panel).getByRole("button", { name: "Copy" })).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: "Details" })).toBeTruthy();
     // A stopped update is one thing that failed: a toast and a Notices row with Try again.
     const [toast] = await waitFor(() => {
       const found = toastsWith(detail);
@@ -263,6 +263,64 @@ describe("workspace summary changes", () => {
     });
     expect(toast!.textContent).toContain(detail);
     expect(toast!.textContent).not.toContain("share-view-rebuild-linked-folder");
+  });
+
+  // The panel's Details is the toast's: what it copies, with the engine's
+  // code, shows under the actions, and Copy details copies exactly that.
+  it("shows a stop's code and copies it from the panel's Details", async () => {
+    const h = setup();
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      platform: "win32",
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const title = "dohc could not update access";
+    const detail =
+      "dohc could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.";
+    const code = "share-view-rebuild-disk-unreadable";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "failed" as const, title, detail, cause: code },
+    };
+    h.replace([{ ...workspace("a"), shareView }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).queryByRole("button", { name: "Copy" })).toBeNull();
+    expect(panel.textContent).not.toContain(code);
+    const details = within(panel).getByRole("button", { name: "Details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect(details.textContent).toBe("Hide details");
+    const block = document.getElementById(details.getAttribute("aria-controls")!)!;
+    const report = block.querySelector("pre")!.textContent!;
+    expect(report).toBe(
+      [`Error: ${detail}`, `Title: ${title}`, `Code: ${code}`, "Platform: win32"].join("\n"),
+    );
+    fireEvent.click(within(block).getByRole("button", { name: "Copy details" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(report));
+    fireEvent.click(details);
+    expect(document.getElementById(details.getAttribute("aria-controls")!)).toBeNull();
+    // The toast's Details carries the same code.
+    const [toast] = await waitFor(() => {
+      const found = screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((t) => t.textContent?.includes(title));
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    fireEvent.click(within(toast!).getByRole("button", { name: "Details" }));
+    expect(toast!.textContent).toContain(`Code: ${code}`);
   });
 
   // A new try clears the stop, and an ended membership offers no Try again:

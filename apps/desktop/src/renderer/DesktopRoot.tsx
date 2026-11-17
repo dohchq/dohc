@@ -4,7 +4,7 @@ import {
   clearAgentColorOverrides,
 } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
-import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
   ShareHandoffStatus,
@@ -18,7 +18,7 @@ import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { ChevronRight, LockKeyhole } from "lucide-react";
+import { ChevronDown, ChevronRight, LockKeyhole } from "lucide-react";
 import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
 import {
@@ -130,12 +130,26 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       reportFailure?.({
         ...(failedTitle ? { title: failedTitle } : {}),
         message: failedDetail,
-        ...(failedCause ? { cause: failedCause } : {}),
+        ...(failedCause ? { details: [["Code", failedCause] as const] } : {}),
         retry: tryAgain,
         identity,
       });
     } else clearNotice?.(identity);
   }, [failedTitle, failedDetail, failedCause, reportFailure, clearNotice, tryAgain, identity]);
+  // The failure's Details, as its toast reports it but for the time. It
+  // stays open only for the report it opened on.
+  const report =
+    failed === null
+      ? null
+      : errorDetails([
+          ["Error", failed.detail],
+          ...(failed.title ? [["Title", failed.title] as const] : []),
+          ...(failed.cause ? [["Code", failed.cause] as const] : []),
+          ["Platform", bridge().platform],
+        ]);
+  const [detailsFor, setDetailsFor] = useState<string | null>(null);
+  const detailsOpen = report !== null && detailsFor === report;
+  const detailsId = useId();
   return (
     <div
       data-testid="workspace-updating-access"
@@ -159,20 +173,48 @@ function UpdatingAccess(props: { workspace: Workspace }) {
             {stopped.title ? <p className="m-0 font-medium">{stopped.title}</p> : null}
             <p className="m-0">{stopped.detail}</p>
           </div>
-          <CopyButton
-            label="Copy"
-            pinName
-            iconOnly
-            getText={() =>
-              [stopped.title, stopped.detail, stopped.cause].filter(Boolean).join("\n")
-            }
-          />
+          {report === null ? (
+            <CopyButton label="Copy" pinName iconOnly getText={() => stopped.detail} />
+          ) : null}
         </div>
       ) : null}
-      <div className="flex flex-wrap justify-center gap-2">
+      <div className="flex flex-wrap items-center justify-center gap-2">
         {stopped && !ended ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
         <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
+        {report === null ? null : (
+          <button
+            type="button"
+            aria-expanded={detailsOpen}
+            aria-controls={detailsId}
+            onClick={() => setDetailsFor(detailsOpen ? null : report)}
+            className="flex items-center gap-0.5 rounded px-1 text-[12px] text-muted transition-colors hover:text-ink"
+          >
+            {detailsOpen ? "Hide details" : "Details"}
+            <ChevronDown
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-150 ease-out motion-reduce:transition-none${detailsOpen ? " rotate-180" : ""}`}
+            />
+          </button>
+        )}
       </div>
+      {detailsOpen ? (
+        <div
+          id={detailsId}
+          className="relative w-full max-w-md rounded-md border border-line bg-panel-2 text-left"
+        >
+          <span className="absolute right-1 top-1">
+            <CopyButton iconOnly pinName label="Copy details" getText={() => report} />
+          </span>
+          <pre
+            tabIndex={0}
+            className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted"
+          >
+            {report}
+          </pre>
+        </div>
+      ) : null}
     </div>
   );
 }
