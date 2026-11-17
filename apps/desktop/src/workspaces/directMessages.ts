@@ -11,6 +11,7 @@ import {
   type DirectResolution,
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
+import { extractChatFileReferences } from "@dohc/workspace-contracts/chat-mentions";
 import { DIRECT_FINAL, DIRECT_RETRY, DIRECT_SIGNED_OUT } from "../ipc/errorWords";
 
 // Direct messages for the signed-in account. The relay holds each
@@ -349,6 +350,9 @@ export function createDirectMessages<Credentials extends DirectAccount>(
         | { person: DirectMemberPick }
       ),
     ): Promise<DirectSendResult> {
+      // A direct message belongs to no workspace, so it links no file.
+      if (extractChatFileReferences(input.body).length > 0)
+        throw new DirectMessageError("refused", "Files can't be linked in a direct message.");
       const result = parseDirectSendResult(
         await post(await as(viewerId), DIRECT_ROUTES.send, input),
       );

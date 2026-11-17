@@ -130,6 +130,36 @@ describe("direct messages for the signed-in account", () => {
     });
   });
 
+  it("refuses a file link before it reaches the server, with no Try again", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/send", () => Response.json({ conversationId: "c1", seq: 1 }));
+    const refused = await h.service
+      .send("ann", { conversationId: "c1", messageId: "m1", body: "Read @[notes/private.md]" })
+      .then(
+        () => null,
+        (cause: unknown) => cause,
+      );
+    expect(refused).toBeInstanceOf(DirectMessageError);
+    const afterIpc = readError(
+      new Error(
+        `Error invoking remote method 'desktop:direct-send': ${String(ipcWireError(refused))}`,
+      ),
+    );
+    expect(afterIpc).toMatchObject({
+      words: "Files can't be linked in a direct message.",
+      canRetry: false,
+    });
+    expect(h.requests).toEqual([]);
+    await expect(
+      h.service.send("ann", {
+        person: { workspaceId: "w", memberId: "bob" },
+        messageId: "m2",
+        body: "Hello Bob",
+      }),
+    ).resolves.toEqual({ conversationId: "c1", seq: 1 });
+    expect(h.requests).toEqual(["POST /sync/direct/send"]);
+  });
+
   it("offers Try again only where trying again can help", async () => {
     // What the renderer reads: main's wire error, as Electron passes it on.
     const afterIpc = async (call: Promise<unknown>) => {
