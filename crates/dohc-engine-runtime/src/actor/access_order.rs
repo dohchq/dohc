@@ -995,8 +995,29 @@ fn committed_rule(
     }))
 }
 
+/// Why dohc could not read a folder's rule from disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unread {
+    /// Another program holds a rule file open without letting dohc read it.
+    Locked,
+    Other,
+}
+
+impl Unread {
+    /// The refusal a decision gives while the rule can't be read: a held
+    /// file says so, as a write to any held file does; anything else waits.
+    fn refusal(self) -> RuntimeError {
+        match self {
+            Unread::Locked => {
+                RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
+            }
+            Unread::Other => waits(),
+        }
+    }
+}
+
 /// Read every file in exactly `folder` whose name folds to `access.yaml`.
-fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, ()> {
+fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, Unread> {
     let dir = root.join(folder);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -1011,11 +1032,11 @@ fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, ()> {
         Err(_) if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) => {
             return Ok(OnDisk::new());
         }
-        Err(_) => return Err(()),
+        Err(_) => return Err(Unread::Other),
     };
     let mut files = OnDisk::new();
     for entry in entries {
-        let name = entry.map_err(|_| ())?.file_name();
+        let name = entry.map_err(|_| Unread::Other)?.file_name();
         // A name that is not UTF-8 is nothing capture records.
         let Some(name) = name.to_str().filter(|name| is_access_rule_path(name)) else {
             continue;
@@ -1031,7 +1052,8 @@ fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, ()> {
             }
             // A folder or an oversized file is nothing capture records.
             Ok(PublicationTarget::Absent | PublicationTarget::Untracked) => {}
-            Err(_) => return Err(()),
+            Err(dohc_engine_files::MaterializeError::FileLocked) => return Err(Unread::Locked),
+            Err(_) => return Err(Unread::Other),
         }
     }
     Ok(files)
@@ -1317,7 +1339,7 @@ fn judge_folder(
     }
     let disk = match read_disk_rule(order.root, folder) {
         Ok(disk) => with_touches(disk, rule_touches),
-        Err(()) => return Ok(Plan::Verdict(Verdict::Waits)),
+        Err(_) => return Ok(Plan::Verdict(Verdict::Waits)),
     };
     let changes = rule_changes(committed.as_ref(), &disk);
     if changes.is_empty() {
@@ -1971,7 +1993,7 @@ fn decide_on_store(
         return Err(RuntimeError::AccessRuleNotHeld);
     }
     outer_rules_settle(store, order, folder)?;
-    let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
+    let disk = read_disk_rule(order.root, folder).map_err(Unread::refusal)?;
     // A rule gone and a rule spelled twice both record no bytes.
     let reason = if disk.is_empty() {
         access_rule_holds::REMOVED

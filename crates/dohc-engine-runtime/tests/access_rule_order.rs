@@ -584,6 +584,38 @@ fn allowing_an_outer_rule_records_an_inner_rule_it_now_covers() {
     assert_eq!(f.journal(), expected);
 }
 
+/// A decision while another program holds the rule file open says the file
+/// is held, as a write to any held file does, and changes nothing; once the
+/// file is free the same decision runs.
+#[cfg(windows)]
+#[test]
+fn a_decision_on_a_rule_another_program_holds_says_it_is_held() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let before = f.journal();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(f.root().join("team/access.yaml"))
+        .expect("hold the rule open");
+    for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+        let decided = f.decide("team", decision);
+        assert!(
+            matches!(&decided, Err(error) if error.code() == "file-locked"),
+            "{decided:?}"
+        );
+    }
+    assert_eq!(f.journal(), before);
+    assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
+    drop(lock);
+    f.decide("team", AccessRuleDecision::Accept)
+        .expect("accept once the file is free");
+    assert!(f.holds().is_empty());
+}
+
 /// Restoring an outer rule leaves an inner rule that still widens held.
 #[test]
 fn restoring_an_outer_rule_keeps_an_inner_widening_held() {
