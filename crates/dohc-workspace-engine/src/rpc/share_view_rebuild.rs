@@ -976,7 +976,7 @@ impl EngineService {
                         recover(root, &root.join(&item.path), &destination)?
                     }
                     (RecoverySource::Saved, Some(sha)) => {
-                        if moved_from_disk(&plan, &folder, &item.path, sha) {
+                        if moved_from_disk(root, &plan, &folder, &item.path, sha)? {
                             if let Some(plan) = manifest.plan.as_mut() {
                                 plan.recovery.retain(|kept| kept.number != item.number);
                             }
@@ -996,6 +996,7 @@ impl EngineService {
                     done.found = Some(found);
                 }
                 write_manifest(root, manifest)?;
+                self.rebuild_crash_point(&format!("recovered-{}", item.number))?;
             }
             // The aside store still holds the hidden History. A delete that
             // fails is tried again by finish, and the answer says it is left.
@@ -1615,6 +1616,7 @@ fn place_version(root: &Path, sha256: &str, name: &str, destination: &Path) -> R
         return Ok(true);
     }
     let store = aside(root).join("engine").join("engine.db");
+    link_free(root, &store)?;
     if !store.exists() {
         return Ok(false);
     }
@@ -1635,8 +1637,15 @@ fn place_version(root: &Path, sha256: &str, name: &str, destination: &Path) -> R
 }
 
 /// Whether the file the first wave moved from `path` into `folder` holds the
-/// bytes `sha256` names. It is read in pieces, as it may be large.
-fn moved_from_disk(plan: &RebuildPlan, folder: &Path, path: &str, sha256: &str) -> bool {
+/// bytes `sha256` names. It is read in pieces, as it may be large, and never
+/// through a link: the file or folder may have changed since it was moved.
+fn moved_from_disk(
+    root: &Path,
+    plan: &RebuildPlan,
+    folder: &Path,
+    path: &str,
+    sha256: &str,
+) -> Result<bool, Halt> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let Some(item) = plan
@@ -1644,10 +1653,12 @@ fn moved_from_disk(plan: &RebuildPlan, folder: &Path, path: &str, sha256: &str) 
         .iter()
         .find(|item| item.source == RecoverySource::Disk && item.path == path)
     else {
-        return false;
+        return Ok(false);
     };
-    let Ok(mut file) = std::fs::File::open(folder.join(&item.destination)) else {
-        return false;
+    let moved = folder.join(&item.destination);
+    link_free(root, &moved)?;
+    let Ok(mut file) = std::fs::File::open(moved) else {
+        return Ok(false);
     };
     let mut hasher = Sha256::new();
     let mut piece = vec![0u8; 64 * 1024];
@@ -1655,10 +1666,10 @@ fn moved_from_disk(plan: &RebuildPlan, folder: &Path, path: &str, sha256: &str) 
         match file.read(&mut piece) {
             Ok(0) => break,
             Ok(read) => hasher.update(&piece[..read]),
-            Err(_) => return false,
+            Err(_) => return Ok(false),
         }
     }
-    dohc_engine_storage::hex(&hasher.finalize()) == sha256
+    Ok(dohc_engine_storage::hex(&hasher.finalize()) == sha256)
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

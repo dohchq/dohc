@@ -1313,6 +1313,101 @@ async fn an_unsent_version_on_disk_gets_no_saved_copy() {
     assert_no_old_store(&copy.scratch);
 }
 
+/// The rebuild stops once the first wave has moved the member's unsent
+/// "my edit" from `open/a.md` into recovery as `0002 a.md`. While it is
+/// stopped, `link` replaces that file, or its recovery folder, with a link to
+/// another workspace that holds the same bytes. On the next run the rebuild
+/// reads nothing through the link: it stops at the link and keeps the aside
+/// store that holds the version. Once the link is gone, it finishes.
+async fn linked_recovery_after_a_stop(
+    workspace_id: &str,
+    linked: impl FnOnce(&std::path::Path, &std::path::Path) -> (String, Box<dyn FnOnce()>),
+) {
+    let copy = edited_copy(workspace_id).await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("recovered-2");
+    rebuild_on(&service, &copy).await.expect_err("crashed");
+    drop(service);
+    let root = copy.scratch.path();
+    let folder = manifest(&copy).expect("manifest")["plan"]["recoveryFolder"]
+        .as_str()
+        .expect("recovery folder")
+        .to_owned();
+    let elsewhere = ScratchDir::new().expect("other workspace");
+    let (at, restore) = linked(&root.join(&folder), elsewhere.path());
+    let theirs = names_in(elsewhere.path());
+
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    assert_eq!(
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-linked-folder",
+            "path": format!("{folder}/{at}").trim_end_matches('/'),
+        })
+    );
+    assert!(root.join(".dohc/local/rebuild-aside/engine").exists());
+    assert_eq!(names_in(elsewhere.path()), theirs);
+
+    restore();
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let recovery = root.join(&folder);
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 a.md")).expect("edit"),
+        b"my edit"
+    );
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovered_file_linked_while_the_rebuild_was_stopped_stops_it() {
+    linked_recovery_after_a_stop("rpc-rebuild-linked-recovered-file", |folder, elsewhere| {
+        let file = folder.join("0002 a.md");
+        let theirs = elsewhere.join("a.md");
+        std::fs::copy(&file, &theirs).expect("their copy");
+        let kept = folder.join("kept a.md");
+        std::fs::rename(&file, &kept).expect("set aside");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&theirs, &file)
+            .expect("file link: turn on Developer Mode");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&theirs, &file).expect("file link");
+        (
+            "0002 a.md".to_owned(),
+            Box::new(move || {
+                std::fs::remove_file(&file).expect("remove link");
+                std::fs::rename(&kept, &file).expect("restore");
+            }),
+        )
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_folder_linked_while_the_rebuild_was_stopped_stops_it() {
+    linked_recovery_after_a_stop("rpc-rebuild-linked-recovery-folder", |folder, elsewhere| {
+        std::fs::copy(folder.join("0002 a.md"), elsewhere.join("0002 a.md")).expect("their copy");
+        let kept = folder.with_extension("kept");
+        std::fs::rename(folder, &kept).expect("set aside");
+        link_folder(folder, elsewhere);
+        let folder = folder.to_path_buf();
+        (
+            String::new(),
+            Box::new(move || {
+                remove_link(&folder);
+                std::fs::rename(&kept, &folder).expect("restore");
+            }),
+        )
+    })
+    .await;
+}
+
 /// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
 async fn edited_copy(workspace_id: &str) -> ClosedCopy {
     closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {
