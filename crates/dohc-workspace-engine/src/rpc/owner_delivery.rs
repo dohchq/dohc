@@ -728,6 +728,9 @@ impl EngineService {
         let reservation = self
             .reserve_owner_upload(&guard, reservation, &cancellation)
             .await?;
+        if !guard.is_current() {
+            return Err(workspace_unavailable());
+        }
         let outcome = guard
             .open
             .actor

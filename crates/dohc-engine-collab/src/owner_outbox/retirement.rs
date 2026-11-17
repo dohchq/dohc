@@ -112,7 +112,9 @@ fn retain_in(
 ) -> Result<(), OwnerOutboxError> {
     let parent = parent.ok_or(OwnerOutboxError::Corrupt)?;
     let parent = read_parent(tx, &parent.outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
-    let append_key = format!("owner-retired:{}", hex_sha256(update));
+    // Unique per queue: another note's queue may keep the same bytes.
+    let identity = [parent.outbox_id.as_bytes(), &b"\0"[..], update].concat();
+    let append_key = format!("owner-retired:{}", hex_sha256(&identity));
     retain_fenced_in_tx(tx, &parent, revision, &append_key, update, now_ms)
 }
 
