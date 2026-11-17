@@ -998,6 +998,10 @@ impl EngineService {
                 write_manifest(root, manifest)?;
                 self.rebuild_crash_point(&format!("recovered-{}", item.number))?;
             }
+            if let Some(recovery) = plan.recovery_folder.as_deref() {
+                sync_recovery(&root.join(recovery))
+                    .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
+            }
             // The aside store still holds the hidden History. A delete that
             // fails is tried again by finish, and the answer says it is left.
             let _ = remove_folder(&aside(root));
@@ -1673,6 +1677,28 @@ fn moved_from_disk(
         }
     }
     Ok(dohc_engine_storage::hex(&hasher.finalize()) == sha256)
+}
+
+/// Flush the recovery folder before the old store goes: after that, these
+/// files are the only copy of the member's unsent work. POSIX only, as the
+/// materializer's parent sync is: std can't sync a folder on Windows, and
+/// flushing a file there needs write access the member's file may not give.
+fn sync_recovery(folder: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if folder.exists() {
+        for entry in std::fs::read_dir(folder)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::File::open(entry.path())?.sync_all()?;
+            }
+        }
+        for dir in [Some(folder), folder.parent()].into_iter().flatten() {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = folder;
+    Ok(())
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
