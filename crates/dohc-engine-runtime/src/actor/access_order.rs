@@ -1212,7 +1212,8 @@ fn pending_rule_jobs(
         .map_err(StorageError::corrupt_public)?;
     let mut scan = conn
         .prepare_cached(
-            "SELECT target_path, content_sha256, operation='delete',              CASE WHEN preimage_present THEN preimage_sha256 END FROM materialization_jobs \
+            "SELECT target_path, content_sha256, operation='delete', \
+             CASE WHEN preimage_present THEN preimage_sha256 END FROM materialization_jobs \
              WHERE workspace_id IN (?1,'') AND status='pending' AND target_path>=?2 \
              AND target_path<?3 AND instr(substr(target_path, ?4), '/')=0",
         )
@@ -2586,7 +2587,8 @@ mod tests {
             "CREATE TABLE path_aliases (workspace_id TEXT, version_id TEXT, path TEXT, \
              object_id TEXT, PRIMARY KEY (workspace_id, version_id, path)); \
              CREATE TABLE materialization_jobs (workspace_id TEXT, target_path TEXT, \
-             content_sha256 TEXT, preimage_present INTEGER, preimage_sha256 TEXT, status TEXT,              operation TEXT, PRIMARY KEY (workspace_id, target_path))",
+             content_sha256 TEXT, preimage_present INTEGER, preimage_sha256 TEXT, status TEXT, \
+             operation TEXT, PRIMARY KEY (workspace_id, target_path))",
         )
         .unwrap();
         let names = [
