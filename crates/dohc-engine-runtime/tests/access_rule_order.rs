@@ -1662,7 +1662,7 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             }
         }
     }
-    for source_edited in [false, true] {
+    for source_edited in [0, 1, 2] {
         let f = Fixture::new();
         f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
             .expect("write rule");
@@ -1672,7 +1672,7 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             matches!(halfway, Err(RuntimeError::OperationCrashed)),
             "{halfway:?}"
         );
-        if !source_edited {
+        if source_edited == 0 {
             let again =
                 rule_rename(&f, "crew", Arc::new(NoFaults)).expect("the same rename tried again");
             assert_eq!(again.after.text, VIEW);
@@ -1686,8 +1686,39 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             );
             continue;
         }
-        f.versioned_write(write("team/access.yaml", EDIT, "m-later"))
-            .expect("edit the source");
+        if source_edited == 1 {
+            f.versioned_write(write("team/access.yaml", EDIT, "m-later"))
+                .expect("edit the source");
+        } else {
+            f.runtime
+                .block_on(f.actor.versioned_binary_write(
+                    WriteBinary {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: dohc_engine_domain::derive_capture_object_id(
+                            WS,
+                            "main",
+                            "team/access.yaml",
+                        ),
+                        path: "team/access.yaml".to_owned(),
+                        bytes: vec![0xff, 0x00],
+                        moment_id: "m-later-binary".to_owned(),
+                        metadata_origin: "cli".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 45,
+                        request_id: None,
+                    },
+                    f.root().to_path_buf(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))
+                .expect("replace the source with binary content");
+            f.put("team/access.yaml", "");
+            std::fs::write(f.root().join("team/access.yaml"), [0xff, 0x00]).unwrap();
+        }
         let journal = f.journal();
         let again = rule_rename(&f, "crew", Arc::new(NoFaults));
         assert!(
@@ -1707,10 +1738,24 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             "main",
             "team/access.yaml",
         )
-        .expect("read the source")
-        .snapshot
-        .map(|snapshot| snapshot.text);
-        assert_eq!(source.as_deref(), Some(EDIT), "the later edit stays");
+        .expect("read the source");
+        if source_edited == 1 {
+            assert_eq!(
+                source.snapshot.map(|snapshot| snapshot.text).as_deref(),
+                Some(EDIT),
+                "the later edit stays"
+            );
+        } else {
+            assert_eq!(
+                source.binary_sha256,
+                Some(hex_sha256(&[0xff, 0x00])),
+                "the binary replacement stays"
+            );
+            assert_eq!(
+                std::fs::read(f.root().join("team/access.yaml")).unwrap(),
+                [0xff, 0x00]
+            );
+        }
     }
 }
 

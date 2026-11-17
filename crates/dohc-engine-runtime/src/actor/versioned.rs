@@ -1422,9 +1422,9 @@ fn rename_access_rule_on_store(
                 path,
             )
         };
-        // A retry replays from the text its first try wrote, whatever either
-        // path holds now. The halves' own request checks refuse a reused id
-        // whose payload differs.
+        // A retry replays the text its first try wrote. Until the delete
+        // finishes, a changed source refuses the retry. Each half also
+        // checks that its request id still names the same payload.
         if retried {
             let text = conn
                 .query_row(
@@ -1447,12 +1447,13 @@ fn rename_access_rule_on_store(
                     |row| row.get::<_, bool>(0),
                 )
                 .map_err(StorageError::corrupt_public)?;
-            if !deleted
-                && snapshot_at(&input.from_path)?
-                    .snapshot
-                    .is_some_and(|source| source.text != text)
-            {
-                return Err(DomainError::IdempotencyKeyReuseMismatch.into());
+            if !deleted {
+                let source = snapshot_at(&input.from_path)?;
+                if source.binary_sha256.is_some()
+                    || source.snapshot.is_some_and(|source| source.text != text)
+                {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch.into());
+                }
             }
             return Ok(text);
         }
