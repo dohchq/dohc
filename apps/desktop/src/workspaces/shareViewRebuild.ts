@@ -327,6 +327,8 @@ const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   // a real denial does, so the words can't be sure.
   "share-view-rebuild-file-held":
     "dohc could not update access because another program may have a file in this workspace open. Close it, then choose Try again.",
+  "share-view-rebuild-linked-folder":
+    "dohc could not update access because a folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
   "share-view-rebuild-rename-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-move-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-unavailable": CHANGE_FAILED,

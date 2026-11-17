@@ -181,16 +181,31 @@ fn job_id(rebuild_id: &str, wave: u8, path: &str) -> String {
     )
 }
 
+/// Refuse a path that reaches through a link below the root, as the
+/// materializer does: the rebuild reads and moves only this copy's files.
+fn link_free(root: &Path, path: &Path) -> Result<(), WireError> {
+    match dohc_engine_files::ensure_target_symlink_free(root, path) {
+        Ok(()) => Ok(()),
+        Err(dohc_engine_files::MaterializeError::SymlinkTarget) => {
+            Err(failed("share-view-rebuild-linked-folder"))
+        }
+        Err(_) => Err(failed("share-view-rebuild-disk-unreadable")),
+    }
+}
+
 /// The hash of the file at `path`, or `None` when no file is there. On a disk
 /// that ignores case, a file stored under another spelling of its name is not
 /// at `path`: the member renamed it, and the plan must not take it for a
 /// second file.
-fn disk_sha(root: &Path, path: &str) -> Option<String> {
-    let bytes = std::fs::read(root.join(path)).ok()?;
+fn disk_sha(root: &Path, path: &str) -> Result<Option<String>, WireError> {
+    link_free(root, &root.join(path))?;
+    let Ok(bytes) = std::fs::read(root.join(path)) else {
+        return Ok(None);
+    };
     if dohc_engine_files::stored_under_other_spelling(root, path) {
-        return None;
+        return Ok(None);
     }
-    Some(dohc_engine_storage::hex_sha256(&bytes))
+    Ok(Some(dohc_engine_storage::hex_sha256(&bytes)))
 }
 
 /// Every file the engine tracks on disk, with its hash.
@@ -571,10 +586,12 @@ impl EngineService {
             .chain(&heads)
             .map(|head| head.path.as_str())
             .collect();
-        let mut disk: BTreeMap<String, String> = stored
-            .iter()
-            .filter_map(|path| disk_sha(root, path).map(|sha| ((*path).to_owned(), sha)))
-            .collect();
+        let mut disk = BTreeMap::new();
+        for path in &stored {
+            if let Some(sha) = disk_sha(root, path)? {
+                disk.insert((*path).to_owned(), sha);
+            }
+        }
         // A file neither store holds is the member's, which the old store
         // never recorded because the copy closed first.
         disk.extend(
@@ -607,7 +624,7 @@ impl EngineService {
                     RecoverySource::Saved => saved_copies(root).join(&item.destination),
                     RecoverySource::Displaced => live_store(root).join(DISPLACED),
                 };
-                item.found = Some(recover(&source, &folder.join(&item.destination))?);
+                item.found = Some(recover(root, &source, &folder.join(&item.destination))?);
                 item.done = true;
                 self.rebuild_crash_point("planned")?;
             }
@@ -700,7 +717,11 @@ impl EngineService {
                     continue;
                 }
                 let folder = root.join(plan.recovery_folder.as_deref().unwrap_or_default());
-                let found = recover(&root.join(&item.path), &folder.join(&item.destination))?;
+                let found = recover(
+                    root,
+                    &root.join(&item.path),
+                    &folder.join(&item.destination),
+                )?;
                 if let Some(plan) = manifest.plan.as_mut() {
                     plan.recovery[index].done = true;
                     plan.recovery[index].found = Some(found);
@@ -1254,7 +1275,9 @@ fn numbered_name(number: u32, name: &str) -> String {
 /// Move a file or folder to its recovery destination without replacing
 /// anything. Answers whether there was one to move. A destination that
 /// exists is a move already done.
-fn recover(source: &Path, destination: &Path) -> Result<bool, WireError> {
+fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, WireError> {
+    link_free(root, source)?;
+    link_free(root, destination)?;
     if destination.exists() {
         return Ok(true);
     }
@@ -1323,6 +1346,7 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
         }
     }
     let folder = root.join(folder);
+    link_free(root, &folder.join(CONTENTS))?;
     let temp = folder.join(format!("{CONTENTS}.tmp"));
     let written = std::fs::create_dir_all(&folder)
         .and_then(|()| write_synced(&temp, text.as_bytes()))

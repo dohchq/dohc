@@ -398,6 +398,10 @@ describe("the words for a stopped rebuild", () => {
     "dohc could not update access because it could not change files in this workspace. Check that no other program has them open and the disk has room, then choose Try again.";
   it.each([
     ["share-view-rebuild-file-held", HELD],
+    [
+      "share-view-rebuild-linked-folder",
+      "dohc could not update access because a folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
+    ],
     ["share-view-rebuild-rename-failed", UNCHANGED],
     ["share-view-rebuild-recovery-move-failed", UNCHANGED],
     ["share-view-rebuild-staging-unavailable", UNCHANGED],

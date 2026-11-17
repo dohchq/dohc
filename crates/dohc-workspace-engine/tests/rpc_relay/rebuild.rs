@@ -902,6 +902,66 @@ async fn edited_copy(workspace_id: &str) -> ClosedCopy {
     .await
 }
 
+/// Make `link` a link to the folder `target`: a junction on Windows, which
+/// needs no elevation.
+fn link_folder(link: &std::path::Path, target: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .status()
+            .expect("spawn mklink /J");
+        assert!(status.success(), "junction");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+}
+
+fn remove_link(link: &std::path::Path) {
+    #[cfg(windows)]
+    std::fs::remove_dir(link).expect("remove junction");
+    #[cfg(unix)]
+    std::fs::remove_file(link).expect("remove symlink");
+}
+
+/// The member replaces `open` with a link to another workspace's folder,
+/// which holds an `a.md` of its own, before the rebuild. The rebuild must not
+/// read or move anything through the link: it stops, and the other folder's
+/// file stays. Once the link is gone, the rebuild finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_linked_elsewhere_stops_the_rebuild_and_moves_nothing() {
+    let copy = edited_copy("rpc-rebuild-linked-folder").await;
+    let elsewhere = ScratchDir::new().expect("other workspace");
+    std::fs::write(elsewhere.path().join("a.md"), "another workspace's file").expect("theirs");
+    let root = copy.scratch.path();
+    std::fs::rename(root.join("open"), root.join("open-before")).expect("set aside");
+    link_folder(&root.join("open"), elsewhere.path());
+
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    assert_eq!(
+        std::fs::read(elsewhere.path().join("a.md")).expect("theirs"),
+        b"another workspace's file"
+    );
+    assert_eq!(names_in(elsewhere.path()), ["a.md"]);
+    assert!(!root.join(".dohc/local/recovery").exists());
+    let refused = outcome.expect_err("refused");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (ErrorCode::Conflict, "share-view-rebuild-linked-folder")
+    );
+
+    remove_link(&root.join("open"));
+    std::fs::rename(root.join("open-before"), root.join("open")).expect("restore");
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A_BYTES);
+    finish(&copy).await;
+}
+
 /// A file on disk whose bytes the new store holds is replaced in place, with
 /// those bytes as its preimage, and nothing goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
