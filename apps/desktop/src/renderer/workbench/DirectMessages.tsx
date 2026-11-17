@@ -50,6 +50,7 @@ import {
   useDirectConversations,
   type DirectListState,
   type DirectStore,
+  type DirectViewer,
 } from "./directConversations";
 
 // Direct messages in Chats: the People section, one conversation, and New
@@ -290,15 +291,15 @@ async function blockPerson(input: {
   /** Runs once the change is made, by the first try or by the notice's Try again. */
   onDone?: () => void;
   /** The account that asked. Try again keeps it, so main refuses a retry once another account signs in. */
-  viewerId?: string;
+  viewer?: DirectViewer;
 }): Promise<void> {
   const { store, conversationId, person, blocked, reporting } = input;
   const name = directPersonName(person);
   const identity = `direct-block:${conversationId}`;
-  let viewerId = input.viewerId;
+  let viewer = input.viewer;
   try {
-    viewerId ??= store.viewer();
-    await store.setBlocked(viewerId, conversationId, blocked);
+    viewer ??= store.viewer();
+    await store.setBlocked(viewer, conversationId, blocked);
     reporting.onClearError?.(identity);
     // No notice: the blocked line, with its Unblock, shows the change where it happened.
     input.onDone?.();
@@ -310,7 +311,7 @@ async function blockPerson(input: {
         blocked ? `dohc could not block ${name}.` : `dohc could not unblock ${name}.`,
       ),
       cause,
-      () => void blockPerson(viewerId === undefined ? input : { ...input, viewerId }),
+      () => void blockPerson(viewer === undefined ? input : { ...input, viewer }),
       undefined,
       { identity },
     );
@@ -387,6 +388,7 @@ function ConversationForAccount(props: ConversationProps) {
   useListFailureReport(state, store, props);
   const ready = state.status === "ready" ? state : null;
   const viewerId = ready?.viewerId ?? null;
+  const scope = ready?.scope ?? null;
   const conversation =
     ready?.conversations.find((entry) => entry.conversationId === conversationId) ?? null;
   const reporting = useRef<Reporting>(props);
@@ -402,7 +404,7 @@ function ConversationForAccount(props: ConversationProps) {
   // The history is read as the account the list names, once the list has read.
   const load = useCallback(
     async (before?: number) => {
-      if (viewerId === null) return;
+      if (viewerId === null || scope === null) return;
       const mine = ++request.current;
       if (before !== undefined) {
         setHistory((current) =>
@@ -414,6 +416,7 @@ function ConversationForAccount(props: ConversationProps) {
       try {
         const page = await bridge().directHistory({
           viewerId,
+          scope,
           conversationId,
           ...(before === undefined ? {} : { before }),
         });
@@ -456,7 +459,7 @@ function ConversationForAccount(props: ConversationProps) {
         );
       }
     },
-    [conversationId, historyIdentity, store, viewerId],
+    [conversationId, historyIdentity, store, viewerId, scope],
   );
 
   useEffect(() => {
@@ -525,14 +528,14 @@ function ConversationForAccount(props: ConversationProps) {
     : (!ready && state.status !== "signed-out" && props.savedName) || "Direct message";
   // A send and its Try again name the account that wrote them, so main refuses them once another account signs in.
   const send = useCallback(
-    async (sender: string, body: string, messageId: string, to: string) => {
+    async (sender: DirectViewer, body: string, messageId: string, to: string) => {
       if (sendingRef.current) return;
       sendingRef.current = true;
       setSending(true);
       const session = store.session();
       try {
         const result = await bridge().directSend({
-          viewerId: sender,
+          ...sender,
           conversationId,
           messageId,
           body,
@@ -550,7 +553,7 @@ function ConversationForAccount(props: ConversationProps) {
           const mine: DirectMessage = {
             seq: result.seq,
             messageId,
-            authorId: sender,
+            authorId: sender.viewerId,
             authorName: null,
             body,
             createdAtMs: Date.now(),
@@ -584,8 +587,8 @@ function ConversationForAccount(props: ConversationProps) {
   );
   const submit = () => {
     const body = draft.trim();
-    if (!body || viewerId === null) return;
-    void send(viewerId, body, store.messageIdFor(conversationId, body), name);
+    if (!body || viewerId === null || scope === null) return;
+    void send({ viewerId, scope }, body, store.messageIdFor(conversationId, body), name);
   };
 
   // Signed out, or as another account, the name stays hidden with the rest of the conversation.

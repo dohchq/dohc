@@ -9,6 +9,7 @@ function fakeApi() {
     directConversations: vi.fn(async () => ({
       available: true as const,
       viewerId: "ana",
+      scope: "a".repeat(64),
       conversations: [],
     })),
     directMarkRead: vi.fn(async () => undefined),
@@ -50,6 +51,7 @@ describe("direct store", () => {
     api.directConversations.mockResolvedValue({
       available: true,
       viewerId: "ana",
+      scope: "a".repeat(64),
       conversations: [
         {
           conversationId: "c1",
@@ -77,6 +79,7 @@ describe("direct store", () => {
     store.markRead("c1", 7);
     expect(api.directMarkRead).toHaveBeenCalledWith({
       viewerId: "ana",
+      scope: "a".repeat(64),
       conversationId: "c1",
       seq: 7,
     });

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { DIRECT_INACTIVE_MESSAGE } from "../ipc/directMessageOperations";
 import { ipcWireError, readError } from "../ipc/errorWords";
-import { createDirectMessages, DirectMessageError } from "./directMessages";
+import { createDirectMessages, DirectMessageError, directScope } from "./directMessages";
 
 interface Account {
   relayUrl?: string;
@@ -106,13 +106,12 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   };
 }
 
-/** The signed-in account reads a list that has c1, as a window does before it opens the conversation. */
-async function listC1(h: ReturnType<typeof harness>) {
-  h.routes.set("/sync/direct/conversations", () =>
-    Response.json({ revision: 1, conversations: [conversation(message(1))] }),
-  );
-  await h.service.list();
-}
+/** The account a window's list names, as main gives it. */
+const viewer = (userId: string, relayUrl = "https://relay.test") => ({
+  viewerId: userId,
+  scope: directScope({ relayUrl, userId }),
+});
+const ANN = viewer("ann");
 
 describe("direct messages for the signed-in account", () => {
   it("fails plainly while the server is unreachable, with nothing kept on this computer", async () => {
@@ -126,21 +125,24 @@ describe("direct messages for the signed-in account", () => {
     });
     h.goOffline();
     await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
-    await expect(h.service.history("ann", "c1")).rejects.toMatchObject({ failure: "unreachable" });
+    await expect(h.service.history(ANN, "c1")).rejects.toMatchObject({ failure: "unreachable" });
   });
 
   it("refuses a call that names an account no longer signed in, before it reaches the server", async () => {
     const h = harness();
     h.routes.set("/sync/direct/send", () => Response.json({ conversationId: "c1", seq: 1 }));
     // The window read Ann's list, then the account changed to Cat before its calls arrived.
-    await listC1(h);
-    const listRead = h.requests.length;
     h.signInAs({ relayUrl: "https://relay.test", userId: "cat" });
     const calls = [
-      h.service.send("ann", { conversationId: "c1", messageId: "m1", body: "for Ann's friend" }),
-      h.service.history("ann", "c1"),
-      h.service.read("ann", "c1", 1),
-      h.service.block("ann", "c1", true),
+      h.service.send({
+        viewer: ANN,
+        conversationId: "c1",
+        messageId: "m1",
+        body: "for Ann's friend",
+      }),
+      h.service.history(ANN, "c1"),
+      h.service.read(ANN, "c1", 1),
+      h.service.block(ANN, "c1", true),
       h.service.resolve("ann", {
         person: { workspaceId: "w", memberId: "owner" },
         admitted: { relayUrl: "https://relay.test", userId: "ann" },
@@ -148,11 +150,15 @@ describe("direct messages for the signed-in account", () => {
       }),
     ];
     for (const call of calls) await expect(call).rejects.toMatchObject({ failure: "refused" });
-    expect(h.requests).toHaveLength(listRead);
-    // The account that is signed in still acts, in a conversation its own list gave.
-    await listC1(h);
+    expect(h.requests).toEqual([]);
+    // The account that is signed in still acts.
     expect(
-      await h.service.send("cat", { conversationId: "c1", messageId: "m2", body: "hi" }),
+      await h.service.send({
+        viewer: viewer("cat"),
+        conversationId: "c1",
+        messageId: "m2",
+        body: "hi",
+      }),
     ).toEqual({ conversationId: "c1", seq: 1 });
   });
 
@@ -168,18 +174,25 @@ describe("direct messages for the signed-in account", () => {
     // account, Ann signed in on another server that has the same ids.
     h.signInAs({ relayUrl: "https://other.test", userId: "ann" });
     await expect(
-      h.service.send("ann", { pick, messageId: "m1", body: "for the first server's owner" }),
+      h.service.send({
+        viewerId: "ann",
+        pick,
+        messageId: "m1",
+        body: "for the first server's owner",
+      }),
     ).rejects.toMatchObject({ failure: "refused" });
     await expect(h.service.resolve("ann", pick)).rejects.toMatchObject({ failure: "refused" });
     expect(h.requests).toEqual([]);
     h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
-    await expect(h.service.send("ann", { pick, messageId: "m2", body: "hi" })).resolves.toEqual({
+    await expect(
+      h.service.send({ viewerId: "ann", pick, messageId: "m2", body: "hi" }),
+    ).resolves.toEqual({
       conversationId: "c1",
       seq: 1,
     });
-    // The conversation that send started goes on from its window before any list is read.
+    // The conversation that send started goes on, as the account the window's list named.
     await expect(
-      h.service.send("ann", { conversationId: "c1", messageId: "m3", body: "again" }),
+      h.service.send({ viewer: ANN, conversationId: "c1", messageId: "m3", body: "again" }),
     ).resolves.toEqual({ conversationId: "c1", seq: 1 });
     expect(h.requests).toEqual(["POST /sync/direct/send", "POST /sync/direct/send"]);
   });
@@ -203,7 +216,12 @@ describe("direct messages for the signed-in account", () => {
       },
     };
     const release = h.holdCredentials();
-    const sending = h.service.send("ann", { pick, messageId: "m1", body: "for the old workspace" });
+    const sending = h.service.send({
+      viewerId: "ann",
+      pick,
+      messageId: "m1",
+      body: "for the old workspace",
+    });
     const resolving = h.service.resolve("ann", pick);
     current = false;
     release();
@@ -212,13 +230,15 @@ describe("direct messages for the signed-in account", () => {
     expect(h.requests).toEqual([]);
     // A window still on its workspace sends as before.
     current = true;
-    await expect(h.service.send("ann", { pick, messageId: "m2", body: "hi" })).resolves.toEqual({
+    await expect(
+      h.service.send({ viewerId: "ann", pick, messageId: "m2", body: "hi" }),
+    ).resolves.toEqual({
       conversationId: "c1",
       seq: 1,
     });
   });
 
-  it("acts in a conversation only on the server that gave it", async () => {
+  it("acts in a conversation only on the server whose list named it, even where another lists the same ids", async () => {
     const h = harness();
     h.routes.set("/sync/direct/conversations", () =>
       Response.json({ revision: 1, conversations: [conversation(message(1))] }),
@@ -229,27 +249,51 @@ describe("direct messages for the signed-in account", () => {
     );
     h.routes.set("/sync/direct/conversations/c1/read", () => Response.json({ ok: true }));
     h.routes.set("/sync/direct/conversations/c1/block", () => Response.json({ ok: true }));
-    // A window read Ann's conversation on the first server. Then Ann signed in on another one.
-    await h.service.list();
+    // Both servers have Ann and c1, as when one server's store was copied to the other.
+    const first = await h.service.list();
     h.signInAs({ relayUrl: "https://other.test", userId: "ann" });
+    const second = await h.service.list();
+    expect(second.conversations.map((entry) => entry.conversationId)).toEqual(["c1"]);
+    const listed = h.servers.length;
+    // An old window, or a notice's Try again, still carries the first server's list.
     const calls = [
-      h.service.send("ann", {
+      h.service.send({
+        viewer: first,
         conversationId: "c1",
         messageId: "m1",
         body: "for the first server",
       }),
-      h.service.history("ann", "c1"),
-      h.service.read("ann", "c1", 1),
-      h.service.block("ann", "c1", true),
+      h.service.history(first, "c1"),
+      h.service.read(first, "c1", 1),
+      h.service.block(first, "c1", true),
     ];
-    for (const call of calls) await expect(call).rejects.toMatchObject({ failure: "refused" });
-    expect(h.servers).toEqual(["https://relay.test"]);
-    // Back on the first server, the conversation acts again.
-    h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
+    for (const call of calls)
+      await expect(call).rejects.toMatchObject({
+        failure: "refused",
+        message: "You signed in as someone else. Open Chats again to see their direct messages.",
+      });
+    expect(h.servers.slice(listed)).toEqual([]);
+    // The second server's own list acts there.
     await expect(
-      h.service.send("ann", { conversationId: "c1", messageId: "m2", body: "hi" }),
+      h.service.send({ viewer: second, conversationId: "c1", messageId: "m2", body: "hi" }),
     ).resolves.toEqual({ conversationId: "c1", seq: 2 });
-    expect(h.servers.every((server) => server === "https://relay.test")).toBe(true);
+    await h.service.history(second, "c1");
+    await h.service.read(second, "c1", 1);
+    await h.service.block(second, "c1", true);
+    expect(h.servers.slice(listed)).toEqual(Array(4).fill("https://other.test"));
+  });
+
+  it("says a conversation is missing when its server has no such conversation", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 1, conversations: [] }),
+    );
+    const listed = await h.service.list();
+    await expect(h.service.history(listed, "gone")).rejects.toMatchObject({
+      failure: "refused",
+      status: 404,
+      message: "dohc could not find this conversation or person. They may have left the workspace.",
+    });
   });
 
   it("refuses as signed out without calling the server", async () => {
@@ -264,9 +308,8 @@ describe("direct messages for the signed-in account", () => {
     h.routes.set("/sync/direct/send", () =>
       Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }),
     );
-    await listC1(h);
     await expect(
-      h.service.send("ann", { conversationId: "c1", messageId: "m1", body: "hi" }),
+      h.service.send({ viewer: ANN, conversationId: "c1", messageId: "m1", body: "hi" }),
     ).rejects.toMatchObject({
       failure: "refused",
       code: "direct_blocked",
@@ -278,7 +321,12 @@ describe("direct messages for the signed-in account", () => {
     const h = harness();
     h.routes.set("/sync/direct/send", () => Response.json({ conversationId: "c1", seq: 1 }));
     const refused = await h.service
-      .send("ann", { conversationId: "c1", messageId: "m1", body: "Read @[notes/private.md]" })
+      .send({
+        viewer: ANN,
+        conversationId: "c1",
+        messageId: "m1",
+        body: "Read @[notes/private.md]",
+      })
       .then(
         () => null,
         (cause: unknown) => cause,
@@ -295,7 +343,8 @@ describe("direct messages for the signed-in account", () => {
     });
     expect(h.requests).toEqual([]);
     await expect(
-      h.service.send("ann", {
+      h.service.send({
+        viewerId: "ann",
         pick: {
           person: { workspaceId: "w", memberId: "bob" },
           admitted: { relayUrl: "https://relay.test", userId: "ann" },
@@ -321,18 +370,17 @@ describe("direct messages for the signed-in account", () => {
         ),
       );
     };
-    const send = (h: ReturnType<typeof harness>, as = "ann") =>
-      h.service.send(as, { conversationId: "c1", messageId: "m1", body: "hi" });
+    const send = (h: ReturnType<typeof harness>, as = ANN) =>
+      h.service.send({ viewer: as, conversationId: "c1", messageId: "m1", body: "hi" });
     const h = harness();
     h.routes.set("/sync/direct/send", () =>
       Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }),
     );
-    await listC1(h);
     expect(await afterIpc(send(h))).toMatchObject({
       words: "You can't message this person.",
       canRetry: false,
     });
-    expect(await afterIpc(send(h, "cat"))).toMatchObject({ canRetry: false });
+    expect(await afterIpc(send(h, viewer("cat")))).toMatchObject({ canRetry: false });
     h.routes.set("/sync/direct/send", () => Response.json({ error: "busy" }, { status: 429 }));
     expect((await afterIpc(send(h))).canRetry).toBeUndefined();
     h.goOffline();
@@ -366,7 +414,7 @@ describe("direct messages for the signed-in account", () => {
     expect(lists).toBe(1);
     // A read mark changes the list, so the next read goes to the server.
     unread = 0;
-    await h.service.read("ann", "c1", 2);
+    await h.service.read(ANN, "c1", 2);
     expect((await h.service.list()).conversations[0]?.unread).toBe(0);
     expect(lists).toBe(2);
     expect(h.service.listed("ann")?.conversations[0]?.unread).toBe(0);

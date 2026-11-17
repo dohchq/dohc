@@ -18,7 +18,8 @@ import type { OperationTable } from "./operationTable";
 // workspace, so most rows are device-scoped. Starting from a member list
 // needs the window's workspace, because main names the relay workspace from it.
 // Every call but the list names the account the window read; main acts only
-// while that account is signed in.
+// while that account is signed in. A conversation call also names the scope
+// its list came with, so it reaches only the server that list came from.
 
 export const DIRECT_INACTIVE_MESSAGE =
   "This message was not sent because this window changed workspaces.";
@@ -26,6 +27,8 @@ export const DIRECT_INACTIVE_MESSAGE =
 // The contract's own checks, so the window and the relay agree on every limit.
 const id = z.string().refine(isDirectId, "invalid id");
 const viewerId = z.string().refine(isDirectPersonId, "invalid account");
+// Opaque to the window: main derives it from the account and server it read the list as.
+const scope = z.string().regex(/^[0-9a-f]{64}$/u, "invalid account");
 const body = z.string().refine(isDirectMessageBody, "message is empty or too long");
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const memberId = z.string().min(1).max(256);
@@ -39,6 +42,7 @@ const DirectListResult = z.discriminatedUnion("available", [
     .object({
       available: z.literal(true),
       viewerId,
+      scope,
       conversations: z.array(
         contract<DirectConversation>(parseDirectConversation, "invalid conversation"),
       ),
@@ -58,7 +62,9 @@ export const directMessageOperations = {
   directHistory: {
     capabilityId: "direct.read",
     channel: "desktop:direct-history",
-    payload: z.object({ viewerId, conversationId: id, before: count.min(1).optional() }).strict(),
+    payload: z
+      .object({ viewerId, scope, conversationId: id, before: count.min(1).optional() })
+      .strict(),
     result: contract<DirectMessagePage>(parseDirectMessagePage, "invalid page"),
     guard: "trusted-sender",
     scope: "device",
@@ -86,7 +92,7 @@ export const directMessageOperations = {
   directSend: {
     capabilityId: "direct.send",
     channel: "desktop:direct-send",
-    payload: z.object({ viewerId, conversationId: id, messageId: id, body }).strict(),
+    payload: z.object({ viewerId, scope, conversationId: id, messageId: id, body }).strict(),
     result: contract<DirectSendResult>(parseDirectSendResult, "invalid send result"),
     guard: "trusted-sender",
     scope: "device",
@@ -94,14 +100,14 @@ export const directMessageOperations = {
   directMarkRead: {
     capabilityId: "direct.read",
     channel: "desktop:direct-read",
-    payload: z.object({ viewerId, conversationId: id, seq: count }).strict(),
+    payload: z.object({ viewerId, scope, conversationId: id, seq: count }).strict(),
     guard: "trusted-sender",
     scope: "device",
   },
   directBlock: {
     capabilityId: "direct.block",
     channel: "desktop:direct-block",
-    payload: z.object({ viewerId, conversationId: id, blocked: z.boolean() }).strict(),
+    payload: z.object({ viewerId, scope, conversationId: id, blocked: z.boolean() }).strict(),
     guard: "trusted-sender",
     scope: "device",
   },

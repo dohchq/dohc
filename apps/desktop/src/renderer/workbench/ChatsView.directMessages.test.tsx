@@ -14,6 +14,8 @@ import { initWindowFocus } from "../windowFocus";
 // this computer: while the server is away, the views say so with Try again.
 
 const VIEWER = "me";
+// Main gives each list a scope for its account and server. The window only passes it back.
+const SCOPE = "a".repeat(64);
 
 function directStoreViewer(): string | null {
   const state = directStore().snapshot();
@@ -47,6 +49,7 @@ function signedIn(conversations: DirectConversation[]) {
   bridgeMock.directConversations.mockResolvedValue({
     available: true,
     viewerId: VIEWER,
+    scope: SCOPE,
     conversations,
   });
 }
@@ -312,11 +315,13 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
     expect(bridgeMock.directHistory).toHaveBeenCalledWith({
       viewerId: VIEWER,
+      scope: SCOPE,
       conversationId: "conversation-sam",
     });
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         seq: 2,
       }),
@@ -341,6 +346,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         seq: 2,
       }),
@@ -358,7 +364,12 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => expect(bridgeMock.directConversations).toHaveBeenCalled());
     act(() => emitCloudSessionChanged("session-b", "changing"));
     await act(async () =>
-      resolveBefore({ available: true, viewerId: VIEWER, conversations: [conversation()] }),
+      resolveBefore({
+        available: true,
+        viewerId: VIEWER,
+        scope: SCOPE,
+        conversations: [conversation()],
+      }),
     );
     expect(screen.queryByTestId("chats-dm-item")).toBeNull();
     signedIn([
@@ -383,6 +394,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         seq: 2,
       }),
@@ -443,6 +455,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         seq: 3,
       }),
@@ -466,13 +479,17 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directConversations.mockResolvedValue({
       available: true,
       viewerId: "someone-else",
+      scope: "b".repeat(64),
       conversations: [],
     });
     act(() => emitCloudSessionChanged("session-other", "ready"));
     await act(async () => (tryAgain as () => void)());
     expect(
-      bridgeMock.directSend.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId),
-    ).toEqual([VIEWER, VIEWER]);
+      bridgeMock.directSend.mock.calls.map(([input]) => [input.viewerId, input.scope]),
+    ).toEqual([
+      [VIEWER, SCOPE],
+      [VIEWER, SCOPE],
+    ]);
   });
 
   it("closes the New message tab once its conversation opens in a tab of its own", async () => {
@@ -503,7 +520,12 @@ describe("ChatsView direct messages", () => {
   it("files no notice when a conversation can't be read because nobody is signed in", async () => {
     // The session ended between reading the list and reading the conversation.
     bridgeMock.directConversations
-      .mockResolvedValueOnce({ available: true, viewerId: VIEWER, conversations: [conversation()] })
+      .mockResolvedValueOnce({
+        available: true,
+        viewerId: VIEWER,
+        scope: SCOPE,
+        conversations: [conversation()],
+      })
       .mockResolvedValue({ available: false });
     bridgeMock.directHistory.mockRejectedValue(
       new Error(
@@ -610,6 +632,7 @@ describe("ChatsView direct messages", () => {
     };
     expect(first).toMatchObject({
       viewerId: VIEWER,
+      scope: SCOPE,
       conversationId: "conversation-sam",
       body: "On my way",
     });
@@ -647,6 +670,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         blocked: true,
       }),
@@ -663,6 +687,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenLastCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         blocked: false,
       }),
@@ -682,6 +707,7 @@ describe("ChatsView direct messages", () => {
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenCalledWith({
         viewerId: VIEWER,
+        scope: SCOPE,
         conversationId: "conversation-sam",
         blocked: true,
       }),
@@ -705,14 +731,18 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directConversations.mockResolvedValue({
       available: true,
       viewerId: "sam",
+      scope: "b".repeat(64),
       conversations: [conversation()],
     });
     act(() => emitCloudSessionChanged("session-sam", "ready"));
     await waitFor(() => expect(directStoreViewer()).toBe("sam"));
     await act(async () => (tryAgain as () => void)());
     expect(
-      bridgeMock.directBlock.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId),
-    ).toEqual([VIEWER, VIEWER]);
+      bridgeMock.directBlock.mock.calls.map(([input]) => [input.viewerId, input.scope]),
+    ).toEqual([
+      [VIEWER, SCOPE],
+      [VIEWER, SCOPE],
+    ]);
   });
 
   it("picks no one with the Enter that ends an IME composition in To", async () => {
@@ -877,6 +907,7 @@ describe("ChatsView direct messages", () => {
     await user.click(screen.getByTestId("chats-dm-new-blocked-line-action"));
     expect(bridgeMock.directBlock).toHaveBeenCalledWith({
       viewerId: VIEWER,
+      scope: SCOPE,
       conversationId: "conversation-ana",
       blocked: false,
     });

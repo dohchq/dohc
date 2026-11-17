@@ -284,6 +284,7 @@ import {
 import {
   createDirectMessages,
   DirectMessageError,
+  directScope,
   type DirectPick,
 } from "./workspaces/directMessages";
 import { directNoticeRead, directNoticeRows } from "./notices/directNotices";
@@ -9093,25 +9094,26 @@ function registerIpcHandlers(): void {
       if (!cachedCredentials?.relayUrl) return { available: false as const };
       return { available: true as const, ...(await directMessages.list()) };
     },
-    directHistory: ({ viewerId, conversationId, before }) =>
-      directMessages.history(viewerId, conversationId, before),
+    directHistory: ({ viewerId, scope, conversationId, before }) =>
+      directMessages.history({ viewerId, scope }, conversationId, before),
     directResolve: async ({ viewerId, memberId }, { operation }) =>
       directMessages.resolve(
         viewerId,
         await directPick(operation.workspace, memberId, () => operation.assertCurrent()),
       ),
     directStart: async ({ viewerId, memberId, messageId, body }, { operation }) =>
-      directMessages.send(viewerId, {
+      directMessages.send({
+        viewerId,
         messageId,
         body,
         pick: await directPick(operation.workspace, memberId, () => operation.assertCurrent()),
       }),
-    directSend: ({ viewerId, conversationId, messageId, body }) =>
-      directMessages.send(viewerId, { conversationId, messageId, body }),
-    directMarkRead: ({ viewerId, conversationId, seq }) =>
-      directMessages.read(viewerId, conversationId, seq),
-    directBlock: ({ viewerId, conversationId, blocked }) =>
-      directMessages.block(viewerId, conversationId, blocked),
+    directSend: ({ viewerId, scope, conversationId, messageId, body }) =>
+      directMessages.send({ viewer: { viewerId, scope }, conversationId, messageId, body }),
+    directMarkRead: ({ viewerId, scope, conversationId, seq }) =>
+      directMessages.read({ viewerId, scope }, conversationId, seq),
+    directBlock: ({ viewerId, scope, conversationId, blocked }) =>
+      directMessages.block({ viewerId, scope }, conversationId, blocked),
   });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
@@ -11325,7 +11327,7 @@ function registerIpcHandlers(): void {
         // Read or dismissed, a direct message's row goes once its conversation is read.
         const viewer =
           cachedCredentials && chatShareSessionKey(cachedCredentials) === input.account
-            ? cachedCredentials.userId
+            ? { viewerId: cachedCredentials.userId, scope: directScope(cachedCredentials) }
             : null;
         await Promise.all([
           others.length > 0 ? noticeStore().mark(others, input.mark, input.account) : undefined,

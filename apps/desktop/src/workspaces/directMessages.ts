@@ -11,6 +11,7 @@ import {
   type DirectResolution,
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
+import { createHash } from "node:crypto";
 import { extractChatFileReferences } from "@dohc/workspace-contracts/chat-mentions";
 import { DIRECT_FINAL, DIRECT_RETRY, DIRECT_SIGNED_OUT } from "../ipc/errorWords";
 
@@ -53,9 +54,17 @@ export class DirectMessageError extends Error {
   }
 }
 
-/** The list as the server last gave it, for one account. */
-export interface DirectListed {
+/**
+ * Who a window's conversation call is for: the account its list named. `scope` stands for that account's server
+ * and user, so main refuses the call once another account, or the same user on another server, signs in.
+ */
+export interface DirectViewer {
   viewerId: string;
+  scope: string;
+}
+
+/** The list as the server last gave it, for one account. */
+export interface DirectListed extends DirectViewer {
   conversations: DirectConversation[];
 }
 
@@ -79,6 +88,9 @@ const OTHER_ACCOUNT =
   "You signed in as someone else. Open Chats again to see their direct messages.";
 
 const accountKey = (account: DirectAccount) => `${account.relayUrl}\n${account.userId}`;
+/** The scope a window passes back with each call for `account`. Opaque to the window. */
+export const directScope = (account: DirectAccount) =>
+  createHash("sha256").update(accountKey(account)).digest("hex");
 const conversationPath = (route: string, conversationId: string) =>
   route.replace(":conversationId", encodeURIComponent(conversationId));
 
@@ -125,16 +137,12 @@ export function createDirectMessages<Credentials extends DirectAccount>(
   let listed: (DirectListed & { key: string; read: number; fresh: boolean }) | null = null;
   // Numbers each list read as it starts. A server's revision can go backwards after a reset, so it can't order reads.
   let reads = 0;
-  // The conversations each account's server named here. A window learns a conversation only from these answers,
-  // so its calls go only to that server, never to another where the same account signed in.
-  const given = new Map<string, Set<string>>();
-  const give = (credentials: Credentials, conversationId: string) => {
-    const key = accountKey(credentials);
-    const ids = given.get(key) ?? new Set<string>();
-    ids.add(conversationId);
-    given.set(key, ids);
-  };
 
+  const toListed = ({ viewerId, scope, conversations }: DirectListed): DirectListed => ({
+    viewerId,
+    scope,
+    conversations,
+  });
   const setListed = (next: typeof listed) => {
     const before = listed;
     listed = next;
@@ -148,27 +156,20 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     return credentials;
   };
   /**
-   * The one door for a window's call: it names the account it read, and acts only while that account is signed in.
-   * A member pick names its workspace's member ids, which mean someone else on another server, so it also needs the
-   * server main admitted the pick on.
+   * The one door for a window's call: it acts only while the account it names is signed in on the same server.
+   * A conversation call names the scope its list came with. A member pick names its workspace's member ids,
+   * which mean someone else on another server, so it names the account main admitted the pick on.
    */
-  const as = async (viewerId: string, admitted?: DirectAccount): Promise<Credentials> => {
+  const as = async (viewer: DirectViewer): Promise<Credentials> => {
     const credentials = await signedIn();
-    if (credentials.userId !== viewerId) throw new DirectMessageError("refused", OTHER_ACCOUNT);
-    if (admitted && accountKey(admitted) !== accountKey(credentials))
+    if (credentials.userId !== viewer.viewerId || directScope(credentials) !== viewer.scope)
       throw new DirectMessageError("refused", OTHER_ACCOUNT);
     return credentials;
   };
   // The window may leave the pick's workspace while the account is read, so its check runs after that read.
   const asPicked = async (viewerId: string, pick: DirectPick): Promise<Credentials> => {
-    const credentials = await as(viewerId, pick.admitted);
+    const credentials = await as({ viewerId, scope: directScope(pick.admitted) });
     pick.assertCurrent();
-    return credentials;
-  };
-  const asIn = async (viewerId: string, conversationId: string): Promise<Credentials> => {
-    const credentials = await as(viewerId);
-    if (!given.get(accountKey(credentials))?.has(conversationId))
-      throw new DirectMessageError("refused", OTHER_ACCOUNT);
     return credentials;
   };
 
@@ -220,23 +221,21 @@ export function createDirectMessages<Credentials extends DirectAccount>(
         null,
         true,
       );
-    for (const conversation of answer.conversations) give(credentials, conversation.conversationId);
     const next = {
       key: accountKey(credentials),
       viewerId: credentials.userId,
+      scope: directScope(credentials),
       conversations: answer.conversations,
       read,
       fresh,
     };
     // A read that lands after the account changed does not replace the new account's list.
     const current = await dependencies.credentials().catch(() => null);
-    if (!current || accountKey(current) !== next.key)
-      return { viewerId: next.viewerId, conversations: next.conversations };
+    if (!current || accountKey(current) !== next.key) return toListed(next);
     // Reads overlap, so answers can arrive out of order. An older one would bring back a Notice already read.
-    if (listed?.key === next.key && listed.read > next.read)
-      return { viewerId: listed.viewerId, conversations: listed.conversations };
+    if (listed?.key === next.key && listed.read > next.read) return toListed(listed);
     setListed(next);
-    return { viewerId: next.viewerId, conversations: next.conversations };
+    return toListed(next);
   }
 
   const pause = (ms: number) =>
@@ -330,7 +329,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     /** The list the follow loop read last, for `userId` only. Nothing is read from the server. */
     listed(userId: string): DirectListed | null {
       return listed && listed.viewerId === userId && following?.key === listed.key
-        ? { viewerId: listed.viewerId, conversations: listed.conversations }
+        ? toListed(listed)
         : null;
     },
 
@@ -338,18 +337,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     async list(): Promise<DirectListed> {
       const credentials = await signedIn();
       void ensureFollowing();
-      if (listed?.fresh && listed.key === accountKey(credentials))
-        return { viewerId: listed.viewerId, conversations: listed.conversations };
+      if (listed?.fresh && listed.key === accountKey(credentials)) return toListed(listed);
       return readList(credentials, false);
     },
 
     /** The newest page, or the page before `before`. */
     async history(
-      viewerId: string,
+      viewer: DirectViewer,
       conversationId: string,
       before?: number,
     ): Promise<DirectMessagePage> {
-      const credentials = await asIn(viewerId, conversationId);
+      const credentials = await as(viewer);
       const query = before === undefined ? "" : `?before=${before}`;
       const page = parseDirectMessagePage(
         await call(
@@ -381,16 +379,14 @@ export function createDirectMessages<Credentials extends DirectAccount>(
           null,
           true,
         );
-      if (resolved.conversationId !== null) give(credentials, resolved.conversationId);
       return resolved;
     },
 
     /** Sends one message. The caller keeps `messageId` for Try again, so a retry never sends twice. */
     async send(
-      viewerId: string,
       input: { messageId: string; body: string } & (
-        | { conversationId: string }
-        | { pick: DirectPick }
+        | { viewer: DirectViewer; conversationId: string }
+        | { viewerId: string; pick: DirectPick }
       ),
     ): Promise<DirectSendResult> {
       // A direct message belongs to no workspace, so it links no file.
@@ -399,8 +395,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       const { messageId, body } = input;
       const [credentials, to] =
         "pick" in input
-          ? [await asPicked(viewerId, input.pick), { person: input.pick.person }]
-          : [await asIn(viewerId, input.conversationId), { conversationId: input.conversationId }];
+          ? [await asPicked(input.viewerId, input.pick), { person: input.pick.person }]
+          : [await as(input.viewer), { conversationId: input.conversationId }];
       const result = parseDirectSendResult(
         await post(credentials, DIRECT_ROUTES.send, { messageId, body, ...to }),
       );
@@ -409,24 +405,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(
           "refused",
           "Your server answered in a way dohc could not read. Check the conversation before sending again.",
         );
-      give(credentials, result.conversationId);
       return result;
     },
 
-    async read(viewerId: string, conversationId: string, seq: number): Promise<void> {
-      await post(
-        await asIn(viewerId, conversationId),
-        conversationPath(DIRECT_ROUTES.read, conversationId),
-        { seq },
-      );
+    async read(viewer: DirectViewer, conversationId: string, seq: number): Promise<void> {
+      await post(await as(viewer), conversationPath(DIRECT_ROUTES.read, conversationId), { seq });
     },
 
-    async block(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
-      await post(
-        await asIn(viewerId, conversationId),
-        conversationPath(DIRECT_ROUTES.block, conversationId),
-        { blocked },
-      );
+    async block(viewer: DirectViewer, conversationId: string, blocked: boolean): Promise<void> {
+      await post(await as(viewer), conversationPath(DIRECT_ROUTES.block, conversationId), {
+        blocked,
+      });
     },
   };
 }

@@ -131,6 +131,7 @@ describe("chat editor tabs", () => {
       list.resolve({
         available: true,
         viewerId: "viewer",
+        scope: "a".repeat(64),
         conversations: [
           {
             conversationId: "conversation-1",
@@ -746,6 +747,7 @@ describe("chat editor tabs", () => {
         list.resolve({
           available: true,
           viewerId: "ann",
+          scope: "a".repeat(64),
           conversations: [
             {
               conversationId: "conversation-1",

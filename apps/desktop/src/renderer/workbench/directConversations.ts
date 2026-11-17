@@ -14,6 +14,12 @@ import { ownPresentation, relayPresentation } from "./actorPresentation";
 // this window. They belong to the account on its server, not to a workspace,
 // so a workspace switch keeps them and a change of account starts over.
 
+/** The account a list was read as. Each conversation call names it, so main sends it only to that account on that server. */
+export interface DirectViewer {
+  viewerId: string;
+  scope: string;
+}
+
 export type DirectListState =
   | { status: "loading" }
   | { status: "signed-out" }
@@ -21,6 +27,7 @@ export type DirectListState =
   | {
       status: "ready";
       viewerId: string;
+      scope: string;
       conversations: readonly DirectConversation[];
       failure: string | null;
     }
@@ -96,7 +103,13 @@ export function createDirectStore(api: Api) {
                 ? { ...conversation, unread: 0 }
                 : conversation;
             });
-            set({ status: "ready", viewerId: result.viewerId, conversations, failure: null });
+            set({
+              status: "ready",
+              viewerId: result.viewerId,
+              scope: result.scope,
+              conversations,
+              failure: null,
+            });
           }
         } catch (cause) {
           if (mine !== session) continue;
@@ -134,9 +147,9 @@ export function createDirectStore(api: Api) {
   }
 
   // The account the list belongs to. Every call names it, so main refuses one made for an account no longer signed in.
-  const viewer = (): string => {
+  const viewer = (): DirectViewer => {
     if (state.status !== "ready") throw new Error("Direct messages are not loaded yet.");
-    return state.viewerId;
+    return { viewerId: state.viewerId, scope: state.scope };
   };
 
   return {
@@ -171,16 +184,22 @@ export function createDirectStore(api: Api) {
           : { ...conversation, unread: 0 },
       );
       const mine = session;
-      api.directMarkRead({ viewerId: state.viewerId, conversationId, seq }).catch(() => {
-        if (mine !== session) return;
-        if (readSent.get(conversationId) === seq) readSent.delete(conversationId);
-        void refresh();
-      });
+      api
+        .directMarkRead({ viewerId: state.viewerId, scope: state.scope, conversationId, seq })
+        .catch(() => {
+          if (mine !== session) return;
+          if (readSent.get(conversationId) === seq) readSent.delete(conversationId);
+          void refresh();
+        });
     },
-    /** Blocks or unblocks the other person, as `viewerId`. Rejects with the server's reason. */
-    async setBlocked(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
+    /** Blocks or unblocks the other person, as `viewer`. Rejects with the server's reason. */
+    async setBlocked(
+      viewer: DirectViewer,
+      conversationId: string,
+      blocked: boolean,
+    ): Promise<void> {
       const mine = session;
-      await api.directBlock({ viewerId, conversationId, blocked });
+      await api.directBlock({ ...viewer, conversationId, blocked });
       if (mine !== session) return;
       patch(conversationId, (conversation) => ({
         ...conversation,
