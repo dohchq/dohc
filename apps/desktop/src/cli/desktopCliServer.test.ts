@@ -454,9 +454,15 @@ describe("desktop CLI workspace context", () => {
       "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
     ],
     [
+      "waits for the server",
+      { reason: "waiting" as const, detail: "dohc could not reach the server. It keeps trying." },
+      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+    ],
+    // It reopens only once someone chooses Try again.
+    [
       "stopped and waits for Try again",
       { reason: "failed" as const, detail: "dohc could not update access." },
-      "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+      "dohc stopped updating your access to this workspace. Open it in dohc, then choose Try again.",
     ],
     [
       "belongs to a membership that ended",

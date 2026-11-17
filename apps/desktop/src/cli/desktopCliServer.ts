@@ -389,9 +389,13 @@ interface DesktopCliServerDependencies<State> {
 function refuseClosedCopy(workspace: RegistryEntry): void {
   const rebuild = workspace.shareView?.rebuild;
   if (!rebuild) return;
+  if (workspace.shareView?.ended === true || rebuild.stopped?.reason === "ended") {
+    throw new Error("Your membership of this workspace ended. What arrived stays in its folder.");
+  }
+  // A stopped update reopens only once someone chooses Try again.
   throw new Error(
-    rebuild.stopped?.reason === "ended"
-      ? "Your membership of this workspace ended. What arrived stays in its folder."
+    rebuild.stopped?.reason === "failed"
+      ? "dohc stopped updating your access to this workspace. Open it in dohc, then choose Try again."
       : "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
   );
 }
