@@ -233,8 +233,12 @@ export async function holdShareViewCopy(
   try {
     // The activity's last file reads go through the copy's session, which
     // the hold and the engine both refuse. What they would have recorded
-    // stays on disk, where the rebuild's plan reads it.
-    await parts.closeActivity(isClosedCopyRefusal);
+    // stays on disk, where the rebuild's plan reads it. A close already under
+    // way runs without the filter, and the hold joins it, so its refusal is
+    // dropped here too.
+    await parts.closeActivity(isClosedCopyRefusal).catch((error: unknown) => {
+      if (!isClosedCopyRefusal(error)) throw error;
+    });
     await holding;
     await parts.closeLivePages();
   } catch (error) {

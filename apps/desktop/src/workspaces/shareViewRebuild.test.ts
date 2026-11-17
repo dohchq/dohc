@@ -10,6 +10,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { RelayUnreachableError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import { closeActivity, type ActivityUse } from "./activityRelease";
 import type { EngineYDocSessionReleaseOutcome } from "./engineYDocSessionOwner";
 import {
   classifyShareViewRebuildError,
@@ -516,6 +517,30 @@ describe("holding a copy for its rebuild", () => {
     await expect(hold()).resolves.toBeUndefined();
     await expect(sessions.run(workspace, async () => undefined)).rejects.toBeInstanceOf(
       EngineWorkspaceRebuildingError,
+    );
+    await sessions.closeAll();
+  });
+
+  // A window or a background run started closing the copy first, without the
+  // hold's filter, and the hold joins that close.
+  it("holds the copy though it joins a close whose reads were refused", async () => {
+    const use: ActivityUse = { retainedActivity: false, backgroundHolds: 0, activityClosing: null };
+    const { workspace, sessions, hold } = await heldCopy(async (read) => {
+      await closeActivity(use, async () => {
+        await read();
+      });
+    });
+    const reading = deferred();
+    const earlier = closeActivity(use, async () => {
+      await reading.promise;
+      await sessions.run(workspace, async () => undefined);
+    });
+    const held = hold();
+    reading.resolve();
+    await expect(held).resolves.toBeUndefined();
+    // The earlier closer still gets its refusal.
+    await expect(earlier?.catch((error: unknown) => isClosedCopyRefusal(error))).resolves.toBe(
+      true,
     );
     await sessions.closeAll();
   });
