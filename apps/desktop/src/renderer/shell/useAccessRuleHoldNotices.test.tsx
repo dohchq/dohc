@@ -380,18 +380,63 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce());
     // Main recorded the engine's new judgment, which arrives as the list.
     h.list([{ ...WIDENED, observedSha256: "b".repeat(64), recordedAtMs: 2 }]);
-    await waitFor(() => expect(h.errors().shellErrors[0]?.id).not.toBe(first.id));
-    expect(h.errors().shellErrors).toHaveLength(1);
-    expect(h.errors().shellErrors[0]).toMatchObject({
+    await waitFor(() => expect(h.row("team")?.id).not.toBe(first.id));
+    expect(h.row("team")).toMatchObject({
       title: "Access to team was widened outside dohc",
       seen: false,
     });
-    act(() => h.errors().runShellErrorAction(h.errors().shellErrors[0]!.id, 1));
+    // Beside it, the press says why nothing ran.
+    expect(h.errors().shellErrors.map((error) => error.identity)).toEqual(
+      expect.arrayContaining(["access-rule:main:team:decided"]),
+    );
+    expect(h.errors().shellErrors).toHaveLength(2);
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
     await waitFor(() =>
       expect(h.bridge.decideAccessRule).toHaveBeenLastCalledWith(
         expect.objectContaining({ expectedSha256: "b".repeat(64) }),
       ),
     );
+  });
+
+  // Judging the changed rule again can clear its hold, as when the rule on
+  // disk went back to the recorded one. The row goes, and the press still says
+  // why nothing ran, whichever reaches the renderer first.
+  it("says why nothing ran when the rule changed again and its hold cleared, in either order", async () => {
+    const changed = () =>
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [CONFLICT]: access-rule-changed: team",
+      );
+    for (const order of ["refusal first", "list first"]) {
+      cleanup();
+      const h = harness([WIDENED]);
+      await waitFor(() => expect(h.row("team")).toBeDefined());
+      let refuse!: (error: Error) => void;
+      h.bridge.decideAccessRule.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            refuse = reject;
+          }),
+      );
+      act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+      await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce());
+      if (order === "refusal first") await act(async () => refuse(changed()));
+      h.list([]);
+      if (order === "list first") await act(async () => refuse(changed()));
+      await waitFor(() => expect(h.row("team")).toBeUndefined());
+      const said = () =>
+        h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:decided");
+      await waitFor(() =>
+        expect(said(), order).toMatchObject({
+          tone: "warning",
+          message:
+            "dohc didn't apply your choice because the access rule for team changed again outside dohc.",
+          retry: null,
+          action: { label: "Open History", ends: true },
+        }),
+      );
+      act(() => h.errors().runShellErrorAction(said()!.id));
+      expect(h.openHistory).toHaveBeenCalledOnce();
+    }
   });
 
   it("says when a decision failed for another reason, with Try again", async () => {

@@ -449,8 +449,8 @@ export function useAccessRuleHoldNotices(
         (error: unknown) => {
           if (currentWorkspace.current !== asked) return;
           const listed = putBack(asked, identity);
-          // A hold decided already, or judged again since, leaves with the list
-          // that follows; the press still says why nothing ran.
+          // A hold decided already leaves with the list that follows; the press
+          // still says why nothing ran.
           if (isAccessRuleNotHeldRefusal(error)) {
             latest.current.reportShellFailure({
               identity: decidedOf(identity),
@@ -460,8 +460,20 @@ export function useAccessRuleHoldNotices(
             });
             return;
           }
-          // A changed rule comes back as its notice, judged again.
-          if (!listed || isAccessRuleChangedRefusal(error)) return;
+          // A changed rule comes back as its notice, judged again, or leaves the
+          // list once judging it again clears its hold. Either way the press
+          // says why nothing ran.
+          if (isAccessRuleChangedRefusal(error)) {
+            latest.current.reportShellFailure({
+              identity: decidedOf(identity),
+              tone: "warning",
+              message: `dohc didn't apply your choice because ${ruleOfLower(hold.folder)} changed again outside dohc.`,
+              retry: null,
+              action: { label: "Open History", run: latest.current.openHistory, ends: true },
+            });
+            return;
+          }
+          if (!listed) return;
           const outer = heldOuterAccessRuleFolder(error);
           if (outer !== null && outer !== hold.folder) {
             waitFor(hold, outer);
