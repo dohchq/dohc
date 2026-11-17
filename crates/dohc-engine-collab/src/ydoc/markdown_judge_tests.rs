@@ -1543,6 +1543,30 @@ fn a_dropped_cell_or_definition_keeps_its_words() {
     }
 }
 
+/// Each paragraph that holds only a no-break space reads as one paragraph.
+/// The random test found a note of 32,768 of them that asked for 32 GiB.
+#[test]
+fn paragraphs_of_a_no_break_space_read_once_each() {
+    let source = format!("qa\n\n{}qb\n", "\u{a0}\n\n".repeat(1000));
+    let (body, _) = generated::read(&source).unwrap();
+    let tags: Vec<_> = body["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|child| child["tag"].as_str().unwrap())
+        .collect();
+    assert_eq!(tags, vec!["paragraph"; 1002]);
+}
+
+/// A checked task's `[X]` is written `[x]`, and the item still reads as a
+/// task rather than keeping its source.
+#[test]
+fn a_capital_task_marker_reads_as_a_task() {
+    let (body, _) = generated::read("- [X] qt\n").unwrap();
+    assert_eq!(body["children"][0]["tag"], "taskList");
+    assert_eq!(body["children"][0]["children"][0]["attrs"]["checked"], true);
+}
+
 /// A link's address and title read as the editor reads them: of the
 /// references, only the block escapes its writer uses decode. Each expected
 /// value is the editor's reading of the source.

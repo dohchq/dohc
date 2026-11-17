@@ -159,11 +159,8 @@ const READS_UNLIKE_THE_EDITOR: &[(&str, &[&str])] = &[
         "A part the writer cannot write back as it reads keeps its source, \n         where the editor reads it",
         &[
             "empty-task-root",
-            "task-casing",
-            "mixed",
             "task-marker-changes",
             "ordered-delimiter-change",
-            "task-checkbox-tab",
             "r25-bare-reread",
         ],
     ),

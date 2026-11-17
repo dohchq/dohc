@@ -401,10 +401,12 @@ pub(super) fn holds_words<'a>(
 }
 
 /// A word: a run of ASCII letters and digits that holds a letter, so a
-/// list's renumbered markers don't count.
+/// list's renumbered markers don't count. `X` counts as `x`, since a checked
+/// task's `[X]` is written `[x]`.
 pub(super) fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| word.bytes().any(|byte| byte.is_ascii_alphabetic()))
+        .map(|word| if word == "X" { "x" } else { word })
 }
 
 /// `source` with what a reading need not keep as a space: the name in an
@@ -998,9 +1000,13 @@ impl<'a> Reader<'a> {
     }
 
     /// Record that the container's last block ends at `end`, after its
-    /// trailing white space.
+    /// trailing white space. A no-break space is a paragraph's text, not
+    /// white space: trimming it moved the end back past earlier blank
+    /// lines, which each later paragraph then counted again.
     fn block_ends(&mut self, end: usize) {
-        let end = self.src[..end.min(self.src.len())].trim_end().len();
+        let end = self.src[..end.min(self.src.len())]
+            .trim_end_matches(|character: char| character.is_ascii_whitespace())
+            .len();
         self.container().last_end = Some(end);
     }
 
