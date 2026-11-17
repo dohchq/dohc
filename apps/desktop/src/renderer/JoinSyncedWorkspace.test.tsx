@@ -54,7 +54,11 @@ async function fillJoinForm(user: ReturnType<typeof userEvent.setup>) {
     "dohc-sync:ws-joined:http://localhost:1788",
   );
   await user.click(screen.getByTestId("join-choose-folder"));
-  await screen.findByText("/home/sam/dohc/notes");
+  await waitFor(() =>
+    expect(screen.getByTestId("join-choose-folder").getAttribute("title")).toBe(
+      "/home/sam/dohc/notes",
+    ),
+  );
 }
 
 describe("JoinSyncedWorkspace", () => {

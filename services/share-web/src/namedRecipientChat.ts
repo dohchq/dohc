@@ -16,15 +16,24 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+const MESSAGE_KEYS =
+  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,lane,linkAgent,messageId,parentMessageId,relaySeq,startsPost,threadId";
+
+/** A message in a follow of every Group a workspace share reaches also names its Group. */
+function groupMessage(value: unknown): boolean {
+  if (!record(value) || typeof value.channelWireId !== "string") return false;
+  const { channelWireId: _group, ...rest } = value;
+  return message(rest);
+}
+
 function message(value: unknown): boolean {
-  if (
-    !record(value) ||
-    Object.keys(value).sort().join() !==
-      "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,linkAgent,messageId,relaySeq,threadId"
-  )
-    return false;
+  if (!record(value) || Object.keys(value).sort().join() !== MESSAGE_KEYS) return false;
   return (
     ["messageId", "threadId", "authorDisplayName"].every((key) => typeof value[key] === "string") &&
+    (value.lane === "posts" || value.lane === "chat") &&
+    (value.parentMessageId === null ||
+      (typeof value.parentMessageId === "string" && value.lane === "chat")) &&
+    (value.startsPost === false || (value.startsPost === true && value.lane === "posts")) &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) ||
       (value.bodyTooLarge === false && typeof value.body === "string")) &&
@@ -46,8 +55,18 @@ function resultMatches(
   channels: boolean,
   write: boolean,
   following: boolean,
+  everyGroup: boolean,
 ): boolean {
   if (typeof value.shareId !== "string") return false;
+  if (everyGroup)
+    return (
+      Object.keys(value).sort().join() === "hasMore,messages,nextCursor,shareId" &&
+      Array.isArray(value.messages) &&
+      value.messages.every(groupMessage) &&
+      Number.isSafeInteger(value.nextCursor) &&
+      Number(value.nextCursor) >= 0 &&
+      typeof value.hasMore === "boolean"
+    );
   if (channels)
     return (
       Object.keys(value).sort().join() === "channels,maxBodyBytes,maxPostBytes,shareId,userId" &&
@@ -60,23 +79,31 @@ function resultMatches(
       value.channels.every(
         (channel) =>
           record(channel) &&
-          Object.keys(channel).sort().join() === "access,channelWireId,kind,name" &&
+          Object.keys(channel).sort().join() === "access,channelWireId,kind,name,type" &&
           typeof channel.channelWireId === "string" &&
+          (channel.type === "posts" || channel.type === "chat" || channel.type === "both") &&
           (channel.name === null || typeof channel.name === "string") &&
           (channel.kind === null || channel.kind === "channel" || channel.kind === "dm") &&
           (channel.access === "read-only" || channel.access === "read-write"),
       )
     );
-  if (typeof value.channelWireId !== "string") return false;
-  if (write)
-    return (
-      Object.keys(value).sort().join() === "channelWireId,message,shareId" && message(value.message)
-    );
+  // A file's Comments answer with the file's path where a channel answers with its wire ID.
+  const place =
+    typeof value.channelWireId === "string"
+      ? "channelWireId"
+      : typeof value.path === "string"
+        ? "path"
+        : null;
+  if (!place) return false;
+  const keys = (names: string[]) =>
+    Object.keys(value).sort().join() === [place, ...names].sort().join();
+  if (write) return keys(["message", "shareId"]) && message(value.message);
   return (
-    Object.keys(value).sort().join() ===
-      (following
-        ? "channelWireId,hasMore,messages,nextCursor,shareId"
-        : "channelWireId,messages,nextCursor,olderCursor,shareId") &&
+    keys(
+      following
+        ? ["hasMore", "messages", "nextCursor", "shareId"]
+        : ["messages", "nextCursor", "olderCursor", "shareId"],
+    ) &&
     Array.isArray(value.messages) &&
     value.messages.every(message) &&
     Number.isSafeInteger(value.nextCursor) &&
@@ -212,12 +239,16 @@ export function createNamedRecipientChatClient(options: {
           const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
           if (!record(result)) return refuse();
           if (response.status === 200) {
+            // A workspace share's follow names no Group and no file, and gets every Group it reaches.
+            const onFile = url.searchParams.has("path");
+            const everyGroup = following && !url.searchParams.has("channelWireId") && !onFile;
             if (
               !resultMatches(
                 result,
                 url.pathname.endsWith("/channels"),
                 write,
-                url.searchParams.has("since"),
+                following,
+                everyGroup,
               )
             )
               return refuse();
@@ -225,7 +256,10 @@ export function createNamedRecipientChatClient(options: {
               !write &&
               !url.pathname.endsWith("/channels") &&
               (result.shareId !== url.searchParams.get("shareId") ||
-                result.channelWireId !== url.searchParams.get("channelWireId"))
+                (!everyGroup &&
+                  (onFile
+                    ? result.path !== url.searchParams.get("path")
+                    : result.channelWireId !== url.searchParams.get("channelWireId"))))
             )
               return refuse();
           } else if (

@@ -1,5 +1,6 @@
 import { withWorkspaceSyncTransition } from "../workspaces/stopWorkspaceSync";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
@@ -251,6 +252,14 @@ export function registerCloudIpcHandlers<
             ...(workspace?.remote ? { workspaceServerUrl: workspace.remote.serverUrl } : {}),
             ...(!shareViewIsPresent(workspace?.shareView) && workspace?.syncPause
               ? { syncPause: syncPauseFor(workspace) }
+              : {}),
+            ...(shareViewIsPresent(workspace?.shareView)
+              ? {
+                  joinedBySignedInAccount: joinedByAccount(
+                    workspace?.shareView,
+                    currentCredentials(),
+                  ),
+                }
               : {}),
             workspaceSyncConnected:
               !!workspace?.remote &&

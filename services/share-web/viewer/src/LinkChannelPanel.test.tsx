@@ -133,6 +133,7 @@ it("posts from a read-write link with the name it sets once, and marks the post 
   await render();
   await opened();
   expect(container.querySelector("h2")?.textContent).toBe("Team");
+  expect(composer()?.placeholder).toBe("Message #Team");
   setControlValue(nameField()!, "Sam");
   setControlValue(composer()!, "Count me in");
   await act(async () => send().click());

@@ -16,6 +16,7 @@ import {
   NOTICE_KINDS,
   NOTICE_LIST_ROW_LIMIT,
   NOTICE_READ_RETENTION_MS,
+  NOTICE_BODY_MAX_CHARS,
   NOTICE_TITLE_MAX_CHARS,
   NOTICE_SENDER_LABEL_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
@@ -37,6 +38,8 @@ import { authorizeShareGrantAction } from "../shareAuthorization";
 import { showsGranterEmail } from "../shareSummaries";
 import { fileSideOf, parseStoredAnyShareSelectorJson, type ShareSelector } from "../shareFilter";
 import { threadPathsInTransaction } from "./accountFeed";
+import type { ChatMessageAccess, PushMessage } from "../chatMessageInterest";
+import { accountName } from "./accountNames";
 import type { StorageContext } from "./context";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import type { SyncRelayShareRow } from "./types";
@@ -512,6 +515,76 @@ export function noticePersonalAgentSignedIn(
   });
 }
 
+export interface NoticeChatMessageInput {
+  message: PushMessage;
+  recipientUserId: string;
+  reason: "mention" | "reply";
+  access: ChatMessageAccess;
+  nowMs: number;
+}
+
+// Characters a notice body cannot hold.
+const CHAT_NOTICE_BODY_REMOVALS = /[\u0000-\u0008\u000b-\u001f\u007f]/gu;
+
+/**
+ * Tells a person someone mentioned them or replied in a thread they wrote
+ * in: "Sam mentioned you in #events". Only a person's message writes one;
+ * the author is named by their account's display name. The owner's row
+ * sits in the workspace; anyone else's sits on the share they read the
+ * message through. Runs inside the message append transaction, so a full
+ * list skips the row without touching the append.
+ */
+export function noticeChatMessage(storage: StorageContext, input: NoticeChatMessageInput): void {
+  const { message, recipientUserId, access, nowMs } = input;
+  const authorUserId = message.authorUserId;
+  if (message.authorKind !== "human" || authorUserId === null) return;
+  const noticeId = noticeIdFrom(authorUserId, `chat-message:${message.relaySeq}`);
+  if (
+    storage.db
+      .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+      .get(recipientUserId, noticeId)
+  )
+    return;
+  const senderLabel = cutText(
+    accountName(storage, authorUserId) ?? "Someone",
+    NOTICE_SENDER_LABEL_MAX_CHARS,
+  );
+  const lead = `${senderLabel} ${input.reason === "mention" ? "mentioned you in" : "replied in"} `;
+  const place = access.channel ? `#${access.place}` : access.place;
+  const body = message.body.isWellFormed()
+    ? message.body.replace(CHAT_NOTICE_BODY_REMOVALS, " ").trim()
+    : "";
+  storage.db.exec("SAVEPOINT chat_message_notice");
+  try {
+    sweepExpiredNotices(storage, recipientUserId, nowMs);
+    makeRoom(storage, recipientUserId, authorUserId, nowMs);
+    insertNotice(storage, {
+      recipientUserId,
+      noticeId,
+      placement:
+        access.shareId === null
+          ? { workspaceId: message.workspaceId, recipientShareId: null }
+          : { workspaceId: null, recipientShareId: access.shareId },
+      kind: "chat-message",
+      senderUserId: authorUserId,
+      senderLabel,
+      title: `${lead}${cutText(place, NOTICE_TITLE_MAX_CHARS - [...lead].length)}`,
+      body: cutText(body, NOTICE_BODY_MAX_CHARS),
+      target:
+        access.shareId === null
+          ? { thread: message.threadId, message: message.messageId }
+          : { share: access.shareId, thread: message.threadId, message: message.messageId },
+      originInstallId: "relay",
+      nowMs,
+    });
+    storage.db.exec("RELEASE chat_message_notice");
+  } catch (error) {
+    storage.db.exec("ROLLBACK TO chat_message_notice");
+    storage.db.exec("RELEASE chat_message_notice");
+    if (!(error instanceof RelayError) || error.code !== "notice_list_full") throw error;
+  }
+}
+
 function shareNoticeSender(full: string, email: string | null): string {
   const name =
     email && full.endsWith(` (${email})`)
@@ -760,6 +833,7 @@ function withWakes(
 const PHONE_NOTICE_KINDS = {
   // Who mentioned you, and where.
   mention: "located",
+  "chat-message": "located",
   // The agent's name, the thread's place, and its reply's opening words.
   "agent-run": "located",
   // The automation's name.

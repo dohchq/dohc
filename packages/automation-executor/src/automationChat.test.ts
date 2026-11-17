@@ -27,7 +27,7 @@ const inDm = (wireId: string, userId: string | null, email: string): RosterGrant
   recipientUserId: userId,
   recipientEmail: email,
   files: null,
-  channel: { wireId, canPost: true },
+  chat: { kind: "channel", wireId, canPost: true },
 });
 
 describe("where automations write", () => {

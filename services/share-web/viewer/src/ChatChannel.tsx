@@ -9,10 +9,15 @@ import {
   type ReactNode,
 } from "react";
 import { renderSafeMarkdown } from "./markdown";
+import { readDraft, writeDraft } from "./drafts";
+import { CopyWork } from "./CopyWork";
+import { Icon } from "./icons";
 import {
   CHAT_FOLLOW_HOLD_MS,
   mergeChatMessages,
   NamedChatError,
+  type ChatPost,
+  type GroupType,
   type NamedChatAccess,
   type NamedChatMessage,
 } from "./namedChat";
@@ -26,6 +31,8 @@ const POST_UNKNOWN =
 const POST_BUSY = "The server is busy. Try again in a moment.";
 const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
+const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
+const EMPTY = "No messages in this channel yet.";
 
 /** A 401 or 404 ends the channel for this account; other failures leave it open. */
 export function ended(error: unknown): Ended | null {
@@ -82,7 +89,21 @@ function LinkHolderMark() {
   );
 }
 
-function ChatMessage({ message }: { message: NamedChatMessage }) {
+/** A post or a chat message with its replies: how many, and how to open them. */
+interface Replies {
+  count: number;
+  open(): void;
+}
+
+function ChatMessage({
+  message,
+  replies,
+  canReply,
+}: {
+  message: NamedChatMessage;
+  replies?: Replies;
+  canReply: boolean;
+}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(
     () => (message.body === null ? null : renderSafeMarkdown(message.body, () => null)),
@@ -94,6 +115,9 @@ function ChatMessage({ message }: { message: NamedChatMessage }) {
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs),
     dated = !Number.isNaN(sent.getTime());
+  // "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
+  const owner = agent ? message.authorOwnerDisplayName : null,
+    unnamed = owner !== null && message.authorDisplayName === "Agent";
   return (
     <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
       <p className="chat-meta">
@@ -104,11 +128,11 @@ function ChatMessage({ message }: { message: NamedChatMessage }) {
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">{message.authorDisplayName}</span>
+        <span className="chat-author">
+          {unnamed ? `${owner}'s agent` : message.authorDisplayName}
+        </span>
         {message.authorKind === "link" && <LinkHolderMark />}
-        {agent && message.authorOwnerDisplayName && (
-          <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>
-        )}
+        {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
       </p>
       {html === null ? (
@@ -118,8 +142,81 @@ function ChatMessage({ message }: { message: NamedChatMessage }) {
       ) : (
         <div className="markdown chat-body" dangerouslySetInnerHTML={{ __html: html }} />
       )}
+      {/* A person who can't post has nothing to reply with, so only a thread with replies opens. */}
+      {replies && (canReply || replies.count > 0) && (
+        <button type="button" className="chat-replies" onClick={replies.open}>
+          {replies.count === 0
+            ? "Reply"
+            : replies.count === 1
+              ? "1 reply"
+              : `${replies.count} replies`}
+        </button>
+      )}
     </li>
   );
+}
+
+type Lane = "posts" | "chat";
+const LANES = [
+  ["posts", "Posts"],
+  ["chat", "Chat"],
+] as const;
+/** An open thread: a post's, or one chat message's replies. */
+type OpenThread = { threadId: string; rootId: string | null };
+
+// The desktop's Group: a feed of posts, each a thread, and one running chat whose messages can each hold a thread.
+function threadView(
+  messages: readonly NamedChatMessage[],
+  lane: Lane,
+  open: OpenThread | null,
+  onOpen: (thread: OpenThread, seq: number) => void,
+) {
+  if (open)
+    return {
+      shown: messages.filter(
+        (message) =>
+          message.threadId === open.threadId &&
+          (open.rootId === null ||
+            message.messageId === open.rootId ||
+            message.parentMessageId === open.rootId),
+      ),
+      replies: new Map<number, Replies>(),
+    };
+  const replies = new Map<number, Replies>(),
+    shown: NamedChatMessage[] = [];
+  if (lane === "posts") {
+    const threads = new Map<string, NamedChatMessage[]>();
+    for (const message of messages)
+      if ((message.lane ?? "posts") === "posts")
+        threads.set(message.threadId, [...(threads.get(message.threadId) ?? []), message]);
+    // History loads newest first, so once a post's first message has loaded, so have all its replies.
+    // Until then the post belongs above Load earlier messages.
+    for (const [threadId, thread] of threads) {
+      const post = thread.find((message) => message.startsPost);
+      if (!post) continue;
+      shown.push(post);
+      replies.set(post.relaySeq, {
+        count: thread.length - 1,
+        open: () => onOpen({ threadId, rootId: null }, post.relaySeq),
+      });
+    }
+    shown.sort((left, right) => left.relaySeq - right.relaySeq);
+    return { shown, replies };
+  }
+  const counts = new Map<string, number>();
+  for (const message of messages)
+    if (message.lane === "chat" && message.parentMessageId)
+      counts.set(message.parentMessageId, (counts.get(message.parentMessageId) ?? 0) + 1);
+  for (const message of messages) {
+    if (message.lane !== "chat" || message.parentMessageId) continue;
+    shown.push(message);
+    replies.set(message.relaySeq, {
+      count: counts.get(message.messageId) ?? 0,
+      open: () =>
+        onOpen({ threadId: message.threadId, rootId: message.messageId }, message.relaySeq),
+    });
+  }
+  return { shown, replies };
 }
 
 /** How a channel view reads, follows and posts: through a named account, or through a share link. */
@@ -134,26 +231,53 @@ export interface ChatChannelClient {
     holdMs: number,
     signal: AbortSignal,
   ): Promise<{ messages: NamedChatMessage[]; nextCursor: number; hasMore: boolean }>;
-  post(post: { id: string; body: string }, signal: AbortSignal): Promise<NamedChatMessage>;
+  post(post: ChatPost, signal: AbortSignal): Promise<NamedChatMessage>;
   /** The body the relay stores, or null when it would refuse it. */
   normalize(text: string): string | null;
   tooLong(text: string): boolean;
 }
 
-/** `composerField` sits above the message box; while `holdSend` is set, the message waits for that field. */
+/**
+ * `composerField` sits above the message box; while `holdSend` is set, the message waits for that field.
+ * `readOnlyNote`, `empty`, `messageLabel` and `placeholder` replace the channel's own words, where the page names its conversations differently.
+ * `threads` shows a Group's lanes and threads as the desktop does. `draftKey` keeps unsent text for the tab, per composer.
+ */
 export function ChannelView({
   client,
   name,
   onEnded,
   composerField,
   holdSend = false,
+  readOnlyNote = READ_ONLY,
+  empty = EMPTY,
+  messageLabel = "Message",
+  placeholder: channelPlaceholder = name ? `Message #${name}` : "Write a message…",
+  threads,
+  draftKey,
 }: {
   client: ChatChannelClient;
   name: string | null;
   onEnded(reason: Ended): void;
   composerField?: ReactNode;
   holdSend?: boolean;
+  readOnlyNote?: string;
+  empty?: string;
+  messageLabel?: string;
+  placeholder?: string;
+  threads?: GroupType;
+  draftKey?: string;
 }) {
+  const [lane, setLane] = useState<Lane>(threads === "chat" ? "chat" : "posts"),
+    [open, setOpen] = useState<OpenThread | null>(null);
+  // Each composer keeps its own draft: the Group's lane, or the open thread.
+  const composerKey =
+    draftKey === undefined
+      ? null
+      : !threads
+        ? draftKey
+        : open
+          ? `${draftKey}\nthread\n${open.threadId}\n${open.rootId ?? ""}`
+          : `${draftKey}\n${lane}`;
   const [messages, setMessages] = useState<NamedChatMessage[] | null>(null),
     [loadFailed, setLoadFailed] = useState(false);
   const [attempt, setAttempt] = useState(0),
@@ -162,20 +286,53 @@ export function ChannelView({
   const [following, setFollowing] = useState<"live" | "delayed" | "stopped">("live"),
     [unseen, setUnseen] = useState(0);
   const [access, setAccess] = useState(client.access),
-    [draft, setDraft] = useState("");
+    [accessFrom, setAccessFrom] = useState(client.access),
+    [draft, setDraftText] = useState(() => (composerKey === null ? "" : readDraft(composerKey)));
+  const [draftFor, setDraftFor] = useState(composerKey),
+    currentKey = useRef(composerKey);
+  currentKey.current = composerKey;
+  if (draftFor !== composerKey) {
+    setDraftFor(composerKey);
+    setDraftText(composerKey === null ? "" : readDraft(composerKey));
+  }
+  // A changed level reaches a mounted channel in place, so its messages and draft stay.
+  // A discarded draft the person can no longer post, kept only for its Undo, as the page's kept edits are.
+  const [discarded, setDiscarded] = useState<{ key: string | null; text: string } | null>(null);
+  if (accessFrom !== client.access) {
+    setAccessFrom(client.access);
+    setAccess(client.access);
+    setDiscarded(null);
+  }
+  const setDraft = (text: string) => {
+    setDraftText(text);
+    if (composerKey !== null) writeDraft(composerKey, text);
+  };
   const [posting, setPosting] = useState(false),
     [postError, setPostError] = useState<{ text: string; retry: boolean } | null>(null);
   const mounted = useRef<AbortController | null>(null),
     follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]),
     cursorRef = useRef<number | null>(null);
-  const intent = useRef<{ id: string; body: string } | null>(null),
+  const intent = useRef<(ChatPost & { key: string | null }) | null>(null),
     postingRef = useRef(false),
     olderRef = useRef(false);
   const scroller = useRef<HTMLDivElement | null>(null),
     pinned = useRef(true),
     stick = useRef(false);
   const anchor = useRef<{ seq: string; offset: number } | null>(null);
+  // Opening a thread moves focus to its back control. Going back returns it to the Reply that opened the thread.
+  const backControl = useRef<HTMLButtonElement | null>(null),
+    opener = useRef<number | null>(null),
+    focusNext = useRef<"back" | number | null>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    focusNext.current = null;
+    if (target === "back") backControl.current?.focus();
+    else if (target !== null)
+      scroller.current
+        ?.querySelector<HTMLElement>(`.chat-message[data-seq="${target}"] .chat-replies`)
+        ?.focus();
+  }, [open]);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
 
@@ -344,22 +501,76 @@ export function ChannelView({
 
   const body = client.normalize(draft),
     tooLong = client.tooLong(draft);
+  const placeholder = !threads
+    ? channelPlaceholder
+    : open
+      ? "Reply…"
+      : lane === "posts"
+        ? `What's happening in #${name ?? "Group"}?`
+        : `Message #${name ?? "Group"}`;
+  const target: Omit<ChatPost, "id" | "body"> = !threads
+    ? {}
+    : open
+      ? { threadId: open.threadId, ...(open.rootId ? { parentMessageId: open.rootId } : {}) }
+      : { lane };
+  const view =
+    threads && messages
+      ? threadView(messages, lane, open, (thread, seq) => {
+          setOpen(thread);
+          stick.current = true;
+          opener.current = seq;
+          focusNext.current = "back";
+        })
+      : null;
+  const shown = view?.shown ?? messages;
+  const showLane = (next: Lane) => {
+    setLane(next);
+    setOpen(null);
+    intent.current = null;
+    setPostError(null);
+    stick.current = true;
+  };
+  // The arrow keys, Home and End move between the lanes, as between the workspace's tabs.
+  const moveLane = (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = LANES.findIndex(([value]) => value === lane),
+      count = LANES.length;
+    const target =
+      event.key === "ArrowRight"
+        ? (index + 1) % count
+        : event.key === "ArrowLeft"
+          ? (index + count - 1) % count
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? count - 1
+              : -1;
+    if (target < 0) return;
+    event.preventDefault();
+    showLane(LANES[target]![0]);
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[target]?.focus();
+  };
   const send = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     const controller = mounted.current;
     if (!controller || body === null || holdSend || postingRef.current || access !== "read-write")
       return;
     // The same text keeps its client ID, so a retry after an unknown outcome cannot post twice.
-    const post = intent.current?.body === body ? intent.current : { id: crypto.randomUUID(), body };
+    const post =
+      intent.current?.body === body && intent.current.key === composerKey
+        ? intent.current
+        : { id: crypto.randomUUID(), body, key: composerKey, ...target };
     intent.current = post;
     postingRef.current = true;
     setPosting(true);
     setPostError(null);
     try {
-      const message = await client.post(post, controller.signal);
+      const { key, ...sent } = post;
+      const message = await client.post(sent, controller.signal);
       if (controller.signal.aborted) return;
+      // A confirmed send clears its own composer's draft, wherever the person is now.
       intent.current = null;
-      setDraft("");
+      if (key !== null) writeDraft(key, "");
+      if (currentKey.current === key) setDraftText("");
       receive([message], true);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -420,8 +631,58 @@ export function ChannelView({
     : tooLong
       ? "This message is too long. Shorten it before sending."
       : (postError?.text ?? "");
+  const back = open && (
+    <div className="chat-thread-head">
+      <button
+        type="button"
+        className="icon-button"
+        ref={backControl}
+        aria-label={lane === "posts" ? "Back to posts" : "Back to the conversation"}
+        title={lane === "posts" ? "Back to posts" : "Back to the conversation"}
+        onClick={() => {
+          setOpen(null);
+          intent.current = null;
+          setPostError(null);
+          stick.current = true;
+          focusNext.current = opener.current;
+        }}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.9}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="m15 18-6-6 6-6" />
+        </svg>
+      </button>
+      <h3>Thread</h3>
+    </div>
+  );
   return (
     <section className="chat-channel" aria-label={name ?? "Shared channel"}>
+      {threads === "both" && !open && (
+        <div className="chat-lanes" role="tablist" aria-label="Group lanes" onKeyDown={moveLane}>
+          {LANES.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={lane === value}
+              tabIndex={lane === value ? 0 : -1}
+              onClick={() => showLane(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+      {back}
       <div className="chat-messages">
         <div
           className="chat-scroller"
@@ -460,12 +721,17 @@ export function ChannelView({
               </div>
             ) : !messages ? (
               <p className="chat-state">Loading messages…</p>
-            ) : !messages.length && olderCursor === null ? (
-              <p className="chat-state">No messages in this channel yet.</p>
+            ) : !shown!.length && olderCursor === null ? (
+              <p className="chat-state">{empty}</p>
             ) : (
               <ol className="chat-list">
-                {messages.map((message) => (
-                  <ChatMessage key={message.relaySeq} message={message} />
+                {shown!.map((message) => (
+                  <ChatMessage
+                    key={message.relaySeq}
+                    message={message}
+                    replies={view?.replies.get(message.relaySeq)}
+                    canReply={access === "read-write"}
+                  />
                 ))}
               </ol>
             )}
@@ -492,8 +758,65 @@ export function ChannelView({
       </div>
       {access === "read-only" ? (
         <div className="chat-read-only">
-          <p>You can read this channel but not post. The owner gave you read-only access.</p>
-          {draft && <textarea readOnly value={draft} aria-label="Your unsent message" />}
+          <p className="chat-read-only-note">
+            <Icon name="lock" size={14} />
+            <span>{readOnlyNote}</span>
+          </p>
+          {/* Text the person wrote before they could no longer post stays theirs to copy, until they discard it. */}
+          {draft ? (
+            <>
+              {/* The same pattern as a page's unsent edits: what and where, then where the text lives. */}
+              <h3 className="chat-unsent-title">
+                <Icon name="triangle-alert" size={14} />
+                <span>{name ? `Unsent message to #${name}` : "Unsent message"}</span>
+              </h3>
+              <p className="chat-unsent-note">Only this tab has it. Copy it before you close it.</p>
+              <textarea readOnly value={draft} aria-label="Your unsent message" />
+              <div className="chat-unsent-actions">
+                <CopyWork
+                  text={draft}
+                  label="Copy unsent message"
+                  failure="dohc could not copy the message. Select it, then copy it."
+                />
+                <button
+                  type="button"
+                  className="handoff-button secondary"
+                  onClick={() => {
+                    setDiscarded({ key: composerKey, text: draft });
+                    setDraft("");
+                  }}
+                >
+                  Discard
+                </button>
+              </div>
+            </>
+          ) : (
+            discarded &&
+            discarded.key === composerKey && (
+              <div className="chat-unsent-discarded">
+                <p>Discarded your unsent message.</p>
+                <button
+                  type="button"
+                  className="handoff-button secondary"
+                  onClick={() => {
+                    setDraft(discarded.text);
+                    setDiscarded(null);
+                  }}
+                >
+                  Undo
+                </button>
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => setDiscarded(null)}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            )
+          )}
         </div>
       ) : (
         <form className="chat-composer" onSubmit={(event) => void send(event)}>
@@ -504,7 +827,8 @@ export function ChannelView({
               value={draft}
               readOnly={posting}
               rows={1}
-              aria-label="Message"
+              aria-label={messageLabel}
+              placeholder={placeholder}
               aria-describedby="chat-composer-status"
               enterKeyHint="send"
               onKeyDown={keyDown}

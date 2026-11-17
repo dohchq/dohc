@@ -26,6 +26,7 @@ export interface DocumentSaveFailure {
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   identity?: string;
+  quiet?: boolean;
 }
 
 // States that replace a failed save: it saved, or another state with its own
@@ -131,6 +132,27 @@ export function reportDocumentReplacement(
 ): void {
   for (const listener of [...replacementListeners])
     listener({ workspaceId, path, setAside, failure });
+}
+
+// A shared page the server's live host would not take, so it opened
+// read-only. `refusal` is null once the page opens for editing. `waits` says
+// it waits for its owner's dohc, which dohc is fixing by itself. `quiet` files
+// the row without a toast, for an answer this open already raised. `retry`
+// answers false when no page is open to try again.
+interface LiveHostRefusal {
+  workspaceId: string;
+  path: string;
+  refusal: { reason?: string; waits?: boolean; quiet: boolean; retry: () => boolean } | null;
+}
+
+const hostRefusalListeners = new Set<(refusal: LiveHostRefusal) => void>();
+
+export function reportLiveHostRefusal(
+  workspaceId: string,
+  path: string,
+  refusal: LiveHostRefusal["refusal"],
+): void {
+  for (const listener of [...hostRefusalListeners]) listener({ workspaceId, path, refusal });
 }
 
 // The engine settles a live document; the plain editor writes every other
@@ -400,12 +422,40 @@ export function useDocumentSaveNotices(input: {
         latest.current.clear(notice.identity);
       }
     };
+    const hostRefusal = ({ workspaceId: refused, path, refusal }: LiveHostRefusal): void => {
+      if (!current() || refused !== owner) return;
+      const identity = `live-host-refused:${owner}:${path}`;
+      if (!refusal) {
+        latest.current.clear(identity);
+        return;
+      }
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      latest.current.report({
+        // Waiting for the owner's dohc is a state dohc is still fixing, not a failure.
+        ...(refusal.waits ? { tone: "warning" as const } : {}),
+        title: refusal.waits
+          ? `Waiting to edit "${name}"`
+          : `dohc could not open "${name}" for editing`,
+        message: refusal.reason
+          ? `${refusal.reason} You can still read it.`
+          : "You can still read it.",
+        details: [["File", path, path.length]],
+        identity,
+        target: { to: "file", path },
+        quiet: refusal.quiet,
+        retry: () => {
+          if (current() && !refusal.retry()) latest.current.open(path);
+        },
+      });
+    };
     textSaveListeners.add(textSave);
     replacementListeners.add(replacement);
+    hostRefusalListeners.add(hostRefusal);
     return () => {
       stopDocuments();
       textSaveListeners.delete(textSave);
       replacementListeners.delete(replacement);
+      hostRefusalListeners.delete(hostRefusal);
     };
   }, [workspaceId]);
   return failedSaves.workspaceId === workspaceId ? failedSaves.count : 0;

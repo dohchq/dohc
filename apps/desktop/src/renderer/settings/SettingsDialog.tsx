@@ -155,6 +155,7 @@ export function SettingsDialog(props: {
    * shared view never has.
    */
   sharedView?: boolean;
+  membership?: boolean;
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   // The part a Customize… command opened Settings for: its row is marked and
@@ -332,13 +333,15 @@ export function SettingsDialog(props: {
     };
   }, [props.workspaceId, props.workspaceIsReady]);
 
-  // A shared view lists no Members: the workspace it came from does.
+  // A shared view lists no Members: the workspace it came from does. A
+  // joined workspace lists the owner's.
+  const listsMembers = !props.sharedView || !!props.membership;
   const sections = useMemo(
     () =>
-      props.sharedView
-        ? SETTINGS_SECTIONS.filter((section) => section.id !== "members")
-        : SETTINGS_SECTIONS,
-    [props.sharedView],
+      listsMembers
+        ? SETTINGS_SECTIONS
+        : SETTINGS_SECTIONS.filter((section) => section.id !== "members"),
+    [listsMembers],
   );
   const filteredSections = useMemo(
     () => sections.filter((section) => sectionMatches(section, query)),
@@ -896,10 +899,10 @@ export function SettingsDialog(props: {
       case "members":
         return (
           <div data-testid={settingsSectionPin("members")}>
-            {/* A shared view has no Members of its own: the original workspace lists them. */}
-            {props.sharedView ? null : (
+            {listsMembers ? (
               <MembersSettings
                 workspaceId={props.workspaceId}
+                {...(props.membership ? { joined: true } : {})}
                 workspaceName={
                   props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
                 }
@@ -911,7 +914,7 @@ export function SettingsDialog(props: {
                 {...(props.onError ? { onError: props.onError } : {})}
                 {...(props.onClearError ? { onClearError: props.onClearError } : {})}
               />
-            )}
+            ) : null}
           </div>
         );
       case "apps":

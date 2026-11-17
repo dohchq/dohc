@@ -33,6 +33,11 @@ export function linkLogWaitGroup(workspaceId: string): string {
   return `log:${workspaceId}`;
 }
 
+/** Browser chat follows wait apart, so a full room of tabs leaves room for link readers. */
+export function browserChatWaitGroup(workspaceId: string): string {
+  return `browser-chat:${workspaceId}`;
+}
+
 export function ownerLogWaitGroup(workspaceId: string): string {
   return `owner-log:${workspaceId}`;
 }
@@ -80,9 +85,10 @@ export class DiscussionActivityHub {
     this.waiters.wake(shareId, undefined);
   }
 
-  /** The workspace log changed: wakes its link readers, its owner's devices, its personal agents, and its account change feeds. */
+  /** The workspace log changed: wakes its link readers, its browser chats, its owner's devices, its personal agents, and its account change feeds. */
   wakeLog(workspaceId: string): void {
     this.waiters.wake(linkLogWaitGroup(workspaceId), undefined);
+    this.waiters.wake(browserChatWaitGroup(workspaceId), undefined);
     this.waiters.wake(ownerLogWaitGroup(workspaceId), undefined);
     this.personal.wake(ownerLogWaitGroup(workspaceId), undefined);
     this.waiters.wake(accountFeedWaitGroup(workspaceId), undefined);

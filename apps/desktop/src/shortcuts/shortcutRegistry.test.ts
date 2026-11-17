@@ -152,7 +152,7 @@ describe("shortcut menu contract", () => {
       expect(labels).toEqual({ ...rowLabels, ...findLabels });
       expect(labels).toEqual({
         ...findLabels,
-        "new-file": "New file",
+        "new-file": "New page",
         "new-folder": "New folder",
         "new-collection": "New collection",
         "open-workspace": "Open workspace folder…",
@@ -192,7 +192,7 @@ describe("shortcut menu contract", () => {
       ] as const) {
         Reflect.set(row, "owner", owner);
         const { items, sendCommand } = menu("win32");
-        const matches = items.filter((item) => item.label?.startsWith("New file"));
+        const matches = items.filter((item) => item.label?.startsWith("New page"));
         expect(matches.map((item) => item.accelerator)).toEqual(row.accelerators);
         expect(matches.map((item) => item.visible === false)).toEqual([false, true]);
         for (const item of matches) {

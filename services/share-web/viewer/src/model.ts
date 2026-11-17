@@ -15,6 +15,8 @@ export interface ViewMeta {
   lastSettledKnown: boolean;
   /** A Group link's channel. The share's answer without one confirms the link has none. */
   channel?: { channelWireId: string };
+  /** For a member, who last set the members' level, by name. */
+  levelChangedBy?: string;
 }
 
 export interface RelayOp {

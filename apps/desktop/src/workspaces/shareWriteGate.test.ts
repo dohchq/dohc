@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
+  joinedByAccount,
   SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
   shareViewTakesLocalWrites,
+  shareViewWriteScopeOf,
+  workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./shareWriteGate";
 
@@ -82,5 +85,96 @@ describe("workspaceWriteRefusal", () => {
     expect(workspaceWriteRefusal({ ...marker("edit"), granterEmail: null })).toBe(
       "This is a shared view — ask the person who shared it for changes.",
     );
+  });
+});
+
+// What a joined workspace offers. A page needs Edit; a folder starts with its
+// first page and only an admin starts one, as the relay decides.
+describe("workspaceCreateOffers in a joined workspace", () => {
+  const member = (access: ShareAccess, role?: "admin" | "member") =>
+    workspaceCreateOffers({ access, ended: false, membership: true }, role);
+
+  it("offers a new page at Edit only", () => {
+    expect(
+      (["view", "comment", "edit"] as const).filter((access) => member(access, "member").write),
+    ).toEqual(["edit"]);
+  });
+
+  it("offers a new folder and a new Collection to an admin at Edit, and to nobody else", () => {
+    expect(member("edit", "admin")).toEqual({ write: true, folder: true, collection: true });
+    expect(member("edit", "member")).toEqual({ write: true, folder: false, collection: false });
+    expect(member("edit")).toEqual({ write: true, folder: false, collection: false });
+    expect(member("comment", "admin")).toEqual({ write: false, folder: false, collection: false });
+    expect(
+      workspaceCreateOffers({ access: "edit", ended: true, membership: true }, "admin").folder,
+    ).toBe(false);
+  });
+
+  it("keeps a path share at Edit to files and Collections, with no folder", () => {
+    expect(workspaceCreateOffers({ access: "edit", ended: false }, "admin")).toEqual({
+      write: true,
+      folder: false,
+      collection: true,
+    });
+  });
+
+  it("reads a membership from the pinned grant", () => {
+    const pinned = {
+      ...marker("edit"),
+      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    };
+    expect(shareViewWriteScopeOf(pinned, null)).toMatchObject({ membership: true });
+    expect(shareViewWriteScopeOf(marker("edit"), null)).toMatchObject({ membership: false });
+  });
+});
+
+// A joined workspace's level belongs to the account that joined. Signed out, a
+// local change waits for that account, and nothing goes to the relay. Another
+// account gets neither. Each row fails if its writer reads as another.
+describe("the joined-account rule", () => {
+  const joinedView = {
+    ...marker("edit"),
+    recipientUserId: "recipient-a",
+    grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+  };
+  const joined = { userId: "recipient-a", relayUrl: "https://relay.test" };
+
+  it.each([
+    ["the account that joined", joined, "joined", true, true],
+    [
+      "another account",
+      { userId: "someone-else", relayUrl: "https://relay.test" },
+      "other",
+      false,
+      false,
+    ],
+    [
+      "the same user id on another relay",
+      { userId: "recipient-a", relayUrl: "https://other-relay.test" },
+      "other",
+      false,
+      false,
+    ],
+    ["nobody", null, "signed-out", true, false],
+  ] as const)(
+    "with %s signed in, takes local writes and relay actions as the writer allows",
+    (_name, credentials, writer, local, relay) => {
+      const scope = shareViewWriteScopeOf(joinedView, credentials)!;
+      expect(scope.writer).toBe(writer);
+      expect(shareViewTakesLocalWrites(scope)).toBe(local);
+      expect(workspaceCreateOffers(scope, "admin")).toEqual({
+        write: local,
+        folder: local,
+        collection: local,
+      });
+      expect(joinedByAccount(joinedView, credentials)).toBe(relay);
+    },
+  );
+
+  it("names no writer for a path share or an ended membership", () => {
+    expect(
+      shareViewWriteScopeOf({ ...marker("edit"), recipientUserId: "recipient-a" }, joined)?.writer,
+    ).toBeUndefined();
+    expect(shareViewWriteScopeOf({ ...joinedView, ended: true }, joined)?.writer).toBeUndefined();
   });
 });

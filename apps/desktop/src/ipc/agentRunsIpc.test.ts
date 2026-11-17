@@ -776,6 +776,24 @@ describe("agent run IPC registrations", () => {
     expect(h.config).toHaveBeenCalledWith(h.workspace.rootPath, "view");
   });
 
+  // Agents run only in a workspace you capture, so a joined workspace's
+  // threads have no runs and nothing queued, and opening one must not fail.
+  it("answers no runs and an idle dispatch for a shared view without capture", async () => {
+    const h = await harness(true);
+    await expect(h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload)).resolves.toEqual({
+      runs: {},
+    });
+    await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({
+      liveRunId: null,
+      liveTriggerMessageId: null,
+      pendingCount: 0,
+      paused: false,
+    });
+    expect(h.requireCapture).not.toHaveBeenCalled();
+    expect(h.records).not.toHaveBeenCalled();
+    expect(h.dispatch.dispatchStateForThread).not.toHaveBeenCalled();
+  });
+
   it("rejects a stop from another renderer before dispatch", async () => {
     const h = await harness();
     await expect(

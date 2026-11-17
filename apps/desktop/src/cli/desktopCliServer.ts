@@ -49,9 +49,18 @@ import {
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
-import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
+import type {
+  PhysicalWorkspace,
+  WorkspaceAuthorityOperation,
+} from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
+import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
+import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import type { JoinedGroupInput } from "../workspaces/joinedGroupCreate";
+import type { ReceivedRecordDraft } from "../workspaces/receivedShareRecordCreation";
+import type { CreateCollectionRecordPayload } from "../ipc/bridgeContract";
+import type { CreationPartial } from "@dohc/cli/creation";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
@@ -95,10 +104,15 @@ import {
   UNNAMED_AGENT_ID,
   VersionedTextStoreError,
   type MomentWriteAuthor,
+  type ChatChannelSummary,
 } from "@dohc/workspace-contracts/engine";
 
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
+
+// A member's refusal names the command that lists their level and role.
+const needsEdit = (action: string, access: string | null | undefined) =>
+  `${action} needs Edit. You can ${access ?? "view"} here. Run dohc members list to see what you can do.`;
 
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
@@ -286,7 +300,38 @@ interface DesktopCliServerDependencies<State> {
   agentDispatchStoreHandleFor(
     workspace: RegistryEntry,
   ): Pick<LiveAgentDispatchStoreHandle, "store">;
-  sharedViewOf(workspaceId: string): unknown;
+  // A share view's scope, or null for a workspace this computer owns. A
+  // membership is a view of a whole workspace: a joined workspace.
+  sharedViewOf(workspaceId: string): ShareViewWriteScope | null;
+  // A share view's History: what its share imported, from its own store.
+  sharedViewHistory(
+    workspace: PhysicalWorkspace<RegistryEntry>,
+  ): Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">;
+  // An agent's new page in a joined workspace. The relay decides each one;
+  // the role and folders only give a refusal its reason first.
+  // New group in a joined workspace, through the relay (joinedGroupCreate).
+  createJoinedGroup(
+    workspace: RegistryEntry,
+    store: DesktopLinkedChatStore,
+    input: JoinedGroupInput,
+    assertCurrent: () => void,
+  ): Promise<ChatChannelSummary>;
+  joinedPages: {
+    // The role the relay last named, or undefined before it has.
+    role(workspaceId: string): "admin" | "member" | undefined;
+    folderHoldsFile(workspaceId: string, folder: string): Promise<boolean>;
+    // The Explorer's New page in a share view. Returns the created path.
+    create(workspace: RegistryEntry, path: string, markdown: string): Promise<string>;
+  };
+  // A joined workspace's Collection records, as its Collection page changes
+  // them: New record through the share, and record text from the view.
+  joinedRecords: {
+    create(
+      operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+      input: CreateCollectionRecordPayload,
+    ): Promise<ReceivedRecordDraft | CreationPartial>;
+    readText(workspaceId: string, path: string): Promise<{ text: string; truncated: boolean }>;
+  };
   // A shared view's projection status, or undefined for any other workspace.
   shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
@@ -390,10 +435,22 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       throw new Error("dohc: not inside a dohc workspace");
     }
     await openWorkspaceActivity(workspace);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (!capture) {
+    // A share view has no capture. Its files resolve through the view's own
+    // engine session, and its History is what its share imported.
+    const shareView = sharedViewOf(workspace.workspaceId) !== null;
+    const capture = shareView ? null : activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture && !shareView) {
       throw new Error(captureRefusal("Chats"));
     }
+    const resolveViewFile = async (target: { path: string } | { objectId: string }) => {
+      const [found] =
+        (await withEngineAdapter(
+          workspace,
+          async (adapter) =>
+            await resolveEngineFileTargets(adapter, workspace.workspaceId, [target]),
+        )) ?? [];
+      return found?.status === "found" ? found : null;
+    };
     const store = linkedChatStoreFor(workspace);
     const daemon = currentDaemon();
     if (!daemon) throw new Error("The workspace engine is not running.");
@@ -418,6 +475,32 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           ),
       );
     };
+    // A joined workspace's record changes through its live session on the
+    // server, the one a member's cell edit opens, and is done once the server
+    // holds it. Its text is read from the view.
+    const joinedRecordContext = (): CollectionRecordEditContext => ({
+      openRecord: async (path) => {
+        const provider = await liveDocuments.openSharedDocument(workspace.workspaceId, path);
+        return {
+          applyDecidedLocalUpdate: (decide, onArmed, options) =>
+            provider.applyDecidedLocalUpdate(decide, onArmed, options),
+          settleNow: async () => {
+            if (!provider.savedToHost) throw new Error(`${path} cannot take an edit from here.`);
+            await provider.savedToHost();
+          },
+          close: async () => {
+            await provider.close();
+          },
+        };
+      },
+      createFile: async () => {
+        throw new Error("A joined workspace adds records through the share.");
+      },
+      readText: (path) => dependencies.joinedRecords.readText(workspace.workspaceId, path),
+      withAdapter: async () => null,
+      onRecordsChanged: () => () => undefined,
+      signal: AbortSignal.timeout(CLI_REQUEST_DEADLINE_MS),
+    });
     const publicationAttachment = await withPhysicalWorkspaceOperation(
       workspace.workspaceId,
       (operation) => {
@@ -561,7 +644,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
         : {}),
       ...(dependencies.workspaceMembers
         ? {
-            members: (request: import("@dohc/cli/members").OwnerMembersRequest) =>
+            members: (request: import("@dohc/cli/members").AgentMembersRequest) =>
               withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
                 if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
                   throw new Error("This workspace changed while this ran. Try again.");
@@ -631,6 +714,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       accountReadOwner: (threadId) => dependencies.accountReadOwner(workspace, store, threadId),
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      joined: sharedViewOf(workspace.workspaceId)?.membership === true,
       makeWorkReference: async (target) => {
         const made = await withEngineAdapter(workspace, (adapter) =>
           adapter.makeWorkReference({
@@ -647,6 +731,11 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           operation.assertCurrent();
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
             throw new Error("This workspace changed while this ran. Try again.");
+          if (sharedViewOf(workspace.workspaceId)?.membership === true) {
+            return await dependencies.createJoinedGroup(operation.workspace, store, input, () =>
+              operation.assertCurrent(),
+            );
+          }
           if (sharedViewOf(workspace.workspaceId))
             throw new Error("This workspace is read-only. Write in the owning workspace.");
           return await createGroup(
@@ -657,7 +746,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             { workspaceId: workspace.workspaceId, ...input },
           );
         }),
-      fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+      fileObjectIdForPath: async (path) =>
+        capture
+          ? await capture.fileObjectIdForPath(path)
+          : ((await resolveViewFile({ path }))?.objectId ?? null),
       sharedFilesHeld: async () => {
         const projection = await shareProjection(workspace);
         if (!projection) return null;
@@ -710,9 +802,62 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       // through the desktop's one collection write seam.
       collections: {
         writes: {
-          setFields: (input) =>
-            cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
-          createRecord: (input) => runCollectionRecordCreation(cliCollectionEdit, input),
+          setFields: async (input) => {
+            const view = sharedViewOf(workspace.workspaceId);
+            if (view?.membership !== true)
+              return await cliCollectionEdit((context) =>
+                setCollectionRecordFields(context, input),
+              );
+            if (view.access !== "edit")
+              throw new Error(needsEdit("Changing a Collection record", view.access));
+            return await setCollectionRecordFields(joinedRecordContext(), input);
+          },
+          createRecord: async (input) => {
+            const view = sharedViewOf(workspace.workspaceId);
+            if (view?.membership !== true)
+              return await runCollectionRecordCreation(cliCollectionEdit, input);
+            if (view.access !== "edit")
+              throw new Error(needsEdit("Adding a Collection record", view.access));
+            const created = await withPhysicalWorkspaceOperation(
+              workspace.workspaceId,
+              async (operation) => {
+                operation.assertCurrent();
+                return await dependencies.joinedRecords.create(operation, {
+                  workspaceId: workspace.workspaceId,
+                  collectionPath: input.collectionPath,
+                  name: input.name,
+                  ...(input.recordId ? { recordId: input.recordId } : {}),
+                });
+              },
+            );
+            if ("kind" in created) return created;
+            if (created.delivery === "refused")
+              throw new Error(created.reason ?? "The sync relay did not accept this record.");
+            if (Object.keys(input.fields ?? {}).length === 0)
+              return { path: created.path, recordId: created.recordId };
+            try {
+              const { kept } = await setCollectionRecordFields(joinedRecordContext(), {
+                recordPath: created.path,
+                fields: input.fields!,
+                author: input.author,
+              });
+              return { path: created.path, recordId: created.recordId, kept };
+            } catch (error) {
+              // The record exists. Sent again with its id, the create finds it and sets what still differs.
+              return {
+                kind: "partial" as const,
+                created: [created.path],
+                failedStage: "fields" as const,
+                reason: error instanceof Error ? error.message : String(error),
+                retry: {
+                  mode: "resume" as const,
+                  recordId: created.recordId,
+                  instruction:
+                    "Try again with the same record ID and fields once the record reaches the server.",
+                },
+              };
+            }
+          },
         },
         query: async (params) => {
           const result = await withEngineAdapter(
@@ -804,8 +949,14 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               });
           return { path: live.path, markdown };
         },
-        edit: ({ path, edit, origin, allowLossySourceSha256 }) =>
-          liveDocuments.editDocument({
+        edit: async ({ path, edit, origin, allowLossySourceSha256 }) => {
+          // A joined workspace's page changes through its live session on the
+          // server, as its editor does, and the server decides again.
+          const view = sharedViewOf(workspace.workspaceId);
+          if (view?.membership === true && view.access !== "edit") {
+            throw new Error(needsEdit("Editing a page", view.access));
+          }
+          return await liveDocuments.editDocument({
             ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
             workspaceId: workspace.workspaceId,
             path,
@@ -828,11 +979,35 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 headSha256,
                 ...(allowLossySourceSha256 ? {} : { refuseLossy: path }),
               }),
-          }),
+          });
+        },
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
           // anything exists.
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
+          const view = sharedViewOf(workspace.workspaceId);
+          if (view?.membership === true) {
+            if (view.access !== "edit") throw new Error(needsEdit("Adding a page", view.access));
+            const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+            if (
+              folder !== "" &&
+              dependencies.joinedPages.role(workspace.workspaceId) !== "admin" &&
+              !(await dependencies.joinedPages.folderHoldsFile(workspace.workspaceId, folder))
+            ) {
+              throw new Error(
+                "Only admins add a page in a new folder. Put it in a folder that has a page.",
+              );
+            }
+            return {
+              path: await withPhysicalWorkspaceOperation(
+                workspace.workspaceId,
+                async (operation) => {
+                  operation.assertCurrent();
+                  return await dependencies.joinedPages.create(operation.workspace, path, markdown);
+                },
+              ),
+            };
+          }
           // An empty file written on the capture chain, which refuses a path
           // that exists and records the agent as the file's author, and then
           // the text through the new file's live session, like typing into it.
@@ -881,7 +1056,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           return { path };
         },
       },
-      ...(sharedViewOf(workspace.workspaceId)
+      ...(capture === null
         ? {}
         : {
             versions: {
@@ -1129,14 +1304,23 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 }
               : {}),
           }),
-      filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
+      filePathForObjectId: async (objectId) =>
+        capture
+          ? await capture.filePathForObjectId(objectId)
+          : ((await resolveViewFile({ objectId }))?.path ?? null),
       listMoments: async ({ limit, objectId }) => {
         // Unreadable rules hide every change, as the desktop's History does.
-        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
-        if (policy.errors.length)
+        // A share view's store holds only what its share imported, so it reads no rules.
+        const policy = capture ? await readWorkspaceEnginePolicy(workspace.rootPath) : null;
+        if (policy?.errors.length)
           return { status: "policy-unreadable", unreadable: policy.unreadable };
-        const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
-        const admitted = historyPathAdmission(policy);
+        const input = { limit, ...(objectId ? { objectId } : {}) };
+        const page = capture
+          ? await capture.listMoments(input)
+          : await withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+              dependencies.sharedViewHistory(operation.workspace).listMoments(input),
+            );
+        const admitted = policy ? historyPathAdmission(policy) : () => true;
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
@@ -1158,6 +1342,12 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           }));
       },
       readMoment: async (momentId) => {
+        if (!capture) {
+          const detail = await withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+            dependencies.sharedViewHistory(operation.workspace).readMoment(momentId),
+          );
+          return detail && !detail.protected ? detail.moment : null;
+        }
         // Unreadable rules hide every change, as the desktop's History does,
         // so the answer says nothing about this change.
         const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
@@ -1195,6 +1385,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           workspaceId,
           rootPath,
           readOnly: Boolean(sharedViewOf(workspaceId)),
+          joined: sharedViewOf(workspaceId)?.membership === true,
         })),
       openWorkspace: openCliWorkspace,
       notices: dependencies.notices,

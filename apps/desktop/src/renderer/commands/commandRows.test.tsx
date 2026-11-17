@@ -64,6 +64,54 @@ describe("command availability", () => {
     ).toEqual(expected);
   });
 
+  it.each<[string, ShareViewWriteScope, "admin" | "member" | undefined, readonly CommandId[]]>([
+    [
+      "a member at Edit",
+      { access: "edit", ended: false, membership: true },
+      "member",
+      ["new-file", "new-file-at-path", "new-drawing", "import-files"],
+    ],
+    [
+      "an admin at Edit",
+      { access: "edit", ended: false, membership: true },
+      "admin",
+      CREATE_COMMANDS,
+    ],
+    [
+      "a member whose role is not known yet",
+      { access: "edit", ended: false, membership: true },
+      undefined,
+      ["new-file", "new-file-at-path", "new-drawing", "import-files"],
+    ],
+    ["an admin at Comment", { access: "comment", ended: false, membership: true }, "admin", []],
+  ])(
+    "in a joined workspace, %s gets only the creates the level and role allow",
+    (_name, shareView, memberRole, expected) => {
+      const current = { ...context, shareView, memberRole };
+      expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual(expected);
+    },
+  );
+
+  // Another account's level is not this one's, so nothing is offered until Switch account succeeds.
+  it("offers no creates in a joined workspace while another account is signed in", () => {
+    const current = {
+      ...context,
+      shareView: {
+        access: "edit" as const,
+        ended: false,
+        membership: true,
+        writer: "other" as const,
+      },
+      memberRole: "admin" as const,
+    };
+    expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual([]);
+    expect(
+      paletteCommandRows(current)
+        .map((row) => row.id)
+        .filter((id) => CREATE_COMMANDS.includes(id)),
+    ).toEqual([]);
+  });
+
   it.each([null, "code", "drawing", "markdown"])(
     "source toggle with active kind %s",
     (activeDocumentKind) => {

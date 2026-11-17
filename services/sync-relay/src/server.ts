@@ -306,7 +306,7 @@ export function createSyncRelayHandler({
   lookupVerifiedUserEmail,
   lookupUserEmail,
   lookupUserEmails,
-  lookupUserDisplayName,
+  lookupUserDisplayName: lookupAccountDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
@@ -387,6 +387,8 @@ export function createSyncRelayHandler({
   relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  /** The browser sessions share-web's live socket resolves, when named browser sessions are enabled. */
+  namedBrowserSessions: ReturnType<typeof createNamedLiveBrowserHttp>["sessions"] | undefined;
   /** The link resolver the MCP tool loop's routes use, for the live routes main composes. */
   linkAuthority: LinkAuthorityResolver;
   /** Personal agents' running work and fence, for the routes main composes. */
@@ -411,6 +413,15 @@ export function createSyncRelayHandler({
       ? Promise.resolve(actor).then(requireUnfencedActor)
       : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
   };
+  // Each name the relay looks up becomes the account's current name, which
+  // mentions match when a message arrives.
+  const lookupUserDisplayName =
+    lookupAccountDisplayName &&
+    (async (userId: string) => {
+      const name = await lookupAccountDisplayName(userId);
+      storage.recordAccountName(userId, name);
+      return name;
+    });
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost
     ? createDatasetRoutes(datasetHost, storage, {
@@ -613,7 +624,9 @@ export function createSyncRelayHandler({
     claimPendingShares,
     requireShareAction,
     chatResolverFor,
-    lookupUserDisplayName,
+    // Presence names people without recording the name. A write would make
+    // every waiting poll prepare its snapshot again.
+    lookupAccountDisplayName,
   );
 
   function requireShareWorkspace(share: { workspaceId: string }, workspaceId: string): void {
@@ -869,6 +882,7 @@ export function createSyncRelayHandler({
       lookupUserEmails,
       linkKey,
       shareWebOrigin,
+      lookupUserDisplayName,
     );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } =
     shareInventoryRoutes(claimPendingShares);
@@ -964,6 +978,7 @@ export function createSyncRelayHandler({
 
   // The routes share-web's MCP tool loop calls take a link holder's
   // capability or a connected agent's access token through this one resolver.
+  // The link read routes also take a workspace member's account.
   const linkAuthority = createLinkAuthorityResolver({
     storage,
     personalAgents,
@@ -974,6 +989,8 @@ export function createSyncRelayHandler({
     nowMs,
     requireLinkCapability,
     requireFreshLinkRead,
+    resolveActor,
+    publicOrigin: shareWebOrigin,
   });
   const respondToLinkCollectionWrites = linkKey
     ? createLinkCollectionWriteRoute({
@@ -1154,6 +1171,7 @@ export function createSyncRelayHandler({
     respondWithLinkBytes,
     linkKey,
     replicaLinkReads,
+    lookupUserDisplayName,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({
@@ -1833,6 +1851,7 @@ export function createSyncRelayHandler({
     },
     resolveNamedBrowserSession: (request: Request, discriminator: string) =>
       namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+    namedBrowserSessions: namedBrowser?.sessions,
     /**
      * A GET of the owner's share listings, answered in process as the
      * routes answer the owner, so the server's automations find a

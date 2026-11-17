@@ -8,6 +8,7 @@ import {
   shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./shareViewMarker";
+import { recordedShareSelector } from "./shareViewRecords";
 
 // The registry -> renderer projection. The registry file is data, not a
 // contract: a record can be hand-edited, half-written by a crash, or written
@@ -86,6 +87,12 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? { sharerName: normalizeShareLabel(raw.sharerName, 320) }
         : {}),
       ...(damaged ? { damaged: true as const } : { access: level, genericChatWritable }),
+      ...(!damaged && recordedShareSelector(raw.grantedSelector)?.wholeWorkspace === true
+        ? {
+            membership: true as const,
+            ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
+          }
+        : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(raw.unsavedPaths !== undefined
         ? {

@@ -321,6 +321,81 @@ describe("desktop relay helpers", () => {
     ).resolves.toMatchObject({ channelWireId: "wire-g", access: "read-write", kind: "group" });
   });
 
+  it("reads a membership as the whole workspace, with the role and the workspace name", async () => {
+    const body = (
+      selector: unknown,
+      access = "comment",
+      workspaceId: unknown = "owner-workspace",
+    ) =>
+      Response.json({
+        shareId: "share-member",
+        workspaceId,
+        granterUserId: "owner",
+        granterEmail: null,
+        sharerName: "Ana",
+        subjectName: "Community",
+        genericChatWritable: false,
+        selector,
+        access,
+        createdAtMs: 7,
+      });
+    const read = (selector: unknown, access?: string, workspaceId?: unknown) =>
+      fetchShareViewInfo({
+        relay: relay(
+          vi.fn<typeof globalThis.fetch>(async () => body(selector, access, workspaceId)),
+        ),
+        shareId: "share-member",
+      });
+    await expect(read({ kind: "workspace", role: "member" })).resolves.toMatchObject({
+      subjectName: "Community",
+      sharerName: "Ana",
+      role: "member",
+      membersWorkspaceId: "owner-workspace",
+      selector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    });
+    await expect(read({ kind: "workspace", role: "admin" }, "edit")).resolves.toMatchObject({
+      role: "admin",
+      selector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    });
+    // A role or level the relay could not have issued is not a membership.
+    for (const [selector, access] of [
+      [{ kind: "workspace" }, "comment"],
+      [{ kind: "workspace", role: "owner" }, "comment"],
+      [{ kind: "workspace", role: "member" }, "read-write"],
+      [{ kind: "workspace", role: "member", paths: ["docs"] }, "comment"],
+    ] as const) {
+      await expect(read(selector, access)).rejects.toBeInstanceOf(ShareSelectorInvalidError);
+    }
+    // Members is reached by the workspace's id, so a membership needs one.
+    for (const workspaceId of [null, "", 7]) {
+      await expect(
+        read({ kind: "workspace", role: "member" }, "comment", workspaceId),
+      ).rejects.toBeInstanceOf(ShareSelectorInvalidError);
+    }
+  });
+
+  it("keeps a path share free of a role", async () => {
+    const info = await fetchShareViewInfo({
+      relay: relay(
+        vi.fn<typeof globalThis.fetch>(async () =>
+          Response.json({
+            shareId: "share-a",
+            granterUserId: "user-a",
+            genericChatWritable: false,
+            workspaceId: "owner-workspace",
+            selector: { paths: ["docs"], versionId: null },
+            access: "view",
+            createdAtMs: 1,
+          }),
+        ),
+      ),
+      shareId: "share-a",
+    });
+    expect(info).not.toHaveProperty("role");
+    expect(info).not.toHaveProperty("membersWorkspaceId");
+    expect(info.selector).not.toHaveProperty("wholeWorkspace");
+  });
+
   it("fetches shared-channel information with its access mode", async () => {
     await expect(
       fetchSharedChannelInfo({

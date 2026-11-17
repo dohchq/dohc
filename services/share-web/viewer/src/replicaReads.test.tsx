@@ -17,7 +17,7 @@ it.each(transientReplicaStates)(
   async (kind) => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     vi.stubGlobal("window", globalThis);
-    const { loadCurrentState, loadLog } = await import("./App"),
+    const { loadCurrentState, loadLog } = await import("./viewFiles"),
       f = await fixture(kind === "epoch floor" ? "edit" : "view");
     let attempts = 0;
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -68,7 +68,7 @@ it.each(transientReplicaStates)(
 it.each(["view", "comment", "edit"] as const)(
   "R4: %s responses preserve the viewer contract and saved settlement facts",
   async (access) => {
-    const { loadCurrentState, loadLog } = await import("./App");
+    const { loadCurrentState, loadLog } = await import("./viewFiles");
     const f = await fixture(access);
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = new URL(String(input), "https://viewer.dohc.test");
@@ -152,7 +152,7 @@ it.each(["view", "comment", "edit"] as const)(
 );
 
 it("R4: edit inventory uses the applied saved-log cursor for the viewer's raw-log continuation", async () => {
-  const { loadCurrentState, loadLog } = await import("./App");
+  const { loadCurrentState, loadLog } = await import("./viewFiles");
   const f = await fixture("edit");
   const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(String(input), "https://viewer.dohc.test");

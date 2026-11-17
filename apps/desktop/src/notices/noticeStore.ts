@@ -3,7 +3,11 @@ import { mkdir, readFile, rename } from "node:fs/promises";
 import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
-import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
+import {
+  SETTLEMENT_ATTRIBUTION_REFUSED,
+  SETTLEMENT_BINDING_CHANGED,
+  SHARE_CHAT_REFUSED,
+} from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import { cutText } from "@dohc/workspace-contracts/names";
 import {
@@ -930,21 +934,25 @@ export function createNoticeStore(deps: {
           const markdownHeld = refusal.reason === "markdown-write-held";
           // Says only what holds for every refused save: its author names did not sync.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
+          // A joined workspace's chat message, comment or reaction. It names no file.
+          const chatRefused = refusal.reason === SHARE_CHAT_REFUSED;
           const target =
             NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
-          const body = markdownHeld
-            ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
-            : attributionRefused
-              ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
-              : bindingChanged
-                ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
-                : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${
-                    document?.conflictId
-                      ? "Open its conflict and choose a copy."
-                      : tooLarge
-                        ? "Make the file smaller, then try sync again."
-                        : "Review the file, then try sync again."
-                  }`;
+          const body = chatRefused
+            ? "dohc set it aside and sent the messages after it. Send it again if you still need it."
+            : markdownHeld
+              ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
+              : attributionRefused
+                ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
+                : bindingChanged
+                  ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
+                  : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${
+                      document?.conflictId
+                        ? "Open its conflict and choose a copy."
+                        : tooLarge
+                          ? "Make the file smaller, then try sync again."
+                          : "Review the file, then try sync again."
+                    }`;
           rows.push(
             LocalRow.parse({
               noticeId: refusal.noticeId,
@@ -952,19 +960,25 @@ export function createNoticeStore(deps: {
               kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
               refusalCoordinates,
               pendingRefusalDismissals,
-              title: attributionRefused
-                ? unattributedTitle(document?.path)
-                : markdownHeld
-                  ? heldTitle(document?.path)
-                  : bindingChanged
-                    ? "dohc skipped an earlier save"
-                    : "A change needs your review",
+              title: chatRefused
+                ? "The server did not accept a chat message"
+                : attributionRefused
+                  ? unattributedTitle(document?.path)
+                  : markdownHeld
+                    ? heldTitle(document?.path)
+                    : bindingChanged
+                      ? "dohc skipped an earlier save"
+                      : "A change needs your review",
               body,
               detail: [
                 refusal.reason,
                 `Workspace: ${workspaceId}`,
-                `Object: ${document?.objectId ?? "unknown"}`,
-                `Lineage: ${document?.lineageClaimId ?? "unknown"}`,
+                ...(chatRefused
+                  ? []
+                  : [
+                      `Object: ${document?.objectId ?? "unknown"}`,
+                      `Lineage: ${document?.lineageClaimId ?? "unknown"}`,
+                    ]),
                 ...(refusal.originId === null
                   ? []
                   : [`Origin: ${refusal.originId}:${refusal.originSeq}`]),

@@ -428,7 +428,11 @@ describe("ShareHandoffSurface", () => {
       shareId: "share-exact",
     });
 
-    await screen.findByText("/home/sam/dohc/shared/share-exact");
+    await waitFor(() =>
+      expect(screen.getByTestId("open-share-choose-folder").getAttribute("title")).toBe(
+        "/home/sam/dohc/shared/share-exact",
+      ),
+    );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("open-share-start"));
 

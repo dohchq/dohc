@@ -88,7 +88,7 @@ pub(super) fn journal_local_moment(
 
 pub(super) fn proposal_grant(access: crate::ShareAccess) -> ShareGrant {
     ShareGrant {
-        paths: vec!["shared/docs".to_owned()],
+        scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
         version_id: None,
         access,
     }
@@ -1403,7 +1403,7 @@ fn proposal_never_uploads_or_advances_past_unadmitted_native_owner_content() {
         10,
     );
     let grant = ShareGrant {
-        paths: vec!["owner.md".into()],
+        scope: crate::ShareScope::Paths(vec!["owner.md".into()]),
         version_id: None,
         access: crate::ShareAccess::Edit,
     };

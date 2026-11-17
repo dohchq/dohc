@@ -366,6 +366,15 @@ export interface PushDirectWritesResult {
   morePending: boolean;
 }
 
+// What a direct push that stopped in transit left unsent: the planned writes
+// the relay has not answered, as new pages and other Collection writes.
+// `morePending`: the journal holds more than that plan read.
+export interface DirectWritesWaiting {
+  pages: number;
+  collectionWrites: number;
+  morePending: boolean;
+}
+
 // One net change to one file, as the GRANTER sees it. The `current*` fields
 // are the granter's own state now, so the reviewer can see the change against
 // what it will actually land on rather than against what the recipient had.
@@ -455,6 +464,9 @@ export const NOTICE_KINDS = {
   // One of your personal agents signed in. The relay writes it from the
   // agent when a sign-in is redeemed.
   "personal-agent-signed-in": { senderKind: "agent", recipients: "relay" },
+  // Someone mentioned you, or replied in a thread you wrote in. The relay
+  // writes it from the message's author when the message arrives.
+  "chat-message": { senderKind: "person", recipients: "relay" },
 } as const satisfies Record<
   string,
   {

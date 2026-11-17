@@ -481,7 +481,7 @@ it.each(["owner"])("invalidates owner capture when %s changes", async (kind) => 
         "UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1",
       )
       .run();
-  f.changes.notify();
+  f.changes.notifyWrite();
   await Promise.resolve();
   expect(capture.invalidated.aborted).toBe(true);
   await expect(
@@ -959,4 +959,62 @@ it("lets the next save of a note in when the editor whose check holds it disconn
   await expect(held).rejects.toThrow("capture closed");
   expect(await after).toEqual({ result: "success", ack });
   expect(next).toHaveBeenCalledOnce();
+});
+
+it("wakes only the listeners on a changed document, a relay write's documents, or a serving host's workspaces", async () => {
+  const changes = createNamedFrameChanges(8),
+    woken: string[] = [];
+  const other = { ...binding, objectId: "other-object" },
+    elsewhere = { ...binding, workspaceId: "other-workspace" };
+  const listen = (name: string, scope: Parameters<typeof changes.subscribe>[1]) =>
+    changes.subscribe(() => {
+      woken.push(name);
+    }, scope);
+  listen("standing", { kind: "standing", document: binding });
+  listen("applied", { kind: "applied", document: binding });
+  listen("other standing", { kind: "standing", document: other });
+  listen("other applied", { kind: "applied", document: other });
+  listen("elsewhere standing", { kind: "standing", document: elsewhere });
+  listen("elsewhere applied", { kind: "applied", document: elsewhere });
+  listen("object", {
+    kind: "object",
+    workspaceId: binding.workspaceId,
+    objectId: binding.objectId,
+  });
+  listen("waiting object", {
+    kind: "object",
+    workspaceId: binding.workspaceId,
+    objectId: "waiting-object",
+  });
+  const wake = async (run: () => void) => {
+    woken.length = 0;
+    run();
+    await new Promise<void>(queueMicrotask);
+    return [...woken].sort();
+  };
+  expect(
+    await wake(() => {
+      changes.notify(binding);
+      changes.notify(binding);
+    }),
+  ).toEqual(["applied", "object", "standing"]);
+  expect(await wake(() => changes.notify({ ...binding, lineageClaimId: "other-lineage" }))).toEqual(
+    ["object"],
+  );
+  expect(await wake(() => changes.notify(elsewhere))).toEqual([
+    "elsewhere applied",
+    "elsewhere standing",
+  ]);
+  expect(await wake(() => changes.notifyWrite([other]))).toEqual(["other standing"]);
+  expect(await wake(() => changes.notifyWrite())).toEqual([
+    "elsewhere standing",
+    "other standing",
+    "standing",
+  ]);
+  expect(
+    await wake(() => {
+      changes.notifyHost([binding.workspaceId]);
+      changes.notifyHost([binding.workspaceId]);
+    }),
+  ).toEqual(["applied", "object", "other applied", "other standing", "standing", "waiting object"]);
 });

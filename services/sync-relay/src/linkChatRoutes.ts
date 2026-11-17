@@ -105,12 +105,15 @@ export function createLinkChatRoutes(options: {
     SyncRelayStorage,
     | "appendLinkChatPost"
     | "fetchChatMessages"
+    | "fetchChannelMessages"
     | "findChannelCreateKind"
     | "getShare"
     | "getShareGrant"
     | "getShareLabels"
     | "getLinkPrincipalForGrantProfile"
     | "workspaceIsOwnedBy"
+    | "findThreadCreateLane"
+    | "findThreadFirstMessageId"
   >;
   linkKey: string | Uint8Array | undefined;
   nowMs: () => number;

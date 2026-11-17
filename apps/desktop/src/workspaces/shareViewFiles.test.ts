@@ -320,7 +320,9 @@ const unusedReconcilePorts: Pick<
   | "assertProjectionRoot"
   | "createMount"
   | "removeMount"
+  | "signedInAccount"
 > = {
+  signedInAccount: { settle: async () => undefined, current: () => null },
   resolveRelay: async () => null,
   pull: async () => {
     throw new Error("Unexpected pull");
@@ -638,6 +640,74 @@ describe("ShareViewFiles", () => {
         });
         expect(saved.unsavedPaths).toEqual([]);
       }
+    },
+  );
+
+  // A member's unsent page waits in the journal and goes when Edit returns,
+  // so a lower level is no reason to copy it away. Leaving still is.
+  it.each([
+    ["narrow", []],
+    ["end", ["notes/Budget.md"]],
+  ] as const)(
+    "lists a membership's unsent page as a change to copy after %s: %j",
+    async (restriction, listed) => {
+      const rootPath = await workspaceRoot();
+      const page = "notes/Budget.md";
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: undefined as string[] | null | undefined,
+        unconfirmedChanges: undefined as
+          | { paths: string[]; unchecked: boolean; checked: number }
+          | undefined,
+        grantedSelector: {
+          paths: [] as string[],
+          versionId: null,
+          access: "edit" as "edit" | "comment",
+          wholeWorkspace: true,
+        },
+      };
+      const initial = [{ path: page, text: "---\ntitle: Budget\n---\n", pending: true }];
+      const store = mutableTextStore({ initial });
+      await mkdir(join(rootPath, "notes"), { recursive: true });
+      await writeFile(join(rootPath, page), initial[0]!.text);
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        updateUnsavedPaths: async (_target: ResolvedShareViewFilesTarget, paths: string[]) => {
+          registered.unsavedPaths = paths;
+        },
+        markEnded: async (
+          _target: ResolvedShareViewFilesTarget,
+          paths?: string[] | null,
+          snapshot?: { paths: string[]; unchecked: boolean; checked: number },
+        ) => {
+          registered.ended = true;
+          registered.unsavedPaths = paths;
+          registered.unconfirmedChanges = snapshot;
+        },
+      });
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else
+          await files.narrow(
+            lease,
+            requested,
+            () => undefined,
+            async (paths, snapshot) => {
+              registered.grantedSelector.access = "comment";
+              registered.unsavedPaths = paths;
+              registered.unconfirmedChanges = snapshot;
+            },
+          );
+      });
+      expect(registered.unsavedPaths).toEqual([]);
+      expect(registered.unconfirmedChanges).toEqual({
+        paths: listed,
+        unchecked: false,
+        checked: 0,
+      });
     },
   );
 
@@ -1166,13 +1236,13 @@ describe("ShareViewFiles", () => {
   });
 
   it.each([false, true])(
-    "reports the cursor internally only after a successful commit (commit fails: %s)",
+    "reports the cursor and the pulled changes internally only after a successful commit (commit fails: %s)",
     async (commitFails) => {
       const rootPath = await workspaceRoot();
       const registered = target(rootPath, "view");
       const committing = deferred();
       const committed = deferred();
-      const onCursorCommitted = vi.fn();
+      const onPullCommitted = vi.fn();
       const files = createShareViewFiles({
         ...unusedReconcilePorts,
         resolveTarget: () => registered,
@@ -1184,7 +1254,9 @@ describe("ShareViewFiles", () => {
           skipped: 0,
           refusals: [],
           refusalCount: 0,
-          changedPaths: [],
+          changedPaths: [
+            { path: "gone.md", operation: "delete" as const, contentKind: "text" as const },
+          ],
           nextCursor: 57,
           commitCursor: async () => {
             committing.resolve();
@@ -1197,21 +1269,24 @@ describe("ShareViewFiles", () => {
           lease,
           { kind: "standalone", workspaceId: registered.workspaceId },
           "refresh",
-          onCursorCommitted,
+          onPullCommitted,
         ),
       );
       await committing.promise;
-      expect(onCursorCommitted).not.toHaveBeenCalled();
+      expect(onPullCommitted).not.toHaveBeenCalled();
       if (commitFails) committed.reject(new Error("cursor commit failed"));
       else committed.resolve();
       const reconciled = await result;
       expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
       if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
       expect(reconciled.outcome).not.toHaveProperty("nextCursor");
-      if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+      if (commitFails) expect(onPullCommitted).not.toHaveBeenCalled();
       else {
-        expect(onCursorCommitted).toHaveBeenCalledOnce();
-        expect(onCursorCommitted).toHaveBeenCalledWith(57);
+        expect(onPullCommitted).toHaveBeenCalledOnce();
+        expect(onPullCommitted).toHaveBeenCalledWith({
+          cursor: 57,
+          changes: [{ path: "gone.md", operation: "delete" }],
+        });
       }
     },
   );
@@ -1348,6 +1423,7 @@ describe("ShareViewFiles", () => {
         text: "forged\n",
         expectedContentHash: "not-the-current-hash",
         shareViewStore: () => store,
+        assertAdmitted: () => undefined,
       }),
     ).rejects.toThrow("ownership admission is inactive");
     expect(store.ensureMainVersion).not.toHaveBeenCalled();
@@ -1515,6 +1591,7 @@ describe("ShareViewFiles", () => {
         text: "stale write\n",
         expectedContentHash: "not-current",
         shareViewStore: () => staleStore,
+        assertAdmitted: () => undefined,
       }),
     ).rejects.toThrow("ownership admission is inactive");
     expect(staleStore.ensureMainVersion).not.toHaveBeenCalled();
@@ -2977,6 +3054,37 @@ describe("ShareViewFiles", () => {
       ),
     ).rejects.toBeInstanceOf(SharedFileReadOnlyError);
     expect(store.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it("writes a page in a joined workspace at Edit and refuses a path outside the member's reach", async () => {
+    const rootPath = await workspaceRoot();
+    const store = mutableTextStore({ initial: [] });
+    const joined = {
+      ...target(rootPath),
+      grantedSelector: {
+        paths: [],
+        versionId: null,
+        access: "edit" as const,
+        wholeWorkspace: true as const,
+      },
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => joined,
+      openStore: () => store,
+    });
+    const create = (path: string) =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "create", path, initialText: "Idea\n" },
+        ),
+      );
+
+    await expect(create("ideas/new.md")).resolves.toMatchObject({ status: "committed" });
+    await expect(readFile(join(rootPath, "ideas/new.md"), "utf8")).resolves.toBe("Idea\n");
+    await expect(create(".env/secret.md")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
   });
 
   it("keeps a mount store warm across canonical reads and listings", async () => {

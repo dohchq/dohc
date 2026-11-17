@@ -95,7 +95,13 @@ interface RosterState {
   } | null;
   running: Promise<"requested" | "unavailable"> | null;
   again: boolean;
-  retry: ReturnType<typeof setTimeout> | null;
+  // The listing a paced request scheduled. `settle` resolves its waiters with
+  // whichever listing replaces it, or with unavailable when the roster closes.
+  retry: {
+    timer: ReturnType<typeof setTimeout>;
+    listed: Promise<"requested" | "unavailable">;
+    settle: (status: Promise<"requested" | "unavailable"> | "unavailable") => void;
+  } | null;
   changeGeneration: number;
   checkedAtMs: number | null;
   checkedContext: unknown;
@@ -284,22 +290,26 @@ export function createShareRosters(dependencies: {
 
   // Pace Access requests independently of immediate share-change and pull
   // relisting for automation reach.
-  function pacedRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
+  // A request that waits joins the scheduled listing instead of answering paced.
+  function pacedRefresh(workspaceId: string, wait = false): Promise<AccessRefreshResult["status"]> {
     const state = stateFor(workspaceId);
-    if (state.running)
-      return state.running.then((status) => (status === "requested" ? "joined" : status));
+    const joined = (running: Promise<"requested" | "unavailable">) =>
+      running.then((status) => (status === "requested" ? "joined" : status));
+    if (state.running) return joined(state.running);
     if (due(state)) return refresh(workspaceId);
     if (!state.retry) {
-      state.retry = setTimeout(
-        () => {
-          state.retry = null;
-          void refresh(workspaceId);
-        },
+      let settle!: (status: Promise<"requested" | "unavailable"> | "unavailable") => void;
+      const listed = new Promise<"requested" | "unavailable">((resolve) => {
+        settle = resolve;
+      });
+      const timer = setTimeout(
+        () => void refresh(workspaceId),
         Math.max(0, SHARE_ROSTER_FRESH_MS - (nowMs() - state.lastAttemptMs!)),
       );
-      state.retry.unref?.();
+      timer.unref?.();
+      state.retry = { timer, listed, settle };
     }
-    return Promise.resolve("paced");
+    return wait ? joined(state.retry.listed) : Promise.resolve("paced");
   }
 
   function refresh(workspaceId: string): Promise<"requested" | "unavailable"> {
@@ -308,8 +318,9 @@ export function createShareRosters(dependencies: {
       state.again = true;
       return state.running;
     }
-    if (state.retry) {
-      clearTimeout(state.retry);
+    const retry = state.retry;
+    if (retry) {
+      clearTimeout(retry.timer);
       state.retry = null;
     }
     const running = (async () => {
@@ -323,6 +334,7 @@ export function createShareRosters(dependencies: {
       state.running = null;
     });
     state.running = running;
+    retry?.settle(running);
     return running;
   }
 
@@ -400,7 +412,10 @@ export function createShareRosters(dependencies: {
       const state = states.get(workspaceId);
       if (!state) return;
       if (state.timer) clearInterval(state.timer);
-      if (state.retry) clearTimeout(state.retry);
+      if (state.retry) {
+        clearTimeout(state.retry.timer);
+        state.retry.settle("unavailable");
+      }
       state.timer = null;
       state.retry = null;
       state.changeGeneration += 1;
@@ -462,9 +477,15 @@ export function createShareRosters(dependencies: {
       };
     },
 
-    /** Sharing, Access, and the CLI use this same pacing decision. */
-    requestRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
-      return pacedRefresh(workspaceId);
+    /**
+     * Sharing, Access, and the CLI use this same pacing decision. With `wait`,
+     * a paced request resolves when the scheduled listing ends.
+     */
+    requestRefresh(
+      workspaceId: string,
+      options?: { wait?: boolean },
+    ): Promise<AccessRefreshResult["status"]> {
+      return pacedRefresh(workspaceId, options?.wait === true);
     },
 
     observation(workspaceId: string): RosterObservation {

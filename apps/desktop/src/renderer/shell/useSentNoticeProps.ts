@@ -5,6 +5,7 @@ import type {
   ChatDispatchFailedRun,
   GetRelayReceivedShareResult,
   NoticeRow,
+  RelayShareReceivedRow,
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -29,7 +30,7 @@ import {
   type NoticeTarget,
 } from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
-import { chatOnScreen } from "../workbench/chatsOnScreen";
+import { chatOnScreen, messageOnScreen, watchChatsOnScreen } from "../workbench/chatsOnScreen";
 
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
@@ -69,7 +70,7 @@ function agentRunOfNotice(
 // file, to open once the share is added. `controls` opens an automation's
 // switch instead when the share opens as its own workspace.
 export interface NoticeShare {
-  resolvedShare: { shareId: string; shareCode: string };
+  resolvedShare: { shareId: string; shareCode: string; share?: RelayShareReceivedRow };
   liveEditing: boolean;
   path: string | null;
   controls?: Extract<NoticeTarget, { to: "automation-controls" }>;
@@ -264,15 +265,52 @@ export function useSentNoticeProps(input: {
     for (const ref of refs) askedRead.current.add(`${ref.store}:${ref.noticeId}`);
     if (refs.length > 0) readNotices(refs).catch(() => undefined);
   }, [here, readNotices, sentNotices?.notices]);
+  // "Sam mentioned you in #events" is about one message. Once that message
+  // shows here, however the person got there, the row reads and its toast
+  // closes. A reply folded into a post's card does not show. The owner's row sits on this workspace; a member's on the share
+  // this view joined it through.
+  const viewShareId = here?.shareView?.shareId;
+  const seenMessage = useCallback(
+    (notice: NoticeRow): boolean => {
+      const message = notice.kind === "chat-message" ? notice.target?.message : undefined;
+      const placed =
+        notice.workspaceId === null
+          ? notice.recipientShareId !== null && notice.recipientShareId === viewShareId
+          : notice.workspaceId === workspaceId;
+      return message !== undefined && placed && messageOnScreen(message);
+    },
+    [viewShareId, workspaceId],
+  );
+  const toastNotice = sentNotices?.toast;
+  useEffect(() => {
+    if (!readNotices || !hideToast) return;
+    const readSeen = () => {
+      const refs = (sentNotices?.notices ?? [])
+        .filter(
+          (notice) =>
+            notice.readAtMs === null &&
+            !askedRead.current.has(`${notice.store}:${notice.noticeId}`) &&
+            seenMessage(notice),
+        )
+        .map(sentNoticeRef);
+      if (toastNotice && seenMessage(toastNotice)) hideToast();
+      if (refs.length === 0) return;
+      for (const ref of refs) askedRead.current.add(`${ref.store}:${ref.noticeId}`);
+      readNotices(refs).catch(() => undefined);
+    };
+    readSeen();
+    return watchChatsOnScreen(readSeen);
+  }, [hideToast, readNotices, seenMessage, sentNotices?.notices, toastNotice]);
   const toast = useMemo(
     () =>
       sentNotices?.toast &&
       sentNotices.toast !== seenRun?.notice &&
+      !seenMessage(sentNotices.toast) &&
       (!isRefusalNoticeKind(sentNotices.toast.kind) ||
         sentNotices.toast.workspaceId !== workspaceId)
         ? describe(sentNotices.toast)
         : null,
-    [describe, seenRun, sentNotices?.toast, workspaceId],
+    [describe, seenMessage, seenRun, sentNotices?.toast, workspaceId],
   );
 
   const listFailure = sentNotices?.listFailure ?? null;
@@ -418,7 +456,11 @@ export function useSentNoticeProps(input: {
                 ? notice.target?.automation
                 : undefined;
             onOpenShare({
-              resolvedShare: { shareId: found.share.shareId, shareCode: found.share.shareCode },
+              resolvedShare: {
+                shareId: found.share.shareId,
+                shareCode: found.share.shareCode,
+                share: found.share,
+              },
               liveEditing: opensForLiveEditing(found.share),
               path: place.path,
               ...(automation === undefined || place.path === null

@@ -49,7 +49,7 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
   const copy = demo.getByRole("button", { name: "Copy details" });
   fireEvent.pointerDown(copy, { bubbles: true, composed: true });
   expect(demo.getByRole("button", { name: "Copy details" })).toBe(copy);
-  fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), {
+  fireEvent.pointerDown(demo.getByRole("button", { name: "New page" }), {
     bubbles: true,
     composed: true,
   });

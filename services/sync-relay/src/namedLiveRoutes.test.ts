@@ -1,137 +1,57 @@
+import { request as httpRequest } from "node:http";
+import {
+  chatChannelCreate,
+  chatMessageAppend,
+  chatThreadCreate,
+  json,
+  jsonBody,
+  request,
+  sequenced,
+  testHandler,
+} from "./testing";
 import { LIVE_CONNECTION_LIMIT_CLOSE_CODE } from "@dohc/live-session-contract/live-connection";
 import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
-import { createNamedDesktopLive } from "./namedDesktopLive";
+import { observeRelayWrites } from "./relayWriteChanges";
+import { WORKSPACE_SHARE_SELECTOR_JSON } from "./storage/workspaceMembers";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
-import { request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { serveFetchHandler } from "@dohc/service-http";
-import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import {
-  createPhoneCapableAccountSessionResolver,
-  UnauthorizedError,
-  type AccountSession,
-  type StoredAccountSession,
-} from "@dohc/workspace-auth/session";
+
 import type { LiveRooms } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import {
-  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   createLiveFrameSession,
-  decodeLiveFrame,
   encodeLiveFrame,
   type LiveFrame,
 } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import { createSyncRelayHandler } from "./server.js";
-import {
-  createOwnerLiveRoutes,
-  createNamedLiveRoutes,
-  OWNER_SESSION_CHECK_MS,
-  type NamedLiveRouteLimits,
-} from "./namedLiveRoutes.js";
-import { createLinkLiveResolver } from "./linkLiveBrowserAuth.js";
+import { OWNER_SESSION_CHECK_MS } from "./namedLiveRoutes.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
-import { createLiveMembershipRegistry, type LiveMembershipPolicy } from "./liveMembership.js";
 import { liveBrowserActor } from "./liveBrowserContext.js";
 import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";
-import { createLiveTickets } from "./liveTickets.js";
-import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
-import {
-  fixture as ticketFixture,
-  audience,
-  binding,
-  host,
-  key,
-  scope,
-  seedLinkAgent,
-} from "./liveTickets.test-helper.js";
+import { audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
-import type { SessionHostBlock } from "./linkRefusal";
 
-// The production resolver over the owner's own phone sign-in, which a test may end sooner.
-let phoneExpiresAt = 8e12;
-const ownerPhone = createPhoneCapableAccountSessionResolver({
-  api: {
-    getSession: async () => ({
-      user: { id: "owner-1" },
-      session: {
-        id: "phone-session",
-        userId: "owner-1",
-        expiresAt: phoneExpiresAt,
-        clientKind: "phone",
-      },
-    }),
-  },
-} as unknown as WorkspaceAuth);
-const phoneScope = {
-  kind: "owner" as const,
-  workspaceId: scope.workspaceId,
-  userId: "owner-1",
-  sessionId: "phone-session",
-  sessionExpiresAtMs: 8e12,
-};
-const phoneHeaders = { authorization: "Bearer owner-phone-token" };
-
-const exchangeKey = "test-exchange-key-".repeat(3),
-  relayHost = "relay.example.test";
-const frames = {
-  receive: {
-    maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
-    maxStateVectorBytes: 1024,
-    maxUpdateBytes: 4096,
-    maxSyncBytes: 4096,
-  },
-  maxQueuedBytes: 4096,
-  maxQueuedFrames: 32,
-  maxControlBytes: 4096,
-  maxControlFrames: 8,
-  maxAssemblyBytes: 4096,
-};
-const bounds = {
-  maxClientVectorBytes: 1024,
-  maxSyncOutputBytes: 4096,
-  maxAppliedUpdateBytes: 4096,
-  maxSubmissionBytes: 4096,
-  maxAdmissionBytes: 16384,
-};
-const policy = {
-  maxStructVisits: 10000,
-  maxValueNodeVisits: 10000,
-  maxDecodedPayloadByteVisits: 1000000,
-  maxStructClientGroupVisits: 10000,
-  maxDeleteClientGroupVisits: 10000,
-  maxDeleteIntervalVisits: 10000,
-  maxIndexOperations: 100000,
-};
-const limits: NamedLiveRouteLimits = {
-  maxConnections: 8,
-  maxConnectionsPerWorkspace: 96,
-  reservedOwnerConnections: 0,
-  maxConnectionsPerSession: 2,
-  maxConnectionsPerPrincipal: 3,
-  maxConnectionsPerGrant: 4,
-  maxBufferedBytes: 134217728,
-  maxPendingRequests: 4,
-  maxRequestBytes: 4096,
-  maxResponseBytes: 4096,
-  maxPendingBytes: 4096,
-  maxFragments: 8,
-  maxBufferedChunks: 16,
-  // Open routes idle between frames while a test sets up its next peer over real
-  // sockets; a loaded gate host can stretch that past 5 s.
-  upgradeTimeoutMs: 1000,
-  idleTimeoutMs: 10_000,
-  drainTimeoutMs: 100,
-};
-const cleanups: (() => Promise<void>)[] = [];
+import {
+  fixture,
+  relayHost,
+  frames,
+  bounds,
+  policy,
+  limits,
+  cleanups,
+  phoneState,
+  phoneScope,
+  phoneHeaders,
+  openProductionSync,
+} from "./namedLiveRoutes.test-helper";
 
 it("refuses desktop cross-account, scope, Origin, cookie, and host changes", async () => {
   const f = await fixture(limits, false, undefined, false, true);
@@ -254,577 +174,6 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
-const defaultScope = scope,
-  defaultBinding = binding,
-  defaultFrames = frames,
-  defaultBounds = bounds;
-async function fixture(
-  routeLimits = limits,
-  link = false,
-  membershipPolicy: LiveMembershipPolicy = {
-    maxSessions: 16,
-    maxMembers: 8,
-    maxSnapshotBytes: 153,
-  },
-  owner = false,
-  desktop = false,
-  admission?: ReturnType<typeof createLiveConnectionAdmission>,
-  person = 0,
-  document = 0,
-  production = false,
-  workspaceId = defaultScope.workspaceId,
-  shareId = defaultScope.shareId,
-  population?: { people: number; documents: number },
-  ownerRooms?: LiveRooms,
-) {
-  const liveProfile = selfHostLiveProfile();
-  const frames = production ? liveProfile.frames : defaultFrames,
-    bounds = production ? liveProfile.namedLive.host : defaultBounds;
-  const scope = {
-    ...defaultScope,
-    workspaceId,
-    shareId,
-    userId: person ? "reader-" + person : defaultScope.userId,
-    grantId:
-      link && shareId !== defaultScope.shareId
-        ? shareId + "-link"
-        : !link && person
-          ? "edit-" + person
-          : defaultScope.grantId,
-  };
-  const binding = {
-    ...defaultBinding,
-    workspaceId,
-    objectId: document ? "object-" + document : defaultBinding.objectId,
-  };
-  const state = await ticketFixture(
-    population ? { liveTickets: { ...liveProfile.namedLive.tickets, now: () => 1000 } } : undefined,
-    {
-      userId: scope.userId,
-      grantId: scope.grantId,
-      objectId: binding.objectId,
-      workspaceId,
-      shareId,
-    },
-    population,
-  );
-  const routeKind = desktop ? "desktop" : link ? "link" : "named";
-  const memberships = createLiveMembershipRegistry(
-    membershipPolicy,
-    state.storage.readLiveAuthority.bind(state.storage),
-  );
-  const bearer = Buffer.alloc(32, 1).toString("base64url"),
-    profile = Buffer.alloc(32, person || 2).toString("base64url");
-  const currentScope = link
-    ? {
-        kind: "link" as const,
-        workspaceId: scope.workspaceId,
-        shareId: scope.shareId,
-        grantId: scope.grantId,
-        sessionId: "link-session",
-        capabilityHash: hashLinkBearer(bearer, key),
-        profileTokenHash: hashLinkProfileSecret(profile, key),
-      }
-    : scope;
-  const holderHeaders: Record<string, string> = link
-    ? { authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile }
-    : {};
-  let linkHeaders = holderHeaders;
-  if (link) {
-    vi.spyOn(Date, "now").mockReturnValue(1000);
-    state.raw.exec(
-      "UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL",
-    );
-    for (let person = 1; person <= (population?.people ?? 1); person++) {
-      expect(
-        state.storage.mintLinkSession({
-          session: {
-            sessionId: population ? "link-session-" + person : "link-session",
-            capabilityHash: hashLinkBearer(
-              population ? Buffer.alloc(32, person).toString("base64url") : bearer,
-              key,
-            ),
-            grantId: scope.grantId,
-            generation: 4,
-            mintedAtMs: 999,
-            expiresAtMs: 61_000,
-          },
-        }),
-      ).toBe(true);
-    }
-  }
-  const changes = createNamedFrameChanges(population ? liveProfile.namedLive.maxListeners : 16),
-    invalidated = new AbortController();
-  const native: NamedFrameNativeHost = {
-    workspace: "never-send-native-handle",
-    registrationId: 73,
-    binding: { ...binding, selectorPaths: [binding.currentPath] },
-    coordinate: host,
-    invalidated: invalidated.signal,
-    changes,
-    deadlineMs: 1000,
-    nextRequestId: () => 1,
-    drain: vi.fn(async () => undefined),
-    client: {
-      openLiveAppliedSync: vi.fn(async () => ({
-        binding: { ...binding, selectorPaths: [binding.currentPath] },
-        hostVector: Buffer.from([0]),
-        missingStateUpdate: Buffer.from([0, 0]),
-        observedLocalYDocHeadSequence: 100,
-        position: { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) },
-      })),
-      readNextLiveApplied: vi.fn(async () => null),
-      readLiveApplicationAck: vi.fn(async () => null),
-    },
-  };
-  const captureNative = vi.fn(async (current?: LiveObjectBinding) =>
-    population && current
-      ? { ...native, binding: { ...current, selectorPaths: [current.currentPath] } }
-      : native,
-  );
-  const sessionHostBlocked = vi.fn(
-    (_document: { workspaceId: string; objectId: string }): SessionHostBlock | undefined =>
-      undefined,
-  );
-  const actor = vi.fn(async (request: Request, workspaceId: string) => {
-    if (owner || desktop) {
-      const bearer = request.headers.get("authorization");
-      if (!bearer) throw new UnauthorizedError();
-      return {
-        userId:
-          bearer === "Bearer owner-token"
-            ? "owner-1"
-            : bearer === "Bearer reader-token"
-              ? "reader-1"
-              : "other-user",
-        workspaceId,
-      };
-    }
-    const cookie = request.headers.get("cookie");
-    if (!cookie || cookie === "anonymous") throw new UnauthorizedError();
-    return {
-      userId:
-        population && /^account=reader-\d+$/.test(cookie)
-          ? cookie.slice("account=".length)
-          : cookie === "account=reader"
-            ? scope.userId
-            : "other-user",
-      workspaceId,
-    };
-  });
-  // The owner route's sign-ins: a phone's through the production resolver, any other as a desktop's.
-  const accountSession = vi.fn(async (request: Request): Promise<AccountSession> => {
-    if (request.headers.get("authorization") === phoneHeaders.authorization)
-      return await ownerPhone(request);
-    const { userId } = await actor(request, "");
-    return { userId, sessionId: `session-${userId}`, expiresAtMs: 8e12, clientKind: "desktop" };
-  });
-  const sessionRows = new Map<string, StoredAccountSession>([
-    ["phone-session", { userId: "owner-1", expiresAtMs: 8e12, clientKind: "phone" }],
-  ]);
-  const readSessions = vi.fn(
-    async (ids: readonly string[]) =>
-      new Map(
-        ids.flatMap((id): [string, StoredAccountSession][] =>
-          sessionRows.has(id) ? [[id, sessionRows.get(id)!]] : [],
-        ),
-      ),
-  );
-  const application = createSyncRelayHandler({
-    storage: state.storage,
-    resolveActor: actor,
-    shareWebOrigin: audience,
-    relayExchangeKey: exchangeKey,
-    nowMs: () => 1000,
-    ...(link ? { linkKey: key, publicEditRelease: { version: 1 } } : {}),
-    namedBrowserSessionLimits: {
-      maxSessions: population ? liveProfile.browserSessions.maxSessions : 8,
-      retentionMs: 30000,
-      maxPendingRequests: 4,
-      maxRequestBytes: 16384,
-      maxResponseBytes: 16384,
-      timeoutMs: 1000,
-    },
-  });
-  const tickets = createLiveTickets({
-    storage: state.storage,
-    audience,
-    key,
-    hostReports: createLiveHostReports({ storage: state.storage, captureNative }),
-  });
-  const desktopAdmission = desktop
-    ? createNamedDesktopLive({
-        storage: state.storage,
-        resolveActor: actor,
-        readinessLimits: { maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000 },
-        publicOrigin: audience,
-        hosts: new Set([relayHost]),
-        tickets,
-        changes,
-        limits: {
-          maxSessions: 32,
-          retentionMs: 60000,
-          maxPendingRequests: 8,
-          maxRequestBytes: 16384,
-          maxResponseBytes: 16384,
-          timeoutMs: 5000,
-        },
-        editorLimits: {
-          provider: {
-            frames,
-            maxPendingUpdateBytes: 8192,
-            maxPendingUpdates: 4,
-            maxDeliveryAttempts: 3,
-          },
-          maxHttpResponseBytes: 4096,
-          maxSocketBufferedBytes: 4096,
-          connectTimeoutMs: 1000,
-          sendTimeoutMs: 1000,
-          drainPollMs: 10,
-        },
-      })
-    : undefined;
-  const routes = owner
-    ? createOwnerLiveRoutes({
-        storage: state.storage,
-        resolveAccountSession: accountSession,
-        accountSessions: { read: readSessions },
-        tickets,
-        ...(ownerRooms ? { rooms: ownerRooms } : {}),
-        hosts: new Set([relayHost]),
-        publicOrigin: audience,
-        exchangeKey,
-        frames,
-        bounds,
-        limits: routeLimits,
-        validate: ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
-          createLiveMarkdownJournalValidator(policy)(input),
-        captureNative,
-        admission,
-      })
-    : createNamedLiveRoutes({
-        kind: link ? "link" : "named",
-        desktopBearer: desktop,
-        membership: memberships,
-        storage: state.storage,
-        hosts: new Set([relayHost]),
-        publicOrigin: audience,
-        exchangeKey,
-        frames,
-        bounds,
-        limits: routeLimits,
-        validate: ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
-          createLiveMarkdownJournalValidator(policy)(input),
-        sessions:
-          desktopAdmission ??
-          (link
-            ? createLinkLiveResolver({
-                publicEditRelease: { version: 1 },
-                storage: state.storage,
-                linkKey: key,
-                linkAuthority: application.linkAuthority,
-              })
-            : { resolve: application.resolveNamedBrowserSession }),
-        tickets,
-        captureNative,
-        admission,
-        sessionHostBlocked,
-      });
-  const http = serveFetchHandler({
-    handler: (request) =>
-      new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission
-        ? desktopAdmission.handle(request)
-        : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets`
-          ? routes.handle(request)
-          : application(request),
-    maxBodyBytes: () => 16384,
-    oversized: () => Response.json({}, { status: 404 }),
-    failure: () => Response.json({}, { status: 500 }),
-  });
-  const upgrades: Promise<void>[] = [],
-    sockets: WebSocket[] = [];
-  http.on("upgrade", (request, socket, head) => {
-    upgrades.push(routes.handleUpgrade(request, socket, head));
-  });
-  cleanups.push(async () => {
-    routes.close();
-    sockets.forEach((ws) => ws.terminate());
-    await Promise.all(upgrades);
-    await new Promise<void>((done) => http.close(() => done()));
-    await state.close();
-  });
-  http.listen(0, "127.0.0.1");
-  await once(http, "listening");
-  const port = (http.address() as { port: number }).port;
-  // A link request sends a cookie only when a test names one: an agent's is refused, a holder's ignored.
-  const defaultCookie = link ? "" : "account=reader";
-  async function post(
-    path: string,
-    body: unknown,
-    cookie = defaultCookie,
-    extra: Record<string, string> = {},
-  ) {
-    return new Promise<Response>((resolve, reject) => {
-      const request = httpRequest(
-        `http://127.0.0.1:${port}${path}`,
-        {
-          method: "POST",
-          headers: {
-            host: relayHost,
-            "content-type": "application/json",
-            ...(desktop
-              ? { authorization: "Bearer reader-token" }
-              : {
-                  origin: audience,
-                  "x-dohc-relay-exchange-key": exchangeKey,
-                  ...(cookie ? { cookie } : {}),
-                  ...linkHeaders,
-                }),
-            ...extra,
-          },
-        },
-        (response) => {
-          const bytes: Buffer[] = [];
-          response.on("data", (chunk) => bytes.push(Buffer.from(chunk)));
-          response.once("end", () =>
-            resolve(new Response(Buffer.concat(bytes), { status: response.statusCode })),
-          );
-          response.once("error", reject);
-        },
-      );
-      request.once("error", reject);
-      request.end(JSON.stringify(body));
-    });
-  }
-  const bootstrap = desktop
-    ? await post("/sync/live/desktop-open", { shareId: scope.shareId, path: binding.currentPath })
-    : population || link || owner
-      ? Response.json({
-          discriminator:
-            production && document ? "abcdefghijk" + document.toString(36) : "abcdefghijkl",
-        })
-      : await post("/sync/live/named-sessions", { grantId: scope.grantId });
-  expect(bootstrap.status).toBe(200);
-  const bootstrapped = (await bootstrap.json()) as {
-    discriminator: string;
-    ticket?: { token: string; expiresAtMs: number };
-  };
-  let discriminator = bootstrapped.discriminator,
-    initialDesktopTicket = bootstrapped.ticket;
-  async function mint(): Promise<{
-    token: string;
-    expiresAtMs: number;
-    publicPrincipalId?: string;
-  }> {
-    if (desktop) {
-      if (initialDesktopTicket) {
-        const ticket = initialDesktopTicket;
-        initialDesktopTicket = undefined;
-        return ticket;
-      }
-      const response = await post("/sync/live/desktop-open", {
-        shareId: scope.shareId,
-        path: binding.currentPath,
-      });
-      expect(response.status).toBe(200);
-      const admitted = (await response.json()) as {
-        discriminator: string;
-        ticket: { token: string; expiresAtMs: number };
-      };
-      discriminator = admitted.discriminator;
-      return admitted.ticket;
-    }
-    if (!link && !desktop)
-      expect(
-        await application.resolveNamedBrowserSession(
-          new Request("https://relay.example.test", { headers: { cookie: "account=reader" } }),
-          discriminator,
-        ),
-      ).toEqual(scope);
-    expect(
-      state.storage.resolveLiveObjectHostBinding(currentScope, binding.objectId),
-    ).toMatchObject({ kind: "current", binding });
-    const response = await post(`/sync/live/${routeKind}-tickets`, {
-      discriminator,
-      objectId: binding.objectId,
-    });
-    expect(response.status).toBe(200);
-    return (await response.json()) as {
-      token: string;
-      expiresAtMs: number;
-      publicPrincipalId?: string;
-    };
-  }
-  function connect(
-    token: string,
-    cookie = defaultCookie,
-    extra: Record<string, string> = {},
-    ownerQuery = "",
-    session = discriminator,
-  ) {
-    const target = owner
-      ? `/sync/workspaces/${binding.workspaceId}/live/owner?objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}`
-      : `/sync/live/${routeKind}?session=${session}`;
-    const ws = new WebSocket(
-      `ws://127.0.0.1:${port}${target}`,
-      owner && !token ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`],
-      {
-        headers: desktop
-          ? { host: relayHost, authorization: "Bearer reader-token", ...extra }
-          : owner
-            ? { host: relayHost, authorization: "Bearer owner-token", ...extra }
-            : {
-                host: relayHost,
-                origin: audience,
-                "x-dohc-relay-exchange-key": exchangeKey,
-                ...(cookie ? { cookie } : {}),
-                ...linkHeaders,
-                ...extra,
-              },
-        perMessageDeflate: false,
-      },
-    );
-    sockets.push(ws);
-    ws.on("error", () => undefined);
-    const received: LiveFrame[] = [],
-      watchers = new Set<() => void>();
-    ws.on("message", (bytes) => {
-      received.push(decodeLiveFrame(Buffer.from(bytes as Buffer), frames.receive.maxFrameBytes));
-      for (const notify of watchers) notify();
-    });
-    const status = new Promise<number>((done) => {
-      ws.once("open", () => done(101));
-      ws.once("error", () => done(0));
-      ws.once("unexpected-response", (_request, response) => {
-        response.resume();
-        done(response.statusCode!);
-        ws.terminate();
-      });
-    });
-    function until(condition: () => boolean, expected = "the expected frame") {
-      if (condition()) return Promise.resolve();
-      return new Promise<void>((resolve, reject) => {
-        const clear = () => {
-          watchers.delete(notify);
-          ws.off("close", close);
-          ws.off("error", error);
-        };
-        const notify = () => {
-          if (condition()) {
-            clear();
-            resolve();
-          }
-        };
-        const close = (code: number, reason: Buffer) => {
-          clear();
-          reject(new Error(`Live socket closed before ${expected}: ${code} ${reason.toString()}`));
-        };
-        const error = (cause: Error) => {
-          clear();
-          reject(new Error(`Live socket failed before ${expected}`, { cause }));
-        };
-        if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          reject(new Error(`Live socket closed before ${expected}`));
-          return;
-        }
-        watchers.add(notify);
-        ws.once("close", close);
-        ws.once("error", error);
-      });
-    }
-    const closed = new Promise<[number, string]>((resolve) =>
-      ws.once("close", (code, reason) => resolve([code, reason.toString()])),
-    );
-    return { ws, status, received, until, closed };
-  }
-  async function peer(person: number, document: number) {
-    const grantId = link ? scope.grantId : "edit-" + person,
-      cookie = "account=reader-" + person;
-    const profile = Buffer.alloc(32, person).toString("base64url"),
-      bearer = Buffer.alloc(32, person).toString("base64url");
-    const headers: Record<string, string> = link
-      ? { authorization: `LinkCapability ${bearer}`, "x-dohc-link-profile-secret": profile }
-      : {};
-    const bootstrap = link
-      ? Response.json({ discriminator })
-      : await post("/sync/live/named-sessions", { grantId }, cookie);
-    expect(bootstrap.status).toBe(200);
-    const session = ((await bootstrap.json()) as { discriminator: string }).discriminator;
-    return {
-      async mint() {
-        if (!link)
-          expect(
-            await application.resolveNamedBrowserSession(
-              new Request("https://relay.example.test", { headers: { cookie } }),
-              session,
-            ),
-          ).toEqual({ ...scope, grantId, userId: "reader-" + person });
-        const context =
-          currentScope.kind === "link"
-            ? {
-                ...currentScope,
-                sessionId: "link-session-" + person,
-                capabilityHash: hashLinkBearer(bearer, key),
-                profileTokenHash: hashLinkProfileSecret(profile, key),
-              }
-            : { ...scope, grantId, userId: "reader-" + person };
-        expect(
-          state.storage.resolveLiveObjectHostBinding(context, "object-" + document),
-        ).toMatchObject({
-          kind: "current",
-          binding: {
-            ...binding,
-            objectId: "object-" + document,
-            currentPath: `docs/${document}.md`,
-            selectorPaths: [`docs/${document}.md`],
-          },
-        });
-        const response = await post(
-          `/sync/live/${routeKind}-tickets`,
-          { discriminator: session, objectId: "object-" + document },
-          cookie,
-          headers,
-        );
-        expect(response.status).toBe(200);
-        return (await response.json()) as { token: string };
-      },
-      connect: (token: string) => connect(token, cookie, headers, "", session),
-    };
-  }
-  const useCredentials = (headers = holderHeaders) => {
-    linkHeaders = headers;
-  };
-  return {
-    ...state,
-    frames,
-    binding,
-    post,
-    discriminator,
-    mint,
-    connect,
-    peer,
-    currentScope,
-    bearer,
-    profile,
-    memberships,
-    tickets,
-    captureNative,
-    native,
-    changes,
-    invalidated,
-    actor,
-    accountSession,
-    sessionRows,
-    readSessions,
-    port,
-    application,
-    routes,
-    desktopAdmission,
-    sessionHostBlocked,
-    useCredentials,
-  };
-}
-
 // A held document waits for its owner, so the page is told and stops asking. Other blocks say nothing new.
 it.each([
   [false, "stopped"],
@@ -1097,7 +446,7 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
       guard() {},
     }),
   ).toBe(true);
-  f.changes.notify();
+  f.changes.notifyWrite();
   expect(f.storage.findLinkSessionByCapabilityHash(old.capabilityHash)).toBeNull();
   expect(
     (
@@ -1115,7 +464,7 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
   expect(provider.state().binding?.workspaceId).toBe(`link:${scope.grantId}`);
   const closed = once(browser.ws, "close");
   f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1001 });
-  f.changes.notify();
+  f.changes.notifyWrite();
   await closed;
   expect(f.invalidated.signal.aborted).toBe(false);
   expect(
@@ -1291,7 +640,7 @@ it("closes only the disconnected agent's live session and keeps the holder's and
       guard: () => undefined,
     }),
   ).not.toBeNull();
-  f.changes.notify();
+  f.changes.notifyWrite();
   await closed;
   for (const socket of [holder, kept]) {
     const pong = once(socket.ws, "pong");
@@ -1475,7 +824,7 @@ it("refuses a native capture for a different owner document", async () => {
 describe("an owner's phone", () => {
   type Fixture = Awaited<ReturnType<typeof fixture>>;
   const phoneFixture = (rooms?: LiveRooms, production = false) => {
-    phoneExpiresAt = 8e12;
+    phoneState.expiresAt = 8e12;
     return fixture(
       production ? selfHostLiveProfile().namedLive.transport : limits,
       false,
@@ -1606,7 +955,7 @@ describe("an owner's phone", () => {
             workspaceId: f.binding.workspaceId,
             showOnPhone: false,
           });
-          f.changes.notify();
+          f.changes.notifyWrite();
         }
       });
       expect(f.native.invalidated.aborted).toBe(false);
@@ -1619,7 +968,7 @@ describe("an owner's phone", () => {
     // The clock stands still while both sockets open, so admission never races the expiry.
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     try {
-      phoneExpiresAt = Date.now() + 5_000;
+      phoneState.expiresAt = Date.now() + 5_000;
       const { phone, desktop } = await openPhone(f);
       const closed = new Promise<void>((resolve) => phone.ws.once("close", () => resolve()));
       await vi.advanceTimersByTimeAsync(4_999);
@@ -1722,7 +1071,7 @@ it.each([
     f.raw
       .prepare("UPDATE sync_relay_shares SET selector_json=?")
       .run(JSON.stringify({ paths: [binding.currentPath], versionId: null }));
-    f.changes.notify();
+    f.changes.notifyWrite();
     await closed;
     expect(f.native.invalidated.aborted).toBe(false);
     const second = f.connect((await f.mint()).token);
@@ -1780,7 +1129,13 @@ it.each([
 it("refuses aggregate frame pressure and releases it on close", async () => {
   const admission = createLiveConnectionAdmission();
   const f = await fixture(
-    { ...limits, maxBufferedBytes: 10_000 },
+    {
+      ...limits,
+      maxBufferedBytes: 10_000,
+      maxBufferedBytesPerPrincipal: 3750,
+      maxBufferedBytesPerShare: 5000,
+      maxBufferedBytesPerWorkspace: 10_000,
+    },
     false,
     undefined,
     false,
@@ -1855,47 +1210,6 @@ type ProductionPeer = {
   f: Awaited<ReturnType<typeof fixture>>;
   socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>;
 };
-
-async function openProductionSync(
-  f: Awaited<ReturnType<typeof fixture>>,
-  socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>,
-  credit = true,
-) {
-  await vi.waitFor(
-    () => {
-      expect(socket.ws.readyState).toBe(WebSocket.OPEN);
-      expect(socket.received.map((frame) => frame.kind)).toContain("credit");
-    },
-    { timeout: 5000 },
-  );
-  const send = (frame: LiveFrame) =>
-    socket.ws.send(encodeLiveFrame(frame, f.frames.receive.maxFrameBytes));
-  send({ kind: "hello", receivePolicy: f.frames.receive });
-  if (credit)
-    send({
-      kind: "credit",
-      grantedBytes: f.frames.maxQueuedBytes,
-      grantedFrames: f.frames.maxQueuedFrames,
-    });
-  const vector = Uint8Array.of(0);
-  send({
-    kind: "begin",
-    purpose: "client-vector",
-    transferId: 1,
-    totalBytes: vector.length,
-    digest: createHash("sha256").update(vector).digest("hex"),
-  });
-  send({ kind: "chunk", transferId: 1, offset: 0, bytes: vector });
-  if (credit)
-    await vi.waitFor(
-      () => {
-        expect(socket.ws.readyState).toBe(WebSocket.OPEN);
-        expect(socket.received.map((frame) => frame.kind)).toContain("chunk");
-      },
-      { timeout: 5000 },
-    );
-  if (credit) send({ kind: "sync-applied", appliedThroughJournalCursor: 0 });
-}
 
 it.each([false, true])(
   "delivers one production-size 2 MiB edit to 22 readers of one document; link=%s",
@@ -2544,3 +1858,368 @@ describe("a link ticket while the relay is busy", () => {
     expect(await ask(f)).toEqual(opaque);
   });
 });
+
+// A person in the owner's workspace opens a live document through the
+// workspace share. The relay checks the path with the workspace file reach
+// and admits only Edit.
+it("admits a workspace member at Edit for a reached path, and refuses View, Comment and a path outside reach", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const relay = testHandler(f.storage);
+  const owner = (path: string, body: Record<string, unknown>) =>
+    relay(request("owner-1", `/sync/${scope.workspaceId}${path}`, jsonBody(body)));
+  const invited = await owner("/members/invites", {
+    email: "reader-1@dohc.test",
+    workspaceName: "Docs",
+  });
+  expect(invited.status, await invited.clone().text()).toBe(200);
+  const shares = await json(await relay(request("reader-1", "/sync/shares")));
+  const shareId = (shares.received as Array<{ shareId: string; selector: { kind?: string } }>).find(
+    (row) => row.selector.kind === "workspace",
+  )!.shareId;
+  f.raw
+    .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+    VALUES (?, 'object-secret', 50, 'moment-secret', 'main', '.env/notes.md', ?, 'text', 1, 1)`)
+    .run(scope.workspaceId, "c".repeat(64));
+  const open = (path: string) => f.post("/sync/live/desktop-open", { shareId, path });
+
+  for (const level of ["view", "comment"]) {
+    expect((await owner("/members/level", { level })).status).toBe(200);
+    expect((await open(binding.currentPath)).status).toBe(404);
+  }
+  expect((await owner("/members/level", { level: "edit" })).status).toBe(200);
+  const admitted = await open(binding.currentPath);
+  expect(admitted.status).toBe(200);
+  const body = (await admitted.json()) as {
+    shareId: string;
+    path: string;
+    discriminator: string;
+    ticket: { token: string };
+  };
+  expect(body).toMatchObject({ shareId, path: binding.currentPath });
+  expect(await f.connect(body.ticket.token, undefined, {}, "", body.discriminator).status).toBe(
+    101,
+  );
+  expect((await open(".env/notes.md")).status).toBe(404);
+});
+
+it("wakes only the connections on a changed document and still closes a revoked one elsewhere", async () => {
+  const profile = selfHostLiveProfile(),
+    admission = createLiveConnectionAdmission();
+  const f = await fixture(
+    profile.namedLive.transport,
+    false,
+    { maxSessions: 16, maxMembers: 16, maxSnapshotBytes: 4096 },
+    false,
+    false,
+    admission,
+    0,
+    0,
+    true,
+    scope.workspaceId,
+    scope.shareId,
+    { people: 4, documents: 2 },
+  );
+  const published = new Map<string, number>(),
+    applied = new Map<string, number>(),
+    standing = new Map<string, number>();
+  const updateBytes = Buffer.alloc(16, 7),
+    updateDigest = createHash("sha256").update(updateBytes).digest("hex");
+  f.captureNative.mockImplementation(async (current?: LiveObjectBinding) => {
+    const native = { ...current!, selectorPaths: [current!.currentPath] };
+    return {
+      ...f.native,
+      binding: native,
+      client: {
+        openLiveAppliedSync: async () => ({
+          binding: native,
+          hostVector: Buffer.from([0]),
+          missingStateUpdate: Buffer.from([0, 0]),
+          observedLocalYDocHeadSequence: 100,
+          position: { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) },
+        }),
+        readNextLiveApplied: async (_request: unknown, after: { eventCount: number }) => {
+          applied.set(native.objectId, (applied.get(native.objectId) ?? 0) + 1);
+          const next = after.eventCount + 1;
+          if (next > (published.get(native.objectId) ?? 0)) return null;
+          return {
+            position: { eventCount: next, journalCursor: next, evidenceDigest: "cd".repeat(32) },
+            updateBytes,
+            ack: {
+              deliveryId: `edit-${next}`,
+              updateDigest,
+              journalCursor: next,
+              acceptingHostEpoch: host.hostEpoch,
+              localYDocSequence: next,
+              applicationReplayed: false,
+            },
+          };
+        },
+        readLiveApplicationAck: async () => null,
+      },
+    } as NamedFrameNativeHost;
+  });
+  const sockets = new Map<number, { document: number; socket: ReturnType<typeof f.connect> }>();
+  for (let person = 1; person <= 4; person++) {
+    const document = ((person - 1) % 2) + 1,
+      peer = await f.peer(person, document),
+      socket = peer.connect((await peer.mint()).token);
+    expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket);
+    sockets.set(person, { document, socket });
+  }
+  // Each connection holds one standing listener and one waiting native read.
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(8));
+  const resolve = f.storage.resolveCurrentLiveDocumentBinding.bind(f.storage);
+  vi.spyOn(f.storage, "resolveCurrentLiveDocumentBinding").mockImplementation(
+    (input, activation) => {
+      standing.set(input.document.objectId, (standing.get(input.document.objectId) ?? 0) + 1);
+      return resolve(input, activation);
+    },
+  );
+  const arrived = (socket: ReturnType<typeof f.connect>, cursor: number) =>
+    socket.until(
+      () =>
+        socket.received.some(
+          (frame) =>
+            frame.kind === "begin" &&
+            frame.purpose === "applied-update" &&
+            frame.journalCursor === cursor,
+        ),
+      `applied update ${cursor}`,
+    );
+  applied.clear();
+  published.set("object-1", 1);
+  f.changes.notify({ ...f.binding, objectId: "object-1" });
+  await Promise.all(
+    [...sockets.values()]
+      .filter(({ document }) => document === 1)
+      .map(({ socket }) => arrived(socket, 1)),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  expect({
+    standing: standing.get("object-2") ?? 0,
+    applied: applied.get("object-2") ?? 0,
+  }).toEqual({ standing: 0, applied: 0 });
+  expect(standing.get("object-1")).toBeGreaterThan(0);
+  expect(applied.get("object-1")).toBeGreaterThan(0);
+  // A relay write naming document 2 rechecks only document 2's standing.
+  standing.clear();
+  applied.clear();
+  f.changes.notifyWrite([{ ...f.binding, objectId: "object-2" }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(Object.fromEntries(standing)).toEqual({ "object-2": 2 });
+  expect(applied.size).toBe(0);
+  // A relay write that names no document rechecks every connection, so a
+  // revoked grant on document 2 still closes its connection.
+  const revoked = sockets.get(2)!.socket;
+  f.raw
+    .prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?")
+    .run("edit-2");
+  f.changes.notifyWrite();
+  expect((await revoked.closed)[0]).not.toBe(1000);
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(6));
+  expect(
+    [1, 3, 4].every((person) => sockets.get(person)!.socket.ws.readyState === WebSocket.OPEN),
+  ).toBe(true);
+  for (const person of [1, 3, 4]) sockets.get(person)!.socket.ws.close();
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(0));
+}, 60_000);
+
+it.each([
+  ["maxConnections", "live_total_limit"],
+  ["maxConnectionsPerWorkspace", "live_workspace_limit"],
+  ["maxConnectionsPerGrant", "live_grant_limit"],
+  ["maxConnectionsPerPrincipal", "live_person_limit"],
+  ["maxConnectionsPerSession", "live_session_limit"],
+] as const)(
+  "names %s only after authenticating and redeeming an in-scope ticket",
+  async (limit, code) => {
+    const f = await fixture({ ...limits, [limit]: 1 });
+    const first = f.connect((await f.mint()).token);
+    expect(await first.status).toBe(101);
+    const ticket = await f.mint();
+    expect(await f.connect(ticket.token, "account=other").status).toBe(404);
+    const refused = f.connect(ticket.token);
+    expect(await refused.status).toBe(101);
+    expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, code]);
+    expect(f.captureNative).toHaveBeenCalledTimes(5);
+  },
+);
+
+it("rechecks no live connection for a Group's posts, and still closes the sockets a removal, a revocation or a lower level ends", async () => {
+  const profile = selfHostLiveProfile(),
+    admission = createLiveConnectionAdmission();
+  const f = await fixture(
+    profile.namedLive.transport,
+    false,
+    { maxSessions: 16, maxMembers: 16, maxSnapshotBytes: 4096 },
+    false,
+    false,
+    admission,
+    0,
+    0,
+    true,
+    scope.workspaceId,
+    scope.shareId,
+    { people: 4, documents: 2 },
+  );
+  // The fixture's share becomes the workspace's membership, and its four Edit grants the members'.
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json = ? WHERE share_id = ?")
+    .run(WORKSPACE_SHARE_SELECTOR_JSON, scope.shareId);
+  f.raw
+    .prepare(`INSERT INTO sync_relay_workspace_memberships (workspace_id, share_id, member_level, workspace_name, created_at_ms)
+    VALUES (?, ?, 'edit', 'Fundraiser', 0)`)
+    .run(scope.workspaceId, scope.shareId);
+  for (let person = 1; person <= 4; person++) {
+    f.raw
+      .prepare(`INSERT INTO sync_relay_workspace_members (member_id, workspace_id, grant_id, user_id, email, role, state, invited_at_ms, joined_at_ms)
+      VALUES (?, ?, ?, ?, NULL, 'member', 'active', 0, 0)`)
+      .run("member-" + person, scope.workspaceId, "edit-" + person, "reader-" + person);
+  }
+  f.captureNative.mockImplementation(async (current?: LiveObjectBinding) => {
+    const native = { ...current!, selectorPaths: [current!.currentPath] };
+    return {
+      ...f.native,
+      binding: native,
+      client: {
+        openLiveAppliedSync: async () => ({
+          binding: native,
+          hostVector: Buffer.from([0]),
+          missingStateUpdate: Buffer.from([0, 0]),
+          observedLocalYDocHeadSequence: 100,
+          position: { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) },
+        }),
+        readNextLiveApplied: async () => null,
+        readLiveApplicationAck: async () => null,
+      },
+    } as NamedFrameNativeHost;
+  });
+  const sockets = new Map<number, ReturnType<typeof f.connect>>();
+  for (let person = 1; person <= 4; person++) {
+    const peer = await f.peer(person, ((person - 1) % 2) + 1),
+      socket = peer.connect((await peer.mint()).token);
+    expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket);
+    sockets.set(person, socket);
+  }
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(8));
+  // As a delivering host wires them.
+  const stop = observeRelayWrites(f.storage, (documents) => f.changes.notifyWrite(documents));
+  cleanups.push(async () => stop());
+  const workspaceId = scope.workspaceId,
+    threadId = "t".repeat(26);
+  const append = (ops: Parameters<typeof sequenced>[0], originId = "member-desktop") =>
+    f.storage.appendLogBatch({
+      workspaceId,
+      originId,
+      ops: sequenced(ops, f.storage.maxOriginSeq(workspaceId, originId) + 1).map(
+        ({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) }),
+      ),
+    });
+  append(
+    [
+      chatChannelCreate("c".repeat(26), {
+        kind: "channel",
+        name: "Events",
+        type: "both",
+        folderPath: "events",
+      }),
+      chatThreadCreate(threadId, "c".repeat(26)),
+    ],
+    "owner-desktop",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  let posted = 0;
+  const post = () =>
+    append([
+      chatMessageAppend(`post-${++posted}`, threadId, "See you at 6", {
+        authorUserId: "reader-1",
+        authorDisplayName: "Sam",
+        parentMessageId: posted > 1 ? "post-1" : undefined,
+      }),
+    ]);
+  const resolve = f.storage.resolveCurrentLiveDocumentBinding.bind(f.storage);
+  const rechecks = vi
+    .spyOn(f.storage, "resolveCurrentLiveDocumentBinding")
+    .mockImplementation((input, activation) => resolve(input, activation));
+  for (let count = 0; count < 3; count++) post();
+  append([
+    {
+      opKind: "chat.reaction.set",
+      payload: {
+        reactionId: "r1",
+        messageId: "post-1",
+        threadId,
+        emoji: "+1",
+        authorId: "reader-2",
+        authorKind: "human",
+        authorDisplayName: "Ana",
+        state: "on",
+        atMs: 5,
+      },
+    },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(rechecks).not.toHaveBeenCalled();
+  expect([...sockets.values()].every((socket) => socket.ws.readyState === WebSocket.OPEN)).toBe(
+    true,
+  );
+  const open = (people: number[]) =>
+    people.every((person) => sockets.get(person)!.ws.readyState === WebSocket.OPEN);
+  post();
+  expect(
+    f.storage.removeWorkspaceMember({
+      workspaceId,
+      actorUserId: "owner-1",
+      memberId: "member-1",
+      nowMs: 10,
+    }),
+  ).toEqual({ ok: true });
+  post();
+  expect((await sockets.get(1)!.closed)[0]).not.toBe(1000);
+  expect(open([2, 3, 4])).toBe(true);
+  post();
+  expect(
+    f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: "edit-2", revokedAtMs: 11 }).ok,
+  ).toBe(true);
+  post();
+  expect((await sockets.get(2)!.closed)[0]).not.toBe(1000);
+  expect(open([3, 4])).toBe(true);
+  post();
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId,
+      actorUserId: "owner-1",
+      level: "comment",
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 12,
+    }),
+  ).toEqual({ ok: true });
+  post();
+  expect((await sockets.get(3)!.closed)[0]).not.toBe(1000);
+  expect((await sockets.get(4)!.closed)[0]).not.toBe(1000);
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(0));
+}, 60_000);
+
+it.each([
+  ["maxConnections", "live_total_limit"],
+  ["maxConnectionsPerWorkspace", "live_workspace_limit"],
+  ["maxConnectionsPerGrant", "live_grant_limit"],
+  ["maxConnectionsPerPrincipal", "live_person_limit"],
+  ["maxConnectionsPerSession", "live_session_limit"],
+] as const)(
+  "names %s only after authenticating and redeeming an in-scope ticket",
+  async (limit, code) => {
+    const f = await fixture({ ...limits, [limit]: 1 });
+    const first = f.connect((await f.mint()).token);
+    expect(await first.status).toBe(101);
+    const ticket = await f.mint();
+    expect(await f.connect(ticket.token, "account=other").status).toBe(404);
+    const refused = f.connect(ticket.token);
+    expect(await refused.status).toBe(101);
+    expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, code]);
+    expect(f.captureNative).toHaveBeenCalledTimes(5);
+  },
+);

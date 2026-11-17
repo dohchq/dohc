@@ -1,6 +1,7 @@
 import type { StorageContext } from "./context";
 import { notFound } from "../errors";
 import { accountIsFenced } from "./accountDeletion";
+import { saveAccountName } from "./accountNames";
 import { SyncRelayConflictError } from "./errors";
 import { PUSH_GENERATIONS, PUSH_SUBSCRIPTIONS } from "./pushSchema";
 
@@ -112,10 +113,7 @@ export function bindPushSubscription(
       input.browserExpiresAtMs ?? Number.MAX_SAFE_INTEGER,
     );
     const setAccountName = () =>
-      db
-        .prepare(`INSERT INTO sync_relay_push_installation_names (installation_id, account_name)
-      VALUES (?, ?) ON CONFLICT(installation_id) DO UPDATE SET account_name = excluded.account_name`)
-        .run(input.installationId, (input.accountName ?? "").slice(0, 1024));
+      saveAccountName(storage, input.userId, input.accountName ?? null, input.nowMs);
     if (
       existing &&
       !changesAccount &&

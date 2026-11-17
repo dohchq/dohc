@@ -40,7 +40,7 @@ export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
           NO_AUTOMATIC_RETRY.includes(state.reason))))
   );
 }
-function statusText(state: NamedLiveBrowserState, link: boolean): string {
+function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean): string {
   if (state.status === "live")
     return state.pendingUpdates
       ? "Saving changes…"
@@ -53,6 +53,11 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
       : "Opening the file…";
   const limit = liveConnectionLimitMessage(state.reason);
   if (limit) return limit;
+  // In the band, the unsent edits show above the page with their own Copy, Download and Discard.
+  if (band && (state.status === "quarantined" || state.status === "closed"))
+    return state.status === "quarantined"
+      ? "Editing stopped. dohc could not send your unsent edits. Copy or download them, then discard them to keep editing."
+      : "Editing stopped.";
   if (state.status === "quarantined")
     return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused")
@@ -64,12 +69,11 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.reason === "access-removed") return "The owner removed your access.";
   if (state.reason === "link-full")
     return "This link cannot take more people. Ask the owner for a new link.";
-  if (state.reason === "authority-unavailable")
-    return "dohc could not open the file for editing. Try again.";
+  if (state.reason === "authority-unavailable") return "dohc could not open the file for editing.";
   if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";
-  return "Editing paused. Check your connection, then retry.";
+  return "Editing paused. Check your connection.";
 }
 type Removed = { id: string; text: string };
 
@@ -212,7 +216,9 @@ export function DraftReview({
  * A live document's editor. The link page draws the title and bar itself, so with `link` this
  * shows neither. Its saved state goes to `statusSlot`, in that bar, while editing works; a state
  * that stops editing stays above the text, where its sentence has room. `bodyHidden` keeps the
- * text out of view while the page still shows its own copy.
+ * text out of view while the page still shows its own copy. With `quietWhenSaved`, the bar shows
+ * nothing while every edit is saved, so the page's own level stays the only word there. With `bandSlot`,
+ * a state that stops editing goes to that band with the warning mark, and the page shows refusals itself.
  */
 export function NamedDocumentEditor({
   session,
@@ -220,13 +226,17 @@ export function NamedDocumentEditor({
   onState,
   link = false,
   statusSlot,
+  bandSlot,
   bodyHidden = false,
+  quietWhenSaved = false,
 }: {
   session: NamedDocumentSession;
   path: string;
   link?: boolean;
   statusSlot?: HTMLElement | null;
+  bandSlot?: HTMLElement | null;
   bodyHidden?: boolean;
+  quietWhenSaved?: boolean;
   onState(state: NamedLiveBrowserState): void;
 }) {
   const element = useRef<HTMLDivElement>(null),
@@ -258,24 +268,52 @@ export function NamedDocumentEditor({
       className={working ? "named-document-status" : "named-document-status stopped"}
       role="status"
     >
-      {statusText(state, link)}
+      {statusText(state, link, false)}
     </p>
   );
+  const retryLabel =
+    state.reason === "authority-unavailable" ||
+    state.reason === "host-unavailable" ||
+    state.reason === "live-stopped" ||
+    liveConnectionLimitMessage(state.reason)
+      ? "Try again"
+      : "Retry connection";
+  const retry =
+    state.status === "disconnected" &&
+    !FINAL.includes(state.reason ?? "") &&
+    (() => void session.reconnect());
+  const inBand = bandSlot !== undefined && !working;
   return (
     <section
       className={link ? "named-document" : "content named-document"}
       aria-label="Shared file"
     >
       {!link && <h1>{path}</h1>}
-      {statusSlot && working ? createPortal(status, statusSlot) : status}
-      {state.status === "disconnected" && !FINAL.includes(state.reason ?? "") && (
-        <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
-          {state.reason === "authority-unavailable" ||
-          state.reason === "host-unavailable" ||
-          state.reason === "live-stopped" ||
-          liveConnectionLimitMessage(state.reason)
-            ? "Try again"
-            : "Retry connection"}
+      {inBand
+        ? bandSlot &&
+          state.status !== "refused" &&
+          createPortal(
+            <>
+              <p role="status">
+                <Icon name="triangle-alert" size={14} />
+                {statusText(state, link, true)}
+              </p>
+              {retry && (
+                <button type="button" onClick={retry}>
+                  {retryLabel}
+                </button>
+              )}
+            </>,
+            bandSlot,
+          )
+        : statusSlot && working
+          ? quietWhenSaved && state.status === "live" && !state.pendingUpdates
+            ? null
+            : createPortal(status, statusSlot)
+          : status}
+      {!inBand && retry && (
+        <button className="handoff-button secondary" onClick={retry}>
+          {retryLabel}
         </button>
       )}
       <RemovedTextNotice session={session} />

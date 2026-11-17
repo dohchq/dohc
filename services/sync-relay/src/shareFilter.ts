@@ -254,9 +254,12 @@ export function isChatChannelSelector(
   return "kind" in selector && (selector as { kind?: unknown }).kind === "chat";
 }
 
-export function isLiveEditShareSelector(selector: AnyShareSelector): selector is ShareSelector {
-  // A workspace share does not open live documents yet: a live binding names
-  // its paths, and the workspace share names none.
+export function isLiveEditShareSelector(
+  selector: AnyShareSelector,
+): selector is ShareSelector | WorkspaceShareSelector {
+  // A workspace share at Edit opens every document its file reach covers;
+  // the caller checks the path with `fileSideOf`.
+  if (isWorkspaceSelector(selector)) return selector.access === "edit";
   if ("kind" in selector) return false;
   return selector.access === "edit" && selector.versionId === null && selector.paths.length > 0;
 }
@@ -1694,6 +1697,9 @@ export type CollectionWrite =
   // An in-place write to `<C>/automations.yaml`, or creating it.
   | { kind: "automations"; collectionPath: string; change: ProposedChange }
   | { kind: "new-record"; collectionPath: string; change: ProposedChange }
+  // Creates one Markdown page, `<folder>/<name>.md`, for a person in the
+  // workspace with Edit. `folder` is "" at the top level.
+  | { kind: "new-page"; folder: string; change: ProposedChange }
   // Creates `<P>/<N>/collection.yaml`, then an optional `automations.yaml`,
   // then `.md` records directly inside `<P>/<N>`, in that order, so the
   // owner's engine meets the schema before the records.
@@ -1754,10 +1760,33 @@ export function filterCollectionWriteForShare(
   selector: AnyShareSelector,
   raw: unknown,
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
+  member?: MemberFolders | null,
 ): CollectionWriteDecision {
   const files = collectionEditSelector(selector, chat);
   if (files === null) return { allowed: false };
-  return decideCollectionWrite(files, raw, chat, (folder) => coversCollectionFolder(files, folder));
+  // A workspace share writes only while the relay finds the writer's role.
+  if (isWorkspaceSelector(selector) && !member) return { allowed: false };
+  return decideCollectionWrite(
+    files,
+    raw,
+    chat,
+    (folder) => coversCollectionFolder(files, folder),
+    isWorkspaceSelector(selector) ? member! : null,
+  );
+}
+
+/**
+ * What the relay knows about the owner's folders, for a person in the
+ * workspace. Storage answers each question from the owner's current files on
+ * main, and the role from its own rows, never from the request.
+ */
+export interface MemberFolders {
+  /** The folder holds a current file at any depth. The top level ("") always does. */
+  holdsFile(folder: string): boolean;
+  /** The folder holds `collection.yaml` or `dataset.json`. */
+  holdsSchema(folder: string): boolean;
+  /** An admin creates folders: a new page or Collection may go in a folder that holds no file yet. */
+  createsFolders: boolean;
 }
 
 /**
@@ -1791,6 +1820,7 @@ function decideCollectionWrite(
   raw: unknown,
   chat: Pick<ChatShareThreadResolver, "channelKind"> | undefined,
   coversFolder: (folder: string) => boolean,
+  member: MemberFolders | null = null,
 ): CollectionWriteDecision {
   const refused: CollectionWriteDecision = { allowed: false };
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
@@ -1850,8 +1880,20 @@ function decideCollectionWrite(
     if (changes.length !== 1) return refused;
     const change = changes[0]!;
     const collectionPath = parentPath(change.afterPath!);
-    if (collectionPath === "" || !coversFolder(collectionPath)) return refused;
     const file = baseName(change.afterPath!);
+    // A page goes in a folder that holds a file, so a missing or hidden
+    // folder answers as a folder outside reach does. Only an admin creates
+    // folders. A Collection or dataset folder takes a record instead.
+    if (
+      member &&
+      change.basedOnPath === null &&
+      file.toLowerCase().endsWith(".md") &&
+      !member.holdsSchema(collectionPath)
+    ) {
+      if (!member.holdsFile(collectionPath) && !member.createsFolders) return refused;
+      return { allowed: true, write: { kind: "new-page", folder: collectionPath, change } };
+    }
+    if (collectionPath === "" || !coversFolder(collectionPath)) return refused;
     if (file === COLLECTION_SCHEMA_FILE && change.basedOnPath !== null) {
       return { allowed: true, write: { kind: "schema", collectionPath, change } };
     }
@@ -1870,6 +1912,8 @@ function decideCollectionWrite(
   const schema = schemaCreates[0]!;
   const collectionPath = parentPath(schema.afterPath!);
   if (collectionPath === "" || !coversFolder(parentPath(collectionPath))) return refused;
+  // A new Collection creates its folder, which only an admin may do.
+  if (member && !member.createsFolders) return refused;
   let automations: ProposedChange | null = null;
   const records: ProposedChange[] = [];
   for (const change of changes) {

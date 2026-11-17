@@ -20,6 +20,7 @@ import {
   ACCESS_ENDED_NOTE,
   AUTOMATION_LOOKUP_FAILED_NOTE,
   AUTOMATION_NOT_HERE_NOTE,
+  CHAT_LOOKUP_FAILED_NOTE,
   CHAT_NOT_FOUND_NOTE,
   RUN_THREAD_LOOKUP_FAILED_NOTE,
   type NoticeTarget,
@@ -28,7 +29,7 @@ import { findNoticeChat } from "./findNoticeChat";
 import { useSentNotices, type SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
-import { showChat } from "../workbench/chatsOnScreen";
+import { showChat, showMessage } from "../workbench/chatsOnScreen";
 import { tellWindowFocused } from "../../testing/windowFocus";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
@@ -346,7 +347,7 @@ describe("opening a sent notice", () => {
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(getRelayReceivedShare).toHaveBeenCalledWith({ shareId: "share-1" });
     expect(onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
       liveEditing: true,
       path: "Trips/Japan/report.md",
     });
@@ -1080,7 +1081,7 @@ describe("a failed run's notice", () => {
     const notAdded = setup([copy], [workspace("notes")]);
     await notAdded.result.current.onOpenSentNotice(copy, live());
     expect(notAdded.onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
       liveEditing: true,
       path: "Tasks/automations.yaml",
       controls: {
@@ -1495,6 +1496,195 @@ describe("an agent run's notice while its chat is on screen", () => {
     const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
     expect(result.current.sentNoticeToast?.notice).toBe(reply);
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
+  });
+});
+
+// "Sam mentioned you in #events" and "Sam replied in #events": the owner's
+// row sits on the workspace, a member's on the share they joined it through.
+describe("a message's notice", () => {
+  const events = {
+    id: "group-events",
+    name: "events",
+    slug: "events",
+    kind: "channel" as const,
+    type: "both" as const,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+    threadCount: 1,
+    unreadCount: 0,
+  };
+  const said = (overrides: Partial<NoticeRow>) =>
+    notice({
+      kind: "chat-message",
+      senderKind: "person",
+      senderLabel: "Sam",
+      body: "@Ana can you check the budget?",
+      ...overrides,
+    });
+  const toMember = said({
+    noticeId: "member",
+    workspaceId: null,
+    recipientShareId: "share-m",
+    title: "Sam mentioned you in #events",
+    target: { share: "share-m", thread: "thread-1", message: "m-1" },
+  });
+  const toOwner = said({
+    noticeId: "owner",
+    workspaceId: "notes",
+    recipientShareId: null,
+    title: "Sam replied in #events",
+    target: { thread: "thread-1", message: "m-1" },
+  });
+  const joined = workspace("trip", { shareView: { shareId: "share-m", granterEmail: null } });
+  beforeEach(() => {
+    listChatChannels.mockResolvedValue({ channels: [events], fileThreads: [] });
+    listChannelThreads.mockResolvedValue({
+      threads: [
+        {
+          id: "thread-1",
+          channelId: events.id,
+          title: "t",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 0,
+        },
+      ],
+    });
+  });
+  afterEach(() => {
+    listChatChannels.mockReset();
+    listChannelThreads.mockReset();
+  });
+
+  it.each([
+    ["a member's, in the workspace they joined", toMember, "trip"],
+    ["the owner's, in their workspace", toOwner, "notes"],
+  ])("opens %s at the message and reads it", async (_whose, row, here) => {
+    const { result, sentNotices, openChat, onSwitchWorkspace } = setup(
+      [row],
+      [workspace("notes"), joined],
+      here,
+    );
+    expect(result.current.sentNotices).toEqual([
+      { notice: row, folder: null, openable: true, retryable: false },
+    ]);
+    await expect(result.current.onOpenSentNotice(row, live())).resolves.toBeNull();
+    expect(openChat).toHaveBeenCalledExactlyOnceWith({
+      level: "channel",
+      channel: events,
+      lane: "chat",
+      focusMessageId: "m-1",
+    });
+    expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: row.noticeId }]);
+    expect(onSwitchWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("goes from another workspace to the one that holds the message", async () => {
+    const { result, onSwitchWorkspace, openChat } = setup(
+      [toMember],
+      [workspace("notes"), joined],
+      "notes",
+    );
+    expect(result.current.sentNotices[0]?.folder).toBe("trip");
+    await result.current.onOpenSentNotice(toMember, live());
+    expect(onSwitchWorkspace).toHaveBeenCalledExactlyOnceWith(joined, {
+      to: "chat",
+      thread: "thread-1",
+      message: "m-1",
+    });
+    expect(openChat).not.toHaveBeenCalled();
+  });
+
+  it("says it could not open the chat, not a run's thread, when the lookup fails", async () => {
+    const cause = new Error("The workspace engine is not running.");
+    listChatChannels.mockRejectedValueOnce(cause);
+    const { result, reportShellError } = setup([toOwner], [workspace("notes")]);
+    await expect(result.current.onOpenSentNotice(toOwner, live())).resolves.toBeNull();
+    expect(reportShellError).toHaveBeenCalledWith(
+      CHAT_LOOKUP_FAILED_NOTE,
+      cause,
+      expect.any(Function),
+      undefined,
+      "sent-notice-open:account:owner",
+    );
+  });
+
+  describe("while its chat is on screen", () => {
+    let shown: HTMLElement;
+    let hide = () => undefined as void;
+    beforeEach(() => {
+      tellWindowFocused(true);
+      shown = document.createElement("div");
+      document.body.append(shown);
+    });
+    afterEach(() => {
+      hide();
+      shown.remove();
+      tellWindowFocused(false);
+    });
+
+    it.each([
+      ["a member's", toMember, "trip"],
+      ["the owner's", toOwner, "notes"],
+    ])("reads %s row and skips its toast, keeping the row", async (_whose, row, here) => {
+      hide = showMessage("m-1", shown);
+      const { result, sentNotices } = setup([row], [workspace("notes"), joined], here, {
+        toast: row,
+      });
+      expect(result.current.sentNoticeToast).toBeNull();
+      await waitFor(() =>
+        expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([
+          { store: "account", noticeId: row.noticeId },
+        ]),
+      );
+      expect(sentNotices.hideToast).toHaveBeenCalled();
+      expect(sentNotices.dismiss).not.toHaveBeenCalled();
+      expect(result.current.sentNotices.map((described) => described.notice)).toEqual([row]);
+    });
+
+    it("reads the row once the person opens the message some other way", async () => {
+      const { result, sentNotices } = setup([toOwner], [workspace("notes")], "notes", {
+        toast: toOwner,
+      });
+      expect(result.current.sentNoticeToast?.notice).toBe(toOwner);
+      expect(sentNotices.read).not.toHaveBeenCalled();
+      await act(async () => {
+        hide = showMessage("m-1", shown);
+      });
+      expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([
+        { store: "account", noticeId: "owner" },
+      ]);
+      expect(sentNotices.hideToast).toHaveBeenCalledOnce();
+    });
+
+    // A reply in a post's collapsed comments is in the chat on screen, but
+    // it does not show, so its row stays unread.
+    it("keeps the row unread while its chat shows but its message does not", async () => {
+      hide = showChat("thread-1", shown);
+      const { sentNotices } = setup([toOwner], [workspace("notes")], "notes", { toast: toOwner });
+      await act(async () => undefined);
+      expect(sentNotices.read).not.toHaveBeenCalled();
+      expect(sentNotices.hideToast).not.toHaveBeenCalled();
+    });
+
+    it("reads no row of another workspace, another chat, or one already read", () => {
+      hide = showMessage("m-1", shown);
+      const rows = [
+        { ...toOwner, noticeId: "elsewhere", workspaceId: "other" },
+        {
+          ...toMember,
+          noticeId: "other-share",
+          recipientShareId: "share-x",
+          target: { share: "share-x", thread: "thread-1", message: "m-1" },
+        },
+        { ...toOwner, noticeId: "other-chat", target: { thread: "thread-2", message: "m-2" } },
+        { ...toOwner, noticeId: "read", readAtMs: 5 },
+      ];
+      const { sentNotices } = setup(rows, [workspace("notes"), workspace("other")], "notes");
+      expect(sentNotices.read).not.toHaveBeenCalled();
+    });
   });
 });
 

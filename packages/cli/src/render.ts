@@ -420,21 +420,23 @@ const LEVEL_WORDS = { view: "view", comment: "comment", edit: "edit" } as const;
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 
 // The Members page as lines: who is in the workspace, then invites and
-// removed accounts, each with the id the other verbs take.
+// removed accounts, each by name and role, with the id the other verbs take last.
+// The owner's id names no one a verb can act on, so its row ends at the email.
 function renderMembers(result: CliResultByVerb["members"]): string {
   if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
   if (result.status === "done") return "You left this workspace.";
   const { view } = result;
   const row = (person: (typeof view.people)[number]) =>
     [
-      person.memberId,
+      person.name === null ? null : lineSafe(person.name),
+      person.name === null && person.email !== null ? lineSafe(person.email) : null,
       person.state === "invited"
         ? "Invited"
         : person.state === "removed"
           ? "Removed"
           : ROLE_WORDS[person.role],
-      person.name === null ? null : lineSafe(person.name),
-      person.email === null ? null : lineSafe(person.email),
+      person.name === null || person.email === null ? null : lineSafe(person.email),
+      person.role === "owner" && person.state === "active" ? null : person.memberId,
     ]
       .filter((part) => part !== null)
       .join(" · ");

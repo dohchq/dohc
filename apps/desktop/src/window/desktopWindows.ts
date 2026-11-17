@@ -7,7 +7,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
-import { buildMenuTemplate } from "./applicationMenu";
+import { buildMenuTemplate, EVERY_CREATE_OFFER, type CreateOffers } from "./applicationMenu";
 import { resolvePersistedZoomApplication } from "./windowZoom";
 import { focusShareHandoffWindow, focusShareHandoffWindowWhenReady } from "../shareHandoffIngress";
 import type { createMainWindow as createMainWindowImplementation } from "./createMainWindow";
@@ -32,6 +32,11 @@ interface DesktopWindowsDependencies {
   process: Pick<NodeJS.Process, "platform" | "execPath" | "argv">;
   workspaceSummaries(): WorkspaceSummary[];
   currentUpdateState(): { canInstall?: boolean };
+  // The window with focus, if dohc has one.
+  focusedWindow(): BrowserWindow | null;
+  // What a workspace offers to create and import, from the rule its write
+  // handlers ask (`workspaceCreateOffers`).
+  createOffersFor(workspaceId: string): CreateOffers;
   stateDir(): string;
   readCachedUserSettingsFile: typeof readSettings;
   // One zoom step through the settings file owner, which saves it and puts it
@@ -80,6 +85,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   } = dependencies;
 
   let applicationMenuCanInstallUpdate: boolean | null = null;
+  let applicationMenuCreateOffers: CreateOffers | null = null;
 
   function nativeWorkspaceSummaries(): WorkspaceSummary[] {
     try {
@@ -309,10 +315,39 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     });
   }
 
+  // The offers of the workspace in the window a File click reaches. A window
+  // with no workspace open keeps every item, as before it had one.
+  function targetCreateOffers(): CreateOffers {
+    const target = targetWindow(dependencies.focusedWindow() ?? undefined);
+    const workspaceId =
+      target && !target.webContents.isDestroyed()
+        ? dependencies.rendererWorkspaceSessions.current(target.webContents)?.workspaceId
+        : undefined;
+    return workspaceId ? dependencies.createOffersFor(workspaceId) : EVERY_CREATE_OFFER;
+  }
+
+  // Focus moved, or a level, role, account or open workspace may have
+  // changed: rebuild the menu only when File's offers did.
+  function refreshApplicationMenuOffers(): void {
+    if (!app.isReady()) return;
+    const offers = targetCreateOffers();
+    const applied = applicationMenuCreateOffers;
+    if (
+      applied &&
+      applied.write === offers.write &&
+      applied.folder === offers.folder &&
+      applied.collection === offers.collection
+    )
+      return;
+    refreshApplicationMenu();
+  }
+
   function refreshApplicationMenu(): void {
     if (!app.isReady()) return;
     const canInstallUpdate = currentUpdateState().canInstall === true;
     applicationMenuCanInstallUpdate = canInstallUpdate;
+    const createOffers = targetCreateOffers();
+    applicationMenuCreateOffers = createOffers;
     // Without these, an unpackaged About panel names Electron, and a packaged
     // one adds the bundle's build number after the version.
     if (process.platform === "darwin") {
@@ -329,6 +364,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
           platform: process.platform,
           recentWorkspaces: nativeWorkspaceSummaries(),
           canInstallUpdate,
+          createOffers,
           sendCommand: sendMenuCommand,
           stepZoom: (step) => {
             void dependencies.stepWindowZoom(step).catch((error) => {
@@ -619,6 +655,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     broadcastUserSettings,
     broadcastAgentColor,
     refreshApplicationMenu,
+    refreshApplicationMenuOffers,
     refreshNativeWorkspaceSurfaces,
     prepareForRendererReload,
     prepareAfterRendererCrash,

@@ -23,14 +23,21 @@ export function selfHostLiveProfile() {
     maxResponseBytes: 64 * 1024,
     timeoutMs: 30_000,
   };
+  // Room for a community of 100 members at Edit, each with a second device or
+  // tab, beside other workspaces. The owner always keeps 16 in their workspace.
+  // A person can hold three 4 MiB syncs, and one share or one workspace's
+  // recipients leave 48 MiB of the 128 MiB for everyone else.
   const connections = {
-    maxConnections: 128,
-    maxConnectionsPerWorkspace: 96,
+    maxConnections: 384,
+    maxConnectionsPerWorkspace: 192,
     reservedOwnerConnections: 16,
     maxConnectionsPerSession: 6,
     maxConnectionsPerPrincipal: 12,
     maxConnectionsPerGrant: 80,
     maxBufferedBytes: 128 * MiB,
+    maxBufferedBytesPerPrincipal: 12 * MiB,
+    maxBufferedBytesPerShare: 80 * MiB,
+    maxBufferedBytesPerWorkspace: 80 * MiB,
     maxPendingBytes: 256 * 1024,
     maxFragments: 16,
     maxBufferedChunks: 128,
@@ -112,7 +119,8 @@ export function selfHostLiveProfile() {
         maxAdmissionBytes: 16 * MiB,
       },
       validation,
-      maxListeners: 320,
+      // Two frame listeners for each connection, and 64 for desktop opens and readiness waits.
+      maxListeners: 2 * connections.maxConnections + 64,
     },
     service: {
       ingress: nativeIngress.ingress,

@@ -114,6 +114,8 @@ export const RELAY_ENTRY_PATTERNS = [
   "/sync/live/named-tickets",
   "/sync/live/desktop-open",
   "/sync/live/desktop-ready",
+  "/sync/live/member-open",
+  "/sync/live/member-ready",
   "/sync/live/link-tickets",
   "/sync/live/link-session",
   "/sync/live/link-document",

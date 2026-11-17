@@ -36,7 +36,8 @@ import {
 } from "@dohc/live-session-contract/live-authorship";
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
-import { recordPushDeliveries } from "./pushDeliveries";
+import { recordChatMessageAlerts } from "./chatMessageAlerts";
+import { NO_LIVE_AUTHORITY } from "../relayWriteChanges";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -123,8 +124,23 @@ export function appendLogBatch(
     };
   },
 ): AppendLogBatchResult {
-  return storage.tx(() => appendLogBatchInTransaction(storage, input));
+  return storage.tx(
+    () => appendLogBatchInTransaction(storage, input),
+    chatAppend(input.ops) ? NO_LIVE_AUTHORITY : undefined,
+  );
 }
+
+// Chat ops that change no live authority: posts, replies and reactions, with
+// their threads, decisions and attachments. Creating a Group still rechecks.
+const CHAT_APPEND_KINDS = new Set([
+  "chat.message.append",
+  "chat.thread.create",
+  "chat.reaction.set",
+  "chat.decision.set",
+  "chat.attachment.add",
+]);
+const chatAppend = (ops: readonly SyncRelayLogInput[]) =>
+  ops.length > 0 && ops.every((op) => CHAT_APPEND_KINDS.has(op.opKind));
 
 /** Internal append for callers already holding the relay write transaction. */
 export function appendLogBatchInTransaction(
@@ -317,7 +333,7 @@ export function appendLogBatchInTransaction(
   const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
   const versionSnapshotBlobStmt = storage.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
   const currentFileStmt = currentFileStatements(storage.db);
-  const pushMessages: number[] = [];
+  const chatMessages: number[] = [];
   for (const op of newOps) {
     const result = insertStmt.run(
       input.workspaceId,
@@ -340,7 +356,7 @@ export function appendLogBatchInTransaction(
       redundant.has(op.originSeq)
     )
       continue;
-    if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
+    if (op.opKind === "chat.message.append") chatMessages.push(Number(result.lastInsertRowid));
     // Keep "where is this object now?" answerable by primary
     // key. The relay_seq this row just took IS the order the guard in the
     // upsert compares, so a later moment always wins and an out-of-order
@@ -419,7 +435,7 @@ export function appendLogBatchInTransaction(
       Number(result.lastInsertRowid),
     );
   }
-  for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
+  for (const relaySeq of chatMessages) recordChatMessageAlerts(storage, relaySeq);
   const settlementRefusals = input.ops
     .filter((op) => op.settlementAdmission?.status === "refused")
     .map((op) => ({
@@ -613,6 +629,17 @@ export function fetchChatMessages(
   });
 }
 
+/** A page of the messages in every channel's threads. The caller checks which channels the reader reaches. */
+export function fetchChannelMessages(
+  storage: StorageContext,
+  input: ChatPageInput,
+): FetchLogPageResult & { latestCursor: number } {
+  return fetchPlacedMessages(storage, input, {
+    sql: "json_extract(create_json, '$.channelWireId') IS NOT NULL",
+    params: [],
+  });
+}
+
 /**
  * A page of the messages in a file's Comment threads: those whose first
  * create binds the file's object, or its path. The caller checks each
@@ -745,48 +772,54 @@ export function appendBrowserChatBatch(
     guard?: (context: AppendLogBatchGuardContext) => void;
   },
 ): AppendLogBatchResult {
-  return storage.tx(() => {
-    const existing = fetchChatMessage(storage, input);
-    const storedPayload = existing
-      ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
-      : null;
-    if (existing) {
-      const previous = fetchLogCoordinate(storage, { ...input, originSeq: existing.originSeq - 1 });
-      const createdThread =
-        previous?.opKind === "chat.thread.create" &&
-        (JSON.parse(previous.payloadJson) as { threadId?: unknown }).threadId ===
-          (JSON.parse(existing.payloadJson) as { threadId?: unknown }).threadId;
-      if (input.ops.length !== (createdThread ? 2 : 1)) {
-        throw new SyncRelayConflictError("retry changes thread creation");
+  return storage.tx(
+    () => {
+      const existing = fetchChatMessage(storage, input);
+      const storedPayload = existing
+        ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
+        : null;
+      if (existing) {
+        const previous = fetchLogCoordinate(storage, {
+          ...input,
+          originSeq: existing.originSeq - 1,
+        });
+        const createdThread =
+          previous?.opKind === "chat.thread.create" &&
+          (JSON.parse(previous.payloadJson) as { threadId?: unknown }).threadId ===
+            (JSON.parse(existing.payloadJson) as { threadId?: unknown }).threadId;
+        if (input.ops.length !== (createdThread ? 2 : 1)) {
+          throw new SyncRelayConflictError("retry changes thread creation");
+        }
       }
-    }
-    const firstSequence = existing
-      ? existing.originSeq - input.ops.length + 1
-      : Number(
-          storage.db
-            .prepare(
-              `SELECT COALESCE(MAX(origin_seq), -1) AS seq FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
-            )
-            .get(input.workspaceId, input.originId)?.seq ?? -1,
-        ) + 1;
-    const ops = input.ops.map((op, index) => {
-      const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
-      const recordedAtMs = existing?.recordedAtMs ?? op.recordedAtMs;
-      return {
-        ...op,
-        originSeq: firstSequence + index,
-        recordedAtMs,
-        payloadJson: JSON.stringify({
-          ...payload,
-          createdAtMs: recordedAtMs,
-          ...(storedPayload && op.opKind === "chat.message.append"
-            ? payload.authorKind === "human"
-              ? { authorDisplayName: storedPayload.authorDisplayName }
-              : { authorOwnerDisplayName: storedPayload.authorOwnerDisplayName }
-            : {}),
-        }),
-      };
-    });
-    return appendLogBatchInTransaction(storage, { ...input, ops });
-  });
+      const firstSequence = existing
+        ? existing.originSeq - input.ops.length + 1
+        : Number(
+            storage.db
+              .prepare(
+                `SELECT COALESCE(MAX(origin_seq), -1) AS seq FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
+              )
+              .get(input.workspaceId, input.originId)?.seq ?? -1,
+          ) + 1;
+      const ops = input.ops.map((op, index) => {
+        const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+        const recordedAtMs = existing?.recordedAtMs ?? op.recordedAtMs;
+        return {
+          ...op,
+          originSeq: firstSequence + index,
+          recordedAtMs,
+          payloadJson: JSON.stringify({
+            ...payload,
+            createdAtMs: recordedAtMs,
+            ...(storedPayload && op.opKind === "chat.message.append"
+              ? payload.authorKind === "human"
+                ? { authorDisplayName: storedPayload.authorDisplayName }
+                : { authorOwnerDisplayName: storedPayload.authorOwnerDisplayName }
+              : {}),
+          }),
+        };
+      });
+      return appendLogBatchInTransaction(storage, { ...input, ops });
+    },
+    chatAppend(input.ops) ? NO_LIVE_AUTHORITY : undefined,
+  );
 }

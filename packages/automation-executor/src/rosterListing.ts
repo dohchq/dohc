@@ -100,10 +100,13 @@ const FileGrant = z.object({
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 // A workspace membership: every tracked file on main, at the member's level.
-// An admin's grant is Edit.
+// An admin's grant is Edit. The relay names the role the person holds now.
 const WorkspaceGrant = z.object({
   ...BASE,
-  selector: z.object({ kind: z.literal("workspace") }),
+  selector: z.object({
+    kind: z.literal("workspace"),
+    role: z.enum(["admin", "member"]).optional(),
+  }),
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);
@@ -226,24 +229,29 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
   };
   if (isFileGrant(grant)) {
     const { paths, versionId } = grant.selector;
-    return { ...recipient, files: { paths, versionId, access: grant.access }, channel: null };
+    return { ...recipient, files: { paths, versionId, access: grant.access }, chat: null };
   }
+  // A membership reads every Group, and posts in them at Comment and Edit.
   if (isWorkspaceGrant(grant)) {
-    return { ...recipient, files: { ...WHOLE_WORKSPACE, access: grant.access }, channel: null };
+    return {
+      ...recipient,
+      files: { ...WHOLE_WORKSPACE, access: grant.access },
+      chat: { kind: "groups", canPost: grant.access !== "view" },
+    };
   }
   // A Group's read-write edits its folder and posts in its chat. Read-only
   // views both.
   const canPost = grant.access === "read-write";
-  const channel = { wireId: grant.selector.channelWireId, canPost };
+  const chat = { kind: "channel" as const, wireId: grant.selector.channelWireId, canPost };
   if (isGroupGrant(grant)) {
-    if (grant.fileScope === "not-served") return { ...recipient, files: null, channel: null };
+    if (grant.fileScope === "not-served") return { ...recipient, files: null, chat: null };
     return {
       ...recipient,
       files: { paths: grant.selector.paths, versionId: null, access: canPost ? "edit" : "view" },
-      channel,
+      chat,
     };
   }
-  return { ...recipient, files: null, channel };
+  return { ...recipient, files: null, chat };
 }
 
 const RecipientEmail = z.object({ recipientEmail: z.string().min(1).max(320) });

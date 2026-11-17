@@ -5,6 +5,7 @@ import {
   RECLAIM_MIN_HOLD_MS,
   RECLAIM_RETENTION_MS,
   SERVICE_HOST_MAX_DOCUMENTS,
+  MEMBER_OPEN_DEMAND_MS,
 } from "./liveHostingLimits";
 import { binding, scope } from "./liveTickets.test-helper";
 import {
@@ -127,6 +128,137 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
   expect(await body(await held, 200)).toEqual(ready);
 });
 
+// Proves: an agent's open of a page a member opened first is the agent's
+// demand. The page stays hosted once the member is removed and after the
+// member's window ends.
+it("keeps a page an agent opened after a member once the member is removed and the member's window ends", async () => {
+  const f = await fixture();
+  f.revoke();
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      workspaceName: "Plans",
+      email: "sam@example.test",
+      recipientUserId: "member-1",
+      newMemberId: () => "member-entry",
+      newGrantId: () => "member-grant",
+      newShareId: () => "members-share",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      level: "edit",
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 6,
+    }),
+  ).toEqual({ ok: true });
+  f.storage.ensureOwnedLiveDocument({
+    intent: "member-open",
+    userId: "member-1",
+    workspaceId: scope.workspaceId,
+    path: binding.currentPath,
+    nowMs: 1_000,
+    guard() {},
+  });
+  expect(f.read()).toMatchObject({ shareId: "members-share", demandAtMs: 1_000 });
+  const held = f.agent("editor").open();
+  await f.holding(1, 1);
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await held, 200)).toEqual(ready);
+  expect(f.read()).toMatchObject({ shareId: null, ownerDemand: false, demandAtMs: 2_000 });
+  expect(
+    f.storage.removeWorkspaceMember({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      memberId: "member-entry",
+      nowMs: 3_000,
+    }),
+  ).toEqual({ ok: true });
+  const late = 2_000 + MEMBER_OPEN_DEMAND_MS;
+  expect(
+    f.storage.releaseServiceHostEnrollment({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+      nowMs: late,
+    }),
+  ).toBeNull();
+  expect(f.storage.serviceHostEnrollmentCovered(f.read()!, late)).toBe(true);
+  expect(
+    f.storage.serviceActivationRetirement({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+    }),
+  ).toBeNull();
+});
+
+// Proves: an agent's open clears the members share of a membership that has
+// ended, so the page a member opened under it stays hosted for the agent.
+it("keeps a page an agent opens after the membership a member opened it under ends", async () => {
+  const f = await fixture();
+  f.revoke();
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      workspaceName: "Plans",
+      email: "sam@example.test",
+      recipientUserId: "member-1",
+      newMemberId: () => "member-entry",
+      newGrantId: () => "member-grant",
+      newShareId: () => "members-share",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      level: "edit",
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 6,
+    }),
+  ).toEqual({ ok: true });
+  f.storage.ensureOwnedLiveDocument({
+    intent: "member-open",
+    userId: "member-1",
+    workspaceId: scope.workspaceId,
+    path: binding.currentPath,
+    nowMs: 1_000,
+    guard() {},
+  });
+  expect(
+    f.storage.endWorkspaceMembership({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      nowMs: 1_500,
+    }),
+  ).toEqual({ ok: true });
+  expect(f.read()).toMatchObject({ shareId: "members-share" });
+  const held = f.agent("editor").open();
+  await f.holding(1, 1);
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await held, 200)).toEqual(ready);
+  expect(f.read()).toMatchObject({ shareId: null, ownerDemand: false, demandAtMs: 2_000 });
+  expect(f.storage.serviceHostEnrollmentCovered(f.read()!, 2_000)).toBe(true);
+  expect(
+    f.storage.releaseServiceHostEnrollment({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+      nowMs: 2_000,
+    }),
+  ).toBeNull();
+});
+
+// Proves: agents alone keep at most 48 documents hosted. The owner's Resume
+// of a document no share covers is not one of them.
 it("refuses an agent's open once agents alone keep 48 documents, and hosts the owner's Resume of a shareless one", async () => {
   const f = await fixture(),
     a = f.agent("editor");

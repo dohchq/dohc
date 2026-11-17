@@ -1,6 +1,10 @@
 import { WORKSPACE_MEMBER_ROUTES } from "@dohc/security-contract/workspace-members";
 import { MembersResult, type MembersRequest } from "@dohc/cli/members";
-import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { recordedShareSelector } from "../workspaces/shareViewRecords";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 
 type MembersWorkspace = { workspaceId: string; rootPath: string; shareView?: unknown };
 type MembersOperation<Workspace> = { workspace: Workspace; assertCurrent(): void };
@@ -8,6 +12,10 @@ interface MembersDependencies<Workspace, Credentials> {
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
+  ): Promise<{ credentials: Credentials; credentialGeneration: number }>;
+  /** The signed-in account, when it is the one that joined this workspace. Rejects with why not. */
+  remoteForJoinedWorkspace(
+    workspace: Workspace,
   ): Promise<{ credentials: Credentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
   /** One relay request with the signed-in account's bearer. Resolves with any status; rejects when the server is unreachable. */
@@ -19,6 +27,33 @@ interface MembersDependencies<Workspace, Credentials> {
 export const MEMBERS_UNREACHABLE =
   "dohc could not reach your server. Check your connection, then try again.";
 const SHARE_VIEW_REFUSAL = "Open the original workspace to manage its members.";
+const NO_PLACE =
+  "dohc does not know where this workspace's Members are yet. Refresh the workspace, then try again.";
+
+// Where a workspace's Members live on the relay: the workspace's own id for
+// one this computer owns, the owner's for a joined one, and null for any
+// other share view.
+function membersPlace(
+  workspace: MembersWorkspace,
+): { workspaceId: string; workspaceName: string } | "joined-unknown" | null {
+  if (!shareViewIsPresent(workspace.shareView))
+    return { workspaceId: workspace.workspaceId, workspaceName: folderName(workspace.rootPath) };
+  const view = workspace.shareView as {
+    grantedSelector?: unknown;
+    membersWorkspaceId?: unknown;
+    subjectName?: unknown;
+  };
+  if (recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true) return null;
+  if (typeof view.membersWorkspaceId !== "string" || view.membersWorkspaceId.length === 0)
+    return "joined-unknown";
+  return {
+    workspaceId: view.membersWorkspaceId,
+    workspaceName:
+      typeof view.subjectName === "string" && view.subjectName
+        ? view.subjectName
+        : folderName(workspace.rootPath),
+  };
+}
 
 const PHRASES: Record<MembersRequest["action"], string> = {
   list: "load Members",
@@ -41,7 +76,9 @@ function failure(action: MembersRequest["action"], status: number): Error {
       );
     case 403:
       return new Error(
-        `dohc could not ${phrase} because your role in this workspace no longer allows it. Reload Members to see what you can do.`,
+        action === "invite"
+          ? "dohc could not send the invite. Only the owner and admins can invite."
+          : `dohc could not ${phrase} because your role in this workspace does not allow it. Reload Members to see what you can do.`,
       );
     case 404:
       return new Error(
@@ -78,38 +115,43 @@ function route(template: string, workspaceId: string, memberId?: string): string
 }
 
 /**
- * The Members page's actions, for the app, the owner's CLI, and MCP. Main
+ * The Members page's actions, for the app and for agents through the CLI and MCP. Main
  * names the workspace the caller's operation holds and the account its
  * credentials belong to; the relay decides every action.
  */
 export function createWorkspaceMembersActions<Workspace extends MembersWorkspace, Credentials>(
   dependencies: MembersDependencies<Workspace, Credentials>,
 ) {
-  const ownerRelayOperation = createOwnerRelayShareOperation<
+  // A joined workspace asks with the account that joined it; any other
+  // with the workspace's own remote.
+  const relayOperation = createOwnerRelayShareOperation<
     Workspace,
     MembersOperation<Workspace>,
     Credentials
   >({
-    remoteForWorkspace: dependencies.remoteForWorkspace,
+    remoteForWorkspace: (workspace, options) =>
+      shareViewIsPresent(workspace.shareView)
+        ? dependencies.remoteForJoinedWorkspace(workspace)
+        : dependencies.remoteForWorkspace(workspace, options),
     credentialGeneration: dependencies.currentCredentialGeneration,
   });
   const assertMembersWorkspace = (workspace: Workspace) => {
-    try {
-      assertOriginalWorkspace(workspace);
-    } catch {
-      throw new Error(SHARE_VIEW_REFUSAL);
-    }
+    const place = membersPlace(workspace);
+    if (place === null) throw new Error(SHARE_VIEW_REFUSAL);
+    if (place === "joined-unknown") throw new Error(NO_PLACE);
   };
 
   return function workspaceMembers(
     operation: MembersOperation<Workspace>,
     request: MembersRequest,
   ): Promise<MembersResult> {
-    return ownerRelayOperation(
+    return relayOperation(
       operation,
       async (operation, credentials, session) => {
-        const workspaceId = operation.workspace.workspaceId;
-        const workspaceName = folderName(operation.workspace.rootPath);
+        const place = membersPlace(operation.workspace);
+        if (place === null || place === "joined-unknown") throw new Error(SHARE_VIEW_REFUSAL);
+        const { workspaceId, workspaceName } = place;
+        const localWorkspaceId = operation.workspace.workspaceId;
 
         const call = async (
           path: string,
@@ -143,7 +185,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           // Every POST here is a change. Refresh before the currency check,
           // because the relay made the change even if this window moved on.
           if (body !== undefined && response.status === 200)
-            dependencies.sharesChanged(workspaceId);
+            dependencies.sharesChanged(localWorkspaceId);
           session.assertCurrent();
           return { status: response.status, data };
         };
@@ -255,5 +297,78 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
       assertMembersWorkspace,
       { allowPaused: true },
     );
+  };
+}
+
+export interface JoinedWorkspaceGroupInput {
+  name: string;
+  type?: "posts" | "chat" | "both";
+  purpose?: string;
+}
+
+/**
+ * New group in a joined workspace, for an admin. The relay reads the role
+ * from its own records and writes the Group into the owner's workspace; the
+ * view's next pull brings it here. Main names the share and the account.
+ */
+export function createJoinedWorkspaceGroupAction<
+  Credentials extends { userId: string; relayUrl?: string },
+>(dependencies: {
+  credentials(): Promise<Credentials | null>;
+  relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
+}) {
+  return async function createJoinedWorkspaceGroup(
+    view: { shareId?: string; relayUrl?: string; recipientUserId?: string } | undefined,
+    input: JoinedWorkspaceGroupInput,
+  ): Promise<{ channelWireId: string }> {
+    const credentials = await dependencies.credentials();
+    if (!view?.shareId || !joinedByAccount(view, credentials))
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
+    let response: Response;
+    try {
+      response = await dependencies.relayResponse(
+        credentials,
+        WORKSPACE_MEMBER_ROUTES.groupCreate,
+        {
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({ shareId: view.shareId, ...input }),
+        },
+      );
+    } catch {
+      throw new Error(MEMBERS_UNREACHABLE);
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      switch (response.status) {
+        case 400:
+          throw new Error("Use 1 to 80 characters, including at least one letter or number.");
+        case 403:
+          throw new Error(
+            `dohc could not create ${input.name} because only admins create Groups here.`,
+          );
+        case 404:
+          throw new Error(`dohc could not create ${input.name} because your membership ended.`);
+        case 413:
+          throw new Error(
+            `dohc could not create ${input.name} because this workspace is out of space.`,
+          );
+        default:
+          throw new Error(
+            `dohc could not create ${input.name}. The server answered ${response.status}. Try again.`,
+          );
+      }
+    }
+    const data: unknown = await response.json().catch(() => null);
+    const channelWireId =
+      typeof data === "object" && data !== null
+        ? (data as { channelWireId?: unknown }).channelWireId
+        : undefined;
+    if (typeof channelWireId !== "string" || channelWireId.length === 0) {
+      throw new Error(
+        `dohc could not read your server's answer. Look for ${input.name} in Chats before you try again.`,
+      );
+    }
+    return { channelWireId };
   };
 }

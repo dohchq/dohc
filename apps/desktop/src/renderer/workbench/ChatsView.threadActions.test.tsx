@@ -3,7 +3,16 @@ import "../../testing/legendListMock";
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { NOW, thread, message, bridgeMock, renderView } from "./ChatsView.testHarness";
+import {
+  NOW,
+  thread,
+  message,
+  openingPreview,
+  bridgeMock,
+  renderView,
+} from "./ChatsView.testHarness";
+import { tellWindowFocused } from "../../testing/windowFocus";
+import { messageOnScreen } from "./chatsOnScreen";
 
 describe("ChatsView decisions", () => {
   it("cancels the answer and its reply together, so the next comment is neither", async () => {
@@ -379,5 +388,34 @@ describe("ChatsView runs that didn't reply", () => {
 
     expect((await screen.findByTestId("chats-run-failed")).textContent).toBe(QUIT);
     expect(screen.queryByTestId("chats-run-try-again")).toBeNull();
+  });
+  // A mention or reply Notice reads when its own message shows. In the feed
+  // a post shows its own message; its comments show once it is open.
+  it("counts a post's message as on screen in the feed, and a comment only in the open post", async () => {
+    const comment = message({
+      id: "message-2",
+      parentMessageId: "message-1",
+      body: "Yes, Friday works.",
+      createdAtMs: NOW + 1,
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2, openingMessage: openingPreview() })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), comment] });
+    renderView();
+    tellWindowFocused(true);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-post-card");
+    await waitFor(() => expect(messageOnScreen("message-1")).toBe(true));
+    expect(messageOnScreen("message-2")).toBe(false);
+    await user.click(screen.getByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(messageOnScreen("message-2")).toBe(true));
+    expect(messageOnScreen("message-1")).toBe(true);
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-channel-view");
+    await waitFor(() => expect(messageOnScreen("message-2")).toBe(false));
   });
 });

@@ -6,11 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createNamedDesktopLiveCapture, waitForNamedDesktopAdmission } from "./namedDesktopLive";
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import {
   LiveAuthorityUnavailableError,
   type NamedLiveSelection,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { preserveLiveDraft } from "./liveDraftRecovery";
+import type { ShareViewSelector } from "./shareViewInfo";
 
 const transport = vi.hoisted(() => ({ factory: vi.fn() }));
 vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async (importOriginal) => {
@@ -25,7 +27,11 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnline = true) {
+function fixture(
+  recordDelivery?: () => Promise<ShareRecordStatus | null>,
+  isOnline = true,
+  selector: ShareViewSelector = { access: "edit", versionId: null, paths: ["docs"] },
+) {
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
   let ended = false;
@@ -117,7 +123,7 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
   const preserveDraft = vi.fn(async () => {});
   const capture = createNamedDesktopLiveCapture({
     shareId: "share",
-    selector: { access: "edit", versionId: null, paths: ["docs"] },
+    selector,
     credentials: {
       relayUrl: "https://relay.test",
       token: "real-account-token",
@@ -205,7 +211,11 @@ it("reports a failed connection without blaming the owner after acceptance", asy
       onRemoteUpdate: vi.fn(),
     }),
   ).rejects.toMatchObject({
-    waiting: { state: "failed", message: "dohc could not connect. Check your connection." },
+    waiting: {
+      state: "failed",
+      message: "dohc could not connect. Check your connection.",
+      reason: "dohc could not connect to the server. Check your connection.",
+    },
   });
   expect(transport.factory).not.toHaveBeenCalled();
 });
@@ -249,6 +259,36 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   expect(onSaveState).toHaveBeenLastCalledWith("saved-to-host", 1, "outcome");
   await provider.close();
   expect(f.preserveDraft).not.toHaveBeenCalled();
+});
+
+it("answers an agent's edit once the host holds it, and says so when live editing stops first", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  await expect(provider.savedToHost!()).resolves.toBeUndefined();
+  const edit = new Y.Doc();
+  edit.getText("body").insert(0, "pending");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit));
+  edit.destroy();
+  let held = false;
+  const saved = provider.savedToHost!().then(() => {
+    held = true;
+  });
+  await Promise.resolve();
+  expect(held).toBe(false);
+  f.ack();
+  await saved;
+  const next = new Y.Doc();
+  next.getText("body").insert(0, "again");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(next));
+  next.destroy();
+  const stopped = provider.savedToHost!();
+  f.terminal();
+  await expect(stopped).rejects.toThrow("The live connection to the server closed.");
+  await provider.close();
 });
 
 it("reports no file head with the note and each update, so the note check still judges a shared note", async () => {
@@ -314,6 +354,44 @@ it("rejects a workspace switch and pinned-selector escape before editing", async
   expect(() => provider.applyLocalUpdate(new Uint8Array([0, 0]))).toThrow("switched");
   expect(f.session.state().pendingUpdates).toBe(0);
   await provider.close();
+});
+
+it("co-edits any reached path in a joined workspace at Edit, and nothing outside the member's reach", async () => {
+  const f = fixture(undefined, true, {
+    access: "edit",
+    versionId: null,
+    paths: [],
+    wholeWorkspace: true,
+  });
+  await expect(
+    f.capture.openYDocSession({
+      path: ".env/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toThrow("outside this view");
+  expect(await f.capture.waitForAdmission!(".env/a.md", new AbortController().signal)).toBe(false);
+  expect(f.request).not.toHaveBeenCalled();
+  const provider = await f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  expect(f.request).toHaveBeenCalledOnce();
+  await provider.close();
+  const comment = fixture(undefined, true, {
+    access: "comment",
+    versionId: null,
+    paths: [],
+    wholeWorkspace: true,
+  });
+  await expect(
+    comment.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toThrow("outside this view");
 });
 
 it("retains an edit quarantined before queue admission across failed recovery and retry", async () => {
@@ -472,6 +550,89 @@ it("returns unavailable when the relay ends a readiness wait", async () => {
   expect(transport.factory).not.toHaveBeenCalled();
 });
 
+// The relay's host answered at once that it will not host the document, as
+// when it is full. The open ends with that answer, in words, instead of the
+// waiting state that waits for the host again.
+it.each([
+  ["live_host_full", "The server is editing too many pages right now."],
+  ["live_paused_by_owner", "The owner paused live editing for this page."],
+  ["document-unavailable", "The page moved or was deleted."],
+])("ends the open with the host's %s refusal and says why", async (code, reason) => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(Response.json({ ok: false, code }, { status: 409 }));
+  const opened = f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  await expect(opened).rejects.toBeInstanceOf(SharedDocumentWaitingError);
+  await expect(opened).rejects.toMatchObject({
+    waiting: {
+      state: "host-refused",
+      message: `dohc could not open this page for editing. ${reason}`,
+      reason,
+    },
+  });
+  expect(transport.factory).not.toHaveBeenCalled();
+});
+
+// A page its owner never opened in dohc has no live-editing history yet. The
+// owner's desktop starts one by itself, so the open waits for the host to be
+// ready instead of for Try again.
+it("waits for the owner's desktop when the host says the page has no live history yet", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(
+    Response.json({ ok: false, code: "live-document-without-lineage" }, { status: 409 }),
+  );
+  await expect(
+    f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    waiting: {
+      state: "host-refused",
+      reason: "Editing starts once the owner's dohc is online.",
+      awaitsHost: true,
+    },
+  });
+});
+
+it("does not guess why when the host gives a refusal dohc does not know", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(
+    Response.json({ ok: false, code: "something-new" }, { status: 409 }),
+  );
+  await expect(
+    f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    waiting: { state: "host-refused", message: "dohc could not open this page for editing." },
+  });
+});
+
+it("keeps waiting for the host after a refusal without a host answer", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }));
+  await expect(
+    f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    waiting: {
+      state: "failed",
+      message: "dohc could not open this file for editing.",
+      reason: "The server did not start live editing for this page.",
+    },
+  });
+});
+
 it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(
   "shows the %s opening refusal",
   async (code, message) => {
@@ -485,7 +646,7 @@ it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(
         contentKind: "richdoc",
         onRemoteUpdate: vi.fn(),
       }),
-    ).rejects.toMatchObject({ waiting: { state: "failed", message } });
+    ).rejects.toMatchObject({ waiting: { state: "failed", message, reason: message } });
     expect(f.closed).toHaveBeenCalled();
   },
 );

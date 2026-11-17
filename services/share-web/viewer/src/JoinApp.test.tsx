@@ -6,8 +6,18 @@ import JoinApp, { takeJoinToken } from "./JoinApp";
 import { jsonResponse, settle, setControlValue } from "./testing";
 
 const TOKEN = "invite_token_0123456789";
-const PREVIEW = { workspaceName: "Community", ownerName: "Ana", alreadyMember: false };
-const JOINED = { workspaceId: "ws-1", shareId: "share-1", workspaceName: "Community" };
+const PREVIEW = {
+  workspaceName: "Community",
+  ownerName: "Ana",
+  alreadyMember: false,
+  grantId: null,
+};
+const JOINED = {
+  workspaceId: "ws-1",
+  shareId: "share-1",
+  workspaceName: "Community",
+  grantId: "grant-1",
+};
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
   container = document.createElement("div");
@@ -65,6 +75,13 @@ async function click(label: string) {
   await act(async () => pressed.click());
   await settle(() => !pressed.disabled || !pressed.isConnected);
 }
+/** Open in browser goes to the person's own workspace page; Open in dohc sits beside it. */
+function expectOpenActions(grantId: string) {
+  const browser = container.querySelector<HTMLAnchorElement>("a.join-open")!;
+  expect(browser.textContent).toBe("Open in browser");
+  expect(browser.getAttribute("href")).toBe(`/s/workspace/${grantId}`);
+  expect(button("Open in dohc")).toBeDefined();
+}
 async function signInAs(email: string, password: string) {
   await act(async () => {
     setControlValue(container.querySelector<HTMLInputElement>('input[name="email"]')!, email);
@@ -86,7 +103,7 @@ it("takes the token from the link, clears it from the address bar, and keeps it 
   expect(location.hash).toBe("");
 });
 
-it("previews the workspace and its owner, says before Join that dohc can't open it yet, joins, and says where to find it", async () => {
+it("previews the workspace and its owner, joins, and opens it in the browser or in dohc", async () => {
   sessionStorage.setItem("dohc.join.token", TOKEN);
   const fetch = server({
     "/api/account/session": signedIn,
@@ -105,20 +122,13 @@ it("previews the workspace and its owner, says before Join that dohc can't open 
   expect(text()).toContain(
     "People in it will see your name. The owner and admins will also see your email.",
   );
-  const limit = container.querySelector('[data-testid="join-limit"]')!;
-  expect(limit.textContent).toBe(
-    "This version of dohc can't open a joined workspace yet. Once you join, it's listed in the dohc app, in Sharing under Shared with me.",
-  );
-  // The limit comes before the button that acts on it.
-  expect(
-    limit.compareDocumentPosition(button("Join workspace")) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
+  expect(text()).not.toContain("can't open");
+  expect(container.querySelector("a.join-open")).toBeNull();
   expect(text()).toContain("Signed in as Sam · Sign out");
   await click("Join workspace");
   expect(heading()?.textContent).toBe("You joined Community");
-  expect(container.querySelector('[data-testid="join-limit"]')?.textContent).toBe(
-    "It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet.",
-  );
+  expect(text()).not.toContain("can't open");
+  expectOpenActions("grant-1");
   expect(text()).toContain("Signed in as Sam · Sign out");
   expect(sessionStorage.getItem("dohc.join.token")).toBeNull();
   expect(paths(fetch)).toEqual([
@@ -128,17 +138,48 @@ it("previews the workspace and its owner, says before Join that dohc can't open 
   ]);
 });
 
-it("tells a person already in the workspace so, with no Join", async () => {
+it("tells a person already in the workspace so, with no Join, and opens it", async () => {
   server({
     "/api/account/session": signedIn,
-    "/api/members/join-preview": () => jsonResponse({ ...PREVIEW, alreadyMember: true }),
+    "/api/members/join-preview": () =>
+      jsonResponse({ ...PREVIEW, alreadyMember: true, grantId: "grant-9" }),
   });
   await render();
   expect(heading()?.textContent).toBe("You're already in Community");
-  expect(text()).toContain("It's listed in the dohc app");
+  expectOpenActions("grant-9");
   expect([...container.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Open in dohc",
     "Sign out",
   ]);
+});
+
+it("offers the owner only Open in dohc, since an owner has no member page", async () => {
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () =>
+      jsonResponse({ ...PREVIEW, alreadyMember: true, grantId: null }),
+  });
+  await render();
+  expect(container.querySelector("a.join-open")).toBeNull();
+  expect(button("Open in dohc")).toBeDefined();
+});
+
+it("says where dohc keeps the workspace when Open in dohc is chosen", async () => {
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () =>
+      jsonResponse({ ...PREVIEW, alreadyMember: true, grantId: "grant-9" }),
+  });
+  await render();
+  const open = button("Open in dohc");
+  expect(open.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => open.click());
+  expect(open.getAttribute("aria-expanded")).toBe("true");
+  const where = container.querySelector("#join-in-dohc")!;
+  expect(where.textContent).toBe(
+    "In the dohc app, open Sharing. Community is under Shared with me.",
+  );
+  expect(open.getAttribute("aria-controls")).toBe("join-in-dohc");
 });
 
 it("signs in, then previews; and offers an account to someone new, keeping the link's place", async () => {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createAutomationControls, type AutomationDeliveryStatus } from "./automationControls";
 import type { AutomationFileContent } from "@dohc/workspace-contracts/automation-controls";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
-import { recordedShareSelector } from "./shareViewRecords";
+import { engineGrantedSelector, recordedShareSelector } from "./shareViewRecords";
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import type {
   ResolvedShareViewFilesTarget,
@@ -127,11 +127,7 @@ export function createDesktopAutomationControls<State>(input: {
                     workspaceId: target.storeWorkspaceId,
                     shareId: target.shareId!,
                     path: found.path,
-                    grantedSelector: {
-                      paths: grant.paths,
-                      versionId: grant.versionId,
-                      access: grant.access,
-                    },
+                    grantedSelector: engineGrantedSelector(grant),
                   },
                   { workspace: binding.workspace },
                 ),

@@ -56,6 +56,7 @@ import { CHATS_METHOD, DaemonRefusalError, type Request } from "@dohc/workspace-
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import type { QuietRunRefusal } from "../agents/chatDispatchService";
@@ -563,6 +564,7 @@ describe("CLI socket server", () => {
         async syncSharedChannelsForChatTarget(_workspaceId, target) {
           writeTargets.push(target);
         },
+        pushShareViewChat: async () => undefined,
         scanChatDispatch: async () => undefined,
         betweenDispatchScans: (_workspaceId, write) => write(),
         notifyRenderer: () => undefined,
@@ -2562,6 +2564,249 @@ describe("CLI socket server", () => {
     ).toHaveLength(1);
   });
 
+  // A joined workspace: the person's view of a whole workspace someone else
+  // owns. Agents post in its Groups at Comment and Edit, as the person does,
+  // and every other write refuses with one reason.
+  describe("in a joined workspace", () => {
+    function joinAs(access: "view" | "comment" | "edit") {
+      chatRow = {
+        shareView: {
+          shareId: "share",
+          granterUserId: "owner",
+          granterEmail: null,
+          genericChatWritable: false,
+          recipientUserId: "verified-user-id",
+          relayUrl: "https://relay.test",
+          grantedSelector: { paths: [], versionId: null, access, wholeWorkspace: true },
+        } as unknown as NonNullable<RegistryEntry["shareView"]>,
+      };
+      registryWorkspace = { ...registryWorkspace, readOnly: true, joined: true };
+      context = { ...context, ...registryWorkspace, readOnly: true, joined: true };
+    }
+    const args = () => ({ cwd: workspaceRoot, actor: "agent" as const });
+
+    it("posts and replies in a Group at Comment, and refuses General and View", async () => {
+      const group = await store!.createChannel({
+        workspaceId: WORKSPACE_ID,
+        name: "Launch team",
+        kind: "channel",
+        type: "both",
+      });
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      // The engine names General by its fixed wire id; this store numbers it.
+      const wireId = store!.getChannelWireId.bind(store);
+      vi.spyOn(store!, "getChannelWireId").mockImplementation(async (input) =>
+        input.channelId === general.id ? GENERAL_CHANNEL_WIRE_ID : await wireId(input),
+      );
+      joinAs("comment");
+      const posted = await invoke("post", {
+        ...args(),
+        group: "Launch team",
+        attachments: [],
+        needsDecision: false,
+        body: "Agent here",
+      });
+      expect(posted.group).toMatchObject({ name: "Launch team" });
+      const replied = await invoke("reply", {
+        ...args(),
+        thread: posted.threadId,
+        attachments: [],
+        needsDecision: false,
+        body: "And a reply",
+      });
+      expect(replied.threadId).toBe(posted.threadId);
+      expect(
+        (await store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: group.id }))
+          .length,
+      ).toBe(1);
+      await expect(
+        invoke("post", {
+          ...args(),
+          group: "general",
+          attachments: [],
+          needsDecision: false,
+          body: "Hi all",
+        }),
+      ).rejects.toThrow("In a joined workspace you can post in Groups and comment on files only.");
+      expect(
+        await store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id }),
+      ).toEqual([]);
+      joinAs("view");
+      await expect(
+        invoke("post", {
+          ...args(),
+          group: "Launch team",
+          attachments: [],
+          needsDecision: false,
+          body: "At View",
+        }),
+      ).rejects.toThrow("Only people who can comment post here.");
+      // Reading stays open at every level, and marks the thread read.
+      await expect(
+        invoke("show", { ...args(), target: posted.threadId, peek: false }),
+      ).resolves.toMatchObject({ thread: { id: posted.threadId } });
+    });
+
+    it("comments on a file and replies on it at Comment and Edit, and refuses View", async () => {
+      for (const access of ["comment", "edit"] as const) {
+        joinAs(access);
+        const commented = await invoke("fileChatStart", {
+          ...args(),
+          path: "tracked.md",
+          title: "Review",
+          body: `At ${access}`,
+        });
+        if (!commented.ok) throw new Error(commented.reason);
+        await invoke("reply", {
+          ...args(),
+          thread: commented.threadId,
+          attachments: [],
+          needsDecision: false,
+          body: "And more",
+        });
+        await expect(
+          store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: commented.threadId }),
+        ).resolves.toMatchObject([{ body: `At ${access}` }, { body: "And more" }]);
+      }
+      joinAs("view");
+      await expect(
+        invoke("fileChatStart", {
+          ...args(),
+          path: "tracked.md",
+          title: "Review",
+          body: "At View",
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("Only people who can comment post here."),
+      });
+    });
+
+    // Members goes to the owner's workspace with the person's own account;
+    // the relay decides what it lists and allows.
+    it("reaches Members in a joined workspace, and not in a path share", async () => {
+      const members = vi.fn(async () => ({ status: "refused" as const }));
+      joinAs("comment");
+      context = { ...context, members };
+      await expect(invoke("members", { ...args(), request: { action: "list" } })).resolves.toEqual({
+        status: "refused",
+      });
+      expect(members).toHaveBeenCalledWith({ action: "list" });
+      context = { ...context, joined: false };
+      registryWorkspace = { ...registryWorkspace, joined: false };
+      await expect(invoke("members", { ...args(), request: { action: "list" } })).rejects.toThrow(
+        "Open the original workspace to manage its members.",
+      );
+      expect(members).toHaveBeenCalledOnce();
+    });
+
+    // Its links would name this computer's view, which no one else can open.
+    it("refuses a link at every level, without calling it read-only", async () => {
+      const makeWorkReference = vi.fn(async () => "ref");
+      for (const access of ["view", "edit"] as const) {
+        joinAs(access);
+        context = { ...context, makeWorkReference };
+        await expect(
+          invoke("link", { ...args(), target: { kind: "path", path: "tracked.md" } }),
+        ).rejects.toThrow(
+          "Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.",
+        );
+      }
+      expect(makeWorkReference).not.toHaveBeenCalled();
+    });
+
+    it("takes a page edit to the workspace's live documents", async () => {
+      joinAs("edit");
+      const edit = vi.fn(async ({ path }: { path: string }) => ({ path, changed: true }));
+      context = {
+        ...context,
+        documents: {
+          read: async () => {
+            throw new Error("unused");
+          },
+          edit,
+          create: async () => {
+            throw new Error("unused");
+          },
+        },
+      };
+      await expect(
+        invoke("documentEdit", {
+          ...args(),
+          path: "notes/plan.md",
+          find: "Old",
+          replacement: "Done.",
+        }),
+      ).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+      expect(edit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: "notes/plan.md",
+          edit: { find: "Old", replacement: "Done." },
+        }),
+      );
+    });
+
+    it("takes record writes to the workspace's Collections", async () => {
+      joinAs("edit");
+      const setFields = vi.fn(async ({ recordPath }: { recordPath: string }) => ({
+        path: recordPath,
+        replaced: {},
+        kept: {},
+      }));
+      const createRecord = vi.fn(async () => ({
+        path: "tasks/b.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }));
+      context = {
+        ...context,
+        collections: {
+          query: vi.fn(),
+          getRecord: vi.fn(),
+          writes: { setFields, createRecord },
+        } as never,
+      };
+      await expect(
+        invoke("collectionSetFields", {
+          ...args(),
+          recordPath: "tasks/a.md",
+          fields: { status: "done" },
+        }),
+      ).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+      await expect(
+        invoke("collectionCreateRecord", {
+          ...args(),
+          collectionPath: "tasks",
+          name: "b",
+          fields: {},
+        }),
+      ).resolves.toMatchObject({ ok: true, recordPath: "tasks/b.md" });
+      expect(setFields).toHaveBeenCalledOnce();
+      expect(createRecord).toHaveBeenCalledOnce();
+    });
+
+    it("refuses the writes a member cannot make with one reason each", async () => {
+      joinAs("edit");
+      const refusals: [CliVerb, Record<string, unknown>, string][] = [
+        [
+          "fileWrite",
+          { requestId: "joined", files: [{ path: "notes/a.md", contentBase64: "eA==" }] },
+          "In a joined workspace agents add pages with dohc document create.",
+        ],
+        [
+          "export",
+          { outDir: join(tempRoot, "out"), scope: { kind: "all" } },
+          "Export chats from the owner's workspace.",
+        ],
+        ["watch", { timeoutMs: 0 }, "Chat waits need a workspace you own."],
+      ];
+      for (const [verb, extra, reason] of refusals) {
+        await expect(invokeAny(verb, { ...args(), ...extra } as never), verb).rejects.toThrow(
+          reason,
+        );
+      }
+    });
+  });
+
   // Only the run itself says it has nothing to report, and the chat's own
   // service decides whether it may.
   describe("nothing to report", () => {
@@ -3849,7 +4094,11 @@ describe("CLI socket server", () => {
       [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
     ] as const) {
       const denied = await comment(path, "T", "B");
-      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
+      expect(denied).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr: `${reason.startsWith("dohc ") ? reason : `dohc: ${reason}`}\n`,
+      });
     }
     const beforeReadOnly = calls.writes;
     registryWorkspace = { ...registryWorkspace, readOnly: true };

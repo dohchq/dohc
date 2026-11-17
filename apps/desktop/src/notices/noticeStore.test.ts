@@ -17,6 +17,7 @@ import type { SyncRelayHandler } from "@dohc/sync-relay";
 import type { SyncRelayStorage } from "@dohc/sync-relay/storage";
 import { type NoticeReach } from "@dohc/workspace-contracts/relay";
 import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import { SHARE_CHAT_REFUSED } from "./settlementRefusal";
 import {
   AUTOMATION_SWITCHED_OFF_BODY,
   AUTOMATION_SWITCHED_OFF_VIEW_BODY,
@@ -1789,4 +1790,34 @@ describe("the relay hands an agent wake to one owner computer", () => {
       expect(errors).toHaveLength(1);
     });
   });
+});
+
+it("says a chat message the server refused is set aside, and that later ones still send", async () => {
+  const refusalNotices = async () => [
+    {
+      workspaceId: WORKSPACE,
+      notices: [
+        {
+          noticeId: "sync-refusal-chat",
+          originId: "member",
+          originSeq: 4,
+          refusalCoordinates: [
+            { originId: "member", originSeq: 4 },
+            { originId: "member", originSeq: 5 },
+          ],
+          reason: SHARE_CHAT_REFUSED,
+          document: null,
+        },
+      ],
+    },
+  ];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  expect(row).toMatchObject({
+    kind: "sync-refusal",
+    title: "The server did not accept a chat message",
+    body: "dohc set it aside and sent the messages after it. Send it again if you still need it.",
+    detail: [SHARE_CHAT_REFUSED, `Workspace: ${WORKSPACE}`, "Origin: member:4"].join("\n"),
+  });
+  expect(row!.target).toEqual({});
 });

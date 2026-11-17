@@ -5,6 +5,11 @@
 /* Focus lands on a new stage's heading to say where the page changed; the heading is not a control. */
 .join-page .state h1:focus { outline: none; }
 .join-primary { width: 100%; }
+/* Open in browser and Open in dohc stack under the heading, full width like Join. */
+.join-actions { display: flex; width: 100%; flex-direction: column; gap: 8px; margin-top: 4px; }
+.join-actions .handoff-button { gap: 8px; }
+.join-page a.join-open { color: var(--viewer-on-accent); }
+.join-page .state .join-actions p { max-width: none; }
 .join-page .handoff-button.primary:disabled { border-color: var(--viewer-line); background: var(--viewer-line); color: var(--viewer-subtle); opacity: 1; }
 .join-form { display: flex; width: 100%; flex-direction: column; gap: 12px; margin-top: 4px; text-align: left; }
 .join-form label { display: flex; flex-direction: column; gap: 4px; color: var(--viewer-muted); font-size: 12px; font-weight: 500; }

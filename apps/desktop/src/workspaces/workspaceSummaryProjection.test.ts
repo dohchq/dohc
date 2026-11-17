@@ -49,6 +49,40 @@ describe("workspace summary projection", () => {
     ).toMatchObject({ damaged: true, recipientUserId: "recipient" });
   });
 
+  // The shell names a joined workspace by what its pin says it is.
+  it("marks a membership's view, and only a membership's", () => {
+    const whole = { paths: [], versionId: null, access: "comment", wholeWorkspace: true };
+    expect(workspaceSummaryFor(entry({ shareView: shareView(whole) })).shareView).toMatchObject({
+      membership: true,
+      access: "comment",
+    });
+    expect(
+      workspaceSummaryFor(entry({ shareView: shareView(goodSelector) })).shareView?.membership,
+    ).toBeUndefined();
+    // A damaged pin claims nothing.
+    expect(
+      workspaceSummaryFor(entry({ shareView: shareView({ ...whole, paths: ["docs"] }) })).shareView,
+    ).toMatchObject({ damaged: true });
+    expect(
+      workspaceSummaryFor(entry({ shareView: shareView({ ...whole, paths: ["docs"] }) })).shareView
+        ?.membership,
+    ).toBeUndefined();
+  });
+
+  it("carries a membership's role, and no other view's", () => {
+    const whole = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
+    expect(
+      workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "admin" } })).shareView,
+    ).toMatchObject({ membership: true, role: "admin" });
+    expect(
+      workspaceSummaryFor(entry({ shareView: { ...shareView(whole), role: "owner" } })).shareView,
+    ).not.toHaveProperty("role");
+    expect(
+      workspaceSummaryFor(entry({ shareView: { ...shareView(goodSelector), role: "admin" } }))
+        .shareView,
+    ).not.toHaveProperty("role");
+  });
+
   it("carries durable unsaved paths to the shell", () => {
     for (const unsavedPaths of [["docs/locked.md"], null]) {
       expect(

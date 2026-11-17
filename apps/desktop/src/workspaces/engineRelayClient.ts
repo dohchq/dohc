@@ -29,11 +29,13 @@ import {
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type DirectWriteReport,
+  type DirectWritesWaiting,
   type PushDirectWritesResult,
   type SubmitShareProposalResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
+
+import { engineGrantedSelector, type GrantedSelector } from "./shareViewRecords";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
@@ -484,10 +486,10 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayKeyEnvelopeMissingError();
   }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
-    if (method.startsWith("share.")) throw new ShareUnavailableError();
-    // Claim setup must distinguish a network outage from a refused claim.
+    // An outage, never an ended share: only SHARE_UNAVAILABLE ends one, and
+    // claim setup must tell an outage from a refused claim.
     if (
-      (SYNC_PASS_METHODS.has(method) || method === "sync.claim") &&
+      (SYNC_PASS_METHODS.has(method) || method === "sync.claim" || method.startsWith("share.")) &&
       error.message === "relay-unreachable"
     ) {
       throw new RelayUnreachableError();
@@ -502,7 +504,7 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayOriginDivergedError();
   }
   if (
-    method === "share.channel.push" &&
+    (method === "share.channel.push" || method === "share.view.pushChat") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "share-read-only"
   ) {
@@ -554,16 +556,17 @@ export interface EngineRelayWorkspaceClient {
     shareId: string;
     channelWireId: string;
   }): Promise<PushSharedChannelResult>;
+  // A joined workspace's own posts in its Groups, at Comment or Edit.
+  pushShareViewChat(input: {
+    shareId: string;
+    grantedSelector: GrantedSelector;
+  }): Promise<PushSharedChannelResult>;
   pullShareView(input: {
     shareId: string;
     // The selector the relay stated for this share, pinned on first read.
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
     // Called with each page's refusals BEFORE that page's cursor is
     // committed. A refusal is a durable fact — the commit moves permanently
     // past the op — so it has to be recorded first, or a later page that
@@ -594,11 +597,7 @@ export interface EngineRelayWorkspaceClient {
   // engine-side is also what makes a refresh safe: the durable row is the
   // record, so nothing here has to remember an id between calls.
   recordShareViewIdentity(input: {
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
   }): Promise<RecordShareViewIdentityResult>;
 
   // This replica's own edits of the shared files, offered to the
@@ -606,11 +605,7 @@ export interface EngineRelayWorkspaceClient {
   // same reason, and the engine offers nothing below `edit`.
   submitShareProposal(input: {
     shareId: string;
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
     // The idempotency key for one submit. The caller owns it so a retry of
     // the same intent answers with the proposal the relay already holds
     // instead of opening a second one.
@@ -622,16 +617,18 @@ export interface EngineRelayWorkspaceClient {
   // Send changes. The engine writes nothing below `edit`.
   pushDirectWrites(input: {
     shareId: string;
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
   }): Promise<PushDirectWritesResult>;
+
+  // What a push that stopped in transit left unsent. A local read.
+  directWritesWaiting(input: { shareId: string }): Promise<DirectWritesWaiting>;
 }
 
 export interface EngineRelayClientOptions {
   onRefusalsChanged?(): void;
+  // After each share view page that brought files: how many distinct files
+  // this pull has read so far. The open dialog counts a first pull with it.
+  onShareViewPullProgress?(progress: { workspaceId: string; shareId: string; files: number }): void;
   sessions: EngineWorkspaceSessions;
   routes: RelayTransportRouteGuard;
   /** Closes the captured binding without re-entering this client's request lane. */
@@ -644,6 +641,7 @@ const DEFAULT_RELAY_REQUEST_DEADLINE_MS = 30_000;
 
 export class EngineRelayClient {
   private readonly onRefusalsChanged: EngineRelayClientOptions["onRefusalsChanged"];
+  private readonly onShareViewPullProgress: EngineRelayClientOptions["onShareViewPullProgress"];
   private readonly sessions: EngineWorkspaceSessions;
   private readonly routes: RelayTransportRouteGuard;
   private readonly closeWorkspaceBinding: (workspace: EngineWorkspace) => Promise<void>;
@@ -655,6 +653,7 @@ export class EngineRelayClient {
 
   constructor(options: EngineRelayClientOptions) {
     this.onRefusalsChanged = options.onRefusalsChanged;
+    this.onShareViewPullProgress = options.onShareViewPullProgress;
     this.sessions = options.sessions;
     this.routes = options.routes;
     this.closeWorkspaceBinding =
@@ -1000,15 +999,24 @@ export class EngineRelayClient {
           pushed: numberField(result, "pushed", "share.channel.push"),
         };
       },
+      pushShareViewChat: async ({ shareId, grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.pushChat", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: engineGrantedSelector(grantedSelector),
+          }),
+          "share.view.pushChat",
+        );
+        return {
+          pushed: numberField(result, "pushed", "share.view.pushChat"),
+        };
+      },
       recordShareViewIdentity: async ({ grantedSelector }) => {
         const result = resultRecord(
           await request("share.view.recordIdentity", {
             workspaceId: workspace.workspaceId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
           }),
           "share.view.recordIdentity",
         );
@@ -1032,11 +1040,7 @@ export class EngineRelayClient {
           await request("share.proposal.submit", {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
             submitId,
           }),
           "share.proposal.submit",
@@ -1066,11 +1070,7 @@ export class EngineRelayClient {
           await request(method, {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
           }),
           method,
         );
@@ -1079,6 +1079,18 @@ export class EngineRelayClient {
         }
         return {
           writes: result.writes.map((write) => directWriteReport(write, method)),
+          morePending: booleanField(result, "morePending", method),
+        };
+      },
+      directWritesWaiting: async ({ shareId }) => {
+        const method = "share.direct.waiting";
+        const result = resultRecord(
+          await request(method, { workspaceId: workspace.workspaceId, shareId }),
+          method,
+        );
+        return {
+          pages: numberField(result, "pages", method),
+          collectionWrites: numberField(result, "collectionWrites", method),
           morePending: booleanField(result, "morePending", method),
         };
       },
@@ -1120,11 +1132,7 @@ export class EngineRelayClient {
               // that selects everything under a version; dropping the version
               // leaves one the engine refuses outright; dropping the level
               // leaves one the engine cannot read and refuses too.
-              grantedSelector: {
-                paths: [...grantedSelector.paths],
-                versionId: grantedSelector.versionId,
-                access: grantedSelector.access,
-              },
+              grantedSelector: engineGrantedSelector(grantedSelector),
             }),
             "share.view.pull",
           );
@@ -1161,6 +1169,13 @@ export class EngineRelayClient {
           }
           for (const path of pageChangedPaths) {
             changed.set(path.path, path);
+          }
+          if (pageChangedPaths.length > 0) {
+            this.onShareViewPullProgress?.({
+              workspaceId: workspace.workspaceId,
+              shareId,
+              files: changed.size,
+            });
           }
           if (!hasMore) {
             finalCursor = cursor;

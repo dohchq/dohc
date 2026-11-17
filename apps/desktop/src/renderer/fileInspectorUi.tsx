@@ -3,7 +3,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { FilePenLine, Lock, Play, Share2 } from "lucide-react";
+import { FilePenLine, LoaderCircle, Lock, Play, Share2 } from "lucide-react";
 import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
@@ -103,7 +103,8 @@ export function ViewActions(props: {
 
 export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
 
-export const OPENING_TITLE = "You can edit this document when it finishes opening.";
+// Only a Markdown page shows it, so it says page.
+export const OPENING_TITLE = "You can edit this page when it finishes opening.";
 
 // The wait before a slow open says so, the same wait as the loading lines'
 // (styles.css, dohc-reveal-if-slow).
@@ -129,8 +130,12 @@ export function OpeningState() {
 // "Editor", so the words it says on its own never move the menu or Share;
 // only a person's own click to "WYSIWYG" widens it. A truncated read never
 // has the whole document to copy, so it has no menu, and the menu's place
-// stays empty instead of closing up.
+// stays empty instead of closing up. A level that allows no editing has no
+// toggle at all.
+// `mark` stands in the toggle's place when the level allows no editing, in the
+// recipe of StateMark's held "Read-only" chip.
 export function DocumentControls(props: {
+  mark?: { label: string; title: string } | null;
   toggle: {
     label: string;
     testId?: string;
@@ -138,27 +143,39 @@ export function DocumentControls(props: {
     disabled?: boolean;
     title?: string;
     onClick?: () => void;
-  };
+  } | null;
   menu: ComponentProps<typeof DocumentMenu> | null;
 }) {
-  const { toggle } = props;
+  const { toggle, mark } = props;
   return (
     <>
-      <button
-        type="button"
-        data-testid={toggle.testId}
-        aria-pressed={toggle.pressed}
-        disabled={toggle.disabled && !toggle.title}
-        aria-disabled={(toggle.disabled && !!toggle.title) || undefined}
-        title={toggle.title}
-        onClick={() => {
-          if (toggle.disabled) return;
-          toggle.onClick?.();
-        }}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
-      >
-        {toggle.label}
-      </button>
+      {mark && (
+        <span
+          data-testid="level-mark"
+          title={mark.title}
+          className="inline-flex shrink-0 items-center gap-1.5 text-[11px] leading-4 text-muted"
+        >
+          <Lock size={12} aria-hidden className="shrink-0" />
+          {mark.label}
+        </span>
+      )}
+      {toggle && (
+        <button
+          type="button"
+          data-testid={toggle.testId}
+          aria-pressed={toggle.pressed}
+          disabled={toggle.disabled && !toggle.title}
+          aria-disabled={(toggle.disabled && !!toggle.title) || undefined}
+          title={toggle.title}
+          onClick={() => {
+            if (toggle.disabled) return;
+            toggle.onClick?.();
+          }}
+          className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+        >
+          {toggle.label}
+        </button>
+      )}
       {props.menu ? (
         <DocumentMenu {...props.menu} />
       ) : (
@@ -176,20 +193,27 @@ export function DocumentControls(props: {
 // offered where the user is looking.
 export function EngineMayHoldDocumentNotice(props: {
   onRetry: () => void;
+  // What the file is to the person: a Markdown note is a page.
+  noun?: "page" | "document";
   // Is the document's content on screen? When the read failed too, it is
   // not — and "You can still read it" would promise read access to
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  // dohc is still opening it by itself, so a ring shows beside the message
+  // and no Try again.
+  waiting?: boolean;
   children?: ReactNode;
+  // The step that can fix the cause, in place of Try again, which would only fail again.
+  action?: { label: string; run: () => void } | undefined;
 }) {
   return (
     <div
       data-testid="engine-may-hold-document-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
-      {/* "document", the noun the editing controls beside this already use
-          ("You can edit this document when it finishes opening.").
+      {/* A Markdown note is a "page", the noun the editing controls beside
+          this already use ("You can edit this page when it finishes opening.").
 
           No "in time": this notice answers every refusal `main` maps to
           `engineMayHoldDocument`, and only one of them is a timeout. A session
@@ -197,19 +221,29 @@ export function EngineMayHoldDocumentNotice(props: {
           the user did not hit sends them looking for a slow machine (#564,
           codex r20). What is true of all of them is the sentence below, and
           the retry is the same either way. */}
-      <span>
-        {props.message ?? "dohc could not open this document for editing."}
+      <span className="flex items-center gap-1.5">
+        {props.waiting ? (
+          <LoaderCircle
+            data-testid="engine-may-hold-document-ring"
+            size={12}
+            aria-hidden
+            className="shrink-0 motion-safe:animate-spin"
+          />
+        ) : null}
+        {props.message ?? `dohc could not open this ${props.noun ?? "document"} for editing.`}
         {!props.message && props.contentShown ? " You can still read it." : ""}
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
-        <button
-          type="button"
-          onClick={props.onRetry}
-          className="whitespace-nowrap text-subtle hover:text-ink"
-        >
-          Try again
-        </button>
+        {props.waiting ? null : (
+          <button
+            type="button"
+            onClick={props.action?.run ?? props.onRetry}
+            className="whitespace-nowrap text-subtle hover:text-ink"
+          >
+            {props.action?.label ?? "Try again"}
+          </button>
+        )}
       </span>
     </div>
   );
@@ -573,7 +607,7 @@ export const DELETED_FILE_DRAFT_NOTICE =
   "The file was moved or deleted outside dohc. Copy your edits to keep them.";
 // The row for an edit dohc refused to save for good, in either editor.
 export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE =
-  "dohc could not save this document. Copy your edits to keep them.";
+  "dohc could not save this page. Copy your edits to keep them.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;

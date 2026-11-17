@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
-import { createWorkspaceMembersActions, MEMBERS_UNREACHABLE } from "./workspaceMembersActions";
+import {
+  createJoinedWorkspaceGroupAction,
+  createWorkspaceMembersActions,
+  MEMBERS_UNREACHABLE,
+} from "./workspaceMembersActions";
 import { memberOperations, MEMBERS_INACTIVE_MESSAGE } from "./memberOperations";
 import { operationBridge, registerOperations } from "./operationTable";
 import { deferred } from "../testing/deferred";
@@ -57,9 +61,14 @@ function harness(options: { shareView?: unknown } = {}) {
       credentialGeneration: generation,
     }),
   );
+  const joinedRemote = vi.fn(async (_workspace: typeof workspace) => ({
+    credentials: { userId: "ana", token: "ana-secret" },
+    credentialGeneration: generation,
+  }));
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
   const members = createWorkspaceMembersActions<typeof workspace, Credentials>({
     remoteForWorkspace: remote,
+    remoteForJoinedWorkspace: joinedRemote,
     currentCredentialGeneration: () => generation,
     relayResponse: relay,
     sharesChanged,
@@ -92,6 +101,7 @@ function harness(options: { shareView?: unknown } = {}) {
     bridge,
     relay,
     remote,
+    joinedRemote,
     sharesChanged,
     rotate: () => {
       generation++;
@@ -141,6 +151,100 @@ describe("workspace members actions", () => {
       h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
     ).rejects.toThrow("Open the original workspace to manage its members.");
     expect(h.relay).not.toHaveBeenCalled();
+  });
+
+  // A joined workspace reaches the owner's Members with the person's own
+  // account. The relay decides what that account sees and may change.
+  describe("in a joined workspace", () => {
+    const joined = (
+      place: Record<string, unknown> = { membersWorkspaceId: "owner-ws", role: "member" },
+    ) =>
+      harness({
+        shareView: {
+          shareId: "s",
+          granterEmail: null,
+          genericChatWritable: false,
+          subjectName: "Community",
+          recipientUserId: "ana",
+          relayUrl: "https://relay.test",
+          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+          ...place,
+        },
+      });
+    const memberView = view({
+      workspaceId: "owner-ws",
+      viewer: { memberId: "m-ana", role: "member" },
+      inviteLink: null,
+      people: view().people.map((person) => ({ ...person, email: null })),
+    });
+
+    it("lists the owner's Members with the account that joined", async () => {
+      const h = joined();
+      h.relay.mockResolvedValueOnce(json(memberView));
+      await expect(
+        h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+      ).resolves.toEqual({ status: "ready", view: memberView });
+      expect(calls(h.relay)).toEqual(["GET /sync/owner-ws/members"]);
+      expect(h.relay.mock.calls[0]![0]).toEqual({ userId: "ana", token: "ana-secret" });
+      expect(h.remote).not.toHaveBeenCalled();
+    });
+
+    it("sends an admin's invite under the workspace's own name", async () => {
+      const h = joined({ membersWorkspaceId: "owner-ws", role: "admin" });
+      const adminView = view({
+        workspaceId: "owner-ws",
+        viewer: { memberId: "m-kai", role: "admin" },
+      });
+      h.relay.mockResolvedValueOnce(json(adminView));
+      await expect(
+        h.bridge.workspaceMembers({
+          workspaceId: "ws-1",
+          request: { action: "invite", email: "new@test" },
+        }),
+      ).resolves.toEqual({ status: "ready", view: adminView });
+      expect(calls(h.relay)).toEqual([
+        `POST /sync/owner-ws/members/invites ${JSON.stringify({ email: "new@test", workspaceName: "Community" })}`,
+      ]);
+    });
+
+    it("passes on the relay's refusal of a member's invite, saying who can invite", async () => {
+      const h = joined();
+      h.relay.mockResolvedValueOnce(json({ error: "members_forbidden" }, 403));
+      await expect(
+        h.bridge.workspaceMembers({
+          workspaceId: "ws-1",
+          request: { action: "invite", email: "new@test" },
+        }),
+      ).rejects.toThrow("dohc could not send the invite. Only the owner and admins can invite.");
+      expect(calls(h.relay)).toEqual([
+        `POST /sync/owner-ws/members/invites ${JSON.stringify({ email: "new@test", workspaceName: "Community" })}`,
+      ]);
+    });
+
+    it("says how to recover when the view does not know its place yet", async () => {
+      const h = joined({});
+      await expect(
+        h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+      ).rejects.toThrow(
+        "dohc does not know where this workspace's Members are yet. Refresh the workspace, then try again.",
+      );
+      expect(h.relay).not.toHaveBeenCalled();
+    });
+
+    it("refuses with the account check's reason", async () => {
+      const h = joined();
+      h.joinedRemote.mockRejectedValueOnce(
+        new Error(
+          "This computer is signed in to a different account than the one the owner invited.",
+        ),
+      );
+      await expect(
+        h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+      ).rejects.toThrow(
+        "This computer is signed in to a different account than the one the owner invited.",
+      );
+      expect(h.relay).not.toHaveBeenCalled();
+    });
   });
 
   it("rejects a view for another workspace or one the contract refuses, instead of showing it", async () => {
@@ -337,7 +441,7 @@ describe("workspace members actions", () => {
         request: { action: "role", person: "m-ana", role: "admin" },
       }),
     ).rejects.toThrow(
-      "dohc could not change this person's role because your role in this workspace no longer allows it.",
+      "dohc could not change this person's role because your role in this workspace does not allow it.",
     );
   });
 
@@ -356,5 +460,70 @@ describe("workspace members actions", () => {
       }),
     ).rejects.toThrow();
     expect(h.relay).not.toHaveBeenCalled();
+  });
+});
+
+describe("an admin's New group in a joined workspace", () => {
+  type Joined = { userId: string; token: string; relayUrl?: string };
+  const membership = {
+    shareId: "share-1",
+    relayUrl: "https://relay.test",
+    recipientUserId: "u-ana",
+  };
+  function group(
+    credentials: Joined | null = {
+      userId: "u-ana",
+      token: "secret",
+      relayUrl: "https://relay.test/",
+    },
+  ) {
+    const relay = vi.fn(
+      async (_credentials: Joined, _path: string, _init: RequestInit): Promise<Response> =>
+        json({ ok: true, channelWireId: "channel_wire_new", name: "Team" }),
+    );
+    const create = createJoinedWorkspaceGroupAction<Joined>({
+      credentials: async () => credentials,
+      relayResponse: relay,
+    });
+    return { create, relay };
+  }
+
+  it("asks the relay for the Group as the account that joined", async () => {
+    const g = group();
+    await expect(g.create(membership, { name: "Team", type: "chat" })).resolves.toEqual({
+      channelWireId: "channel_wire_new",
+    });
+    expect(calls(g.relay)).toEqual([
+      `POST /sync/members/groups {"shareId":"share-1","name":"Team","type":"chat"}`,
+    ]);
+  });
+
+  it.each([
+    [null, "signed out"],
+    [{ userId: "u-sam", token: "secret", relayUrl: "https://relay.test" }, "another account"],
+    [{ userId: "u-ana", token: "secret", relayUrl: "https://other.test" }, "another server"],
+  ] as const)("refuses before the relay when %s (%s)", async (credentials, _why) => {
+    const g = group(credentials);
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow(
+      "This computer is signed in to a different account than the one the owner invited.",
+    );
+    expect(g.relay).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [400, "Use 1 to 80 characters, including at least one letter or number."],
+    [403, "dohc could not create Team because only admins create Groups here."],
+    [404, "dohc could not create Team because your membership ended."],
+    [413, "dohc could not create Team because this workspace is out of space."],
+  ])("names a %i refusal", async (status, words) => {
+    const g = group();
+    g.relay.mockResolvedValueOnce(json({ error: "refused" }, status));
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow(words);
+  });
+
+  it("says the server cannot be reached when the request fails", async () => {
+    const g = group();
+    g.relay.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow(MEMBERS_UNREACHABLE);
   });
 });

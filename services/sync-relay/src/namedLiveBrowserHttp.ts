@@ -188,5 +188,7 @@ export function createNamedLiveBrowserHttp(options: {
   return Object.assign(handle, {
     resolve: sessions.resolve.bind(sessions),
     deleteAccount: sessions.deleteAccount,
+    // A member's browser opens a page through the member admission, into these same sessions.
+    sessions: { create: sessions.create.bind(sessions), remove: sessions.remove.bind(sessions) },
   });
 }

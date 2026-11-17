@@ -18,6 +18,7 @@ import {
   Search,
   ShieldCheck,
   ShieldOff,
+  User,
   UserMinus,
   UserX,
 } from "lucide-react";
@@ -31,7 +32,6 @@ import {
 import type { MembersRequest, MembersResult } from "@dohc/cli/members";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import { relativeTime } from "../relativeTime";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { CopyField, type CopySecret } from "../ui/CopyButton";
@@ -44,6 +44,7 @@ import { relayPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import type { CloudSettings } from "./CloudSyncSettings";
 import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
+import { joinedByAnother } from "../../ipc/joinedAccountWords";
 
 type ReportError = (
   message: string,
@@ -56,7 +57,7 @@ type ReportError = (
 export const LEVEL_WORDS: Record<MemberLevel, string> = {
   view: "Members can read everything and open apps.",
   comment: "Members can read everything, post in Groups, and comment on files.",
-  edit: "Members can read, comment, and edit documents and Collections.",
+  edit: "Members can read, comment, and edit pages and Collections.",
 };
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 const LINK_SECRET: CopySecret = {
@@ -75,7 +76,7 @@ export type MembersGate =
   | { kind: "not-synced" }
   | { kind: "signed-out"; server: string | null }
   | { kind: "other-server"; server: string }
-  | { kind: "other-account" }
+  | { kind: "other-account"; joined?: { email: string | null } }
   | { kind: "expired" }
   | { kind: "ready"; account: string };
 
@@ -87,9 +88,22 @@ function sameServer(a: string, b: string): boolean {
   }
 }
 
-export function membersGate(cloud: CloudSettings | undefined): MembersGate {
+// A joined workspace has no sync of its own: the signed-in account reaches the
+// owner's Members, and main checks it is the account that joined.
+export function membersGate(cloud: CloudSettings | undefined, joined = false): MembersGate {
   const status = cloud?.status;
   if (!cloud || !status) return cloud?.unreadable ? { kind: "unreadable" } : { kind: "checking" };
+  if (joined) {
+    if (!status.connected) return { kind: "signed-out", server: null };
+    if (cloud.signInExpired) return { kind: "expired" };
+    if (status.joinedBySignedInAccount === false)
+      return { kind: "other-account", joined: { email: status.email ?? null } };
+    return {
+      kind: "ready",
+      account: `${status.serverUrl ?? ""}
+${status.email ?? ""}`,
+    };
+  }
   // A paused workspace keeps its place on the server, so its Members still load.
   if (!status.workspaceSynced && !status.syncPause) return { kind: "not-synced" };
   if (!status.connected) return { kind: "signed-out", server: status.workspaceServerUrl ?? null };
@@ -147,13 +161,15 @@ export function MembersSettings(props: {
   workspaceId: string;
   // The folder's name, until the server names the workspace.
   workspaceName: string;
+  // A workspace this person joined: the owner's Members, as the relay shows them to this account.
+  joined?: boolean;
   cloud?: CloudSettings;
   onOpenSync: () => void;
   onError?: ReportError;
   onClearError?: (identity: string) => void;
 }) {
   const { workspaceId } = props;
-  const gate = membersGate(props.cloud);
+  const gate = membersGate(props.cloud, props.joined);
   const account = gate.kind === "ready" ? gate.account : null;
   const scopeKey = account === null ? null : `${workspaceId}\n${account}`;
   // Bumped when the workspace or the account changes and when the page
@@ -285,7 +301,12 @@ export function MembersSettings(props: {
 
   return (
     <div data-testid="settings-members">
-      <MembersGateView gate={gate} cloud={props.cloud} onOpenSync={props.onOpenSync}>
+      <MembersGateView
+        gate={gate}
+        joined={props.joined === true}
+        cloud={props.cloud}
+        onOpenSync={props.onOpenSync}
+      >
         <MembersLoadView
           load={shown}
           running={running}
@@ -302,6 +323,7 @@ export function MembersSettings(props: {
 
 function MembersGateView(props: {
   gate: MembersGate;
+  joined: boolean;
   cloud: CloudSettings | undefined;
   onOpenSync: () => void;
   children: ReactNode;
@@ -329,16 +351,26 @@ function MembersGateView(props: {
       // Sync and sharing explains each; the button takes the one next step.
       const sync = { label: "Sync and sharing", run: props.onOpenSync };
       const next =
-        gate.kind === "not-synced"
-          ? { label: "Set up sync", run: props.onOpenSync }
-          : gate.kind === "signed-out" && cloud
-            ? { label: "Connect server", run: cloud.onConnect }
-            : gate.kind === "expired" && cloud?.onSignInAgain
-              ? { label: "Sign in again", run: cloud.onSignInAgain }
-              : sync;
+        gate.kind === "other-account" && gate.joined
+          ? { label: "Switch account", run: props.onOpenSync }
+          : gate.kind === "not-synced"
+            ? { label: "Set up sync", run: props.onOpenSync }
+            : gate.kind === "signed-out" && cloud
+              ? { label: "Connect server", run: cloud.onConnect }
+              : gate.kind === "expired" && cloud?.onSignInAgain
+                ? { label: "Sign in again", run: cloud.onSignInAgain }
+                : sync;
       return (
-        <GateState reason={gate.kind} icon={CloudOff} action={{ ...next, primary: true }}>
-          Sync this workspace with your server to see who is in it.
+        <GateState
+          reason={gate.kind}
+          icon={gate.kind === "other-account" && gate.joined ? User : CloudOff}
+          action={{ ...next, primary: true }}
+        >
+          {gate.kind === "other-account" && gate.joined
+            ? joinedByAnother(gate.joined.email)
+            : props.joined
+              ? "Connect your server to see who is in this workspace."
+              : "Sync this workspace with your server to see who is in it."}
         </GateState>
       );
     }
@@ -658,12 +690,7 @@ export function MembersPage(props: {
             title="Member level"
             testId="settings-members-level"
             description={
-              <>
-                <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
-                <span data-testid="settings-members-limit" className="mt-1 block">
-                  {JOINED_WORKSPACE_LIMIT.members}
-                </span>
-              </>
+              <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
             }
           >
             {/* The spinner sits in the gap before the control and takes no

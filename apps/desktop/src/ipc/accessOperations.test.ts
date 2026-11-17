@@ -38,7 +38,7 @@ it("admits Access only in the active workspace and parses allowlisted replies", 
     {
       getObjectAccess: handler as never,
       listSharingAccess: handler as never,
-      requestAccessRefresh: async () => undefined,
+      requestAccessRefresh: async () => ({ status: "paced" as const }),
     },
   );
   const invoke = (workspaceId: string, trusted = true) =>
@@ -100,3 +100,17 @@ it.each(["getObjectAccess", "listSharingAccess"] as const)(
     ).toBe(false);
   },
 );
+
+// About reads again when a paced refresh's scheduled check ends, so the window needs the status.
+it("returns the refresh status and lets the window wait for a paced check", () => {
+  const operation = accessOperations.requestAccessRefresh;
+  expect(
+    operation.payload.parse({ workspaceId: "a", reason: "access-expand", wait: true }),
+  ).toEqual({ workspaceId: "a", reason: "access-expand", wait: true });
+  expect(
+    operation.payload.safeParse({ workspaceId: "a", reason: "access-expand", wait: false }).success,
+  ).toBe(false);
+  expect(operation.result.parse({ status: "paced", bearerUrl: "secret" })).toEqual({
+    status: "paced",
+  });
+});

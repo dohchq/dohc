@@ -590,6 +590,9 @@ impl EngineService {
             "share.view.pull" => {
                 Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
             }
+            "share.view.pushChat" => {
+                Box::pin(self.share_view_push_chat(&ctx, request.workspace, request.params)).await?
+            }
             "share.view.recordIdentity" => {
                 Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
                     .await?
@@ -607,6 +610,10 @@ impl EngineService {
             }
             "share.direct.statuses" => {
                 self.share_direct_statuses(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "share.direct.waiting" => {
+                self.share_direct_waiting(&ctx, request.workspace, request.params)
                     .await?
             }
             "share.records.status" => {
@@ -1859,9 +1866,11 @@ mod tests {
             "share.direct.push",
             "share.direct.status",
             "share.direct.statuses",
+            "share.direct.waiting",
             "share.records.status",
             "share.proposal.submit",
             "share.view.pull",
+            "share.view.pushChat",
             "share.view.recordIdentity",
             "sync.adoptJoinIdentity",
             "sync.claim",

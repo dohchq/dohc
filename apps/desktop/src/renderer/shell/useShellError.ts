@@ -23,9 +23,11 @@ import {
 import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
+import { isJoinedByAnotherAccount } from "../../ipc/joinedAccountWords";
 import {
   SETTLEMENT_ATTRIBUTION_REFUSED,
   SETTLEMENT_BINDING_CHANGED,
+  SHARE_CHAT_REFUSED,
 } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import { TextNotSavedError, type ErrorDetailField } from "./copyDetails";
@@ -144,6 +146,9 @@ export interface ShellError {
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
+  // A change of state, such as a new level, not a failure: nothing to
+  // report, so it has no Details.
+  change?: true;
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
   retryBusy?: boolean;
@@ -233,7 +238,22 @@ export function useNoticeOwner(workspaceId: string, sink: NoticeSink): NoticeOwn
   }, [workspaceId]);
 }
 
-export function useShellError(workspaceId: string, retrySharedView?: () => void) {
+// The words of a joined workspace's one notice that an account other than the
+// one that joined is signed in, while that is so.
+export interface OtherAccountNotice {
+  title: string;
+  message: string;
+  switchAccount: () => void;
+}
+export const OTHER_ACCOUNT_NOTICE = "joined-other-account";
+
+// `otherAccount` names that notice while it applies. A failure with that
+// cause then files the notice and adds no toast of its own.
+export function useShellError(
+  workspaceId: string,
+  retrySharedView?: () => void,
+  otherAccount?: () => OtherAccountNotice | null,
+) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -364,6 +384,22 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     },
     [push],
   );
+  // Files the other-account notice when it applies, and answers whether it did.
+  const reportOtherAccount = useCallback((): boolean => {
+    const notice = otherAccount?.();
+    if (!notice) return false;
+    push(
+      {
+        title: notice.title,
+        message: notice.message,
+        retry: null,
+        action: { label: "Switch account", run: notice.switchAccount },
+        identity: OTHER_ACCOUNT_NOTICE,
+      },
+      "repeat",
+    );
+    return true;
+  }, [otherAccount, push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity)
@@ -529,6 +565,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       // The window's stop message already says why. Main marks the failed
       // read before the window learns of the stop.
       if (isStoppedWorkspaceRead(error) || reportSharedViewRefusal(error)) return;
+      if (isJoinedByAnotherAccount(error) && reportOtherAccount()) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
@@ -591,7 +628,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         quiet || waitedForCollectionMove(error) ? "quiet" : false,
       );
     },
-    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
+    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal, reportOtherAccount],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -630,6 +667,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     }) => {
       if (isStoppedWorkspaceRead(failure.cause) || isStoppedWorkspaceRead(failure.message)) return;
       if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message))
+        return;
+      if (
+        (isJoinedByAnotherAccount(failure.cause) || isJoinedByAnotherAccount(failure.message)) &&
+        reportOtherAccount()
+      )
         return;
       const refusal = [failure.cause, failure.message].find(
         (error) => refusalCode(error) === "share-collision-record",
@@ -675,7 +717,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         failure.quiet ? "quiet" : failure.repeat ? "repeat" : false,
       );
     },
-    [push, privacySettingsAction, reportSharedViewRefusal],
+    [push, privacySettingsAction, reportSharedViewRefusal, reportOtherAccount],
   );
   // A folder Open folder could not open. The reason leads, with no title
   // before it, and the folder goes in the report. Choose another folder
@@ -769,8 +811,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           const markdownHeld = notice.kind === "markdown-write-held";
           const reason = notice.detail?.split("\n")[0];
           const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
-          // Sync has moved past the refused saves, so there is nothing to try again.
+          // Sync has moved past these refusals, so there is nothing to try again.
           const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
+          // A set-aside chat message is not a save to review: it toasts once, in the window open when it happened.
+          const chatRefused = reason === SHARE_CHAT_REFUSED;
           const path = notice.target?.path;
           // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
           const step = (label: string, run: () => void) => ({
@@ -787,17 +831,21 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
             id: notice.noticeId,
             kind: "sync-refusal" as const,
             message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-            title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
+            title: notice.title,
             // The whole path: a title names only the file, and two folders can hold one name.
             details: [
               ...(path ? [["File", path, path.length] as const] : []),
               ["Detail", notice.detail ?? notice.body],
             ] as const,
             atMs: notice.createdAtMs,
-            seen: prior?.seen === true || notice.readAtMs !== null,
+            seen:
+              prior?.seen === true ||
+              notice.readAtMs !== null ||
+              (chatRefused && notice.createdAtMs < performance.timeOrigin),
             // The list holds a read until main answers and lets go of one main refused.
             read: notice.readAtMs !== null,
-            retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
+            retry:
+              bindingChanged || attributionRefused || markdownHeld || chatRefused ? null : retry,
             // A hold is on purpose: nothing failed.
             ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
             ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
@@ -1094,6 +1142,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     (notice: DirectWriteNotice) => {
       const { send } = notice;
       push({
+        ...(notice.tone ? { tone: notice.tone } : {}),
+        ...(notice.title ? { title: notice.title } : {}),
         message: notice.message,
         retry: notice.retry,
         ...(send
@@ -1185,8 +1235,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, paths?: readonly string[]) => {
-      push({ message, retry: null, tone: "warning", ...(paths ? { paths } : {}) });
+    (message: string, options?: { change?: true; paths?: readonly string[] }) => {
+      push({
+        message,
+        retry: null,
+        tone: "warning",
+        ...(options?.paths ? { paths: options.paths } : {}),
+        ...(options?.change ? { change: true } : {}),
+      });
     },
     [push],
   );
@@ -1544,6 +1600,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     clearKind,
     clearIdentity,
     noticeOwner,
+    reportOtherAccount,
     reportShellError,
     reportButtonError,
     reportShellFailure,

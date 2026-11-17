@@ -338,7 +338,7 @@ describe("desktop CLI proxy", () => {
         request: async (request) => {
           throw new DohcCliError(
             request.verb === "post"
-              ? "dohc: no such group: nope"
+              ? "dohc: No Group matches nope. Run dohc chat groups to list them."
               : "dohc: message is not an open decision: msg_1",
           );
         },
@@ -346,7 +346,7 @@ describe("desktop CLI proxy", () => {
 
       await expect(startGroupChat(ctx, { group: "nope", body: "Must not post" })).resolves.toEqual({
         ok: false,
-        reason: "dohc: no such group: nope",
+        reason: "dohc: No Group matches nope. Run dohc chat groups to list them.",
       });
       await expect(
         replyToChat(ctx, { threadId: thread.id, resolve: message.id, body: "Must not post" }),

@@ -49,6 +49,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
     workspaceId: input.workspaceId,
   };
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: (candidate) =>
       candidate.kind === "standalone" && candidate.workspaceId === requested.workspaceId
         ? target
@@ -125,6 +126,7 @@ export async function refreshShareMountThroughOwnerForTest(input: {
     shareId: input.mount.shareId,
   };
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: (candidate) =>
       candidate.kind === "mount" &&
       candidate.workspaceId === requested.workspaceId &&
@@ -209,6 +211,7 @@ function mountMutationOwner(input: {
     shareId: input.target.shareId,
   };
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: (candidate) =>
       registered &&
       candidate.kind === "mount" &&

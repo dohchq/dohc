@@ -1,5 +1,5 @@
 // Each viewer route is its own HTML page, so a browser loads only that route's code.
-const ROUTES = ["edit", "chat", "apps"] as const;
+const ROUTES = ["edit", "chat", "apps", "workspace"] as const;
 
 export const VIEWER_PAGES = ["index.html", ...ROUTES.map((route) => `${route}.html`), "join.html"];
 

@@ -7,12 +7,12 @@ import {
   createAutomationButtons,
   resetAutomationButtonsForTests,
 } from "../collections/useAutomationButtons";
-import { useSharedViewAccess } from "./useSharedViewAccess";
+import { type SharedViewPulled, useSharedViewAccess } from "./useSharedViewAccess";
 
 const check = vi.fn<DohcDesktopBridge["checkSharedViewAccess"]>();
 let visible = true;
 const verified = vi.fn();
-const pull = vi.fn<() => Promise<boolean>>();
+const pull = vi.fn<() => Promise<SharedViewPulled>>();
 const persistent = vi.fn();
 let credentialsChanged: Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 beforeEach(() => {
@@ -23,7 +23,7 @@ beforeEach(() => {
   );
   check.mockReset().mockResolvedValue({ status: "current", access: "edit" });
   verified.mockReset();
-  pull.mockReset().mockResolvedValue(false);
+  pull.mockReset().mockResolvedValue("other");
   persistent.mockReset();
   vi.spyOn(Math, "random").mockReturnValue(0.5);
   window.dohcDesktop = {
@@ -84,6 +84,35 @@ it("pulls every thirty seconds without a second access request", async () => {
   await act(() => vi.advanceTimersByTimeAsync(1));
   expect(pull).toHaveBeenCalledTimes(1);
   expect(check).toHaveBeenCalledTimes(1);
+});
+
+it("starts the next pull as soon as a held pull answers, and checks access when the level changed", async () => {
+  pull.mockResolvedValue("held");
+  setup();
+  await flush();
+  expect(pull).toHaveBeenCalledTimes(1);
+  expect(check).toHaveBeenCalledTimes(1);
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(pull).toHaveBeenCalledTimes(2);
+  expect(check).toHaveBeenCalledTimes(1);
+  pull.mockResolvedValueOnce("level-changed");
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(pull).toHaveBeenCalledTimes(3);
+  expect(check).toHaveBeenCalledTimes(2);
+  expect(verified).toHaveBeenCalledTimes(2);
+});
+
+it("checks access again when a pull that ran beside an access check reports a level change", async () => {
+  // The first access check reads the level before the change.
+  check
+    .mockResolvedValueOnce({ status: "current", access: "comment" })
+    .mockResolvedValueOnce({ status: "current", access: "edit" });
+  pull.mockResolvedValueOnce("level-changed");
+  setup();
+  await flush();
+  await flush();
+  expect(check).toHaveBeenCalledTimes(2);
+  expect(verified).toHaveBeenLastCalledWith({ status: "current", access: "edit" });
 });
 
 it("never overlaps deferred requests and rechecks a focus event after that request", async () => {
@@ -230,7 +259,7 @@ it.each(["focus", "online"])(
     act(() => window.dispatchEvent(new Event(event)));
     await flush();
     expect(pull).toHaveBeenCalledTimes(3);
-    pull.mockResolvedValue(false);
+    pull.mockResolvedValue("other");
     await act(() => vi.advanceTimersByTimeAsync(30_000));
     expect(pull).toHaveBeenCalledTimes(4);
     await act(() => vi.advanceTimersByTimeAsync(30_000));
@@ -262,7 +291,7 @@ it("pauses a 401 until credentials change, including focus, online and explicit 
   });
   expect(pull).toHaveBeenCalledTimes(1);
   expect(check).toHaveBeenCalledTimes(1);
-  pull.mockResolvedValue(false);
+  pull.mockResolvedValue("other");
   act(() => credentialsChanged({ phase: "changing", sessionKey: "account" }));
   await flush();
   expect(pull).toHaveBeenCalledTimes(1);
@@ -272,7 +301,7 @@ it("pauses a 401 until credentials change, including focus, online and explicit 
 });
 
 it("has one queued pull while a pull is in flight and drops that queue while hidden", async () => {
-  const pending = deferred<boolean>();
+  const pending = deferred<SharedViewPulled>();
   pull.mockReturnValueOnce(pending.promise);
   const hook = setup();
   await flush();
@@ -282,9 +311,9 @@ it("has one queued pull while a pull is in flight and drops that queue while hid
     void hook.result.current.pull();
   });
   expect(pull).toHaveBeenCalledTimes(1);
-  await act(async () => pending.resolve(false));
+  await act(async () => pending.resolve("other"));
   expect(pull).toHaveBeenCalledTimes(2);
-  const next = deferred<boolean>();
+  const next = deferred<SharedViewPulled>();
   pull.mockReturnValueOnce(next.promise);
   act(() => {
     void hook.result.current.pull();
@@ -292,13 +321,13 @@ it("has one queued pull while a pull is in flight and drops that queue while hid
   });
   visible = false;
   act(() => document.dispatchEvent(new Event("visibilitychange")));
-  await act(async () => next.resolve(false));
+  await act(async () => next.resolve("other"));
   await act(() => vi.advanceTimersByTimeAsync(3_600_000));
   expect(pull).toHaveBeenCalledTimes(3);
 });
 
 it("drops a stale pull failure after a workspace switch", async () => {
-  const pending = deferred<boolean>();
+  const pending = deferred<SharedViewPulled>();
   pull.mockReturnValueOnce(pending.promise);
   const hook = setup();
   await flush();
@@ -432,8 +461,8 @@ it.each([1, 2, 3, 4])(
     await flush();
     pull.mockClear();
     check.mockClear();
-    for (let count = 1; count < changedAt; count++) pull.mockResolvedValueOnce(false);
-    pull.mockResolvedValueOnce(true);
+    for (let count = 1; count < changedAt; count++) pull.mockResolvedValueOnce("other");
+    pull.mockResolvedValueOnce("other");
     await relayPress();
     await act(() => vi.advanceTimersByTimeAsync(20_000));
     expect(pull).toHaveBeenCalledTimes(4);
@@ -446,12 +475,12 @@ it("coalesces overdue Button probes behind a slow pull without overlap", async (
   setup();
   await flush();
   pull.mockClear();
-  const response = deferred<boolean>();
+  const response = deferred<SharedViewPulled>();
   pull.mockReturnValueOnce(response.promise);
   await relayPress();
   await act(() => vi.advanceTimersByTimeAsync(10_000));
   expect(pull).toHaveBeenCalledOnce();
-  await act(async () => response.resolve(false));
+  await act(async () => response.resolve("other"));
   await act(() => vi.advanceTimersByTimeAsync(0));
   expect(pull).toHaveBeenCalledTimes(2);
   await act(() => vi.advanceTimersByTimeAsync(10_000));

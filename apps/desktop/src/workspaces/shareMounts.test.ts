@@ -1,3 +1,4 @@
+import { assertMountableSelector } from "./shareMounts";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import { RefreshShareMountsResult, ShareMountStatusRow } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./shareViewRecords";
@@ -795,6 +796,16 @@ describe("refreshShareMount", () => {
     expect(outcome.status).toBe("updated");
     expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
+  });
+  it("refuses to mount a membership", () => {
+    expect(() =>
+      assertMountableSelector({
+        paths: [],
+        versionId: null,
+        access: "comment",
+        wholeWorkspace: true,
+      }),
+    ).toThrow("Open it as its own workspace");
   });
 });
 

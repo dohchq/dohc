@@ -3,6 +3,7 @@ import {
   stripWindowsAliasSuffix,
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
+import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { datasetOperationLabel } from "./datasetOperationLabel";
@@ -33,9 +34,16 @@ export interface RosterGrant {
   // anyone can change. A workspace membership covers every file on main.
   // Null for a grant on a chat alone.
   files: (FileScope & { access: ShareAccess }) | null;
-  // The chat a Group or chat grant covers.
-  channel: { wireId: string; canPost: boolean } | null;
+  // The chat the grant covers: one channel for a Group or chat grant, every
+  // Group for a workspace membership.
+  chat: RosterChat | null;
 }
+
+/** One channel by its wire id, or every Group in the workspace. */
+export type RosterChat =
+  | { kind: "channel"; wireId: string; canPost: boolean }
+  // Piece 4 (access rules) replaces this with each Group's own rule.
+  | { kind: "groups"; canPost: boolean };
 
 /** The files a grant covers: its paths, or with `wholeWorkspace` every file on main. */
 export interface FileScope {
@@ -142,8 +150,9 @@ export type ReachStep = (
       reads: readonly ReachDatasetOperation[];
       grants: ReachDatasetGrants;
     }
-  // `channelWireId` is null for a Group that has not synced yet.
-  | { kind: "post"; group: { channelWireId: string | null; name: string } }
+  // A post in a Group, or in a direct message the owner started.
+  // `channelWireId` is null for a chat that has not synced yet.
+  | { kind: "post"; target: "group" | "dm"; group: { channelWireId: string | null; name: string } }
   // A Group whose messages start the automation: every editor must be able
   // to read it, so nobody copies a Group they cannot read into the Collection.
   | { kind: "read-group"; group: { channelWireId: string | null; name: string } }
@@ -318,10 +327,22 @@ export function personHoldsOperation(
   );
 }
 
-function canPost(person: Person, channelWireId: string | null): boolean {
+// A chat grant reaches its own channel. A membership reaches every Group and
+// never a direct message. A Group step names a channel the chat directory
+// lists as an ordinary channel, so its kind is "channel".
+function reachesChat(
+  person: Person,
+  target: "group" | "dm",
+  channelWireId: string | null,
+  post: boolean,
+): boolean {
   return person.grants.some(
-    (grant) =>
-      grant.channel !== null && grant.channel.wireId === channelWireId && grant.channel.canPost,
+    ({ chat }) =>
+      chat !== null &&
+      (!post || chat.canPost) &&
+      (chat.kind === "channel"
+        ? chat.wireId === channelWireId
+        : target === "group" && isWorkspaceGroup(channelWireId, "channel")),
   );
 }
 
@@ -382,7 +403,7 @@ function formerEditorsOf(
         recipientUserId: null,
         recipientEmail: former.recipientEmail,
         files: { ...former.files, access: "edit" },
-        channel: null,
+        chat: null,
       };
       const path = former.files.paths[0];
       const person: Person =
@@ -491,7 +512,9 @@ function checkOwnerStep(
         : ALLOWED;
     }
     case "post": {
-      const blocked = editors.find((person) => !canPost(person, step.group.channelWireId));
+      const blocked = editors.find(
+        (person) => !reachesChat(person, step.target, step.group.channelWireId, true),
+      );
       return blocked
         ? stop(`${nameOf(blocked)} cannot post in ${step.group.name}.`, nameOf(blocked))
         : ALLOWED;
@@ -506,10 +529,7 @@ function checkOwnerStep(
     }
     case "read-group": {
       const blocked = editors.find(
-        (person) =>
-          !person.grants.some(
-            (grant) => grant.channel !== null && grant.channel.wireId === step.group.channelWireId,
-          ),
+        (person) => !reachesChat(person, "group", step.group.channelWireId, false),
       );
       return blocked
         ? stop(`${nameOf(blocked)} cannot read ${step.group.name}.`, nameOf(blocked))
@@ -652,7 +672,7 @@ export function shareImpactOf(
         recipientUserId: known?.recipientUserId ?? null,
         recipientEmail: known?.recipientEmail ?? share.recipientEmail,
         files: { paths: share.paths, versionId: share.versionId, access: share.access },
-        channel: null,
+        chat: null,
       },
     ],
   };

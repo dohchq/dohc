@@ -753,6 +753,7 @@ let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
+let memberAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
 let personalLiveDocument: ReturnType<typeof createPersonalLiveDocumentRoute> | undefined;
 let personalLive: ReturnType<typeof createPersonalLiveRoutes> | undefined;
@@ -793,6 +794,11 @@ const relayHandler = guardRelayResponses(storage, (request) => {
   if (path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")
     return (
       desktopAdmission?.handle(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (path === "/sync/live/member-open" || path === "/sync/live/member-ready")
+    return (
+      memberAdmission?.handle(request) ??
       Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
     );
   if (isLinkLivePath(path))
@@ -963,6 +969,15 @@ function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined
   }
 }
 
+function isLiveAdmissionPath(pathname: string): boolean {
+  return (
+    pathname === "/sync/live/desktop-open" ||
+    pathname === "/sync/live/desktop-ready" ||
+    pathname === "/sync/live/member-open" ||
+    pathname === "/sync/live/member-ready"
+  );
+}
+
 function isNamedBrowserSessionPath(pathname: string): boolean {
   return (
     pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve"
@@ -1039,9 +1054,7 @@ const server = serveFetchHandler({
             ? AUTOMATION_SERVER_MAX_BODY_BYTES
             : isAccountWorkspacePath(url.pathname)
               ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES
-              : (url.pathname === "/sync/live/desktop-open" ||
-                    url.pathname === "/sync/live/desktop-ready") &&
-                  namedBrowserSessionLimits
+              : isLiveAdmissionPath(url.pathname) && namedBrowserSessionLimits
                 ? namedBrowserSessionLimits.maxRequestBytes
                 : (url.pathname === "/sync/live/named-tickets" ||
                       url.pathname === "/sync/live/personal-tickets" ||
@@ -1058,8 +1071,7 @@ const server = serveFetchHandler({
   oversized: (url) =>
     isLinkEndpointPath(url.pathname)
       ? opaqueLinkRefusal()
-      : url.pathname === "/sync/live/desktop-open" ||
-          url.pathname === "/sync/live/desktop-ready" ||
+      : isLiveAdmissionPath(url.pathname) ||
           url.pathname === "/sync/live/named-tickets" ||
           url.pathname === "/sync/live/personal-tickets" ||
           isLinkLivePath(url.pathname) ||
@@ -1433,7 +1445,7 @@ if (namedLiveConfig) {
   }
   if (desktopEditorLimits) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
-    desktopAdmission = createNamedDesktopLive({
+    const openOptions = {
       storage,
       resolveActor,
       publicOrigin: shareWebOrigin!,
@@ -1443,7 +1455,29 @@ if (namedLiveConfig) {
       tickets,
       changes: frameChanges!,
       readinessLimits: selfHostLiveProfile().desktopReadiness,
-    });
+      // As for an agent's open: only a relay running the self-hosted live host hosts a member's.
+      hostsMemberDocuments: () => {
+        const control = storage.getLiveHostControl();
+        return (
+          !!selfHost &&
+          !!deployment &&
+          control?.configuredMode === "service" &&
+          control.configuredHostId === selfHostedLiveHostId(deployment.history.namespace)
+        );
+      },
+      hostBlocked: (document: { workspaceId: string; objectId: string }) =>
+        storage.getLiveHostControl()?.configuredMode === "service"
+          ? selfHost?.blocked(document)
+          : undefined,
+    };
+    desktopAdmission = createNamedDesktopLive(openOptions);
+    // A member's browser, through share-web, into the sessions its live socket resolves.
+    const browserSessions = relayApplication.namedBrowserSessions;
+    if (browserSessions)
+      memberAdmission = createNamedDesktopLive({
+        ...openOptions,
+        browser: { exchangeKey: relayExchangeKey!, sessions: browserSessions },
+      });
     desktopLive = createNamedLiveRoutes({
       kind: "named",
       desktopBearer: true,

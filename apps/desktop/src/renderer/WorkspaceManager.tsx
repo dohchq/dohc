@@ -14,7 +14,7 @@ import { useKeptTyping } from "./shell/useKeptTyping";
 import { useCrashReport } from "./shell/useCrashReport";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
-import { Titlebar, workspaceName } from "./Titlebar";
+import { JoinedWorkspaceMark, Titlebar, workspaceName } from "./Titlebar";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { ipcErrorMessage } from "./ipcError";
 import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
@@ -130,8 +130,9 @@ function WorkspaceRow(props: {
         onClick={props.onOpen}
         className="flex min-w-0 flex-1 flex-col text-left"
       >
-        <span className="truncate text-[13px] font-medium leading-5 text-ink">
-          {workspaceName(props.workspace)}
+        <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium leading-5 text-ink">
+          <span className="truncate">{workspaceName(props.workspace)}</span>
+          {props.workspace.shareView?.membership ? <JoinedWorkspaceMark /> : null}
         </span>
         <PathLine
           path={displayPath(props.workspace.rootPath)}

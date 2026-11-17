@@ -68,7 +68,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
             ),
         );
         let grant = ShareGrant {
-            paths: vec!["docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["docs".to_owned()]),
             version_id: None,
             access,
         };
@@ -206,7 +206,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
         }),
@@ -253,7 +253,7 @@ fn share_view_version_boundary(version_id: Option<&str>) -> ShareBoundary {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: version_id.map(str::to_owned),
             access: ShareAccess::View,
         }),
@@ -1021,7 +1021,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 /// pins for every share except a version share.
 fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
     ShareGrant {
-        paths: paths.into_iter().map(str::to_owned).collect(),
+        scope: crate::ShareScope::Paths(paths.into_iter().map(str::to_owned).collect()),
         version_id: None,
         access: ShareAccess::View,
     }
@@ -1031,7 +1031,7 @@ fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
 /// because the relay serves nothing through a selector with neither dimension.
 fn version_grant<'a>(paths: impl IntoIterator<Item = &'a str>, version_id: &str) -> ShareGrant {
     ShareGrant {
-        paths: paths.into_iter().map(str::to_owned).collect(),
+        scope: crate::ShareScope::Paths(paths.into_iter().map(str::to_owned).collect()),
         version_id: Some(version_id.to_owned()),
         access: ShareAccess::View,
     }
@@ -2185,7 +2185,7 @@ fn share_view_chat_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, Sh
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: crate::ShareAccess::Comment,
         }),
@@ -2508,7 +2508,7 @@ fn share_view_chat_composes_paths_with_a_version() {
             surface: ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(ShareGrant {
-                paths,
+                scope: crate::ShareScope::Paths(paths),
                 version_id: version_id.map(str::to_owned),
                 access: crate::ShareAccess::Comment,
             }),
@@ -3163,7 +3163,7 @@ fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
                 (
                     "outside",
                     ShareGrant {
-                        paths: vec!["private".to_owned()],
+                        scope: crate::ShareScope::Paths(vec!["private".to_owned()]),
                         version_id: None,
                         access: ShareAccess::Edit,
                     },
@@ -3171,7 +3171,7 @@ fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
                 (
                     "version",
                     ShareGrant {
-                        paths: vec![],
+                        scope: crate::ShareScope::Paths(vec![]),
                         version_id: Some("other".to_owned()),
                         access: ShareAccess::Edit,
                     },
@@ -3506,7 +3506,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
             "ws",
             "share",
             &ShareGrant {
-                paths: vec!["docs".into()],
+                scope: crate::ShareScope::Paths(vec!["docs".into()]),
                 version_id: Some("v".into()),
                 access: ShareAccess::View,
             },
@@ -3948,4 +3948,243 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
         TxnOutcome::Committed(answers) => answers,
         TxnOutcome::Crashed { .. } => panic!("lane read crashed"),
     }
+}
+
+/// A membership's view: the chat fixture's store under a workspace grant.
+fn member_view_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, ShareBoundary) {
+    let (scratch, path, engine, mut boundary) = share_view_chat_fixture();
+    boundary.granted = Some(ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: crate::ShareAccess::Comment,
+    });
+    (scratch, path, engine, boundary)
+}
+
+fn channel_create(seq: i64, wire_id: &str, kind: &str, slug: &str) -> ReplicationEnvelope {
+    envelope(
+        "granter",
+        seq,
+        "chat.channel.create",
+        json!({
+            "channelId": wire_id,
+            "name": slug,
+            "slug": slug,
+            "kind": kind,
+            "createdAtMs": 50,
+            "wireId": wire_id,
+        }),
+    )
+}
+
+fn group_thread(seq: i64, thread_id: &str, wire_id: &str) -> ReplicationEnvelope {
+    envelope(
+        "granter",
+        seq,
+        "chat.thread.create",
+        json!({
+            "threadId": thread_id,
+            "title": "Plans",
+            "createdAtMs": 100,
+            "channelWireId": wire_id,
+            "lane": "posts",
+        }),
+    )
+}
+
+fn message_body(engine: &EngineStore, message_id: &str) -> Option<String> {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT body FROM chat_messages WHERE workspace_id='ws' AND message_id=?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })
+        .expect("message read")
+}
+
+#[test]
+fn a_member_view_applies_a_groups_channel_thread_and_messages() {
+    let (_scratch, _path, mut engine, boundary) = member_view_fixture();
+    for op in [
+        channel_create(0, "wire-plans", "channel", "plans"),
+        group_thread(1, "thread-plans", "wire-plans"),
+        thread_message(2, "thread-plans", "m-plans"),
+    ] {
+        apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults)
+            .unwrap_or_else(|error| panic!("{} applies: {error:?}", op.op_kind));
+    }
+    assert_eq!(message_body(&engine, "m-plans").as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_path_share_view_refuses_a_groups_channel_and_thread() {
+    let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
+    assert!(matches!(
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &channel_create(0, "wire-plans", "channel", "plans"),
+            &NoFaults,
+        ),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &group_thread(0, "thread-plans", "wire-plans"),
+            &NoFaults,
+        ),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+}
+
+#[test]
+fn a_member_view_refuses_general_agent_chats_and_direct_messages() {
+    let (_scratch, _path, mut engine, boundary) = member_view_fixture();
+    for refused in [
+        channel_create(0, GENERAL_CHANNEL_WIRE_ID, "channel", "general"),
+        channel_create(0, AGENT_CHANNEL_WIRE_ID, "agent", "agent"),
+        channel_create(0, "wire-dm", "dm", "ana-and-bo"),
+    ] {
+        let payload = refused.payload.clone();
+        assert!(
+            matches!(
+                apply_shared_envelope(&mut engine, &boundary, &refused, &NoFaults),
+                Err(SyncError::ShareBoundaryViolation)
+            ),
+            "{payload} must be refused",
+        );
+    }
+
+    // Channels this store already holds that are not Groups: its own General,
+    // its agent's chat, and a direct message.
+    LinkedChatStore::new(&mut engine)
+        .ensure_general_channel("ws", "general-local", 10, &NoFaults)
+        .expect("general");
+    LinkedChatStore::new(&mut engine)
+        .ensure_agent_channel("ws", "agent-local", "agent", "Agent", 10, &NoFaults)
+        .expect("agent chat");
+    LinkedChatStore::new(&mut engine)
+        .create_channel("ws", "dm-local", "Bo", ChatChannelKind::Dm, 10, &NoFaults)
+        .expect("dm");
+    let wires: Vec<String> = engine
+        .read_with(|conn| {
+            let mut statement = conn
+                .prepare("SELECT wire_id FROM chat_channel_wire_ids WHERE workspace_id='ws'")
+                .map_err(SyncError::corrupt)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .map_err(SyncError::corrupt)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(SyncError::corrupt)
+        })
+        .expect("wire ids");
+    assert!(wires.iter().any(|wire| wire == GENERAL_CHANNEL_WIRE_ID));
+    for (seq, wire) in wires.iter().enumerate() {
+        let thread = format!("thread-{seq}");
+        assert!(
+            matches!(
+                apply_shared_envelope(
+                    &mut engine,
+                    &boundary,
+                    &group_thread(seq as i64, &thread, wire),
+                    &NoFaults,
+                ),
+                Err(SyncError::ShareBoundaryViolation)
+            ),
+            "a thread in {wire} must be refused",
+        );
+    }
+
+    // A message into a thread this store holds in a direct message.
+    LinkedChatStore::new(&mut engine)
+        .start_channel_thread(
+            &StartChannelThread {
+                automation: None,
+                workspace_id: "ws".to_owned(),
+                channel_id: "dm-local".to_owned(),
+                thread_id: "thread-dm".to_owned(),
+                message_id: "m-dm-0".to_owned(),
+                title: None,
+                lane: ChatThreadLane::Posts,
+                own_thread: false,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Me".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: Some("me".to_owned()),
+                origin: None,
+                body: "private".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+                now_ms: 20,
+                request_id: Some("thread-dm".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("dm thread");
+    assert!(matches!(
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &thread_message(9, "thread-dm", "m-dm-1"),
+            &NoFaults,
+        ),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert_eq!(message_body(&engine, "m-dm-1"), None);
+}
+
+#[test]
+fn a_member_view_keeps_the_file_comment_rule() {
+    let (_scratch, _path, mut engine, boundary) = member_view_fixture();
+    // Every tracked file is in reach, so a Comment on any of them applies.
+    for op in [
+        thread_create(0, "thread-out", json!({ "linkedPath": "private/out.md" })),
+        thread_message(1, "thread-out", "m-out"),
+    ] {
+        apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults)
+            .unwrap_or_else(|error| panic!("{} applies: {error:?}", op.op_kind));
+    }
+    assert_eq!(
+        thread_row_path(&engine, "thread-out").as_deref(),
+        Some("private/out.md")
+    );
+    // A path the surface never replays stays refused, and a thread bound to
+    // a Group and a file at once is malformed.
+    assert!(matches!(
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &thread_create(
+                2,
+                "thread-secret",
+                json!({ "linkedPath": "shared/docs/.env" })
+            ),
+            &NoFaults,
+        ),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &thread_create(
+                3,
+                "thread-both",
+                json!({ "linkedPath": "private/out.md", "channelWireId": "wire-plans" })
+            ),
+            &NoFaults,
+        ),
+        Err(SyncError::InvalidInput { .. })
+    ));
 }

@@ -14,6 +14,7 @@ afterEach(() => {
 });
 import { createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
 import { liveDeliveryBookkeepingBytes } from "./liveDeliveryQuotaTestSupport.js";
+import { observeRelayWrites } from "../../../services/sync-relay/src/relayWriteChanges.js";
 
 function registered(...args: Parameters<typeof registeredFixture>) {
   const f = registeredFixture(...args);
@@ -576,3 +577,44 @@ it.each(["bytes"])(
     }
   },
 );
+
+it("names the edited document on a live edit's journal and acknowledgement writes", async () => {
+  const f = registered();
+  const scopes: unknown[] = [],
+    stop = observeRelayWrites(f.storage, (documents) => {
+      scopes.push(documents);
+    });
+  try {
+    const { store } = delivery(f),
+      document = f.input.evidence.document;
+    let drain = store.open({ host, document });
+    ackBaseline(store, drain);
+    store.close(drain);
+    await new Promise<void>(queueMicrotask);
+    scopes.length = 0;
+    expect(
+      f.storage.commitLiveUpdateJournal(f.capture(f.update(), "scoped-event")).result.kind,
+    ).toBe("accepted");
+    await new Promise<void>(queueMicrotask);
+    drain = store.open({ host, document });
+    const next = store.next(drain);
+    if (next.kind !== "next") throw Error("expected event");
+    store.acknowledge(drain, next.predecessor, {
+      ...next.admitted.metadata.accepted.receipt,
+      localYDocSequence: 1,
+      applicationReplayed: false,
+    });
+    store.close(drain);
+    await new Promise<void>(queueMicrotask);
+    const key = {
+      workspaceId: document.workspaceId,
+      mainVersionId: document.mainVersionId,
+      objectId: document.objectId,
+      lineageClaimId: document.lineageClaimId,
+    };
+    expect(scopes).toEqual([[key], [key]]);
+  } finally {
+    stop();
+    f.close();
+  }
+});

@@ -1,7 +1,7 @@
 import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
-import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
+import { Check, PanelLeft, PanelRight, Search, Users } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
@@ -19,6 +19,21 @@ export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "sh
       .replace(/[\\/]+$/, "")
       .split(/[\\/]/)
       .pop() || "workspace"
+  );
+}
+
+// A workspace this account joined as a member or admin.
+export function JoinedWorkspaceMark() {
+  return (
+    <span
+      data-testid="workspace-joined-mark"
+      role="img"
+      aria-label="Joined workspace"
+      title="Joined workspace"
+      className="flex shrink-0 items-center text-subtle"
+    >
+      <Users size={12} aria-hidden />
+    </span>
   );
 }
 
@@ -90,6 +105,8 @@ export function Titlebar(props: {
   workspace?: WorkspaceSummary;
   workspaces?: WorkspaceSummary[];
   onOpenShare?: () => void;
+  // A joined workspace's level, said once on its own row in the workspace menu.
+  level?: string;
   onManageWorkspaces?: () => void;
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
@@ -234,7 +251,15 @@ export function Titlebar(props: {
                         <span className="w-3" aria-hidden />
                       )}
                       <span className="truncate">{workspaceName(candidate)}</span>
-                      {candidate.kind === "shared" ? (
+                      {candidate.shareView?.membership ? <JoinedWorkspaceMark /> : null}
+                      {props.level && candidate.workspaceId === props.workspace?.workspaceId ? (
+                        <span
+                          data-testid="workspace-switcher-level"
+                          className="ml-auto shrink-0 text-[12px] text-subtle"
+                        >
+                          {props.level}
+                        </span>
+                      ) : candidate.kind === "shared" ? (
                         <span className="ml-auto text-[12px] text-subtle">Shared</span>
                       ) : null}
                     </button>

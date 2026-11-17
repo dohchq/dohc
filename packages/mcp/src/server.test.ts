@@ -30,8 +30,6 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_again",
   "dohc_delete_retained_copies",
   "dohc_publish_app",
-  // Members belong to the original workspace and its owner account.
-  "dohc_members",
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_duplicate_file",
@@ -44,7 +42,6 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_set_record_fields",
   "dohc_create_record",
   "dohc_edit_document",
-  "dohc_create_document",
   // A shared view keeps no automation runs, so run tools stay owner-only.
   "dohc_list_automation_runs",
   "dohc_read_automation_run",
@@ -54,6 +51,24 @@ const DOCUMENT_WRITE_TOOLS = [
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
+// Tools a joined workspace reaches through its share profile. The socket
+// refuses them in any other share view, and the relay decides each one.
+const JOINED_TOOLS = {
+  view: ["dohc_members"],
+  comment: ["dohc_members", "dohc_start_group_chat", "dohc_reply_to_chat", "dohc_start_file_chat"],
+  edit: [
+    "dohc_members",
+    "dohc_start_group_chat",
+    "dohc_reply_to_chat",
+    "dohc_start_file_chat",
+    "dohc_create_document",
+    "dohc_edit_document",
+    "dohc_set_record_fields",
+    "dohc_create_record",
+    "dohc_create_group",
+    "dohc_switch_automation",
+  ],
+} as const;
 
 const SHARED_TOOLS = [
   "dohc_inspect_buttons",
@@ -370,34 +385,139 @@ describe("share-level tool profiles", () => {
     expect(() => parseArgs(["--tool"])).toThrow(/Received: no value/u);
   });
 
-  it("registers NO write tools for a view profile and keeps read tools", async () => {
-    const { names } = await connectedToolNames({ ...base, shareAccess: "view" });
-    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
-      expect(names, tool).not.toContain(tool);
-    }
-    for (const tool of SHARED_TOOLS) {
-      expect(names, tool).toContain(tool);
-    }
-  });
-
-  // Local file, document, and chat writes require an owning workspace.
-  // Shared views expose Button presses checked by the owner's host.
-  it("registers no write tool at all for a comment profile, chat tools included", async () => {
-    const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
-    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
-      expect(names, `${tool}: offering a write tool a shared view always refuses`).not.toContain(
-        tool,
+  it.each(["view", "comment", "edit"] as const)(
+    "offers the %s profile the read tools and only its joined-workspace tools",
+    async (shareAccess) => {
+      const { names } = await connectedToolNames({ ...base, shareAccess });
+      const joined: readonly string[] = JOINED_TOOLS[shareAccess];
+      for (const tool of [
+        ...DOCUMENT_WRITE_TOOLS,
+        ...CHAT_WRITE_TOOLS,
+        "dohc_create_document",
+        "dohc_create_group",
+        "dohc_members",
+      ]) {
+        expect(names.includes(tool), tool).toBe(joined.includes(tool));
+      }
+      for (const tool of SHARED_TOOLS) expect(names, tool).toContain(tool);
+      const { names: view } = await connectedToolNames({ ...base, shareAccess: "view" });
+      expect([...names].sort()).toEqual(
+        [...view, ...joined.filter((tool) => !view.includes(tool))].sort(),
       );
-    }
-    for (const tool of SHARED_TOOLS) {
-      expect(names, tool).toContain(tool);
-    }
+    },
+  );
+
+  it("sends a joined workspace's Group post and Members list to the desktop, and returns its refusal as an error", async () => {
+    const sent: Array<{ verb: string; args: unknown }> = [];
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({
+      ...base,
+      root,
+      shareAccess: "comment",
+      request: async (request) => {
+        sent.push({ verb: request.verb, args: request.args });
+        if (request.verb === "members")
+          return {
+            status: "ready",
+            view: {
+              workspaceId: "owner-ws",
+              workspaceName: "Trip",
+              viewer: { memberId: "m-ana", role: "member" },
+              memberLevel: "comment",
+              inviteLink: null,
+              people: [],
+            },
+          };
+        if ((request.args as { group?: string }).group === "general")
+          throw new DohcCliError(
+            "Agents post in a joined workspace's Groups. General belongs to the owner.",
+          );
+        return {
+          group: { id: "ch_trip", name: "Trip", slug: "trip", kind: "group" },
+          threadId: "th_1",
+          messageId: "msg_1",
+          title: "Booked.",
+        };
+      },
+    });
+    const posted = await client.callTool({
+      name: "dohc_start_group_chat",
+      arguments: { group: "trip", body: "Booked." },
+    });
+    expect(posted.structuredContent, JSON.stringify(posted)).toMatchObject({
+      ok: true,
+      threadId: "thread-1",
+    });
+    const listed = await client.callTool({
+      name: "dohc_members",
+      arguments: { request: { action: "list" } },
+    });
+    expect(listed.isError).not.toBe(true);
+    expect(listed.structuredContent).toEqual({
+      status: "ready",
+      view: {
+        workspaceId: "owner-ws",
+        workspaceName: "Trip",
+        viewer: { memberId: "m-ana", role: "member" },
+        memberLevel: "comment",
+        inviteLink: null,
+        people: [],
+      },
+    });
+    const general = await client.callTool({
+      name: "dohc_start_group_chat",
+      arguments: { group: "general", body: "Hi" },
+    });
+    expect(general.isError).toBe(true);
+    expect(general.structuredContent).toEqual({
+      ok: false,
+      reason: "Agents post in a joined workspace's Groups. General belongs to the owner.",
+    });
+    expect(sent).toMatchObject([
+      { verb: "post", args: { cwd: root, group: "trip", body: "Booked." } },
+      { verb: "members", args: { cwd: root, actor: "agent", request: { action: "list" } } },
+      { verb: "post", args: { group: "general" } },
+    ]);
   });
 
-  it("adds automation switches to the Edit profile", async () => {
-    const { names: comment } = await connectedToolNames({ ...base, shareAccess: "comment" });
-    const { names: edit } = await connectedToolNames({ ...base, shareAccess: "edit" });
-    expect([...edit].sort()).toEqual([...comment, "dohc_switch_automation"].sort());
+  it("returns the relay's refusal of a member's invite as an error", async () => {
+    const reason = "dohc could not send the invite. Only the owner and admins can invite.";
+    const { client } = await connectedToolNames({
+      ...base,
+      root: await workspaceRoot(),
+      shareAccess: "edit",
+      request: async () => {
+        throw new DohcCliError(reason);
+      },
+    });
+    const result = await client.callTool({
+      name: "dohc_members",
+      arguments: { request: { action: "invite", email: "bo@example.com" } },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, reason });
+  });
+
+  it("returns a page refusal below Edit as an error naming the level", async () => {
+    const { client } = await connectedToolNames({
+      ...base,
+      root: await workspaceRoot(),
+      shareAccess: "edit",
+      request: async () => {
+        throw new DohcCliError(
+          "You have Comment access to this workspace. Adding a page needs Edit.",
+        );
+      },
+    });
+    const result = await client.callTool({
+      name: "dohc_create_document",
+      arguments: { path: "plans/day-1.md", markdown: "# Day 1" },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      reason: "You have Comment access to this workspace. Adding a page needs Edit.",
+    });
   });
 
   it("registers both write tiers for a local workspace (no share level)", async () => {

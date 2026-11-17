@@ -1,3 +1,12 @@
+import { RelayUnreachableError } from "@dohc/workspace-contracts/relay";
+function expectStatefulRequestsScoped(requests: Request[]): void {
+  for (const request of requests) {
+    if (request.method === "workspace.open") continue;
+    expect(request.workspace, `${request.method} must retain its daemon workspace handle`).toBe(
+      "ws-mock",
+    );
+  }
+}
 import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,6 +30,7 @@ import {
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
+  type EngineRelayClientOptions,
   MixedRelayTransportError,
   RelayBusyError,
   RelayConfiguredDaemonClientSource,
@@ -144,6 +154,8 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "share.channel.push":
           return { pushed: 6 };
+        case "share.view.pushChat":
+          return { pushed: 3 };
         case "share.view.pull":
           return {
             fetched: 2,
@@ -193,7 +205,11 @@ afterEach(async () => {
   );
 });
 
-async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void) {
+async function harness(
+  daemon = new MockDaemon(),
+  onRefusalsChanged?: () => void,
+  onShareViewPullProgress?: EngineRelayClientOptions["onShareViewPullProgress"],
+) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
@@ -209,6 +225,7 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
     routes,
     requestDeadlineMs: 1_000,
     onRefusalsChanged,
+    onShareViewPullProgress,
   });
   const relay = { baseUrl: "https://relay.test/", token: "secret-token" };
   const client = live.bind({
@@ -464,6 +481,39 @@ describe("EngineRelayClient", () => {
   // before its cursor commits — so the in-memory aggregate only has to carry
   // enough to log and to show. A relay that refuses on every page must not be
   // able to grow it with its log; the paging loop has no page limit of its own.
+  // A first pull of a large workspace takes many pages. Each page that
+  // brings files says how many distinct files have arrived so far.
+  it("reports how many files a share view pull has read, page by page", async () => {
+    const pages: string[][] = [["a.md", "b.md"], ["b.md", "c.md"], []];
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      const paths = pages[pulls]!;
+      pulls += 1;
+      return {
+        fetched: paths.length,
+        applied: paths.length,
+        skipped: 0,
+        refusals: [],
+        hasMore: pulls < pages.length,
+        nextCursor: pulls,
+        changedPaths: paths.map((path) => ({ path, operation: "write", contentKind: "text" })),
+        pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
+      };
+    });
+    const progress = vi.fn();
+    const { sessions, client } = await harness(daemon, undefined, progress);
+    await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    });
+    expect(progress.mock.calls.map(([event]) => event)).toEqual([
+      { workspaceId: "workspace-a", shareId: "share-view", files: 2 },
+      { workspaceId: "workspace-a", shareId: "share-view", files: 3 },
+    ]);
+    await sessions.closeAll();
+  });
+
   it("bounds the refusals it accumulates in memory while counting them all", async () => {
     const pages = MAX_REPORTED_REFUSALS + 1;
     let pulls = 0;
@@ -506,6 +556,28 @@ describe("EngineRelayClient", () => {
     ).toBe(MAX_REPORTED_REFUSALS);
     expect(pull.refusalCount).toBe(pages);
     expect(recorded).toBe(pages);
+    await sessions.closeAll();
+  });
+
+  it("sends a joined workspace's Group posts with its pinned selector", async () => {
+    const { daemon, sessions, client } = await harness();
+    await expect(
+      client.pushShareViewChat({
+        shareId: "share-membership",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      }),
+    ).resolves.toEqual({ pushed: 3 });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.view.pushChat")
+        .map((request) => request.params),
+    ).toEqual([
+      {
+        workspaceId: "workspace-a",
+        shareId: "share-membership",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      },
+    ]);
     await sessions.closeAll();
   });
 
@@ -892,6 +964,40 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  // A stopped relay is an outage. Calling it an ended share retires a
+  // membership for good.
+  it("names an unreachable relay for every share method, not an ended share", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method.startsWith("share.")) {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterBackoff" },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    const grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    } as const;
+    await expect(
+      client.pullShareView({ shareId: "share", grantedSelector }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pushShareViewChat({ shareId: "share", grantedSelector }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pullSharedChannel({ shareId: "share", channelWireId: "channel" }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pushSharedChannel({ shareId: "share", channelWireId: "channel" }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await sessions.closeAll();
+  });
+
   it("allows a relay change after clean teardown without weakening transport locking", async () => {
     const { rootPath, daemon, live, routes } = await harness();
     const first = live.bind({
@@ -1016,4 +1122,36 @@ describe("allowInsecureLoopbackRelayForTests", () => {
     expect(allowInsecureLoopbackRelayForTests("https://relay.test", enabled)).toBe(false);
     expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
   });
+});
+
+it("reads what a stopped direct push left waiting, and refuses an answer it cannot read", async () => {
+  const answers: JsonValue[] = [
+    { pages: 2, collectionWrites: 1, morePending: false },
+    { pages: -1, collectionWrites: 0, morePending: false },
+    { pages: 1 },
+  ];
+  const daemon = new MockDaemon((request) =>
+    request.method === "share.direct.waiting" ? answers.shift() : undefined,
+  );
+  const { client, sessions } = await harness(daemon);
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).resolves.toEqual({
+    pages: 2,
+    collectionWrites: 1,
+    morePending: false,
+  });
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow(
+    "share.direct.waiting",
+  );
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow(
+    "share.direct.waiting",
+  );
+  expect(
+    daemon.requests
+      .filter((request) => request.method === "share.direct.waiting")
+      .map((request) => request.params),
+  ).toEqual(
+    Array.from({ length: 3 }, () => ({ workspaceId: "workspace-a", shareId: "share-file" })),
+  );
+  expectStatefulRequestsScoped(daemon.requests);
+  await sessions.closeAll();
 });

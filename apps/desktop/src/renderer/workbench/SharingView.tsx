@@ -20,7 +20,11 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import type { ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareProposalRow,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { shareSenderParts } from "../ShareSender";
@@ -35,7 +39,8 @@ import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
-import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -46,9 +51,12 @@ import {
   type AboutNotices,
   type AccessSetup,
   type AccessView,
+  appendAccessPage,
+  awaitingCheck,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { EMPTY_ART } from "./EmptyArt";
+import { membershipWho } from "./membershipWords";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: the shares this workspace granted, and the shares sent
@@ -61,7 +69,12 @@ export type ShareMount = NonNullable<WorkspaceSummary["shareMounts"]>[number];
 export type ShareGroup = { shareId: string; rows: AccessShareRow[] };
 export type WaitingChanges = { count: number; senders: string[]; oldestProposalId: string };
 // A row, or a lane's heading when no share is named, to focus on opening.
-export type SharingFocus = { lane: SharingLane; shareId: string | null };
+export type SharingFocus = {
+  lane: SharingLane;
+  shareId: string | null;
+  // Open this share once shown, as a failed Open's Try again asked.
+  open?: { workspaceId: string; name: string };
+};
 export type CopyWhat = "code" | "invitation";
 // Whether a mount's skipped changes show, against what its record says:
 // shown on request, or hidden up to the generation a Dismiss covered.
@@ -457,6 +470,8 @@ export type SharingActions = {
   cancelEnd: () => void;
   end: (group: ShareGroup) => void;
   mount: (shareId: string) => void;
+  // Opens a membership as its own workspace, named for the error a failure reports.
+  open: (shareId: string, name: string) => void;
   unmount: (mount: ShareMount) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
@@ -710,9 +725,8 @@ function ReceivedRow(props: {
         ? [
             {
               label: "Open",
-              onSelect: () => undefined,
-              disabled: true,
-              description: JOINED_WORKSPACE_LIMIT.open,
+              onSelect: () => actions.open(shareId, subject.name),
+              disabled: props.busy,
             },
           ]
         : [];
@@ -725,17 +739,10 @@ function ReceivedRow(props: {
         : "ended";
   const who: Who =
     membership && !word
-      ? membership.role === "admin"
-        ? {
-            text: `Admin · ${sender} owns this workspace`,
-            title: `Admin · ${parts.full} owns this workspace`,
-          }
-        : access
-          ? {
-              text: `Member · ${sender} lets members ${verbOf(access)}`,
-              title: `Member · ${parts.full} lets members ${verbOf(access)}`,
-            }
-          : { text: `Member · from ${sender}`, title: `Member · from ${parts.full}` }
+      ? {
+          text: membershipWho(membership.role, sender, access),
+          title: membershipWho(membership.role, parts.full, access),
+        }
       : access && !word
         ? {
             text: `${sender} lets you ${verbOf(access)}`,
@@ -1033,20 +1040,24 @@ export function SharingPanel(props: {
 }
 
 // One lane's read, held to the workspace it was asked for.
+// A paced refresh carries main's next check, which resolves true when it ends.
+type Refreshed = { checked: Promise<boolean> } | null;
+
 function useSharingLane(
   workspaceId: string,
   lane: SharingLane,
   notices: AboutNotices,
-  refresh: () => Promise<void>,
+  refresh: () => Promise<Refreshed>,
 ) {
   const read = useSectionRead<AccessView>(`${workspaceId}\0${lane}`, `sharing-${lane}`, notices);
   const { begin, cancel } = read;
   const load = useCallback(
-    async (options: { refreshed?: Promise<void>; after?: AccessAnswer }) => {
+    async (options: { refreshed?: Promise<Refreshed>; after?: AccessAnswer }) => {
       const request = begin();
       try {
+        let checked: Promise<boolean> | null = null;
         if (options.refreshed) {
-          await options.refreshed;
+          checked = (await options.refreshed)?.checked ?? null;
           if (!request.current()) return;
         }
         const cursor = options.after?.nextCursor ?? undefined;
@@ -1063,9 +1074,13 @@ function useSharingLane(
         request.settle({
           status: "ready",
           answer: options.after
-            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
-            : answer,
+            ? appendAccessPage(options.after, answer)
+            : checked
+              ? awaitingCheck(answer)
+              : answer,
         });
+        // As About's Access: when main's next check ends, read again in place.
+        if (checked && (await checked) && request.current()) void load({});
       } catch (error) {
         const retry = () => void load({ refreshed: refresh() });
         request.fail({ status: "failed" }, ipcErrorMessage(error, LANE[lane].failed), error, retry);
@@ -1097,20 +1112,84 @@ export function SharingView(props: {
   onFocused: () => void;
   // New notes the server has no file for until their open editor is left.
   notSentWhileOpen?: readonly string[];
+  // Hands a membership the relay still states to the shell, which asks for a folder.
+  onOpenShare: (share: RelayShareReceivedRow) => void;
+  // Shows this view on a row, after it closed too.
+  onShowSharing: (target: SharingFocus) => void;
+  // The view took the focus's open, so showing the view again doesn't repeat it.
+  onOpenTaken: () => void;
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
-  const refresh = useCallback(
-    () =>
-      bridge()
-        .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
-        .catch(() => undefined),
-    [workspaceId],
-  );
+  const refresh = useCallback(async (): Promise<Refreshed> => {
+    const refreshed = await bridge()
+      .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
+      .catch(() => undefined);
+    if (refreshed?.status !== "paced") return null;
+    // One wait for both lists.
+    return {
+      checked: bridge()
+        .requestAccessRefresh({ workspaceId, reason: "sharing-open", wait: true })
+        .then(
+          () => true,
+          () => false,
+        ),
+    };
+  }, [workspaceId]);
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  const [openTarget, setOpenTarget] = useState<{
+    workspaceId: string;
+    shareId: string;
+    name: string;
+  } | null>(null);
+  if (openTarget && openTarget.workspaceId !== workspaceId) setOpenTarget(null);
+  const opening = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${workspaceId}\0${openTarget?.shareId ?? ""}`,
+    manual: openTarget === null || openTarget.workspaceId !== workspaceId,
+    load: async () => {
+      if (!openTarget) return null;
+      const found = await bridge().getRelayReceivedShare({ shareId: openTarget.shareId });
+      if (!found.found)
+        throw new Error(found.removed?.message ?? "This workspace is no longer shared with you.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
+      return found.share;
+    },
+  });
+  // Try again outlives the view, so it shows the view again to open the share.
+  const { onOpenTaken } = props;
+  useEffect(() => {
+    if (!focus?.open || focus.shareId === null || focus.open.workspaceId !== workspaceId) return;
+    setOpenTarget({ workspaceId, shareId: focus.shareId, name: focus.open.name });
+    onOpenTaken();
+  }, [focus, onOpenTaken, workspaceId]);
+  const { onOpenShare, onShowSharing, reportError } = props;
+  useEffect(() => {
+    if (!openTarget || openTarget.workspaceId !== workspaceId) return;
+    if (opening.value) {
+      setOpenTarget(null);
+      onOpenShare(opening.value);
+    } else if (opening.error !== null) {
+      setOpenTarget(null);
+      reportError(`dohc could not open ${openTarget.name}.`, opening.error, () =>
+        onShowSharing({
+          lane: "received",
+          shareId: openTarget.shareId,
+          open: { workspaceId: openTarget.workspaceId, name: openTarget.name },
+        }),
+      );
+    }
+  }, [
+    onOpenShare,
+    onShowSharing,
+    openTarget,
+    opening.error,
+    opening.value,
+    reportError,
+    workspaceId,
+  ]);
   const [skipView, setSkipView] = useState<SkipView>(new Map());
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
@@ -1351,6 +1430,7 @@ export function SharingView(props: {
     cancelEnd: () => setConfirmShareId(null),
     end: (group) => void end(group),
     mount: (shareId) => void mount(shareId),
+    open: (shareId, name) => setOpenTarget({ workspaceId, shareId, name }),
     unmount: (target) => void unmount(target),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
@@ -1370,7 +1450,7 @@ export function SharingView(props: {
       skipView={skipView}
       invitations={invitations}
       confirmShareId={confirmShareId}
-      busyShareId={busyShareId}
+      busyShareId={openTarget?.shareId ?? busyShareId}
       actions={actions}
       ref={panel}
     />

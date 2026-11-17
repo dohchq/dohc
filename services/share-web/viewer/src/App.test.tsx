@@ -10,15 +10,14 @@ import { act } from "react";
 import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App, dohcNavigation } from "./App";
 import {
-  App,
-  dohcNavigation,
   fileTree,
   loadCurrentState,
   loadLog,
-  TEXT_PREVIEW_BYTE_CAP,
   MAX_LOG_PAGES,
-} from "./App";
+  TEXT_PREVIEW_BYTE_CAP,
+} from "./viewFiles";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 import { RETRY_MAX_MS } from "./retry";
 

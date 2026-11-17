@@ -20,7 +20,7 @@ import {
   type DeclaredWriteVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
-import { MEMBERS_REFUSED } from "./members";
+import { MEMBERS_REFUSED, membersWordsForCli } from "./members";
 import { readPassword, readStdinText } from "./stdin";
 import {
   CHAT_MESSAGE_TOO_LONG,
@@ -832,7 +832,9 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
               : // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
                 command.verb === "saveRecoveryCopy"
                 ? 420_000
-                : command.verb === "historyUndo" ||
+                : // A paced Access refresh waits up to a minute for the next roster check.
+                  command.verb === "historyUndo" ||
+                    command.verb === "accessRefresh" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||
@@ -886,7 +888,11 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     }
   } catch (error) {
     if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
-    return { exitCode: 1, stdout: "", stderr: cliErrorLine(error) };
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: cliErrorLine(options.argv[0] === "members" ? membersWordsForCli(error) : error),
+    };
   }
 }
 

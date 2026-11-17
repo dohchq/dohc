@@ -1,9 +1,5 @@
 import { randomBytes } from "node:crypto";
-import {
-  chatMessageInterest,
-  readPushMessage,
-  type ChatMessageReason,
-} from "../chatMessageInterest";
+import type { ChatMessageReason, PushMessage } from "../chatMessageInterest";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
 
@@ -14,14 +10,13 @@ export const PUSH_RECIPIENT_PENDING_LIMIT = 100;
 export const PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE = 30;
 const TABLE = "sync_relay_push_deliveries";
 const MARKER = "push-deliveries-v1";
+// Mentions match account names (accountNames.ts), so the names each
+// installation once kept are gone.
+const DROP_INSTALLATION_NAMES = "push-deliveries-v2";
 const schema = {
   sync_relay_push_rate: `CREATE TABLE sync_relay_push_rate (
     account_user_id TEXT NOT NULL, minute INTEGER NOT NULL, attempts INTEGER NOT NULL,
     PRIMARY KEY (account_user_id, minute)
-  ) STRICT`,
-  sync_relay_push_installation_names: `CREATE TABLE sync_relay_push_installation_names (
-    installation_id TEXT PRIMARY KEY REFERENCES sync_relay_push_subscriptions(installation_id) ON DELETE CASCADE,
-    account_name TEXT NOT NULL CHECK (length(account_name) <= 1024)
   ) STRICT`,
   [TABLE]: `CREATE TABLE sync_relay_push_deliveries (
     delivery_id TEXT PRIMARY KEY,
@@ -56,69 +51,51 @@ export function initializePushDeliveries(db: SqliteDb): void {
         throw Error("push delivery schema is missing or damaged");
     }
   };
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
-    assert();
-    return;
+  const marked = (id: string) =>
+    Boolean(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(id));
+  const mark = (id: string) =>
+    db
+      .prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)")
+      .run(id, Date.now());
+  if (!marked(MARKER)) {
+    for (const name of [...Object.keys(schema), "sync_relay_push_installation_names"]) {
+      if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
+        throw Error("unmarked push delivery schema already exists");
+    }
+    for (const sql of Object.values(schema)) db.exec(sql);
+    mark(MARKER);
+    mark(DROP_INSTALLATION_NAMES);
+  } else if (!marked(DROP_INSTALLATION_NAMES)) {
+    db.exec("DROP TABLE IF EXISTS sync_relay_push_installation_names");
+    mark(DROP_INSTALLATION_NAMES);
   }
-  for (const name of Object.keys(schema)) {
-    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
-      throw Error("unmarked push delivery schema already exists");
-  }
-  for (const sql of Object.values(schema)) db.exec(sql);
   assert();
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(
-    MARKER,
-    Date.now(),
-  );
 }
 
-/** Runs inside the message append transaction. No network work may enter here. */
+/** Queues the recipient's alert on each of their devices. Runs inside the message append transaction. */
 export function recordPushDeliveries(
   storage: StorageContext,
-  relaySeq: number,
-  nowMs = Date.now(),
+  message: PushMessage,
+  userId: string,
+  reason: ChatMessageReason,
+  nowMs: number,
 ): void {
-  if (!storage.options.pushConfigured) return;
-  const message = readPushMessage(storage, relaySeq);
-  if (!message) return;
-  const first = storage.db
-    .prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?
-    AND op_kind = 'chat.message.append' AND json_valid(payload_json)
-    AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
-    AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
-    .get(message.workspaceId, message.threadId, message.messageId);
-  if (Number(first?.relay_seq) !== relaySeq) return;
-  const recipients = storage.db
-    .prepare(`SELECT p.installation_id, p.account_user_id, p.generation, n.account_name
-    FROM sync_relay_push_subscriptions p LEFT JOIN sync_relay_push_installation_names n USING(installation_id)
-    WHERE p.kind = 'web' AND p.expires_at_ms > ? AND p.account_user_id IN (
-      SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ? UNION
-      SELECT g.principal_user_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id)
-      WHERE s.workspace_id = ? AND g.status = 'active' AND g.principal_kind = 'user')`)
-    .all(nowMs, message.workspaceId, message.workspaceId);
-  const interests = new Map<string, ChatMessageReason | null>();
-  for (const recipient of recipients) {
-    const userId = String(recipient.account_user_id);
-    if (!interests.has(userId))
-      interests.set(
-        userId,
-        chatMessageInterest(storage, message, {
-          userId,
-          accountName: String(recipient.account_name ?? ""),
-        }),
-      );
-    const reason = interests.get(userId);
-    if (!reason) continue;
-    storage.db
-      .prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
-      AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
-      .run(userId, nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
+  const installations = storage.db
+    .prepare(`SELECT installation_id, generation FROM sync_relay_push_subscriptions
+    WHERE kind = 'web' AND account_user_id = ? AND expires_at_ms > ?`)
+    .all(userId, nowMs);
+  if (installations.length === 0) return;
+  storage.db
+    .prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
+    AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
+    .run(userId, nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
+  for (const installation of installations) {
     const count = storage.db
       .prepare(
         `SELECT count(*) AS n FROM ${TABLE} WHERE account_user_id = ? AND state = 'pending' AND expires_at_ms > ?`,
       )
       .get(userId, nowMs);
-    if (Number(count?.n) >= PUSH_RECIPIENT_PENDING_LIMIT) continue;
+    if (Number(count?.n) >= PUSH_RECIPIENT_PENDING_LIMIT) return;
     storage.db
       .prepare(`INSERT OR IGNORE INTO ${TABLE} (delivery_id, workspace_id, thread_id, message_id, relay_seq,
       account_user_id, installation_id, generation, reason, state, attempts, created_at_ms, expires_at_ms, available_at_ms)
@@ -128,10 +105,10 @@ export function recordPushDeliveries(
         message.workspaceId,
         message.threadId,
         message.messageId,
-        relaySeq,
+        message.relaySeq,
         userId,
-        String(recipient.installation_id),
-        Number(recipient.generation),
+        String(installation.installation_id),
+        Number(installation.generation),
         reason,
         nowMs,
         nowMs + PUSH_DELIVERY_EXPIRY_MS,

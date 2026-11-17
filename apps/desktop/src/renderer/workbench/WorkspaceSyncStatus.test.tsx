@@ -200,6 +200,24 @@ describe("sync status surface", () => {
     },
   );
 
+  // Another account signed in syncs nothing, whatever main last reported, so
+  // the dot takes the attention mark, as an unconfirmed account does.
+  it("takes the attention mark while another account is signed in to a joined workspace", () => {
+    const { rerender } = render(
+      <WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} otherAccount />,
+    );
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Another account signed in");
+    expect(status.getAttribute("title")).toBe(
+      "Not syncing. This computer is signed in to another account than the one the owner invited.",
+    );
+    expect(dotOf()).toBe("attention");
+    expect(worded()).toBe(true);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
+    expect(dotOf()).toBe("saved");
+  });
+
+  // A file whose save failed: the title bar must not say saved over it.
   it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
     const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });
     const status = screen.getByTestId("sync-status");

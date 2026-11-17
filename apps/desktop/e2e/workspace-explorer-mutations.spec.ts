@@ -49,7 +49,7 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect.poll(() => pathExists(join(temp.rootPath, "Research"))).toBe(true);
 
     await explorerRow(page, "Research").click();
-    await filesHeader.getByRole("button", { name: "New file" }).click();
+    await filesHeader.getByRole("button", { name: "New page" }).click();
     await page.getByLabel("Page title").fill("notes");
     await page.getByLabel("Page title").press("Enter");
     await expect(explorerRow(page, "Research/notes.md")).toBeVisible();

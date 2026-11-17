@@ -217,13 +217,13 @@ test("quitting writes a typed title that was never left", async () => {
   });
 });
 
-test("New file in a folder makes the page there, in the tree only once its file exists", async () => {
+test("New page in a folder makes the page there, in the tree only once its file exists", async () => {
   await withDesktop([{ path: "Trip/plan.md", contents: "# Plan\n" }], async (page, temp) => {
     await explorerRow(page, "Trip").click();
     await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
     await page
       .getByTestId("explorer-files-header")
-      .getByRole("button", { name: "New file" })
+      .getByRole("button", { name: "New page" })
       .click();
     await expect(page.getByLabel("Page title")).toBeFocused();
     await expect(page.getByTestId("tree-edit-input")).toHaveCount(0);

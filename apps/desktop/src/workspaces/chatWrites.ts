@@ -15,9 +15,15 @@ import {
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
-import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import {
+  agentIdForChannelWireId,
+  GENERAL_CHANNEL_WIRE_ID,
+} from "@dohc/security-contract/chat-wire-ids";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
+import { recordedShareSelector } from "./shareViewRecords";
+import { joinedByAccount } from "./shareWriteGate";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import { chatFileLinkScope, hasChatFileLink, refuseChatFileLinks } from "./chatFileLinkScope";
 import type {
@@ -102,6 +108,10 @@ type ChatWorkspace = Pick<
 interface Admission {
   target: ChatRelayIdentityTarget;
   channelWireId: string | null | undefined;
+  // In a joined workspace, whether the target is in a Group or on a file. A
+  // thread's place, a channel's kind and its wire id never change, so
+  // admission decides it once.
+  inReach: boolean;
   generation: number;
   authorUserId: string | undefined;
   actorCredentials: Pick<CloudCredentials, "serverUrl" | "userId"> | null;
@@ -167,6 +177,8 @@ export function createChatWrites(dependencies: {
     workspaceId: string,
     target: ChatRelayIdentityTarget,
   ): Promise<unknown>;
+  // Sends a joined workspace's own Group posts to the owner.
+  pushShareViewChat(workspaceId: string): Promise<unknown>;
   scanChatDispatch(workspaceId: string): Promise<unknown>;
   // Runs a write of several rows where no dispatch scan of the workspace
   // reads it half done.
@@ -186,20 +198,77 @@ export function createChatWrites(dependencies: {
     projectChatBookmarks,
     queueCloudSync,
     syncSharedChannelsForChatTarget,
+    pushShareViewChat,
     scanChatDispatch,
     betweenDispatchScans,
     notifyRenderer,
   } = dependencies;
 
-  // Every received file share is read-only for chat, whatever its cached relay
-  // capability: there is no durable per-row relay receipt yet.
-  function ownedWorkspace(workspaceId: string): ChatWorkspace {
+  // A joined workspace at Comment or Edit posts in its Groups and comments on
+  // its files, which the relay's append lane admits. Every other received share is read-only for
+  // chat, whatever its cached relay capability: there is no durable per-row
+  // relay receipt yet.
+  function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
+    const view = workspace.shareView;
+    const pin = recordedShareSelector(view?.grantedSelector);
+    return !!view && view.ended !== true && pin?.wholeWorkspace === true && pin.access !== "view";
+  }
+
+  function chatWorkspace(workspaceId: string): ChatWorkspace {
     const workspace = findWorkspace(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
-    if (shareViewIsPresent(workspace.shareView)) {
-      throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
+    if (shareViewIsPresent(workspace.shareView) && !joinedWorkspacePosts(workspace)) {
+      const pin = recordedShareSelector(workspace.shareView?.grantedSelector);
+      throw new SharedFileReadOnlyError(
+        pin?.wholeWorkspace !== true
+          ? "Chats are read-only in this shared view."
+          : workspace.shareView?.ended
+            ? "Your membership ended."
+            : "Only people who can comment post here.",
+      );
     }
     return workspace;
+  }
+
+  // The admitted workspace for one write. In a joined workspace only a Group
+  // or a file's thread takes it.
+  function writableWorkspace(workspaceId: string, inReach: boolean): ChatWorkspace {
+    const workspace = chatWorkspace(workspaceId);
+    if (shareViewIsPresent(workspace.shareView) && !inReach) {
+      throw new SharedFileReadOnlyError(
+        "In a joined workspace you can post in Groups and comment on files only.",
+      );
+    }
+    return workspace;
+  }
+
+  // Whether a target in a joined workspace is one a member writes to: a Group,
+  // which is an ordinary channel and never General, a direct message or an
+  // agent's chat; or a file's thread.
+  async function targetInReach(
+    place: ChatWritePlace,
+    target: ChatRelayIdentityTarget,
+    wire: string | null,
+  ): Promise<boolean> {
+    if (wire === null) {
+      if ("channelId" in target) return false;
+      const { thread } = await place.store.getThread({
+        workspaceId: place.workspaceId,
+        threadId: target.threadId,
+      });
+      return thread.linkedFile !== undefined && thread.channelId === undefined;
+    }
+    if (wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null) return false;
+    const channelId =
+      "channelId" in target
+        ? target.channelId
+        : await place.store.findThreadChannelId({
+            workspaceId: place.workspaceId,
+            threadId: target.threadId,
+          });
+    if (!channelId) return false;
+    const channels = await place.store.listChannels({ workspaceId: place.workspaceId });
+    return channels.some((channel) => channel.id === channelId && channel.kind === "channel");
   }
 
   function hasJoinedChannels(workspaceId: string): boolean {
@@ -256,7 +325,7 @@ export function createChatWrites(dependencies: {
         : channel
           ? await store.getChannelWireId({ workspaceId, channelId: channel.id })
           : null;
-    refuseChatFileLinks(chatFileLinkScope(ownedWorkspace(workspaceId), channel, wireId), texts);
+    refuseChatFileLinks(chatFileLinkScope(chatWorkspace(workspaceId), channel, wireId), texts);
   }
 
   // Synchronous: it reads the registry and the session as they are now, and
@@ -268,8 +337,9 @@ export function createChatWrites(dependencies: {
     place: ChatWritePlace,
     channelWireId: string | null | undefined,
     generation: number,
+    inReach: boolean,
   ): string | undefined {
-    const workspace = ownedWorkspace(place.workspaceId);
+    const workspace = writableWorkspace(place.workspaceId, inReach);
     const joinedChannel =
       channelWireId === undefined
         ? null
@@ -285,6 +355,11 @@ export function createChatWrites(dependencies: {
       authorUserId,
       resolvedAuthorUserId: authorUserId,
     });
+    // A joined workspace's post reaches the owner only as the account that
+    // joined. Without it the post would look sent and never leave.
+    if (workspace.shareView && !joinedByAccount(workspace.shareView, credentials)) {
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
+    }
     if (currentCredentialGeneration() !== generation) throw new Error(SESSION_CHANGED);
     return authorUserId;
   }
@@ -292,13 +367,15 @@ export function createChatWrites(dependencies: {
   // Refuses a received share before any await, then fixes the session the
   // write runs under. A session replaced while the target resolves refuses.
   async function admit(place: ChatWritePlace, target: ChatRelayIdentityTarget): Promise<Admission> {
-    ownedWorkspace(place.workspaceId);
+    const joinedWorkspace = shareViewIsPresent(chatWorkspace(place.workspaceId).shareView);
     await warmCredentials();
     const generation = currentCredentialGeneration();
-    const channelWireId = hasJoinedChannels(place.workspaceId)
-      ? await lookUpWireId(place, target)
-      : undefined;
-    const authorUserId = check(place, channelWireId, generation);
+    const channelWireId =
+      joinedWorkspace || hasJoinedChannels(place.workspaceId)
+        ? await lookUpWireId(place, target)
+        : undefined;
+    const inReach = joinedWorkspace && (await targetInReach(place, target, channelWireId ?? null));
+    const authorUserId = check(place, channelWireId, generation, inReach);
     const credentials = currentCredentials();
     const actorCredentials =
       credentials === null
@@ -310,6 +387,7 @@ export function createChatWrites(dependencies: {
     return {
       target,
       channelWireId,
+      inReach,
       generation,
       authorUserId,
       actorCredentials,
@@ -333,7 +411,10 @@ export function createChatWrites(dependencies: {
     if (admission.channelWireId === undefined && hasJoinedChannels(place.workspaceId)) {
       admission.channelWireId = await lookUpWireId(place, admission.target);
     }
-    if (check(place, admission.channelWireId, admission.generation) !== expected.authorUserId) {
+    if (
+      check(place, admission.channelWireId, admission.generation, admission.inReach) !==
+      expected.authorUserId
+    ) {
       throw new Error(SESSION_CHANGED);
     }
     signal?.throwIfAborted();
@@ -491,6 +572,14 @@ export function createChatWrites(dependencies: {
         console.error("[desktop] chat dispatch scan:", error);
       });
     }
+    if (shareViewIsPresent(findWorkspace(workspaceId)?.shareView)) {
+      // A failed send stays queued in the view's store, and the next pull of
+      // the view sends it again.
+      void pushShareViewChat(workspaceId).catch((error) => {
+        console.error("[desktop] joined workspace chat push:", error);
+      });
+      return;
+    }
     queueCloudSync(workspaceId);
     // Naming the target puts its joined channel in this pass instead of
     // leaving it to the rotation.
@@ -501,6 +590,8 @@ export function createChatWrites(dependencies: {
 
   // A file chat has no author and belongs to no channel, so only the shared
   // view gate applies. It links the file's stable object id, never the path.
+  // A joined workspace sends it to the owner, so it needs the account that
+  // joined, as a post does.
   async function createFileThread(
     place: ChatWritePlace,
     input: {
@@ -508,10 +599,17 @@ export function createChatWrites(dependencies: {
       linkedFile(): Promise<{ objectId: string; pathHint: string }>;
     },
   ) {
-    ownedWorkspace(place.workspaceId);
+    const joinedWorkspace = shareViewIsPresent(chatWorkspace(place.workspaceId).shareView);
+    if (joinedWorkspace) await warmCredentials();
+    const generation = currentCredentialGeneration();
+    const admitted = () =>
+      joinedWorkspace
+        ? check(place, undefined, generation, true)
+        : writableWorkspace(place.workspaceId, false);
+    admitted();
     const linkedFile = await input.linkedFile();
     // The recheck and the store call share one synchronous block.
-    ownedWorkspace(place.workspaceId);
+    admitted();
     const thread = await place.store.createThread({
       workspaceId: place.workspaceId,
       title: input.title,
@@ -526,7 +624,7 @@ export function createChatWrites(dependencies: {
     input: ChatMessageInput,
     target: ChatRelayIdentityTarget,
   ) {
-    ownedWorkspace(place.workspaceId);
+    chatWorkspace(place.workspaceId);
     if (input.writer.via !== "automation" || !input.messageId || !input.idempotencyKey) return null;
     const sent = await place.store
       .getMessage({ workspaceId: place.workspaceId, messageId: input.messageId })

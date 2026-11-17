@@ -78,6 +78,9 @@ const routeLimits = {
   maxConnectionsPerPrincipal: 3,
   maxConnectionsPerGrant: 4,
   maxBufferedBytes: 134217728,
+  maxBufferedBytesPerPrincipal: 100663296,
+  maxBufferedBytesPerShare: 134217728,
+  maxBufferedBytesPerWorkspace: 134217728,
   maxPendingRequests: 4,
   maxRequestBytes: 4096,
   maxResponseBytes: 8192,
@@ -414,6 +417,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         hosts,
         tickets,
         changes: sharedChanges,
+        hostsMemberDocuments: () => true,
         readinessLimits: { maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 30000 },
         limits: { ...browserLimits, maxSessions: 16, retentionMs: 120000 },
         editorLimits: {
@@ -708,7 +712,11 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         settlement,
       };
       const wrong = await desktop(0, "wrong-bearer", { token: tokens[1] });
-      const failedOpen = { state: "failed", message: "dohc could not open this file for editing." };
+      const failedOpen = {
+        state: "failed",
+        message: "dohc could not open this file for editing.",
+        reason: "The server did not start live editing for this page.",
+      };
       expect(wrong.mirror.available).toBe(false);
       expect(wrong.mirror.doc).toBeNull();
       expect(wrong.mirror.liveHostUnavailable).toBe(false);

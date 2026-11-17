@@ -223,7 +223,11 @@ type CliUnreadFileThread = Pick<
 export interface CliRegistryWorkspace {
   workspaceId: string;
   rootPath: string;
+  // A share view: the owner's surfaces refuse.
   readOnly?: boolean;
+  // A share view of a whole workspace, at the member level. Its agents post
+  // in Groups and create pages as the person does there.
+  joined?: boolean;
 }
 
 // The desktop's one collection write seam. The shapes mirror
@@ -487,7 +491,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     >;
   };
   members?(
-    request: import("@dohc/cli/members").OwnerMembersRequest,
+    request: import("@dohc/cli/members").AgentMembersRequest,
   ): Promise<import("@dohc/cli/members").MembersResult>;
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
@@ -521,6 +525,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   accountReadOwner?(threadId: string): Promise<string | undefined>;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  joined?: boolean;
   // Makes, or finds, the work reference that names `target` in this workspace.
   makeWorkReference?(target: WorkTargetInput): Promise<string>;
   // The shared files this shared view holds back, or null outside a shared view.
@@ -708,7 +713,7 @@ export interface CliServerHandle {
 
 class CliCommandError extends Error {
   constructor(message: string) {
-    super(message.startsWith("dohc:") ? message : `dohc: ${message}`);
+    super(namesDohc(message) ? message : `dohc: ${message}`);
     this.name = "CliCommandError";
   }
 }
@@ -749,7 +754,12 @@ function oneLine(value: string): string {
 function cliErrorLine(error: unknown): string {
   const raw = error instanceof Error ? error.message : "Unexpected CLI failure.";
   const message = oneLine(raw) || "Unexpected CLI failure.";
-  return message.startsWith("dohc:") ? message : `dohc: ${message}`;
+  return namesDohc(message) ? message : `dohc: ${message}`;
+}
+
+// A line that already starts with dohc, as "dohc: …" or a sentence such as "dohc could not…", names it once.
+function namesDohc(message: string): boolean {
+  return /^dohc[: ]/u.test(message);
 }
 
 // A conversation a notice opens, under the ids `show` takes.
@@ -2948,6 +2958,10 @@ async function makeLink(
   context: CliWorkspaceContext,
   chats: ChatsHost,
 ): Promise<CliResultByVerb["link"]> {
+  if (context.joined)
+    throw new CliCommandError(
+      "Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.",
+    );
   if (context.readOnly || !context.makeWorkReference)
     throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
   const make = context.makeWorkReference;
@@ -3138,10 +3152,10 @@ async function dispatchWorkspace(
         connectionId: request.args.connectionId,
       });
     case "members":
-      if (context.readOnly || !context.members)
-        throw new CliCommandError(
-          "Members requires the original workspace and its signed-in owner account.",
-        );
+      // A joined workspace reaches the owner's Members with the person's own
+      // account. Any other share view has none.
+      if ((context.readOnly && !context.joined) || !context.members)
+        throw new CliCommandError("Open the original workspace to manage its members.");
       return context.members(request.args.request);
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
@@ -4352,7 +4366,7 @@ async function dispatchWorkspace(
       const shown = await showChat(chats, request.args);
       if ("stream" in shown) return shown;
       if (!request.args.peek) {
-        if (context.readOnly) {
+        if (context.readOnly && !context.joined) {
           throw new CliCommandError("show requires --peek in a read-only workspace");
         }
         // A read from the run dohc started is its agent's, whatever actor it
@@ -4958,7 +4972,10 @@ async function workspaceContextForRequest(
     request.verb === "export" ||
     request.verb === "watch" ||
     (request.verb === "show" && !request.args.peek);
-  if (workspace.readOnly && writeRequest) {
+  if (workspace.readOnly && writeRequest && workspace.joined) {
+    const refusal = joinedWorkspaceWriteRefusal(request.verb, fileRequest);
+    if (refusal) throw new CliCommandError(refusal);
+  } else if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
       fileRequest
         ? "This workspace is read-only. Write in the owning workspace."
@@ -4975,6 +4992,34 @@ async function workspaceContextForRequest(
     await notifyRead(options, context, chatReadTarget(request));
   }
   return run === undefined ? context : { ...context, run };
+}
+
+// What an agent may write in a joined workspace is what the person may: a
+// post or reply in a Group, a comment on a file, a reaction, a new page, a
+// page edit or a Collection record at Edit, and a Group for an admin. Each
+// verb's own path and the relay decide the level and the role.
+// Every other write refuses here with its reason.
+function joinedWorkspaceWriteRefusal(verb: CliVerb, fileRequest: boolean): string | null {
+  if (fileRequest) return "In a joined workspace agents add pages with dohc document create.";
+  switch (verb) {
+    case "post":
+    case "reply":
+    case "react":
+    case "show":
+    case "documentCreate":
+    case "documentEdit":
+    case "collectionSetFields":
+    case "collectionCreateRecord":
+    case "groupCreate":
+    case "fileChatStart":
+      return null;
+    case "export":
+      return "Export chats from the owner's workspace.";
+    case "watch":
+      return "Chat waits need a workspace you own.";
+    default:
+      return "Only the owner's computer does this.";
+  }
 }
 
 // The run dohc dispatched in the workspace, when the request carries that

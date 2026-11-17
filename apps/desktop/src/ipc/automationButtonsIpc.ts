@@ -43,6 +43,7 @@ import {
   type PressAutomationButtonResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 import type { RemoteDatasetData } from "../workspaces/remoteDataset";
 
 // Button fields (item 8). Main decides who may press a button and which
@@ -273,6 +274,8 @@ export function registerAutomationButtonsIpc<
     datasetId: string,
   ): Promise<{ data: Pick<RemoteDatasetData, "press"> } | null>;
   inspectionAccount(): Promise<string | null>;
+  /** A joined workspace while an account other than the one that joined is signed in. The relay refuses it too. */
+  joinedByAnotherAccount(workspaceId: string): boolean;
   inspectionChanged(workspaceId: string, attachmentId: symbol | undefined): void;
   pressWindows: PressWindows<Sender>;
 }): {
@@ -347,6 +350,10 @@ export function registerAutomationButtonsIpc<
     if (account === null)
       return buttons.map(() => ({
         state: { kind: "disabled", reason: "Sign in with Edit access to use this button." },
+      }));
+    if (dependencies.joinedByAnotherAccount(operation.workspace.workspaceId))
+      return buttons.map(() => ({
+        state: { kind: "disabled", reason: JOINED_BY_ANOTHER_ACCOUNT },
       }));
     const refresh = async () => {
       const answers = await dependencies.relayInspect(operation, targets).catch(() =>
@@ -606,6 +613,8 @@ export function registerAutomationButtonsIpc<
           )
         )
           throw new Error(`${input.field} changed after it was pressed. Press it again.`);
+        if (dependencies.joinedByAnotherAccount(operation.workspace.workspaceId))
+          throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
         await dependencies.relayPress(operation, {
           pressId: input.pressId,
           ...inspected.target,

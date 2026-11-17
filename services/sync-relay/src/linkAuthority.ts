@@ -1,11 +1,12 @@
 import type { TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
+import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { AGENT_URI_CHAR_LIMIT } from "@dohc/security-contract/wire-patterns";
 import { invalidLinkCapability, relayError } from "./errors";
 import { hashAgentCredential, servableFiles, type ValidatedLinkCapability } from "./linkSecurity";
 import type { PersonalAgents } from "./personalAgents";
-import { authorizeLinkShareAction } from "./shareAuthorization";
-import type { ShareSelector } from "./shareFilter";
+import { authorizeLinkShareAction, authorizeShareGrantAction } from "./shareAuthorization";
+import { fileSideOf, isWorkspaceSelector, type ShareSelector } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnections";
 
@@ -14,7 +15,10 @@ import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnec
 //   - a link holder's capability, `Authorization: LinkCapability <token>`;
 //   - an agent's access token, `Authorization: DohcAgent <token>` with
 //     `x-dohc-agent-resource: <the MCP address it signed in at>`, which also
-//     needs the relay exchange key.
+//     needs the relay exchange key;
+//   - a workspace member's account, on the read routes only:
+//     `Authorization: DohcMember <grant>` with the account cookie and the
+//     relay exchange key. The person comes from the cookie's session.
 //
 // Nothing is cached. Every request authenticates, and `fresh` authenticates
 // again. Every refusal is the bytes of a link that never existed.
@@ -25,7 +29,8 @@ import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnec
 
 export type LinkCredential =
   | { kind: "holder"; capabilityToken: string; capability: ValidatedLinkCapability }
-  | { kind: "agent"; check: AgentAccessCheck; connection: AgentConnectionRow };
+  | { kind: "agent"; check: AgentAccessCheck; connection: AgentConnectionRow }
+  | { kind: "member"; userId: string };
 
 export interface LinkAuthority {
   shareId: string;
@@ -33,7 +38,7 @@ export interface LinkAuthority {
   generation: number;
   access: ShareSelector["access"];
   effectiveSelector: ShareSelector;
-  /** Rate limits and held waits count per caller: the capability's hash, or the agent's connection. */
+  /** Rate limits and held waits count per caller: the capability's hash, the agent's connection, or the member's account. */
   callerKey: string;
   credential: LinkCredential;
 }
@@ -73,6 +78,12 @@ export interface LinkAuthorityResolver {
     callerLimiter: TokenBucketLimiter,
     grantLimiter: TokenBucketLimiter,
   ): LinkAuthority;
+  /** As `require`, for a workspace member's account (`isMemberRequest`). Only the read routes call it. */
+  requireMember(
+    request: Request,
+    callerLimiter: TokenBucketLimiter,
+    grantLimiter: TokenBucketLimiter,
+  ): Promise<LinkAuthority>;
   /** Authenticates the same credential again, for the same link at the same generation. */
   fresh(authority: LinkAuthority): LinkAuthority;
   /** Authenticates a personal agent's request at its account's current fence. 503 while the fence can't be read. */
@@ -82,12 +93,18 @@ export interface LinkAuthorityResolver {
 }
 
 const AGENT_SCHEME = /^DohcAgent (.+)$/u;
+const MEMBER_SCHEME = /^DohcMember ([A-Za-z0-9_.:-]{1,256})$/u;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 
 /** Whether the request names the agent scheme, so a route can skip a holder's checks. */
 export function isAgentRequest(request: Request): boolean {
   return (request.headers.get("authorization") ?? "").startsWith("DohcAgent ");
+}
+
+/** Whether the request names a workspace member's grant. */
+export function isMemberRequest(request: Request): boolean {
+  return (request.headers.get("authorization") ?? "").startsWith("DohcMember ");
 }
 
 /** An agent's access token and the MCP address it was sent to, hashed; null when either is malformed. */
@@ -122,7 +139,13 @@ export function createLinkAuthorityResolver(input: {
     | "workspaceIsOwnedBy"
     | "personalCredentialOwner"
     | "authenticatePersonalAuthority"
+    | "workspaceMemberGrantIsCurrent"
+    | "workspaceRoleOf"
   >;
+  /** The account behind a member's cookie. A fenced account is already refused. */
+  resolveActor: ResolveActor;
+  /** share-web's origin, which a member's request names. */
+  publicOrigin: string | undefined;
   personalAgents: Pick<PersonalAgents, "readFence">;
   linkKey: string | Uint8Array | undefined;
   publicEditRelease: PublicEditRelease | undefined;
@@ -206,6 +229,89 @@ export function createLinkAuthorityResolver(input: {
     return check;
   };
 
+  // A member's grant on the workspace share, while the membership, both
+  // accounts and the grant are current. The files are the workspace's reach.
+  const member = (
+    userId: string,
+    grantId: string,
+    expected?: { shareId: string; generation: number },
+  ): LinkAuthority => {
+    const authorized = authorizeShareGrantAction({
+      storage,
+      grantId,
+      action: "read",
+      principal: { kind: "user", userId },
+    });
+    if (!authorized.ok || !isWorkspaceSelector(authorized.effectiveSelector))
+      throw invalidLinkCapability();
+    const role = storage.workspaceRoleOf(authorized.share.workspaceId, userId);
+    const files = fileSideOf(authorized.effectiveSelector);
+    if (
+      !role ||
+      role.role === "owner" ||
+      !files ||
+      !storage.workspaceMemberGrantIsCurrent(authorized.share.shareId, grantId) ||
+      (expected &&
+        (expected.shareId !== authorized.share.shareId ||
+          expected.generation !== authorized.grant.generation))
+    ) {
+      throw invalidLinkCapability();
+    }
+    return {
+      shareId: authorized.share.shareId,
+      grantId,
+      generation: authorized.grant.generation,
+      access: files.access,
+      effectiveSelector: files,
+      callerKey: `member:${userId}`,
+      credential: { kind: "member", userId },
+    };
+  };
+
+  // Only share-web sends a member's request: the account's cookie, and nothing a link or an agent sends.
+  const memberRequest = async (request: Request): Promise<LinkAuthority> => {
+    const grantId = MEMBER_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1];
+    const cookie = request.headers.get("cookie");
+    if (
+      !grantId ||
+      !cookie ||
+      !input.publicOrigin ||
+      request.headers.get("origin") !== input.publicOrigin ||
+      !input.relayExchangeKeyConfigured ||
+      !input.hasValidRelayExchangeKey(request) ||
+      request.headers.has("x-dohc-link-profile-secret") ||
+      request.headers.has("x-dohc-agent-resource")
+    ) {
+      throw invalidLinkCapability();
+    }
+    const grant = storage.getShareGrant(grantId);
+    const share = grant && storage.getShare(grant.shareId);
+    let actor;
+    try {
+      actor = await input.resolveActor(
+        new Request(request.url, { headers: { cookie }, signal: request.signal }),
+        share ? share.workspaceId : "",
+      );
+    } catch {
+      throw invalidLinkCapability();
+    }
+    if (!share || actor.workspaceId !== share.workspaceId) throw invalidLinkCapability();
+    return member(actor.userId, grantId);
+  };
+
+  const admit = (
+    authority: LinkAuthority,
+    callerLimiter: TokenBucketLimiter,
+    grantLimiter: TokenBucketLimiter,
+  ) => {
+    const admittedAtMs = nowMs();
+    const admitted =
+      callerLimiter.allow(authority.callerKey, admittedAtMs) &&
+      grantLimiter.allow(authority.grantId, admittedAtMs);
+    if (!admitted) throw relayError("link_read_rate_limited");
+    return authority;
+  };
+
   const resolve = (request: Request): LinkAuthority => {
     if (!isAgentRequest(request)) {
       // A holder never names an agent's address.
@@ -243,17 +349,16 @@ export function createLinkAuthorityResolver(input: {
   return {
     resolve,
     require(request, callerLimiter, grantLimiter) {
-      const authority = resolve(request);
-      const admittedAtMs = nowMs();
-      const admitted =
-        callerLimiter.allow(authority.callerKey, admittedAtMs) &&
-        grantLimiter.allow(authority.grantId, admittedAtMs);
-      if (!admitted) throw relayError("link_read_rate_limited");
-      return authority;
+      return admit(resolve(request), callerLimiter, grantLimiter);
+    },
+    async requireMember(request, callerLimiter, grantLimiter) {
+      return admit(await memberRequest(request), callerLimiter, grantLimiter);
     },
     fresh(authority) {
       const { credential } = authority;
       if (credential.kind === "agent") return agent(credential.check, authority);
+      if (credential.kind === "member")
+        return member(credential.userId, authority.grantId, authority);
       return holder(
         credential.capabilityToken,
         input.requireFreshLinkRead(credential.capabilityToken, authority),

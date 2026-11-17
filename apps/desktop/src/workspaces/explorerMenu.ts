@@ -29,6 +29,8 @@ export interface ExplorerMenuScope {
   canShare: boolean;
   // The share view this workspace IS, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
+  // A joined workspace's role, as the relay last named it to main.
+  memberRole?: "admin" | "member";
 }
 
 // Each platform's own name for its file manager, as its own apps word the
@@ -66,7 +68,7 @@ export function explorerMenuEntries(
     write: canWrite,
     folder: canCreateFolder,
     collection: canCreateCollection,
-  } = workspaceCreateOffers(scope.shareView);
+  } = workspaceCreateOffers(scope.shareView, scope.memberRole);
 
   // A selection: only what acts on every row, with the count.
   if (scope.count !== undefined && scope.kind !== "root") {
@@ -97,7 +99,7 @@ export function explorerMenuEntries(
     return [
       ...(canWrite
         ? [
-            item("New file", "new-file"),
+            item("New page", "new-file"),
             ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
             ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
             separator,
@@ -115,7 +117,7 @@ export function explorerMenuEntries(
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
     ...(canWrite && scope.kind === "folder"
       ? [
-          item("New file", "new-file"),
+          item("New page", "new-file"),
           ...(canCreateFolder ? [item("New folder", "new-folder")] : []),
           ...(canCreateCollection ? [item("New collection…", "new-collection")] : []),
           // Folder-targeted import: files land IN this folder (the renderer

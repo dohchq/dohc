@@ -13,13 +13,33 @@ import {
   type NamedLiveBrowserHttpLimits,
 } from "./namedLiveBrowserHttp";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
+import {
+  fileSideOf,
+  parseStoredAnyShareSelectorJson,
+  pathVisibleThroughShare,
+} from "./shareFilter";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
+import type { NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
+import { LiveHostingRefusal } from "./storage/serviceHostEnrollment";
 import type { createLiveTickets } from "./liveTickets";
 import type { SyncRelayStorage } from "./storage";
 import { type LiveHostChanges } from "./relayWriteChanges";
 import { observeDesktopReadiness } from "./desktopReadinessChanges";
 
-/** Desktop bearer admission shares named grant, ticket, and frame-host authority. */
+/** The browser's live sessions, which share-web's live socket resolves with the account cookie. */
+export interface MemberBrowserSessions {
+  create(context: NamedLiveBrowserContext): { discriminator: string; expiresAtMs: number } | null;
+  remove(discriminator: string): boolean;
+}
+
+/**
+ * Desktop bearer admission shares named grant, ticket, and frame-host authority.
+ * With `browser`, the same admission serves a workspace member's browser
+ * through share-web: `/sync/live/member-open` and `/sync/live/member-ready`
+ * take the account cookie, the relay exchange key, and the member's grant.
+ */
 export function createNamedDesktopLive(options: {
+  browser?: { exchangeKey: string; sessions: MemberBrowserSessions };
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   publicOrigin: string;
@@ -29,6 +49,10 @@ export function createNamedDesktopLive(options: {
   tickets: ReturnType<typeof createLiveTickets>;
   changes: LiveHostChanges;
   readinessLimits: { maxPendingRequests: number; maxPendingPerUser: number; timeoutMs: number };
+  /** Whether this server's own live host hosts the documents workspace members open. */
+  hostsMemberDocuments(): boolean;
+  /** Why this server's live host stopped trying to host the document, if it did. */
+  hostBlocked?(document: { workspaceId: string; objectId: string }): string | undefined;
 }) {
   const { storage } = options,
     limits = parseNamedLiveBrowserHttpLimits(options.limits);
@@ -50,16 +74,26 @@ export function createNamedDesktopLive(options: {
   // A desktop session only opens its socket, and the desktop asks again before every connect,
   // so it lasts as long as its ticket and ends once the socket opens. It has no per-account
   // limit: a note that keeps failing to connect would push out another note's slow connect.
-  const sessions = createNamedLiveBrowserSessions({
+  const ownSessions = createNamedLiveBrowserSessions({
     ...options,
     ...limits,
     retentionMs: LIVE_TICKET_LIFETIME_MS,
     authentication: "bearer",
   });
+  const browser = options.browser;
+  const sessions: MemberBrowserSessions = browser?.sessions ?? ownSessions;
+  const exchangeHash = browser && hashRelayExchangeKey(browser.exchangeKey);
+  const route = browser ? "member" : "desktop";
   const refuse = () =>
     Response.json(
       { ok: false },
       { status: 404, headers: { "cache-control": "private, no-store" } },
+    );
+  // The host's answer to hosting the document, which the desktop shows instead of waiting.
+  const hostRefused = (code: LiveHostingRefusal["reason"] | "live-document-without-lineage") =>
+    Response.json(
+      { ok: false, code },
+      { status: 409, headers: { "cache-control": "private, no-store" } },
     );
   let pending = 0;
   let readinessPending = 0;
@@ -71,15 +105,23 @@ export function createNamedDesktopLive(options: {
   const waitingOpensByUser = new Map<string, number>();
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const readiness = url.pathname === "/sync/live/desktop-ready";
+    const readiness = url.pathname === `/sync/live/${route}-ready`;
+    // A desktop sends its bearer token. A browser's request comes only from share-web, with the account cookie.
+    const credentialed = exchangeHash
+      ? request.headers.has("cookie") &&
+        !request.headers.has("authorization") &&
+        request.headers.get("origin") === options.publicOrigin &&
+        verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)
+      : hosts.has(request.headers.get("host") ?? "") &&
+        !request.headers.has("cookie") &&
+        (!request.headers.has("origin") ||
+          request.headers.get("origin") === options.publicOrigin) &&
+        /^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "");
     if (
-      (!readiness && url.pathname !== "/sync/live/desktop-open") ||
+      (!readiness && url.pathname !== `/sync/live/${route}-open`) ||
       url.search ||
       request.method !== "POST" ||
-      !hosts.has(request.headers.get("host") ?? "") ||
-      request.headers.has("cookie") ||
-      (request.headers.has("origin") && request.headers.get("origin") !== options.publicOrigin) ||
-      !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") ||
+      !credentialed ||
       request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
         "application/json" ||
       request.signal.aborted ||
@@ -107,22 +149,26 @@ export function createNamedDesktopLive(options: {
           !input ||
           typeof input !== "object" ||
           Array.isArray(input) ||
-          Object.keys(input).sort().join() !== "path,shareId"
+          Object.keys(input).sort().join() !== (browser ? "grantId,path" : "path,shareId")
         )
           return refuse();
         const fields = input as Record<string, unknown>;
-        const shareId = parseLiveUpdateIdentifier(fields.shareId);
-        if (typeof fields.path !== "string") return refuse();
+        // A browser names its member's grant; a desktop names the share and may hold several grants on it.
+        const namedGrant = browser
+          ? storage.getShareGrant(parseLiveUpdateIdentifier(fields.grantId))
+          : undefined;
+        const shareId = browser ? namedGrant?.shareId : parseLiveUpdateIdentifier(fields.shareId);
+        if (typeof fields.path !== "string" || !shareId) return refuse();
         const path = validateUserWritePath(fields.path);
         if (!path.ok || path.normalized !== fields.path || !/\.md$/i.test(path.normalized))
           return refuse();
         const share = storage.getShare(shareId);
         if (!share) return refuse();
+        const credential: Record<string, string> = browser
+          ? { cookie: request.headers.get("cookie")! }
+          : { authorization: request.headers.get("authorization")! };
         const actor = await options.resolveActor(
-          new Request(request.url, {
-            headers: { authorization: request.headers.get("authorization")! },
-            signal,
-          }),
+          new Request(request.url, { headers: credential, signal }),
           share.workspaceId,
         );
         signal.throwIfAborted();
@@ -140,9 +186,32 @@ export function createNamedDesktopLive(options: {
           path: path.normalized,
         });
         if (!objectIdAtStart) return refuse();
+        // A member's open asks this server's host for the document once. Its transaction authorizes the member.
+        const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+        const workspace = !!selector && "kind" in selector && selector.kind === "workspace";
+        if (browser && !workspace) return refuse();
+        if (workspace && options.hostsMemberDocuments()) {
+          try {
+            storage.ensureOwnedLiveDocument({
+              intent: "member-open",
+              userId: actor.userId,
+              workspaceId: share.workspaceId,
+              path: path.normalized,
+              nowMs: Date.now(),
+              guard: () => {
+                signal.throwIfAborted();
+                check();
+              },
+            });
+          } catch (error) {
+            if (error instanceof LiveHostingRefusal) return hostRefused(error.reason);
+            throw error;
+          }
+        }
         let wake = () => {};
         const changed = () => wake();
         const removeHost = options.changes.subscribe(changed, {
+          kind: "object",
           workspaceId: share.workspaceId,
           objectId: objectIdAtStart,
         });
@@ -169,7 +238,10 @@ export function createNamedDesktopLive(options: {
             if (!objectId) return refuse();
             let authorized = false,
               counted = false;
-            for (const grant of storage.listActiveShareGrantsForRecipient(shareId, actor.userId)) {
+            const grants = namedGrant
+              ? [namedGrant]
+              : storage.listActiveShareGrantsForRecipient(shareId, actor.userId);
+            for (const grant of grants) {
               const authority = authorizeNamedLiveEditShareGrant({
                 storage,
                 actorUserId: actor.userId,
@@ -177,12 +249,19 @@ export function createNamedDesktopLive(options: {
               });
               if (
                 !authority.ok ||
-                !authority.effectiveSelector.paths.some(
-                  (root) => path.normalized === root || path.normalized.startsWith(`${root}/`),
-                )
+                !pathVisibleThroughShare(fileSideOf(authority.effectiveSelector)!, path.normalized)
               )
                 continue;
               authorized = true;
+              // A document with no live-editing history waits for its owner's desktop to start one.
+              // The open says so at once. The readiness wait keeps waiting for the host.
+              if (
+                !readiness &&
+                options.hostBlocked?.({ workspaceId: share.workspaceId, objectId }) ===
+                  "without-lineage"
+              ) {
+                return hostRefused("live-document-without-lineage");
+              }
               const context = {
                 kind: "named" as const,
                 userId: actor.userId,
@@ -325,8 +404,8 @@ export function createNamedDesktopLive(options: {
   return {
     handle,
     async resolve(request: Request, discriminator: string) {
-      const context = await sessions.resolve(request, discriminator);
-      if (context) sessions.remove(discriminator);
+      const context = await ownSessions.resolve(request, discriminator);
+      if (context) ownSessions.remove(discriminator);
       return context;
     },
   };

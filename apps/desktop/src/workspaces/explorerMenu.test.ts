@@ -136,6 +136,56 @@ describe("a share view", () => {
   });
 });
 
+// A joined workspace: main passes the role the relay last named.
+describe("a joined workspace", () => {
+  const joined = (access: ShareAccess) => ({ access, ended: false, membership: true });
+
+  it("offers New folder at Edit to an admin only", () => {
+    for (const kind of ["root", "folder"] as const) {
+      expect(commands({ kind, shareView: joined("edit"), memberRole: "admin" })).toContain(
+        "new-folder",
+      );
+      expect(commands({ kind, shareView: joined("edit"), memberRole: "member" })).not.toContain(
+        "new-folder",
+      );
+      expect(
+        commands({ kind, shareView: joined("edit") }),
+        "a role the relay has not named is no role",
+      ).not.toContain("new-folder");
+    }
+    expect(commands({ kind: "root", shareView: joined("comment"), memberRole: "admin" })).toEqual([
+      "export-zip",
+    ]);
+  });
+
+  it("names a new page as the rest of dohc does", () => {
+    const labels = explorerMenuEntries(
+      scope({ kind: "root", shareView: joined("edit"), memberRole: "admin" }),
+      "linux",
+    ).flatMap((entry) => (entry.kind === "item" ? [entry.label] : []));
+    expect(labels.slice(0, 2)).toEqual(["New page", "New folder"]);
+  });
+
+  it("offers no create, rename, delete or import while another account is signed in", () => {
+    for (const kind of ["root", "folder", "file"] as const) {
+      const offered = commands({
+        kind,
+        shareView: { ...joined("edit"), writer: "other" },
+        memberRole: "admin",
+      });
+      for (const id of [
+        "new-file",
+        "new-folder",
+        "new-collection",
+        "import-files",
+        "rename",
+        "delete",
+      ])
+        expect(offered).not.toContain(id);
+    }
+  });
+});
+
 describe("a share mount inside an ordinary workspace", () => {
   it("stays read-only, and offers mount controls at its root", () => {
     const atRoot = commands({

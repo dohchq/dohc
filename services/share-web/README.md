@@ -323,8 +323,9 @@ GET requests can omit Origin. Browser requests must come from the configured pub
 Share-web forwards only recognized account cookies and its trusted relay exchange key.
 
 - `GET /api/named-chat/channels?grantId=<id>` resolves an invitation to its share.
-  It returns `{shareId, userId, maxPostBytes, maxBodyBytes, channels: [{channelWireId, name, kind, access}]}`.
+  It returns `{shareId, userId, maxPostBytes, maxBodyBytes, channels: [{channelWireId, name, kind, type, access}]}`.
   A channel or Group share exposes one channel. `name` and `kind` can be null.
+  `type` is the Group's lanes: `posts`, `chat` or `both`.
   Access is `read-only` or `read-write`, including the desktop's append restrictions.
   `maxPostBytes` bounds the complete UTF-8 POST JSON at both services. `maxBodyBytes` bounds the normalized message body.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&limit=50` returns the newest page first.
@@ -334,6 +335,7 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
   Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
   Each page scans at most 2,000 workspace log rows and resolves earliest thread bindings once in SQL.
   The relay applies the share filter before returning messages.
+  Each message names its thread's `lane`, `posts` or `chat`, and `parentMessageId`, the chat message a reply answers, or null.
   Empty pages can advance through other channels. Follow and older cursors include those scanned rows.
   Older-page watermarks must not replace the saved following cursor.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
@@ -355,13 +357,17 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
     "channelWireId": "channel-wire-id",
     "id": "client-retry-id",
     "threadId": "existing-thread-id",
+    "parentMessageId": "answered-message-id",
     "body": "Hello",
     "authorKind": "human"
   }
   ```
 
-Omit `threadId` to create a chat thread and its first message atomically.
-An existing thread must belong to the selected channel.
+Omit `threadId` to post a new message. Pass `lane`, `posts` or `chat`, to choose where it goes; it defaults to `chat` in a chat-only Group and `posts` otherwise.
+A post creates its thread and first message atomically. A chat message joins the Group's oldest chat thread, or creates it.
+A lane the Group's type does not have receives 400.
+An existing thread must belong to the selected channel, or the request receives 404.
+`parentMessageId` answers one message in a chat thread; it needs `threadId` and receives 400 elsewhere.
 Post IDs are non-empty, trimmed strings of at most 256 UTF-16 code units, without control characters.
 The relay assigns the message ID, timestamp, and authenticated `authorUserId`.
 An optional `authorUserId` must equal that account; a different claim receives 403.
@@ -384,6 +390,14 @@ Changed fields receive 409. Use a new ID for a new message.
 The thread and message use the existing named log append, including its transaction authorization check.
 The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
 The ordinary recipient log route reserves `browser-chat` for these server-assigned sequences.
+
+A workspace member's share reaches every Group and every current file.
+`channels` lists every Group. A follow without `channelWireId` returns every Group's new messages, and each message names its `channelWireId`.
+Name a file with `path=<path>` instead of `channelWireId` to read, follow, or post on its Comments.
+Those responses carry `path` in place of `channelWireId`.
+A new post starts a thread bound to the file. A reply's `threadId` must be one of that file's threads.
+View reads Comments; Comment and Edit also post.
+A removed member, an ended membership, a fenced owner, another account, and a path outside the workspace's files all get the answer for an unknown share.
 
 Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
 `authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.

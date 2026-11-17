@@ -19,6 +19,7 @@ import {
 import { UnreadPill } from "./ChatsControls";
 import { WorkLinkText } from "./workReferences";
 import { WorkStatus } from "./WorkCard";
+import { showMessage } from "./chatsOnScreen";
 
 export type PostOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
@@ -241,6 +242,8 @@ export function PostCard(props: {
 
   return (
     <div
+      // The card shows the post's own message, not its comments.
+      ref={(element) => (element && message ? showMessage(message.id, element) : undefined)}
       data-testid="chats-post-card"
       data-thread-id={props.thread.id}
       data-author-kind={message?.authorKind ?? "unknown"}

@@ -213,6 +213,7 @@ function resolveIdPrefix<T>(
   values: readonly T[],
   idFor: (value: T) => string,
   aliasesFor: (value: T) => readonly string[] = () => [],
+  missing = `no such ${label}: ${input}`,
 ): T {
   const handlesFor = (value: T) => [idFor(value), ...aliasesFor(value)];
   const exact = values.filter((value) => handlesFor(value).includes(input));
@@ -223,7 +224,7 @@ function resolveIdPrefix<T>(
   );
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) ambiguous(label, input, matches.map(idFor));
-  throw new OperationError(`no such ${label}: ${input}`);
+  throw new OperationError(missing);
 }
 
 export function resolveChannel(input: string, channels: readonly ChannelEntry[]): ChannelEntry {
@@ -246,6 +247,7 @@ export function resolveChannel(input: string, channels: readonly ChannelEntry[])
     channels,
     ({ cli }) => cli.id,
     ({ engine }) => [engine.id],
+    `No Group matches ${normalized}. Run dohc chat groups to list them.`,
   );
 }
 

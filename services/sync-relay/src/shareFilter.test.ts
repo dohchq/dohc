@@ -8,10 +8,12 @@ import {
 import {
   MAX_CHANNEL_WIRE_ID_CHARS,
   MAX_SHARE_PATHS,
+  filterCollectionWriteForShare,
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,
   isLiveEditShareSelector,
+  MAX_COLLECTION_WRITE_BYTES,
   parseChatThreadTopic,
   parseStoredShareSelectorJson,
   presenceTopicAllowedForShare,
@@ -21,8 +23,10 @@ import {
   validateShareSelector,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
+  type MemberFolders,
   type ShareFileChatResolver,
   type ShareSelector,
+  type WorkspaceShareSelector,
 } from "./shareFilter";
 
 // A resolver that knows no file-linked thread and no object. Channel-share
@@ -139,14 +143,17 @@ describe("share selector validation", () => {
     expect(visibleSharePath({ ...pathShare, paths: [], versionId: null }, "docs//a.md")).toBeNull();
   });
 
-  it("requires a nonempty main-version file selector at exact Edit access", () => {
+  it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
+    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit" })).toBe(true);
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
+      { kind: "workspace" as const, access: "view" as const },
+      { kind: "workspace" as const, access: "comment" as const },
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -1944,5 +1951,122 @@ describe("file-chat share filter", () => {
       filterOpForShare(poisoned, "chat.message.append", message("thread-secret"), secretResolver)
         .allowed,
     ).toBe(false);
+  });
+});
+
+describe("a new page under Edit", () => {
+  const sha = (n: number) => String(n % 10).repeat(64);
+  const page = (path: string, overrides: Record<string, unknown> = {}) => ({
+    basedOnPath: null,
+    basedOnBlobSha256: null,
+    operation: "write",
+    afterPath: path,
+    afterBlobSha256: sha(1),
+    afterContentKind: "text",
+    afterByteLength: 12,
+    recordedAtMs: 1,
+    ...overrides,
+  });
+  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit" };
+  // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
+  // and a dataset at `trip/people`.
+  const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
+  const folders = (createsFolders: boolean): MemberFolders => ({
+    holdsFile: (folder) => folder === "" || files.some((path) => path.startsWith(`${folder}/`)),
+    holdsSchema: (folder) =>
+      files.includes(`${folder}/collection.yaml`) || files.includes(`${folder}/dataset.json`),
+    createsFolders,
+  });
+  const decide = (
+    selector: Parameters<typeof filterCollectionWriteForShare>[0],
+    changes: unknown[],
+    createsFolders = false,
+  ) => filterCollectionWriteForShare(selector, changes, undefined, folders(createsFolders));
+  const REFUSED = { allowed: false };
+
+  it("takes one Markdown create in a folder that holds a file, or at the top level", () => {
+    for (const path of ["docs/idea.md", "idea.md", "docs/Idea.MD"]) {
+      expect(decide(member, [page(path)]), path).toEqual({
+        allowed: true,
+        write: {
+          kind: "new-page",
+          folder: path.includes("/") ? "docs" : "",
+          change: expect.objectContaining({ afterPath: path }),
+        },
+      });
+    }
+  });
+
+  it("refuses View and Comment", () => {
+    for (const access of ["view", "comment"] as const) {
+      expect(decide({ kind: "workspace", access }, [page("docs/idea.md")]), access).toEqual(
+        REFUSED,
+      );
+    }
+  });
+
+  it("leaves a path share's Edit recipient on proposals", () => {
+    const share: ShareSelector = { paths: ["docs"], versionId: null, access: "edit" };
+    const decision = decide(share, [page("docs/idea.md")]);
+    expect(decision.allowed && decision.write.kind).not.toBe("new-page");
+    expect(
+      decide({ paths: [], versionId: null, access: "edit", wholeWorkspace: true }, [
+        page("idea.md"),
+      ]),
+    ).toEqual(REFUSED);
+  });
+
+  it("gives a Collection or dataset folder to new-record", () => {
+    const record = decide(member, [page("trip/packing/item.md")]);
+    expect(record.allowed && record.write.kind).toBe("new-record");
+    const dataset = decide(member, [page("trip/people/item.md")]);
+    expect(dataset.allowed && dataset.write.kind).toBe("new-record");
+  });
+
+  it("gives a missing folder the same answer as a path outside reach", () => {
+    const missing = decide(member, [page("drafts/idea.md")]);
+    expect(missing).toEqual(REFUSED);
+    expect(decide(member, [page("docs/.git/idea.md")])).toEqual(missing);
+    expect(decide(member, [page("docs/deeper/idea.md")])).toEqual(missing);
+  });
+
+  it("gives a member's new folder the same answer, and lets an admin create it with its first page", () => {
+    expect(decide(member, [page("drafts/idea.md")], false)).toEqual(REFUSED);
+    for (const path of ["drafts/idea.md", "docs/deeper/idea.md", "a/b/c/idea.md"]) {
+      const decision = decide(member, [page(path)], true);
+      expect(decision.allowed && decision.write.kind, path).toBe("new-page");
+    }
+    expect(
+      decide({ kind: "workspace", access: "comment" }, [page("drafts/idea.md")], true),
+    ).toEqual(REFUSED);
+  });
+
+  it("refuses a member's new Collection, which would create a folder, and takes an admin's", () => {
+    const schema = page("docs/Packing/collection.yaml", { afterBlobSha256: sha(2) });
+    expect(decide(member, [schema])).toEqual(REFUSED);
+    const admin = decide(member, [schema], true);
+    expect(admin.allowed && admin.write.kind).toBe("new-collection");
+  });
+
+  it("refuses a file that is not Markdown, an oversize body, a base, and a second file", () => {
+    expect(decide(member, [page("docs/idea.txt")])).toEqual(REFUSED);
+    expect(
+      decide(member, [page("docs/idea.md", { afterByteLength: MAX_COLLECTION_WRITE_BYTES + 1 })]),
+    ).toEqual(REFUSED);
+    expect(
+      decide(member, [
+        page("docs/plan.md", { basedOnPath: "docs/plan.md", basedOnBlobSha256: sha(3) }),
+      ]),
+    ).toEqual(REFUSED);
+    expect(
+      decide(member, [page("docs/a.md"), page("docs/b.md", { afterBlobSha256: sha(4) })]),
+    ).toEqual(REFUSED);
+  });
+
+  it("refuses every write when the relay found no role for the writer", () => {
+    expect(filterCollectionWriteForShare(member, [page("docs/idea.md")], undefined, null)).toEqual(
+      REFUSED,
+    );
+    expect(filterCollectionWriteForShare(member, [page("trip/packing/item.md")])).toEqual(REFUSED);
   });
 });

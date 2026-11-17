@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
@@ -280,4 +280,118 @@ describe("FileInspector renders markdown through the shared component map", () =
       }
     },
   );
+  // The page's own line says why it is read-only, in the browser's words, and
+  // offers Try again where dohc is not trying by itself.
+  it.each([
+    [
+      "host-refused",
+      {
+        state: "host-refused",
+        message:
+          "dohc could not open this page for editing. The server is editing too many pages right now.",
+        reason: "The server is editing too many pages right now.",
+      },
+      "The server is editing too many pages right now. You can still read it.",
+    ],
+    [
+      "failed",
+      {
+        state: "failed",
+        message: "dohc could not open this file for editing.",
+        reason: "The server did not start live editing for this page.",
+      },
+      "The server did not start live editing for this page. You can still read it.",
+    ],
+    [
+      "host-refused without a reason",
+      { state: "host-refused", message: "dohc could not open this page for editing." },
+      "dohc could not open this page for editing. You can still read it.",
+    ],
+    [
+      "pending",
+      { state: "pending", message: "Record saved on this device. Waiting to send." },
+      "Record saved on this device. Waiting to send.",
+    ],
+  ] as const)(
+    "states why a %s shared page is read-only on the page",
+    async (_name, waiting, line) => {
+      const read = bridgeMock.readWorkspaceText.getMockImplementation();
+      bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+        text: "# Plan",
+        truncated: false,
+      }));
+      Object.assign(engineDocState, { liveHostUnavailable: true, sharedWaiting: waiting });
+      try {
+        render(<FileInspector workspaceId="ws-1" path="a.md" />);
+        const notice = await screen.findByTestId("engine-may-hold-document-notice");
+        expect(notice.textContent).toBe(`${line}Try again`);
+        // Only a page dohc is still opening by itself wears the ring.
+        expect(within(notice).queryByTestId("engine-may-hold-document-ring")).toBeNull();
+      } finally {
+        Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+        if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+      }
+    },
+  );
+
+  // A page waiting for its owner's dohc opens live by itself, so the page
+  // shows a ring beside its cause at once, with no Try again, and the toast waits.
+  it("shows a ring beside the state of a page waiting for its owner's dohc", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: "# Plan",
+      truncated: false,
+    }));
+    Object.assign(engineDocState, {
+      liveHostUnavailable: true,
+      sharedWaiting: {
+        state: "host-refused",
+        awaitsHost: true,
+        message:
+          "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+        reason: "Editing starts once the owner's dohc is online.",
+      },
+    });
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      const notice = await screen.findByTestId("engine-may-hold-document-notice");
+      expect(notice.textContent).toBe("Editing starts once the owner's dohc is online.");
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(within(notice).getByTestId("engine-may-hold-document-ring")).toBeTruthy();
+    } finally {
+      Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
+
+  // Try again can only fail while another account is signed in, so the page offers the step that fixes it.
+  it("gives the cause of a joined page opened with another account, with Switch account", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: "# Plan",
+      truncated: false,
+    }));
+    Object.assign(engineDocState, {
+      liveHostUnavailable: true,
+      sharedWaiting: {
+        state: "other-account",
+        message:
+          "This computer is signed in as lee@dohc.test, not the account the owner invited. You can still read this page.",
+      },
+    });
+    const onSwitchAccount = vi.fn();
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" onSwitchAccount={onSwitchAccount} />);
+      const notice = await screen.findByTestId("engine-may-hold-document-notice");
+      expect(notice.textContent).toBe(
+        "This computer is signed in as lee@dohc.test, not the account the owner invited. You can still read this page.Switch account",
+      );
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+      fireEvent.click(within(notice).getByRole("button", { name: "Switch account" }));
+      expect(onSwitchAccount).toHaveBeenCalledOnce();
+    } finally {
+      Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
 });

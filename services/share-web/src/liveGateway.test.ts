@@ -52,6 +52,9 @@ const limits: LiveGatewayLimits = {
   maxConnectionsPerPrincipal: 4,
   maxConnectionsPerGrant: 5,
   maxBufferedBytes: 134217728,
+  maxBufferedBytesPerPrincipal: 67108864,
+  maxBufferedBytesPerShare: 83886080,
+  maxBufferedBytesPerWorkspace: 134217728,
   // Upgrades open a real host socket and forward real frames; a loaded gate host
   // can stall either past 2 s. Tests of these bounds override them.
   maxFrameBytes: 2048,
@@ -1072,11 +1075,9 @@ it.each(["principal", "share"])(
     const browser = state.browser();
     expect(await browser.status).toBe(101);
     const size =
-      (profile.gateway.maxBufferedBytes *
-        (scope === "principal"
-          ? profile.gateway.maxConnectionsPerPrincipal
-          : profile.gateway.maxConnectionsPerGrant)) /
-      profile.gateway.maxConnections;
+      scope === "principal"
+        ? profile.gateway.maxBufferedBytesPerPrincipal
+        : profile.gateway.maxBufferedBytesPerShare;
     const key = JSON.stringify(
       scope === "principal"
         ? ["principal", "named", session.userId]
@@ -1152,10 +1153,7 @@ it("contains stalled writes across two links in one workspace while another work
   const other = state.browser();
   expect(await other.status).toBe(101);
   const otherHost = state.hosts[0]!;
-  const workspacePortion =
-    (limits.maxBufferedBytes *
-      (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections)) /
-    limits.maxConnections;
+  const workspacePortion = limits.maxBufferedBytesPerWorkspace;
   expect(workspacePortion).toBe(80 * MiB);
   try {
     for (let index = 0; index < 21; index++) {
