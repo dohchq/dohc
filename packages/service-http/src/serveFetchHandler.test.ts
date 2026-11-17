@@ -60,6 +60,25 @@ describe("serveFetchHandler", () => {
     }
   });
 
+  it("answers on a connection that has waited longer between requests than Node's own limit", async () => {
+    const { port } = await serve({ handler: async () => new Response("ok") });
+    const socket = connect(port, "127.0.0.1");
+    let answered = "";
+    let closed = false;
+    socket.setEncoding("utf8").on("data", (chunk: string) => (answered += chunk));
+    socket.once("close", () => (closed = true));
+    const answers = () => answered.match(/^HTTP\/1\.1 200/gmu)?.length ?? 0;
+    const get = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    socket.write(get);
+    await vi.waitFor(() => expect(answers()).toBe(1));
+    // Node closes a connection 6 s after its last request by default: 5 s, and 1 s it adds for the client.
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    expect(closed).toBe(false);
+    socket.write(get);
+    await vi.waitFor(() => expect(answers()).toBe(2));
+    socket.destroy();
+  }, 15_000);
+
   it("refuses an upload that does not arrive in time while its handler reads it", async () => {
     let readFailed = false;
     const handler = vi.fn(async (request: Request) => {
