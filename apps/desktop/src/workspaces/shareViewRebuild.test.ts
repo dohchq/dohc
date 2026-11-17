@@ -56,6 +56,7 @@ function copy(
     draftsRemoved: [] as string[],
     // How many installs fail before one lands, as a failed registry write does.
     installFails: 0,
+    finishes: 0,
     // The engine's answer once it converged, which it gives again until finish.
     converged: undefined as ShareViewRebuildAnswer<Reach> | undefined,
   };
@@ -89,6 +90,7 @@ function copy(
     },
     // Like the engine: a rebuild already finished has nothing left to delete.
     finish: async (_id, _rebuildId, savedDrafts) => {
+      state.finishes += 1;
       expect(state.manifest).not.toBe("closed");
       // Only once the view stored the result.
       expect(state.view.rebuild).toBeUndefined();
@@ -264,6 +266,8 @@ describe("rebuilding a joined copy", () => {
     const { state, rebuilds } = copy([rebuilt(r2, 1)], [r2, r3]);
     state.installFails = 1;
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "failed" });
+    // Finish waits for the view to store the result, so the retry can still read it.
+    expect(state).toMatchObject({ manifest: "converged", finishes: 0 });
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({
       kind: "rebuilt",
       recovered: 1,
