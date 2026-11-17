@@ -309,12 +309,6 @@ impl ActorHandle {
         .await
     }
 
-    /// A blob's bytes, text or binary, when the store holds it.
-    pub async fn rebuild_blob(&self, sha256: String) -> Result<Option<Vec<u8>>, RuntimeError> {
-        self.run(move |store, _| Ok(store.get_materialization_blob(&sha256)?))
-            .await
-    }
-
     /// Every current file on the workspace's main version, by path.
     pub async fn rebuild_main_heads(
         &self,

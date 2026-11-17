@@ -126,6 +126,11 @@ pub struct RecoveryItem {
     /// Set once done: whether there was a file to move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub found: Option<bool>,
+    /// For a saved version the disk held when planned, its hash. The first
+    /// converge wave places it only if the file it moved from `path` no
+    /// longer holds these bytes, and otherwise drops the item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_disk_changed: Option<String>,
 }
 
 /// A materialization job a converge wave adds.

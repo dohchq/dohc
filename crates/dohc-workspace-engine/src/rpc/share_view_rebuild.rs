@@ -10,14 +10,16 @@
 //!
 //! - `closed`: read the old store's unsent work; build a new store from the
 //!   relay under `.dohc/local/rebuild/`; plan each path on disk against the
-//!   new store; write the copies the plan saves under that folder; write
-//!   `planned`.
+//!   new store; write the copies the plan saves under that folder, reading
+//!   each unsent version from the old store; write `planned`.
 //! - `planned`: move those copies and the old store's `displaced` folder into
 //!   the recovery folder, write its `contents.md`, make the aside folder
 //!   empty, then `swapping`.
 //! - `swapping`: rename the old store aside and the new one into place, as
 //!   the three folders on disk say is left to do, then `swapped`.
-//! - `swapped`: converge the files in three waves, then `converged`.
+//! - `swapped`: converge the files in three waves, then `converged`. The
+//!   first places a saved version the disk held when planned only if the
+//!   disk no longer does, then drops the staging folder.
 //!
 //! `share.view.rebuildFinish` deletes what the rebuild left once main has
 //! stored the new reach, and the manifest last. `share.view.rebuildStatus`
@@ -107,8 +109,15 @@ struct StatusParams {
     root_dir: String,
 }
 
-/// A copy `closed` writes under the staging folder: its name and bytes.
-type SavedCopy = (String, Vec<u8>);
+/// What a copy `closed` writes under the staging folder holds.
+enum Contents {
+    Bytes(Vec<u8>),
+    /// An unsent version, by hash, read from the old store as it is written.
+    Version(String),
+}
+
+/// A copy `closed` writes under the staging folder: its name and contents.
+type SavedCopy = (String, Contents);
 
 /// A section of a saved thread, with the message it shows, if any.
 type ChatSection = (Option<String>, String);
@@ -117,9 +126,6 @@ type ChatSection = (Option<String>, String);
 struct OldRead {
     heads: Vec<RebuildHead>,
     unsent: RebuildUnsent,
-    /// The bytes of each unsent version, by hash. The plan saves those the
-    /// disk no longer holds when it looks, after the download.
-    version_bytes: BTreeMap<String, Vec<u8>>,
     /// Read markers, bookmarks, follows and feed read state.
     carried: RebuildCarried,
     /// The files the old store last captured, which the disk scan starts
@@ -498,10 +504,36 @@ impl EngineService {
         let saved = saved_copies(root);
         std::fs::create_dir_all(&saved)
             .map_err(|_| failed("share-view-rebuild-staging-unavailable"))?;
-        for (name, bytes) in copies {
+        // The old store stays in place until the swap. Each version is read
+        // as it is written, so only one is in memory at a time.
+        let mut old_store = None;
+        for (name, contents) in copies {
+            let bytes = match contents {
+                Contents::Bytes(bytes) => bytes,
+                Contents::Version(sha) => {
+                    let store = match &mut old_store {
+                        Some(store) => store,
+                        None => old_store.insert(
+                            dohc_engine_storage::EngineStore::open_read_only(
+                                &live_store(root).join("engine.db"),
+                            )
+                            .map_err(|_| failed("share-view-rebuild-store-unreadable"))?,
+                        ),
+                    };
+                    // A version the store lost is listed as not found.
+                    let Some(bytes) = store
+                        .get_materialization_blob(&sha)
+                        .map_err(|_| failed("share-view-rebuild-store-unreadable"))?
+                    else {
+                        continue;
+                    };
+                    bytes
+                }
+            };
             write_synced(&saved.join(name), &bytes)
                 .map_err(|_| failed("share-view-rebuild-staging-unavailable"))?;
         }
+        drop(old_store);
         write_manifest(
             root,
             &RebuildManifest {
@@ -514,8 +546,8 @@ impl EngineService {
     }
 
     /// The old store's current files and the member's work the relay hasn't
-    /// taken, with the bytes of each unsent version. The disk may change
-    /// before the plan reads it, so a version it holds now is read too.
+    /// taken. An unsent version is kept by path and hash only: the plan reads
+    /// the bytes of those it saves from the old store.
     async fn rebuild_read_old(
         &self,
         handle: &WorkspaceHandle,
@@ -530,16 +562,6 @@ impl EngineService {
             .rebuild_unsent(params.workspace_id.clone(), params.share_id.clone())
             .await
             .map_err(map_runtime)?;
-        let mut version_bytes = BTreeMap::new();
-        for version in &unsent.versions {
-            if let Some(bytes) = actor
-                .rebuild_blob(version.sha256.clone())
-                .await
-                .map_err(map_runtime)?
-            {
-                version_bytes.insert(version.sha256.clone(), bytes);
-            }
-        }
         let carried = actor
             .rebuild_carried(params.workspace_id.clone())
             .await
@@ -570,7 +592,6 @@ impl EngineService {
         Ok(OldRead {
             heads,
             unsent,
-            version_bytes,
             carried,
             scan_seed,
         })
@@ -727,7 +748,7 @@ impl EngineService {
             for item in &mut plan.recovery {
                 let source = match item.source {
                     RecoverySource::Disk => continue,
-                    _ if item.done => continue,
+                    _ if item.done || item.if_disk_changed.is_some() => continue,
                     RecoverySource::Saved => saved_copies(root).join(&item.destination),
                     RecoverySource::Displaced => live_store(root).join(DISPLACED),
                 };
@@ -793,8 +814,8 @@ impl EngineService {
         self.rebuild_crash_point("swapped")?;
         // The aside store still holds the hidden History. A delete that
         // fails is tried again by finish, and the answer says it is left.
+        // The first wave drops the staging folder once it places its copies.
         let _ = remove_folder(&aside(root));
-        let _ = remove_folder(&staging_root(root));
         let handle = self
             .rebuild_open(ctx, root, workspace_id, None, None)
             .await?;
@@ -819,22 +840,37 @@ impl EngineService {
         let waves_done = manifest.plan.as_ref().map_or(3, |plan| plan.waves_done);
         if waves_done < 1 {
             let plan = manifest.plan.clone().unwrap_or_else(empty_plan);
-            for (index, item) in plan.recovery.iter().enumerate() {
-                if item.done || item.source != RecoverySource::Disk {
-                    continue;
-                }
-                let folder = root.join(plan.recovery_folder.as_deref().unwrap_or_default());
-                let found = recover(
-                    root,
-                    &root.join(&item.path),
-                    &folder.join(&item.destination),
-                )?;
-                if let Some(plan) = manifest.plan.as_mut() {
-                    plan.recovery[index].done = true;
-                    plan.recovery[index].found = Some(found);
+            let folder = root.join(plan.recovery_folder.as_deref().unwrap_or_default());
+            // Every file from disk comes before the versions saved in case
+            // the disk changed, which the plan numbers last.
+            for item in &plan.recovery {
+                let source = match (item.source, &item.if_disk_changed) {
+                    _ if item.done => continue,
+                    (RecoverySource::Disk, _) => root.join(&item.path),
+                    (RecoverySource::Saved, Some(sha)) => {
+                        if moved_from_disk(&plan, &folder, &item.path, sha) {
+                            if let Some(plan) = manifest.plan.as_mut() {
+                                plan.recovery.retain(|kept| kept.number != item.number);
+                            }
+                            write_manifest(root, manifest)?;
+                            continue;
+                        }
+                        saved_copies(root).join(&item.destination)
+                    }
+                    _ => continue,
+                };
+                let found = recover(root, &source, &folder.join(&item.destination))?;
+                if let Some(done) = manifest.plan.as_mut().and_then(|plan| {
+                    plan.recovery
+                        .iter_mut()
+                        .find(|done| done.number == item.number)
+                }) {
+                    done.done = true;
+                    done.found = Some(found);
                 }
                 write_manifest(root, manifest)?;
             }
+            let _ = remove_folder(&staging_root(root));
             self.rebuild_wave_jobs(&actor, root, workspace_id, manifest, 1)
                 .await?;
             self.rebuild_crash_point("wave-1")?;
@@ -984,7 +1020,7 @@ fn empty_plan() -> RebuildPlan {
 ///   no file is.
 ///
 /// A path with no file on disk gets `n`. The plan also saves each unsent
-/// version the disk doesn't hold, the unsent chat by thread, the live
+/// version the new store doesn't hold, the unsent chat by thread, the live
 /// drafts and the displaced folder. Answers the plan and the copies to
 /// write, by name, under the staging folder.
 fn plan(
@@ -1055,8 +1091,9 @@ fn plan(
         .chain(new.disk.keys().map(String::as_str))
         .collect();
     let mut jobs = Vec::new();
-    // What to save: where it comes from, what it was, its name and why.
-    let mut saves: Vec<(RecoverySource, String, String, &str)> = Vec::new();
+    // What to save: where it comes from, what it was, its name, why, and the
+    // hash that makes it needless if the disk still holds it.
+    let mut saves: Vec<(RecoverySource, String, String, &str, Option<String>)> = Vec::new();
     let mut copies = Vec::new();
     let write = |path: &str, sha: &str, preimage: Option<&str>| PlannedJob {
         wave: 3,
@@ -1090,7 +1127,13 @@ fn plan(
                 } else {
                     WHY_NOT_SENT
                 };
-                saves.push((RecoverySource::Disk, path.to_owned(), last_part(path), why));
+                saves.push((
+                    RecoverySource::Disk,
+                    path.to_owned(),
+                    last_part(path),
+                    why,
+                    None,
+                ));
                 if let Some(n) = n {
                     jobs.push(write(path, &n.sha256, None));
                 }
@@ -1099,22 +1142,36 @@ fn plan(
             (None, None) => {}
         }
     }
+    // A version on disk that the first wave moves to recovery is saved too,
+    // in case the disk changes before then: the swap drops the old store.
+    // One the new store holds, or that is on disk where the plan replaces
+    // it with bytes the new store holds, is kept there.
+    let from_disk: HashSet<String> = saves
+        .iter()
+        .map(|(_, path, _, _, _)| path.clone())
+        .collect();
+    let mut in_case = Vec::new();
     for version in &old.unsent.versions {
         let on_disk = new.disk.get(&version.path) == Some(&version.sha256);
         let shared = new_heads
             .get(version.path.as_str())
             .is_some_and(|head| head.sha256 == version.sha256);
-        if on_disk || shared {
+        if shared || (on_disk && !from_disk.contains(&version.path)) {
             continue;
         }
-        if let Some(bytes) = old.version_bytes.get(&version.sha256) {
-            saves.push((
-                RecoverySource::Saved,
-                version.path.clone(),
-                last_part(&version.path),
-                WHY_VERSION,
-            ));
-            copies.push(bytes.clone());
+        let save = (
+            RecoverySource::Saved,
+            version.path.clone(),
+            last_part(&version.path),
+            WHY_VERSION,
+            on_disk.then(|| version.sha256.clone()),
+        );
+        let copy = Contents::Version(version.sha256.clone());
+        if on_disk {
+            in_case.push((save, copy));
+        } else {
+            saves.push(save);
+            copies.push(copy);
         }
     }
     for (title, text) in chat_files(&old.unsent) {
@@ -1123,8 +1180,9 @@ fn plan(
             format!("chat: {title}"),
             format!("chat {}.md", file_safe(&title)),
             WHY_CHAT,
+            None,
         ));
-        copies.push(text.into_bytes());
+        copies.push(Contents::Bytes(text.into_bytes()));
     }
     for draft in &params.live_drafts {
         let name = last_part(&draft.path);
@@ -1134,8 +1192,9 @@ fn plan(
             draft.path.clone(),
             format!("{} (open page).md", file_safe(stem)),
             WHY_DRAFT,
+            None,
         ));
-        copies.push(draft.text.clone().into_bytes());
+        copies.push(Contents::Bytes(draft.text.clone().into_bytes()));
     }
     let displaced = live_store(root).join(DISPLACED);
     if std::fs::read_dir(&displaced).is_ok_and(|mut entries| entries.next().is_some()) {
@@ -1144,7 +1203,14 @@ fn plan(
             format!(".dohc/engine/{DISPLACED}"),
             DISPLACED.to_owned(),
             WHY_DISPLACED,
+            None,
         ));
+    }
+    // Last, so a version the first wave drops leaves no gap in the numbers
+    // before it.
+    for (save, copy) in in_case {
+        saves.push(save);
+        copies.push(copy);
     }
     let undone: Vec<UndoneChange> = old
         .unsent
@@ -1165,10 +1231,12 @@ fn plan(
     let mut recovery = Vec::new();
     let mut named = Vec::new();
     let mut copies = copies.into_iter();
-    for ((source, path, name, why), number) in saves.into_iter().zip(1..) {
+    for ((source, path, name, why, if_disk_changed), number) in saves.into_iter().zip(1..) {
         let destination = numbered_name(number, &name);
-        if source == RecoverySource::Saved {
-            named.push((destination.clone(), copies.next().unwrap_or_default()));
+        if source == RecoverySource::Saved
+            && let Some(copy) = copies.next()
+        {
+            named.push((destination.clone(), copy));
         }
         recovery.push(RecoveryItem {
             number,
@@ -1178,6 +1246,7 @@ fn plan(
             reason: why.to_owned(),
             done: false,
             found: None,
+            if_disk_changed,
         });
     }
     Ok((
@@ -1407,6 +1476,33 @@ fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, WireE
     Ok(true)
 }
 
+/// Whether the file the first wave moved from `path` into `folder` holds the
+/// bytes `sha256` names. It is read in pieces, as it may be large.
+fn moved_from_disk(plan: &RebuildPlan, folder: &Path, path: &str, sha256: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let Some(item) = plan
+        .recovery
+        .iter()
+        .find(|item| item.source == RecoverySource::Disk && item.path == path)
+    else {
+        return false;
+    };
+    let Ok(mut file) = std::fs::File::open(folder.join(&item.destination)) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut piece = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut piece) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&piece[..read]),
+            Err(_) => return false,
+        }
+    }
+    dohc_engine_storage::hex(&hasher.finalize()) == sha256
+}
+
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::File::create(path)?;
     file.write_all(bytes)?;
@@ -1426,10 +1522,17 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
          server hadn't received from this copy, instead of deleting it.\n",
         utc_time(manifest.closed_at_ms)
     );
-    if !plan.recovery.is_empty() {
+    // A version saved in case the disk changed shows once the first wave
+    // places it.
+    let shown: Vec<&RecoveryItem> = plan
+        .recovery
+        .iter()
+        .filter(|item| item.done || item.if_disk_changed.is_none())
+        .collect();
+    if !shown.is_empty() {
         text.push_str("\n| Saved as | Was at | Why |\n| --- | --- | --- |\n");
     }
-    for item in &plan.recovery {
+    for item in shown {
         let why = if item.found == Some(false) {
             format!("{} It wasn't found.", item.reason)
         } else {

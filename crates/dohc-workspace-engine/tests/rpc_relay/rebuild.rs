@@ -609,10 +609,12 @@ async fn a_narrowing_saves_unsent_work_and_undoes_unsent_deletes_and_moves() {
         assert!(!root.join(gone).exists(), "{gone}");
     }
     let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    // The edit and the new file were on disk, so each is saved once.
     assert_eq!(
         names_in(&recovery),
         ["0001 b.md", "0002 a.md", "0003 new.md", "contents.md"]
     );
+    assert_eq!(result["recovered"], 3, "{result}");
     assert_eq!(
         std::fs::read(recovery.join("0002 a.md")).expect("edit"),
         b"my edit"
@@ -631,6 +633,7 @@ async fn a_narrowing_saves_unsent_work_and_undoes_unsent_deletes_and_moves() {
     ] {
         assert!(contents.contains(line), "{line}\n{contents}");
     }
+    assert!(!contents.contains("| 0004 "), "{contents}");
     finish(&copy).await;
     assert_no_old_store(&copy.scratch);
 }
@@ -1112,6 +1115,73 @@ async fn an_unsent_version_the_disk_lost_during_the_download_is_saved() {
         b"my edit"
     );
     finish(&copy).await;
+}
+
+/// The member's unsent edit, "my edit", is on disk when the rebuild plans.
+/// The rebuild stops before the swap, and `change` changes `open/a.md` while
+/// it is stopped. Then the rebuild runs again, as after a restart.
+async fn stopped_then_changed(
+    workspace_id: &str,
+    change: impl FnOnce(&std::path::Path),
+) -> (ClosedCopy, Value) {
+    let copy = edited_copy(workspace_id).await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("rename-0");
+    let crashed = rebuild_on(&service, &copy).await.expect_err("crashed");
+    assert_eq!(crashed.message, "rebuild-crash-for-harness");
+    assert_eq!(manifest(&copy).expect("manifest")["phase"], "swapping");
+    drop(service);
+    change(&copy.scratch.path().join("open/a.md"));
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    (copy, result)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_version_the_disk_lost_while_the_rebuild_was_stopped_is_saved() {
+    let (copy, result) = stopped_then_changed("rpc-rebuild-stopped-overwritten", |a| {
+        std::fs::write(a, "my newer draft").expect("newer draft");
+    })
+    .await;
+    let root = copy.scratch.path();
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "0003 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 a.md")).expect("disk"),
+        b"my newer draft"
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0003 a.md")).expect("stored"),
+        b"my edit"
+    );
+    assert_eq!(result["recovered"], 3, "{result}");
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_version_removed_while_the_rebuild_was_stopped_is_saved() {
+    let (copy, result) = stopped_then_changed("rpc-rebuild-stopped-removed", |a| {
+        std::fs::remove_file(a).expect("remove");
+    })
+    .await;
+    let root = copy.scratch.path();
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0003 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0003 a.md")).expect("stored"),
+        b"my edit"
+    );
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
 }
 
 /// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
