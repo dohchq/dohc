@@ -58,7 +58,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, Tx
 use dohc_engine_sync::SyncError;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1193,6 +1193,8 @@ struct PendingRuleJob {
     path: String,
     /// The bytes a write places.
     content_sha256: String,
+    /// The bytes the job expects to replace, or `None` for no file.
+    preimage: Option<String>,
     deletes: bool,
 }
 
@@ -1210,7 +1212,7 @@ fn pending_rule_jobs(
         .map_err(StorageError::corrupt_public)?;
     let mut scan = conn
         .prepare_cached(
-            "SELECT target_path, content_sha256, operation='delete' FROM materialization_jobs \
+            "SELECT target_path, content_sha256, operation='delete',              CASE WHEN preimage_present THEN preimage_sha256 END FROM materialization_jobs \
              WHERE workspace_id IN (?1,'') AND status='pending' AND target_path>=?2 \
              AND target_path<?3 AND instr(substr(target_path, ?4), '/')=0",
         )
@@ -1230,6 +1232,7 @@ fn pending_rule_jobs(
                         path: row.get(0)?,
                         content_sha256: row.get(1)?,
                         deletes: row.get(2)?,
+                        preimage: row.get(3)?,
                     })
                 })
                 .map_err(StorageError::corrupt_public)?;
@@ -1243,6 +1246,43 @@ fn pending_rule_jobs(
         },
     )?;
     Ok(pending)
+}
+
+/// Whether each rule file in `folder` on disk is the committed one, or, where
+/// dohc is placing it, the bytes before or after that placement.
+fn disk_matches_placement(
+    root: &Path,
+    folder: &str,
+    pending: &[PendingRuleJob],
+    committed: Option<&Committed>,
+) -> bool {
+    let Ok(disk) = read_disk_rule(root, folder) else {
+        return false;
+    };
+    let mut paths: BTreeSet<&str> = disk.keys().map(String::as_str).collect();
+    paths.extend(pending.iter().map(|job| job.path.as_str()));
+    paths.extend(
+        committed
+            .iter()
+            .flat_map(|own| own.files.keys().map(String::as_str)),
+    );
+    paths.into_iter().all(|path| {
+        let on_disk = disk
+            .get(path)
+            .map(|bytes| dohc_engine_storage::hex_sha256(bytes));
+        let on_disk = on_disk.as_deref();
+        let mut jobs = pending.iter().filter(|job| job.path == path).peekable();
+        if jobs.peek().is_none() {
+            return on_disk
+                == committed
+                    .and_then(|own| own.files.get(path))
+                    .map(|file| file.sha256.as_str());
+        }
+        jobs.any(|job| {
+            let placed = (!job.deletes).then_some(job.content_sha256.as_str());
+            on_disk == placed || on_disk == job.preimage.as_deref()
+        })
+    })
 }
 
 /// A rule file to commit: its bytes, or `None` to delete it.
@@ -1415,7 +1455,13 @@ fn judge_folder(
                 .any(|job| !job.deletes && job.path == touch.path && job.content_sha256 == sha256)
         })
     };
-    if !pending.is_empty() && rule_touches.iter().all(placing) {
+    // With no rule file captured, the disk must still show dohc's placement:
+    // a rule changed there since is judged before the covered file.
+    if !pending.is_empty()
+        && rule_touches.iter().all(placing)
+        && (!rule_touches.is_empty()
+            || disk_matches_placement(order.root, folder, &pending, committed.as_ref()))
+    {
         return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
     }
     let disk = match read_disk_rule(order.root, folder) {
@@ -2027,6 +2073,11 @@ fn hold_view(
             _ => None,
         });
     let disk = read_disk_rule(root, folder);
+    // Accept applies only the bytes the hold saw. A disk that holds others
+    // since shows no changes and offers no Accept until capture judges it.
+    let stale = disk
+        .as_ref()
+        .is_ok_and(|disk| observed_sha256(disk) != hold.observed_sha256);
     // The one rule file, or the one another program holds, so the notice
     // can name it.
     let rule_path = match &disk {
@@ -2036,11 +2087,11 @@ fn hold_view(
     };
     let mut view = AccessRuleHoldView {
         can_accept: match &disk {
-            Ok(disk) => {
+            Ok(disk) if !stale => {
                 decision_rule_changes(conn, workspace, version, folder, here.as_ref(), disk)?
                     .is_some()
             }
-            Err(_) => false,
+            _ => false,
         },
         recorded,
         rule_path,
@@ -2064,7 +2115,9 @@ fn hold_view(
     before.extend(here.as_ref().map(Committed::rule));
     if view.hold.reason == access_rule_holds::REMOVED {
         view.falls_back_to = above.first().map(|(at, _)| at.clone());
-        view.changes = level_changes(&before, &outer);
+        if !stale {
+            view.changes = level_changes(&before, &outer);
+        }
         return Ok(view);
     }
     if view.unreadable.is_some() {
@@ -2077,6 +2130,9 @@ fn hold_view(
             return Ok(view);
         }
     };
+    if stale {
+        return Ok(view);
+    }
     let mut after = outer;
     after.push(Some(&now));
     view.changes = level_changes(&before, &after);
@@ -2180,7 +2236,7 @@ fn decide_on_store(
             // a committed spelling can only return once they are gone.
             for (path, bytes) in &disk {
                 if !files.contains_key(path) {
-                    remove_rule(store, order, path, &dohc_engine_storage::hex_sha256(bytes))?;
+                    remove_rule(store, order, path, bytes, self_writes)?;
                     decided.kept.push(path.clone());
                 }
             }
@@ -2389,49 +2445,47 @@ fn place_rule(
     if placed { Ok(()) } else { Err(waits()) }
 }
 
-/// Remove a rule nothing committed, if it still holds the judged bytes. It
-/// stays as a kept copy, as the rule [`place_rule`] displaces does.
+/// Remove a rule nothing committed through an ordinary delete, which moves
+/// it aside and puts back any bytes other than the ones judged here. It stays
+/// as a kept copy, as the rule [`place_rule`] displaces does.
 fn remove_rule(
     store: &mut EngineStore,
     order: &Order<'_>,
     path: &str,
-    judged_sha256: &str,
+    judged: &[u8],
+    self_writes: &dyn super::materialization::SelfWriteRecorder,
 ) -> Result<(), RuntimeError> {
-    let Some(bytes) = read_judged(order, path, judged_sha256)? else {
-        return Ok(());
+    keep_outside_rule(store, order, path, judged)?;
+    let judged_sha256 = dohc_engine_storage::hex_sha256(judged);
+    let job_id = format!(
+        "access-rule-remove_{}_{}",
+        dohc_engine_storage::hex_sha256(path.as_bytes()),
+        order.now_ms
+    );
+    let spec = dohc_engine_storage::MaterializationJobSpec {
+        job_id: job_id.clone(),
+        workspace_id: order.workspace_id.to_owned(),
+        target_path: path.to_owned(),
+        content_sha256: judged_sha256.clone(),
+        preimage: dohc_engine_storage::Preimage::Present(judged_sha256),
+        target_generation: order.now_ms,
+        now_ms: order.now_ms,
     };
-    keep_outside_rule(store, order, path, &bytes)?;
-    remove_checked(order, path, judged_sha256)
-}
-
-/// The bytes at `path`, if they are the judged ones; `None` once it is gone.
-fn read_judged(
-    order: &Order<'_>,
-    path: &str,
-    judged_sha256: &str,
-) -> Result<Option<Vec<u8>>, RuntimeError> {
-    match read_publication_target(order.root, path) {
-        Ok(PublicationTarget::Bytes(bytes))
-            if dohc_engine_storage::hex_sha256(&bytes) == judged_sha256 =>
-        {
-            Ok(Some(bytes))
-        }
-        Ok(PublicationTarget::Absent) => Ok(None),
-        _ => Err(waits()),
-    }
-}
-
-/// Remove `path` if it still holds the judged bytes.
-fn remove_checked(order: &Order<'_>, path: &str, judged_sha256: &str) -> Result<(), RuntimeError> {
-    if read_judged(order, path, judged_sha256)?.is_none() {
-        return Ok(());
-    }
-    match std::fs::remove_file(order.root.join(path)) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(RuntimeError::Storage(StorageError::persist_public(error)))
-        }
-        _ => Ok(()),
-    }
+    committed(store.write_with(order.faults, |tx| {
+        dohc_engine_storage::put_binary_blob(tx, judged)?;
+        dohc_engine_storage::enqueue_delete_job(tx, &spec)
+    })?)?;
+    let removed = super::materialization::materialize_expected_job(
+        store,
+        order.root,
+        order.workspace_id,
+        &job_id,
+        self_writes,
+        order.now_ms,
+        order.faults,
+        None,
+    );
+    if removed { Ok(()) } else { Err(waits()) }
 }
 
 impl ActorHandle {
@@ -2532,7 +2586,7 @@ mod tests {
             "CREATE TABLE path_aliases (workspace_id TEXT, version_id TEXT, path TEXT, \
              object_id TEXT, PRIMARY KEY (workspace_id, version_id, path)); \
              CREATE TABLE materialization_jobs (workspace_id TEXT, target_path TEXT, \
-             content_sha256 TEXT, status TEXT, operation TEXT, PRIMARY KEY (workspace_id, target_path))",
+             content_sha256 TEXT, preimage_present INTEGER, preimage_sha256 TEXT, status TEXT,              operation TEXT, PRIMARY KEY (workspace_id, target_path))",
         )
         .unwrap();
         let names = [

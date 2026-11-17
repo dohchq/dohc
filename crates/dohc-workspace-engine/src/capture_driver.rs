@@ -2375,6 +2375,9 @@ struct RealEnv {
 struct AccessRuleFollow {
     waits_seen: u64,
     holds_seen: u64,
+    /// The hold generation whose holds capture last read; behind
+    /// `holds_seen` while that read fails, so the next pass reads again.
+    holds_announced: u64,
     rescan_at: Option<tokio::time::Instant>,
     announced: std::collections::BTreeSet<(String, String, String, Option<String>)>,
 }
@@ -2411,18 +2414,22 @@ impl RealEnv {
             follow.rescan_at = None;
             files.request_rescan();
         }
-        if holds == follow.holds_seen {
+        if holds != follow.holds_seen {
+            follow.holds_seen = holds;
+            files.request_rescan();
+        }
+        if holds == follow.holds_announced {
             return;
         }
-        follow.holds_seen = holds;
-        files.request_rescan();
-        let Ok(holds) = self
+        let Ok(listed) = self
             .actor
             .access_rule_holds(self.workspace_id.clone())
             .await
         else {
             return;
         };
+        self.access_rules.holds_announced = holds;
+        let holds = listed;
         let mut announced = std::collections::BTreeSet::new();
         for hold in holds {
             let key = (

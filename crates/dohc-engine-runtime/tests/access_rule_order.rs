@@ -1000,6 +1000,37 @@ fn a_widened_hold_lists_who_reaches_the_folder_differently() {
     assert_eq!(f.journal(), expected);
 }
 
+/// A notice shows no change and offers no Accept while the disk holds a rule
+/// other than the one its hold saw: Accept applies only those bytes. Once the
+/// disk holds them again, the notice and Accept agree.
+#[test]
+fn a_hold_previews_only_the_rule_it_saw() {
+    let f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let seen = Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes()));
+    f.put("team/access.yaml", "members: comment\n");
+    let views = f.hold_views();
+    let [view] = views.as_slice() else {
+        panic!("{views:?}")
+    };
+    assert_eq!(view.hold.observed_sha256, seen);
+    assert!(view.changes.is_empty(), "{:?}", rows(view));
+    assert!(!view.can_accept);
+
+    f.put("team/access.yaml", EDIT);
+    let views = f.hold_views();
+    let [view] = views.as_slice() else {
+        panic!("{views:?}")
+    };
+    assert_eq!(rows(view), lines(&["members: view → edit"]));
+    assert!(view.can_accept);
+    f.decide_on("team", AccessRuleDecision::Accept, seen, "widened")
+        .expect("accept");
+    assert!(f.holds().is_empty());
+}
+
 struct CrashAfterOneMoment(PathBuf, i64, std::sync::atomic::AtomicBool);
 impl FaultInjector for CrashAfterOneMoment {
     fn poll(&self, point: FaultPoint) -> FaultAction {
@@ -1421,6 +1452,51 @@ fn restoring_an_uncommitted_rule_keeps_its_bytes() {
     assert!(f.holds().is_empty());
 }
 
+/// A rule saved over the one Restore judged, just before Restore removes it,
+/// stays on disk, and Restore waits.
+#[test]
+fn restore_keeps_a_rule_saved_over_the_one_it_removes() {
+    struct SaveOverOnce {
+        path: PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+    }
+    impl dohc_engine_storage::FaultInjector for SaveOverOnce {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
+                && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&self.path, NOBODY).unwrap();
+            }
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+    let f = ruled_team();
+    f.put("team/sub/access.yaml", EDIT);
+    f.put("team/sub/b.md", "beta");
+    f.settle();
+    assert!(held(&f.capture(&["team/sub/b.md"])[0], "team/sub"));
+    let (_, reason) = f.holds().remove(0);
+    let restored = f.decided_at(
+        "team/sub",
+        AccessRuleDecision::Restore,
+        Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+        &reason,
+        30,
+        Arc::new(SaveOverOnce {
+            path: f.root().join("team/sub/access.yaml"),
+            fired: false.into(),
+        }),
+    );
+    assert!(
+        matches!(&restored, Err(RuntimeError::Sync(SyncError::RetryableState { reason })) if *reason == ACCESS_RULE_WAITS),
+        "{restored:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/sub/access.yaml")).unwrap(),
+        NOBODY
+    );
+}
+
 /// A rule dohc is still placing on disk goes unjudged only while capture
 /// reads the bytes being placed. A widening saved over the placement holds.
 #[test]
@@ -1501,6 +1577,63 @@ fn a_rule_removed_while_a_narrowing_write_is_pending_holds() {
     assert!(held(&retired, "team"), "{retired:?}");
     assert_eq!(f.journal(), before);
     assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+}
+
+/// A rule narrowed outside dohc while dohc still places the committed one
+/// commits before a covered file captured without it.
+#[test]
+fn a_rule_narrowed_over_a_pending_placement_journals_before_a_covered_file() {
+    let f = ruled_team();
+    let view = dohc_engine_storage::hex_sha256(VIEW.as_bytes());
+    rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO materialization_jobs (job_id, target_path, content_sha256, \
+             preimage_present, preimage_sha256, target_generation, created_at_ms, workspace_id) \
+             VALUES ('job-rule', 'team/access.yaml', ?1, 1, ?1, 1, 1, ?2)",
+            [view, WS.to_owned()],
+        )
+        .unwrap();
+    f.put("team/access.yaml", NOBODY);
+    f.put("team/a.md", "alpha 2");
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write team/a.md",
+            "write team/access.yaml",
+            "write team/a.md",
+        ])
+    );
+}
+
+/// While the disk still shows the placement, a covered file goes as it is.
+#[test]
+fn a_covered_file_beside_a_pending_placement_journals_alone() {
+    let f = ruled_team();
+    let view = dohc_engine_storage::hex_sha256(VIEW.as_bytes());
+    rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO materialization_jobs (job_id, target_path, content_sha256, \
+             preimage_present, preimage_sha256, target_generation, created_at_ms, workspace_id) \
+             VALUES ('job-rule', 'team/access.yaml', ?1, 1, ?1, 1, 1, ?2)",
+            [view, WS.to_owned()],
+        )
+        .unwrap();
+    f.put("team/a.md", "alpha 2");
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write team/a.md",
+            "write team/a.md"
+        ])
+    );
 }
 
 #[test]
@@ -1656,7 +1789,7 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             let conn = rusqlite::Connection::open(&self.0).expect("open db");
             let moved: bool = conn
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id='r-move-to')",
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id LIKE 'r-move-to%')",
                     [],
                     |row| row.get(0),
                 )
@@ -1772,11 +1905,21 @@ fn rule_rename(
     to: &str,
     faults: Arc<dyn FaultInjector>,
 ) -> Result<dohc_engine_domain::RenameResult, RuntimeError> {
+    rule_rename_from(f, "team", to, faults)
+}
+
+/// Move folder `from`'s rule into folder `to` as request `r-move`.
+fn rule_rename_from(
+    f: &Fixture,
+    from: &str,
+    to: &str,
+    faults: Arc<dyn FaultInjector>,
+) -> Result<dohc_engine_domain::RenameResult, RuntimeError> {
     f.runtime.block_on(f.actor.versioned_text_rename(
         RenameTextFile {
             workspace_id: WS.to_owned(),
             version_id: "main".to_owned(),
-            from_path: "team/access.yaml".to_owned(),
+            from_path: format!("{from}/access.yaml"),
             to_path: format!("{to}/access.yaml"),
             moment_id: "m-move".to_owned(),
             request_id: Some("r-move".to_owned()),
@@ -1791,6 +1934,68 @@ fn rule_rename(
         faults,
         CancellationToken::new(),
     ))
+}
+
+/// A half-finished rule rename tried again from another rule with the same
+/// text is a new rename onto the rule the first one wrote, and is refused:
+/// the first source stays, and so does the other rule.
+#[test]
+fn a_half_finished_rule_rename_tried_again_from_another_source_is_refused() {
+    struct CrashOnceMoved(PathBuf, std::sync::atomic::AtomicBool);
+    impl FaultInjector for CrashOnceMoved {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point != FaultPoint::StorageBeforePersist
+                || self.1.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return FaultAction::Continue;
+            }
+            let conn = rusqlite::Connection::open(&self.0).expect("open db");
+            let moved: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id LIKE 'r-move-to%')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read requests");
+            if moved {
+                self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+                FaultAction::Crash
+            } else {
+                FaultAction::Continue
+            }
+        }
+    }
+    let f = Fixture::new();
+    f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
+        .expect("write rule");
+    f.versioned_write(write("other/access.yaml", VIEW, "m-other"))
+        .expect("write the other rule");
+    let crash = Arc::new(CrashOnceMoved(f.db.clone(), Default::default()));
+    let halfway = rule_rename(&f, "crew", crash);
+    assert!(
+        matches!(halfway, Err(RuntimeError::OperationCrashed)),
+        "{halfway:?}"
+    );
+    let journal = f.journal();
+    let again = rule_rename_from(&f, "other", "crew", Arc::new(NoFaults));
+    assert!(
+        matches!(
+            again,
+            Err(RuntimeError::Domain(DomainError::TargetPathExists))
+        ),
+        "{again:?}"
+    );
+    assert_eq!(f.journal(), journal);
+    let conn = rusqlite::Connection::open(&f.db).expect("open db");
+    for path in ["team/access.yaml", "other/access.yaml"] {
+        let rule = dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", path)
+            .expect("read the rule");
+        assert_eq!(
+            rule.snapshot.map(|snapshot| snapshot.text).as_deref(),
+            Some(VIEW),
+            "{path}"
+        );
+    }
 }
 
 /// What both rename paths hold on disk.

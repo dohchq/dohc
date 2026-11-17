@@ -200,8 +200,12 @@ pub fn parse_access_rule(text: &str) -> Option<AccessRule> {
     let mut rule = AccessRule::default();
     let (mut saw_members, mut saw_people, mut in_people) = (false, false, false);
     let mut people_indent = None;
-    for raw in text.split('\n') {
-        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+    for raw in text.split_inclusive('\n') {
+        // A CR ends a line only before an LF, as the relay's `\r?\n` split reads it.
+        let raw = match raw.strip_suffix('\n') {
+            Some(line) => line.strip_suffix('\r').unwrap_or(line),
+            None => raw,
+        };
         let Line::Entry { indent, key, value } = read_line(raw)? else {
             continue;
         };

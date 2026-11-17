@@ -1401,7 +1401,12 @@ fn rename_access_rule_on_store(
     token: &CancellationToken,
 ) -> Result<RenameResult, RuntimeError> {
     let suffixed = |id: &str, side: &str| format!("{id}-{side}");
-    let to_request = input.request_id.as_deref().map(|id| suffixed(id, "to"));
+    // The first half's request id names the source too, so a retry from
+    // another source is a new rename, refused like any rename onto a file.
+    let to_request = input.request_id.as_deref().map(|id| {
+        let source = hex_sha256(input.from_path.as_bytes());
+        format!("{id}-to-{}", &source[..16])
+    });
     let to_moment = suffixed(&input.moment_id, "to");
     let text = store.read_with(|conn| -> Result<String, RuntimeError> {
         let retried = match &to_request {
