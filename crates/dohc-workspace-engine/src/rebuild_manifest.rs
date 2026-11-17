@@ -158,11 +158,19 @@ pub fn manifest_path(root: &Path) -> PathBuf {
 
 /// The root's manifest, or `None` when no rebuild is under way. A manifest
 /// that exists but can't be read is an error: the caller refuses the root,
-/// because a rebuild may be under way.
+/// because a rebuild may be under way. A `.dohc/local` that is a file holds
+/// no manifest; the open refuses that folder with its own words.
 pub fn read_manifest(root: &Path) -> Result<Option<RebuildManifest>, ManifestError> {
     let bytes = match std::fs::read(manifest_path(root)) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(ManifestError::Unreadable(error.to_string())),
     };
     serde_json::from_slice(&bytes)
