@@ -296,7 +296,9 @@ mod tests {
         drop(admitting);
         closing.await.expect("close");
         assert_eq!(
-            lock(&service.rebuilding_roots).get(&root).map(String::as_str),
+            lock(&service.rebuilding_roots)
+                .get(&root)
+                .map(String::as_str),
             Some("rebuild-1")
         );
         assert!(
