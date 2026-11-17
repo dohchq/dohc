@@ -3566,7 +3566,12 @@ fn capture_cannot_expose_a_hidden_rule_while_removing_an_empty_folder() {
     }
     f.settle();
     f.retire("team/a.md").unwrap();
-    let _ = f.retire("team/access.yaml");
+    let result = f.retire("team/access.yaml");
+    assert!(
+        matches!(&result, Err(RuntimeError::AccessRuleHeld { folder, reason })
+        if folder == "team" && *reason == "removed"),
+        "{result:?}"
+    );
     assert_rule_prefixes_at_most_view(&f);
     assert_eq!(recorded_reach(&f, "members"), None);
 }
