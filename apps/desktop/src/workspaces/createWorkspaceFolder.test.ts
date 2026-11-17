@@ -476,6 +476,7 @@ describe("createWorkspaceFolder", () => {
       join(records, "missing"),
       recordsLink,
       join(recordsLink, "engine"),
+      join(recordsLink, "missing"),
     ]) {
       await expect(
         createWorkspaceFolder({ rootPath, homeDir, stateDir, computer, kind: "personal" }),
