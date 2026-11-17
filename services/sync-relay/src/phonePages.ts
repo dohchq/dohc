@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AccountSession, AccountSessions } from "@dohc/workspace-auth/session";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { hiddenFile } from "./accountFeed";
 import { badRequest, notFound, RelayError } from "./errors";
@@ -31,6 +32,8 @@ export type PhonePageAnswer =
       /** The one-use ticket, which only the response body carries. */
       ticket: string;
       expiresAtMs: number;
+      /** The bounds the owner connection holds the phone's editor to, as the desktop's admission sends them. */
+      editorLimits: NamedLiveBrowserLimits;
     }
   | { status: "preparing" }
   /** A hidden page and a missing one both answer `missing`. */
@@ -61,6 +64,7 @@ export function createPhonePages(options: {
   /** Read uncached for the mint. */
   sessions: Pick<AccountSessions, "read">;
   nowMs(): number;
+  editorLimits: NamedLiveBrowserLimits;
   waitMs?: number;
 }): PhonePages {
   const { storage, host } = options;
@@ -208,6 +212,7 @@ export function createPhonePages(options: {
       lineageClaimId: binding.lineageClaimId,
       ticket: minted.token,
       expiresAtMs: minted.expiresAtMs,
+      editorLimits: options.editorLimits,
     };
   }
 }

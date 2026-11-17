@@ -65,9 +65,15 @@ final class ServerRoundTests: XCTestCase {
 
   @MainActor
   func test1_deviceFlowSignIn() throws {
-    let origin = try need("DOHC_SERVER_ORIGIN")
     let app = XCUIApplication()
     app.launch()
+    try signIn(app)
+  }
+
+  /// Signs in from Connect through the device flow; the round approves the code it prints.
+  @MainActor
+  private func signIn(_ app: XCUIApplication) throws {
+    let origin = try need("DOHC_SERVER_ORIGIN")
     let field = app.textFields["Server address"]
     XCTAssertTrue(field.waitForExistence(timeout: 30), "A fresh install should open on Connect")
     field.tap()
@@ -186,5 +192,35 @@ final class ServerRoundTests: XCTestCase {
     // An empty field reports its placeholder as its value.
     let value = try XCTUnwrap(field.value as? String, "The server field should report its text")
     XCTAssertTrue(value.isEmpty || value == field.placeholderValue, "The server field should be empty, not \(value)")
+  }
+
+  // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and a server that opens pages for phones (#4173, #4192). Plan
+  // must have been opened live on a computer once. Signs in again after test6, types a sentence into Plan, waits for
+  // Saved, which only the server's host applying every edit gives, then reads the sentence back after a relaunch.
+  @MainActor
+  func test8_editsAPageAndTheServerApplies() throws {
+    let sentence = " Typed on the phone \(UUID().uuidString.prefix(8))."
+    let app = XCUIApplication()
+    app.launch()
+    try signIn(app)
+    openPlan(app)
+    // The title's label is the file's name and its state mark's label.
+    let mark = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Plan' AND label ENDSWITH %@", ", \(label)")).firstMatch }
+    let saved = mark("Saved")
+    XCTAssertTrue(saved.waitForExistence(timeout: 60), "Plan should open live and show Saved")
+    let page = app.webViews.firstMatch
+    let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
+    XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
+    text.tap()
+    app.typeText(sentence)
+    let start = Date()
+    XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
+    XCTAssertTrue(saved.waitForExistence(timeout: 60), "The server should apply the edit within 60 s")
+    say("SERVER ROUND PAGE SAVED \(since(start)) ms")
+    app.terminate()
+    app.launch()
+    openPlan(app)
+    XCTAssertTrue(containing(app.webViews.firstMatch, sentence.trimmingCharacters(in: .whitespaces)).waitForExistence(timeout: 60),
+                  "After a relaunch, Plan should show the sentence typed on the phone")
   }
 }

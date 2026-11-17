@@ -78,26 +78,37 @@ export function createAppRunner(): AppRunner {
   };
 }
 
-/** How the account ends a running app, each before the work it precedes, as AccountProvider wires it. */
-export function appTeardown(runner: AppRunner) {
+/** What runs for one sign-in and workspace and ends with them: the running app, and pages edited live. */
+interface Ends {
+  end(match?: (scope: Pick<AppScope, "signIn" | "workspaceId">) => boolean): void;
+}
+
+/**
+ * How the account ends a running app and the pages edited live, each before the work it precedes, as AccountProvider
+ * wires it. Ending a live page closes its socket, and its web view goes on the next render.
+ */
+export function appTeardown(...runners: readonly Ends[]) {
+  const end = (match?: (scope: Pick<AppScope, "signIn" | "workspaceId">) => boolean) => {
+    for (const runner of runners) runner.end(match);
+  };
   return {
-    /** Sign out's hook, after ending the app: before the outbox deletes anything. */
+    /** Sign out's hook, after ending them: before the outbox deletes anything. */
     signOut:
       <T>(hook: (leave: () => Promise<void>) => Promise<T>) =>
       (leave: () => Promise<void>) => {
-        runner.end();
+        end();
         return hook(leave);
       },
-    /** A 401 or another sign-in ends every app but the current sign-in's. Returns the unsubscribe. */
+    /** A 401 or another sign-in ends every one but the current sign-in's. Returns the unsubscribe. */
     follow: (account: Pick<Account, "subscribe" | "state">) =>
       account.subscribe(() => {
         const now = account.state();
-        runner.end((scope) => now.status !== "signed-in" || scope.signIn !== now.signIn);
+        end((scope) => now.status !== "signed-in" || scope.signIn !== now.signIn);
       }),
     /** The open workspace is now `workspaceId`, by a choice here or a change elsewhere. */
-    open: (workspaceId: string | null) => runner.end((scope) => scope.workspaceId !== workspaceId),
+    open: (workspaceId: string | null) => end((scope) => scope.workspaceId !== workspaceId),
     /** Show on phone off. */
-    hide: (workspaceId: string) => runner.end((scope) => scope.workspaceId === workspaceId),
+    hide: (workspaceId: string) => end((scope) => scope.workspaceId === workspaceId),
   };
 }
 

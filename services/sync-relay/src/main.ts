@@ -1474,8 +1474,9 @@ if (namedLiveConfig) {
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close);
   process.once("SIGTERM", ownerLive.close);
-  // A phone opens its pages only through the self-hosted live host, with a ticket only its sign-in redeems.
-  if (selfHost && deployment && accountResolvers.sessions) {
+  // A phone opens its pages only through the self-hosted live host, with a ticket only its sign-in redeems, and edits
+  // within the editor limits the desktop's admission sends.
+  if (selfHost && deployment && accountResolvers.sessions && desktopEditorLimits) {
     const hostId = selfHostedLiveHostId(deployment.history.namespace);
     phonePages = createPhonePages({
       storage,
@@ -1488,6 +1489,7 @@ if (namedLiveConfig) {
       tickets,
       sessions: accountResolvers.sessions,
       nowMs: () => Date.now(),
+      editorLimits: desktopEditorLimits,
     });
   }
   server.on("upgrade", (request, socket, head) => {

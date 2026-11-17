@@ -1,6 +1,11 @@
 // Words both apps show for a document (page). From the desktop's FileInspector, MarkdownView, fileInspectorUi
 // and StateMark; phone-only sentences are marked. Change them here, never in a copy.
 
+const couldNotOpenForEditing =
+  "dohc could not open this document for editing. You can still read it.";
+const setAsideReadOnly =
+  "This document became read-only before your edit saved. Copy your text to keep it.";
+
 export const documentWords = {
   loading: "Loading…",
   opening: "Opening…",
@@ -12,7 +17,7 @@ export const documentWords = {
   /** Phone: under "dohc could not open this file." when the editor files could not be written for lack of space. */
   notEnoughStorage: "Not enough storage on this phone. Free up space, then choose Try again.",
   noLongerAvailable: "This file is no longer available at this path.",
-  couldNotOpenForEditing: "dohc could not open this document for editing. You can still read it.",
+  couldNotOpenForEditing,
   documentActions: "Document actions",
   copyAsMarkdown: "Copy as Markdown",
   copied: "Copied",
@@ -32,6 +37,24 @@ export const documentWords = {
     tooLarge: { label: "Read-only", explanation: "This file is too large to edit in dohc." },
     readOnlyOffline: { label: "Read-only", explanation: "dohc could not reach the server." },
     readOnlyPhone: { label: "Read-only", explanation: "dohc can't edit pages on a phone yet." },
+    /**
+     * Phone, editing on the server: calm, so no glyph. Saved means the server's host applied every edit made here;
+     * Saving, that it hasn't confirmed some yet.
+     */
+    saved: { label: "Saved", explanation: "Your server has applied every edit you made here." },
+    saving: {
+      label: "Saving",
+      explanation: "Your server hasn't confirmed your latest edits yet. Keep this page open.",
+    },
+    /** Phone: the server didn't open the page for editing, or the open failed. */
+    readOnlyRefused: { label: "Read-only", explanation: couldNotOpenForEditing },
+    /** Phone: the server edits only pages a computer has opened live. */
+    readOnlyNeedsComputer: {
+      label: "Read-only",
+      explanation: "Open this page on a computer once to edit it here.",
+    },
+    /** Phone: the server refused an edit, which stays on screen to copy. */
+    readOnlySetAside: { label: "Read-only", explanation: setAsideReadOnly },
     /** Phone: the desktop's sentence names a trash the phone doesn't have. */
     deleted: {
       label: "Deleted",
@@ -51,8 +74,11 @@ export const documentWords = {
   restoring: "This page is being restored.",
   /** Phone: the desktop's button opens the full file in another app; the phone points to a computer. */
   largeFile: "Showing the start of a large file. Open it on a computer to see all of it.",
-  setAsideReadOnly:
-    "This document became read-only before your edit saved. Copy your text to keep it.",
+  setAsideReadOnly,
+  /** Phone: leaving a page whose edits the server hasn't applied. */
+  unsentTitle: "Your server hasn't saved your latest edits",
+  unsentBody: "Copy the page to keep them, or discard them.",
+  discardEdits: "Discard edits",
   /** Phone: a file chat's header button and its way back. */
   openPage: (name: string) => `Open ${name}`,
   /** Phone only: the page header's button back to the file's chat. */

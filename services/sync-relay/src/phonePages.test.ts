@@ -14,6 +14,7 @@ import type { LiveTicketScope } from "./liveBrowserContext";
 import { binding, keptByOwnerRestore, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
 import { createPhonePages, PHONE_OWNER_DOCUMENTS_PER_ACCOUNT } from "./phonePages";
+import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 
@@ -25,6 +26,7 @@ afterEach(async () => {
 
 // The personal route fixture's activation namespace, which its `ready()` retains an activation under.
 const namespace = "personal-live-route-test";
+const editorLimits = selfHostLiveProfile().editor;
 
 // `Bearer session:<user>:<session>:<kind>`, as the relay's phone-capable resolver answers it.
 const resolveAccountSession: ResolveAccountSession = async (request) => {
@@ -96,6 +98,7 @@ async function phone(options: { waitMs?: number } = {}) {
     tickets: { mint },
     sessions,
     nowMs: () => now,
+    editorLimits,
     ...(options.waitMs === undefined ? {} : { waitMs: options.waitMs }),
   });
   const hub = new DiscussionActivityHub();
@@ -135,6 +138,8 @@ const ready = answer({
   lineageClaimId: binding.lineageClaimId,
   ticket: "ticket-token",
   expiresAtMs: 2_020,
+  // The phone's editor takes its bounds from the answer, so they never drift from the relay's.
+  editorLimits,
 });
 
 it("answers a secret file's page exactly as a missing page, and enrolls nothing", async () => {
