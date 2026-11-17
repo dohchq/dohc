@@ -3768,6 +3768,7 @@ const activity = {
       preserveAgentRun?: boolean;
       notify?: boolean;
       expectedRootPath?: string;
+      ignoreFailure?: (error: unknown) => boolean;
     },
   ) => {
     if (!findWorkspace(workspaceId)) return Promise.resolve(false);
@@ -4636,7 +4637,11 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 
 async function closeDispatchRunActivity(
   workspace: Pick<CreatedWorkspace, "workspaceId"> & { attachmentId?: symbol },
-  options: { notifyRenderer?: boolean; unlessInUse?: boolean } = {},
+  options: {
+    notifyRenderer?: boolean;
+    unlessInUse?: boolean;
+    ignoreFailure?: (error: unknown) => boolean;
+  } = {},
 ): Promise<void> {
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
@@ -4656,6 +4661,7 @@ async function closeDispatchRunActivity(
               expectedRootPath: current.rootPath,
               preserveStatus: true,
               notify: options.notifyRenderer,
+              ...(options.ignoreFailure ? { ignoreFailure: options.ignoreFailure } : {}),
             });
           },
           ...(relayCloseTarget
@@ -10752,8 +10758,11 @@ function registerIpcHandlers(): void {
       const reopen = activity.listOpenWorkspaceIds().includes(workspaceId);
       await holdShareViewCopy(workspaceId, {
         sessions: requireEngineSessions(),
-        closeActivity: () =>
-          closeDispatchRunActivity(requireWorkspace(workspaceId), { notifyRenderer: false }),
+        closeActivity: (ignoreFailure) =>
+          closeDispatchRunActivity(requireWorkspace(workspaceId), {
+            notifyRenderer: false,
+            ignoreFailure,
+          }),
         // Each joined live page keeps its unsent edits as a draft before it
         // closes, and the rebuild saves those drafts. A copy with no window
         // attached has no pages open.

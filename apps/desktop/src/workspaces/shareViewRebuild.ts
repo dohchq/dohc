@@ -221,7 +221,11 @@ export async function holdShareViewCopy(
       holdForRebuild(workspaceId: string): Promise<void>;
       releaseRebuildHold(workspaceId: string): void;
     };
-    closeActivity(): Promise<void>;
+    /**
+     * Close the activity, running every step. A failure `ignoreFailure` names
+     * stops nothing, so the relay close and the window cleanup still run.
+     */
+    closeActivity(ignoreFailure: (error: unknown) => boolean): Promise<void>;
     closeLivePages(): Promise<void>;
   },
 ): Promise<void> {
@@ -230,9 +234,7 @@ export async function holdShareViewCopy(
     // The activity's last file reads go through the copy's session, which
     // the hold and the engine both refuse. What they would have recorded
     // stays on disk, where the rebuild's plan reads it.
-    await parts.closeActivity().catch((error: unknown) => {
-      if (!isClosedCopyRefusal(error)) throw error;
-    });
+    await parts.closeActivity(isClosedCopyRefusal);
     await holding;
     await parts.closeLivePages();
   } catch (error) {

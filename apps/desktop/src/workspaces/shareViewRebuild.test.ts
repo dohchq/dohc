@@ -437,7 +437,12 @@ describe("the words for a stopped rebuild", () => {
 // Main's hold, against the real session gate. The engine closed the copy
 // before main holds it, so it refuses every request but close.
 describe("holding a copy for its rebuild", () => {
-  async function heldCopy(closeActivity: (run: () => Promise<unknown>) => Promise<void>) {
+  async function heldCopy(
+    closeActivity: (
+      run: () => Promise<unknown>,
+      ignoreFailure: (error: unknown) => boolean,
+    ) => Promise<void>,
+  ) {
     const workspace = {
       workspaceId: "w",
       rootPath: await mkdtemp(join(tmpdir(), "dohc-hold-")),
@@ -475,15 +480,18 @@ describe("holding a copy for its rebuild", () => {
         sessions,
         closeLivePages: async () => undefined,
         // The activity's last file reads go through the copy's session.
-        closeActivity: () => closeActivity(() => sessions.run(workspace, async () => undefined)),
+        closeActivity: (ignoreFailure) =>
+          closeActivity(() => sessions.run(workspace, async () => undefined), ignoreFailure),
       });
     return { workspace, sessions, hold };
   }
 
   // A file the watcher saw last stays on disk, where the rebuild's plan reads it.
   it("holds the copy though the activity's last reads are refused", async () => {
-    const { workspace, sessions, hold } = await heldCopy(async (read) => {
-      await read();
+    const { workspace, sessions, hold } = await heldCopy(async (read, ignoreFailure) => {
+      await read().catch((error: unknown) => {
+        if (!ignoreFailure(error)) throw error;
+      });
     });
     await expect(hold()).resolves.toBeUndefined();
     await expect(sessions.run(workspace, async () => undefined)).rejects.toBeInstanceOf(
