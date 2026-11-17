@@ -402,6 +402,65 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 3 }));
   });
 
+  it("shows the newest page when a send skips past more than a page of messages, with the earlier ones still there to show", async () => {
+    const user = userEvent.setup();
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
+    });
+    signedIn([conversation({ last: sent(1, VIEWER, "Dinner Friday?"), unread: 0 })]);
+    // Sam sent 200 messages before this send's answer came back. A page holds 200.
+    const sams = Array.from({ length: 200 }, (_, index) => sent(index + 2, "sam", `Sam ${index}`));
+    let newest = 0;
+    bridgeMock.directHistory.mockImplementation(async (input: { before?: number }) => {
+      if (input.before !== undefined)
+        return {
+          conversationId: "conversation-sam",
+          messages: [sent(1, VIEWER, "Dinner Friday?"), sams[0]!],
+          more: false,
+        };
+      newest += 1;
+      return newest === 1
+        ? {
+            conversationId: "conversation-sam",
+            messages: [sent(1, VIEWER, "Dinner Friday?")],
+            more: false,
+          }
+        : {
+            conversationId: "conversation-sam",
+            messages: [...sams.slice(1), sent(202, VIEWER, "On my way")],
+            more: true,
+          };
+    });
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 202 });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(1));
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    await waitFor(() => expect(bridgeMock.directSend).toHaveBeenCalledTimes(1));
+    signedIn([conversation({ last: sent(202, VIEWER, "On my way"), unread: 200 })]);
+    act(() => changed());
+    // The newest page can't join what showed, so it shows on its own and the read mark moves to its end.
+    await waitFor(() =>
+      expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        viewerId: VIEWER,
+        scope: SCOPE,
+        conversationId: "conversation-sam",
+        seq: 202,
+      }),
+    );
+    expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(200);
+    await user.click(within(view).getByTestId("chats-dm-older"));
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(202));
+    expect(bridgeMock.directHistory).toHaveBeenLastCalledWith({
+      viewerId: VIEWER,
+      scope: SCOPE,
+      conversationId: "conversation-sam",
+      before: 3,
+    });
+  });
+
   it("reads the history again when a send skips past the other person's message, and marks nothing read past the gap", async () => {
     const user = userEvent.setup();
     let changed: () => void = () => {};

@@ -294,8 +294,9 @@ export function directMessageRecord(
 
 /**
  * Merges a page into what is shown, by seq. Seqs count every message, so a
- * newest page that starts past the next seq would leave a gap: it replaces
- * what is shown instead.
+ * newest page that starts past the next seq after the unbroken run shown would
+ * leave a gap: it replaces what is shown instead. A sent message already past
+ * the gap doesn't count, or a gap wider than a page would never close.
  */
 export function mergeDirectPage(
   shown: readonly DirectMessage[],
@@ -303,8 +304,7 @@ export function mergeDirectPage(
   newest: boolean,
 ): DirectMessage[] {
   if (page.messages.length === 0) return [...shown];
-  const lastShown = shown.at(-1)?.seq ?? 0;
-  if (newest && shown.length > 0 && page.messages[0]!.seq > lastShown + 1)
+  if (newest && shown.length > 0 && page.messages[0]!.seq > directShownThrough(shown) + 1)
     return [...page.messages];
   const bySeq = new Map(shown.map((message) => [message.seq, message]));
   for (const message of page.messages) bySeq.set(message.seq, message);
