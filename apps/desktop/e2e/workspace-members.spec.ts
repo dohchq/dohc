@@ -533,9 +533,9 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await relay?.stop();
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
-    await relay?.stop();
   }
 });
 
@@ -947,10 +947,10 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await relay?.stop();
     await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
-    await relay?.stop();
   }
 });
 
@@ -1100,9 +1100,9 @@ test("@two-client a member mentions the owner, the owner replies, and each Notic
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await relay?.stop();
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
-    await relay?.stop();
   }
 });
 
@@ -1376,9 +1376,9 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await relay?.stop();
     await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
-    await relay?.stop();
   }
 });
