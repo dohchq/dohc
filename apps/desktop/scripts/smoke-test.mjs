@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
-// Spawns the built desktop app for a few seconds and fails on fatal stderr
-// patterns (t3code's smoke pattern). Catches broken builds that unit tests
-// cannot see: missing modules, preload failures, renderer crashes.
+// Starts the built desktop app, waits for it to say it has started, keeps it
+// up for a few seconds, and asks it to quit. Fails on a start or a quit that
+// does not come, and on fatal stderr patterns (t3code's smoke pattern).
+// Catches broken builds that unit tests cannot see: missing modules, preload
+// failures, renderer crashes.
 
 const repoRoot = process.cwd();
 const mainEntry = join(repoRoot, "apps/desktop/dist/main/main.js");
@@ -50,7 +52,15 @@ const child = spawn(
 );
 
 let stderr = "";
+// dohc writes this line once its first window has painted and its engine has
+// answered (src/performance/launchMarks.ts).
+const STARTED_LINE = /\[desktop\] launch marks \(ms since process start\)/;
 const QUIT_LINE = /\[desktop\] quit: shutdown (?:finished in \d+ ms|ran past its \d+ ms budget)/;
+// A computer's first launch of dohc reads Electron and the fonts from a disk
+// nothing has read yet. On a fresh release runner that took 11 s, and a
+// signal sent before dohc has started ends the process with nothing written.
+const START_LIMIT_MS = 120_000;
+// How long dohc must stay up, once started, before it is asked to quit.
 const SMOKE_DURATION_MS = 8000;
 // dohc's shutdown takes at most QUIT_ASK_TIMEOUT_MS plus WILL_QUIT_BUDGET_MS
 // (src/shutdownBudgets.ts) before it writes that line.
@@ -59,18 +69,40 @@ const QUIT_LINE_LIMIT_MS = 15_000;
 // Mac that took from seconds to over 90 s, so the smoke stops the
 // process itself instead of failing.
 const TEARDOWN_GRACE_MS = 10_000;
+const spawnedAt = Date.now();
+let startedAfterMs = null;
+let neverStarted = false;
 let sentTerm = false;
+let shutdownOverran = false;
+let termTimer = null;
 let quitLineTimer = null;
 let teardownTimer = null;
 let stoppedAfterQuit = false;
 // Each stream is matched on its own, so the other stream's output cannot split the line.
 const streams = { stdout: "", stderr: "" };
-const findQuitLine = () =>
-  QUIT_LINE.exec(streams.stdout)?.[0] ?? QUIT_LINE.exec(streams.stderr)?.[0];
+const find = (line) => line.exec(streams.stdout)?.[0] ?? line.exec(streams.stderr)?.[0];
+const findQuitLine = () => find(QUIT_LINE);
+
+const startTimer = setTimeout(() => {
+  neverStarted = true;
+  child.kill("SIGKILL");
+}, START_LIMIT_MS);
 
 const onOutput = (stream) => (chunk) => {
   stderr += String(chunk);
   streams[stream] += String(chunk);
+  if (startedAfterMs === null && !neverStarted && find(STARTED_LINE)) {
+    startedAfterMs = Date.now() - spawnedAt;
+    clearTimeout(startTimer);
+    termTimer = setTimeout(() => {
+      sentTerm = true;
+      child.kill("SIGTERM");
+      quitLineTimer = setTimeout(() => {
+        shutdownOverran = true;
+        child.kill("SIGKILL");
+      }, QUIT_LINE_LIMIT_MS);
+    }, SMOKE_DURATION_MS);
+  }
   if (!sentTerm || teardownTimer || !findQuitLine()) return;
   clearTimeout(quitLineTimer);
   teardownTimer = setTimeout(() => {
@@ -82,13 +114,8 @@ child.stderr.on("data", onOutput("stderr"));
 // Electron routes some output to stdout depending on platform; scan both.
 child.stdout.on("data", onOutput("stdout"));
 
-const termTimer = setTimeout(() => {
-  sentTerm = true;
-  child.kill("SIGTERM");
-  quitLineTimer = setTimeout(() => child.kill("SIGKILL"), QUIT_LINE_LIMIT_MS);
-}, SMOKE_DURATION_MS);
-
 const clearTimers = () => {
+  clearTimeout(startTimer);
   clearTimeout(termTimer);
   clearTimeout(quitLineTimer);
   clearTimeout(teardownTimer);
@@ -131,13 +158,21 @@ function judge() {
     ((code !== null && code !== 0) || (signal !== null && signal !== "SIGTERM"));
   if (fatal.length > 0 || earlyExit || !finished || badExit) {
     console.error("Desktop smoke FAILED.");
-    if (earlyExit) {
+    if (neverStarted) {
+      console.error(`  dohc did not start within ${START_LIMIT_MS}ms, so the smoke stopped it`);
+    } else if (startedAfterMs === null) {
+      console.error(`  app exited before it started (code=${code}, signal=${signal})`);
+    } else if (earlyExit) {
       console.error(
         `  app exited early (code=${code}, signal=${signal}) before the ${SMOKE_DURATION_MS}ms window elapsed`,
       );
+    } else if (shutdownOverran) {
+      console.error(
+        `  dohc did not finish its shutdown within ${QUIT_LINE_LIMIT_MS}ms of SIGTERM, so the smoke stopped it`,
+      );
     } else if (!quitLine) {
       console.error(
-        `  dohc did not finish its shutdown within ${QUIT_LINE_LIMIT_MS}ms of SIGTERM (code=${code}, signal=${signal})`,
+        `  dohc ended at SIGTERM without finishing its shutdown (code=${code}, signal=${signal})`,
       );
     } else if (!finished) {
       console.error(`  ${quitLine}`);
@@ -153,6 +188,8 @@ function judge() {
     console.log(
       `${quitLine}. Electron was still exiting ${TEARDOWN_GRACE_MS}ms later, so the smoke stopped it.`,
     );
-  console.log("Desktop smoke passed: app ran with no fatal stderr output.");
+  console.log(
+    `Desktop smoke passed: dohc started in ${startedAfterMs}ms and ran with no fatal stderr output.`,
+  );
   process.exit(0);
 }
