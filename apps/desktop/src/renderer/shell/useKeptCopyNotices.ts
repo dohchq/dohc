@@ -7,7 +7,7 @@ import type { KeptCopyNotice } from "./useShellError";
 
 export function keptCopyMessage(path: string): string {
   if (isAccessRulePath(path)) {
-    return `dohc kept the access rule from outside dohc that Restore rule replaced at ${path}.`;
+    return `dohc kept the access rule from outside dohc that Restore rule removed or replaced at ${path}.`;
   }
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }
