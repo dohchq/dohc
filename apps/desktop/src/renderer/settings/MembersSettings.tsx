@@ -54,10 +54,20 @@ type ReportError = (
 ) => void;
 
 export const LEVEL_WORDS: Record<MemberLevel, string> = {
-  view: "Members can read everything and open apps.",
-  comment: "Members can read everything, post in Groups, and comment on files.",
+  view: "Members can read files and open apps.",
+  comment: "Members can read files, post in Groups, and comment on files.",
   edit: "Members can read, comment, and edit pages and Collections.",
 };
+// The level is what members get where no folder rule says otherwise.
+export const RULE_WORDS = "A folder's access rule can set another level there, or hide the folder.";
+function levelDescription(level: MemberLevel) {
+  return (
+    <>
+      <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>{" "}
+      <span data-testid="settings-members-level-rules">{RULE_WORDS}</span>
+    </>
+  );
+}
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 const LINK_SECRET: CopySecret = {
   what: "the invite link",
@@ -714,11 +724,9 @@ export function MembersPage(props: {
             }
           />
           <SettingRow
-            title="Member level"
+            title="Default member level"
             testId="settings-members-level"
-            description={
-              <span data-testid="settings-members-level-words">{LEVEL_WORDS[level]}</span>
-            }
+            description={levelDescription(level)}
           >
             {/* The spinner sits in the gap before the control and takes no
                 room, so the control never moves and lines up with the words
@@ -733,7 +741,7 @@ export function MembersPage(props: {
                 />
               ) : null}
               <SegmentedControl
-                label="Member level"
+                label="Default member level"
                 testId="settings-members-level-control"
                 value={level}
                 disabled={waiting}
@@ -754,11 +762,7 @@ export function MembersPage(props: {
           <SettingRow
             title="What members can do"
             testId="settings-members-level"
-            description={
-              <span data-testid="settings-members-level-words">
-                {LEVEL_WORDS[view.memberLevel]}
-              </span>
-            }
+            description={levelDescription(view.memberLevel)}
           />
         </SettingsSection>
       )}
