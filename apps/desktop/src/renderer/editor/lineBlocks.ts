@@ -196,14 +196,17 @@ function opensTable(header: string, delimiter: string): boolean {
 type Fence = { marker: string; length: number };
 
 /** The line index where a standalone `$$…$$` block ends, or null when the
- *  line does not open one. `dohc-markdown-extensions.ts` anchors the opener at
- *  column 0 and needs the first `$$` after it to end a line — anything else
+ *  line does not open one. `dohc-markdown-extensions.ts` allows up to three
+ *  spaces before the opener and needs the first `$$` after it to end a line — anything else
  *  is literal text, so an unclosed `$$` is not math and claims nothing. */
-function mathBlockEnd(lines: string[], start: number): number | null {
-  if (!(lines[start] ?? "").startsWith("$$")) return null;
+function mathBlockEnd(lines: string[], start: number, maxIndent = 3): number | null {
+  const first = lines[start] ?? "";
+  let open = 0;
+  while (open < maxIndent && first[open] === " ") open += 1;
+  if (!first.startsWith("$$", open)) return null;
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    const closing = line.indexOf("$$", index === start ? 2 : 0);
+    const closing = line.indexOf("$$", index === start ? open + 2 : 0);
     if (closing === -1) continue;
     return closing + 2 === line.length ? index : null;
   }
@@ -449,12 +452,16 @@ export function blockForLine(body: string, line: number): LineBlock {
     const marker = listMarker(text);
     const listOpen = openKind === "bullet" || openKind === "task" || openKind === "ordered";
     let opener = fenceOpener(text);
-    const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
     // of the same list, content indented into that item, or the next chunk of
     // an indented code block. A fence indented into a list item is one of
     // those continuations, which is why this is read before the starts below.
     const indent = leadingColumns(text);
+    // Display math opens after up to three spaces where a block can start. A
+    // line that continues a list or quote keeps reading it at column 0 only.
+    const continues =
+      (listOpen && (open || indent >= openIndent)) || (openKind === "quote" && (open || quoteOpen));
+    const mathClose = mathBlockEnd(lines, index, continues ? 0 : 3);
     const resumes =
       (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");

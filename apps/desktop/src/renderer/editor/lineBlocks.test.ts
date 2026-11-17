@@ -255,8 +255,8 @@ describe("blockForLine — the index", () => {
   });
 
   it("only reads math where the tokenizer does", () => {
-    // Indented, trailing text after the closer, and unclosed all stay text.
-    expect(blockForLine("Intro\n\n  $$x$$\n\nAfter", 5).index).toBe(2);
+    // Four spaces, trailing text after the closer, and unclosed all stay text.
+    expect(blockForLine("Intro\n\n    $$x$$\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n$$x$$ trailing\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("Intro\n\n$$x\n\nAfter", 5).index).toBe(2);
   });
@@ -1026,10 +1026,10 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an indented $$ is not math",
+      name: "$$ after up to three spaces is math",
       body: "Intro\n\n  $$x$$\n\nAfter",
       lands: [
-        [3, "$$x$$"],
+        [3, "x"],
         [5, "After"],
       ],
     },
