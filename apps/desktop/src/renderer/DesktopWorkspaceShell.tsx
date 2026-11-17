@@ -1168,6 +1168,14 @@ export function DesktopWorkspaceShell(props: {
   // The row or lane Settings search opened the Sharing view on.
   const [sharingFocus, setSharingFocus] = useState<SharingFocus | null>(null);
   const clearSharingFocus = useCallback(() => setSharingFocus(null), []);
+  // Keeps the row to scroll to, and drops the open the view has taken.
+  const takeSharingOpen = useCallback(
+    () =>
+      setSharingFocus((focus) =>
+        focus?.open ? { lane: focus.lane, shareId: focus.shareId } : focus,
+      ),
+    [],
+  );
   // Share removals from Chats, Sharing and the share dialog: one
   // notice with Undo, held here so it outlives the surface that removed the
   // access. Each removal and Undo counts, so an open Sharing view reads again.
@@ -8598,6 +8606,7 @@ export function DesktopWorkspaceShell(props: {
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
                                   onOpenShare: openReceivedShare,
+                                  onOpenTaken: takeSharingOpen,
                                   onShowSharing: (target) => {
                                     setSharingFocus(target);
                                     mutateWb((state) => ({

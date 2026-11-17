@@ -190,6 +190,8 @@ function View(props: {
     callbacks.onFocused();
     setShown(null);
   };
+  const openTaken = () =>
+    setShown((focus) => (focus?.open ? { lane: focus.lane, shareId: focus.shareId } : focus));
   const removals = useMemo(
     () => ({
       removed: (removal: Parameters<typeof shareRemovals.removed>[0]) => {
@@ -224,6 +226,7 @@ function View(props: {
         notSentWhileOpen={props.notSentWhileOpen ?? []}
         onOpenShare={callbacks.onOpenShare}
         onShowSharing={showSharing}
+        onOpenTaken={openTaken}
       />
     </WorkspaceSessionProvider>
   );
@@ -616,6 +619,38 @@ describe("the actions Settings offers on a share", () => {
     rerender(<View />);
     await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledWith(share));
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a Try again's share once, even when Sharing closes before its list answers", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [
+          received({
+            shareId: "member",
+            subjectName: "Community",
+            selector: { kind: "workspace", role: "member" },
+          }),
+        ],
+      }),
+    });
+    bridgeMock.getRelayReceivedShare.mockRejectedValueOnce(new Error("The server is unavailable."));
+    const { rerender } = render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Open" }));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    rerender(<View open={false} />);
+    const share = { shareId: "member", shareCode: "member-code" };
+    bridgeMock.listSharingAccess.mockReturnValue(deferred<AccessAnswer>().promise);
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share });
+    act(() => callbacks.reportError.mock.calls[0]![2]());
+    rerender(<View />);
+    await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledOnce());
+    // The list never answered, so the focus is still waiting to scroll.
+    rerender(<View open={false} />);
+    rerender(<View />);
+    await act(async () => {});
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
+    expect(callbacks.onOpenShare).toHaveBeenCalledOnce();
   });
 
   it.each(["success", "failure"])(

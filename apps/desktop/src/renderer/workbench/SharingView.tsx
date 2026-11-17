@@ -1116,6 +1116,8 @@ export function SharingView(props: {
   onOpenShare: (share: RelayShareReceivedRow) => void;
   // Shows this view on a row, after it closed too.
   onShowSharing: (target: SharingFocus) => void;
+  // The view took the focus's open, so showing the view again doesn't repeat it.
+  onOpenTaken: () => void;
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
@@ -1157,10 +1159,12 @@ export function SharingView(props: {
     },
   });
   // Try again outlives the view, so it shows the view again to open the share.
+  const { onOpenTaken } = props;
   useEffect(() => {
     if (!focus?.open || focus.shareId === null || focus.open.workspaceId !== workspaceId) return;
     setOpenTarget({ workspaceId, shareId: focus.shareId, name: focus.open.name });
-  }, [focus, workspaceId]);
+    onOpenTaken();
+  }, [focus, onOpenTaken, workspaceId]);
   const { onOpenShare, onShowSharing, reportError } = props;
   useEffect(() => {
     if (!openTarget || openTarget.workspaceId !== workspaceId) return;
