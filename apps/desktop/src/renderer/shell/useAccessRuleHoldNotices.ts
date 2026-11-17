@@ -217,15 +217,22 @@ export function accessRuleDecidedWords(
   level: MemberLevel,
 ): string {
   if (decision === "restore") {
+    if (hold.unreadable === "several-files" && hold.recordedRule === null) {
+      const copies = kept.length ? " dohc kept them as copies in Notices." : "";
+      return `Removed the new access rule files from ${placeOf(hold.folder)}.${copies}`;
+    }
     const [only] = hold.changes;
     const can =
       hold.changes.length === 1 && only
         ? canDo(resolve(only.before, level), hold.folder)
         : undefined;
     const now = can ? ` ${whoOf(only!.who)} can ${can}.` : "";
-    const keptCopy = kept[0]
-      ? ` dohc kept the rule from outside dohc in Notices, where Save copy puts it beside ${kept[0]}.`
-      : "";
+    const keptCopy =
+      kept.length > 1
+        ? ` dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: ${kept.join(", ")}.`
+        : kept[0]
+          ? ` dohc kept the rule from outside dohc in Notices, where Save copy puts it beside ${kept[0]}.`
+          : "";
     return `Restored ${ruleOfLower(hold.folder)}.${now}${keptCopy}`;
   }
   if (hold.reason === "removed")

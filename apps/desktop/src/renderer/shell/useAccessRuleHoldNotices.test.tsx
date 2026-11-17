@@ -353,6 +353,48 @@ describe("useAccessRuleHoldNotices", () => {
     expect(success().at(-1)!.action).toBeUndefined();
   });
 
+  it("says Restore removed new rule files and kept every copy in Notices", async () => {
+    const hold: AccessRuleHold = {
+      ...WIDENED,
+      recordedRule: null,
+      canAccept: false,
+      observedSha256: null,
+      changes: [],
+      unreadable: "several-files",
+    };
+    const h = harness([hold]);
+    h.bridge.decideAccessRule.mockResolvedValueOnce({
+      heldAccessRules: [],
+      kept: ["team/access.yaml", "team/\uFF41ccess.yaml"],
+    });
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    await waitFor(() =>
+      expect(h.errors().shellErrors.find((error) => error.tone === "success")).toMatchObject({
+        message:
+          "Removed the new access rule files from team. dohc kept them as copies in Notices.",
+      }),
+    );
+  });
+
+  it("names every saved copy when Restore puts back a recorded rule", async () => {
+    const h = harness([
+      { ...WIDENED, observedSha256: null, changes: [], unreadable: "several-files" },
+    ]);
+    h.bridge.decideAccessRule.mockResolvedValueOnce({
+      heldAccessRules: [],
+      kept: ["team/access.yaml", "team/\uFF41ccess.yaml"],
+    });
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    await waitFor(() =>
+      expect(h.errors().shellErrors.find((error) => error.tone === "success")).toMatchObject({
+        message:
+          "Restored the access rule for team. dohc kept the files from outside dohc as copies in Notices. Save copy puts each beside its original: team/access.yaml, team/\uFF41ccess.yaml.",
+      }),
+    );
+  });
+
   it("offers History after Remove rule", async () => {
     const h = harness([REMOVED]);
     await waitFor(() => expect(h.row("team/sub")).toBeDefined());
