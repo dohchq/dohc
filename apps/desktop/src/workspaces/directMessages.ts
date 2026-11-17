@@ -28,6 +28,12 @@ export interface DirectAccount {
 
 export type DirectFailure = "signed-out" | "unreachable" | "refused";
 
+/** A member picked in a workspace, and the account main checked that workspace against. */
+export interface DirectPick {
+  person: DirectMemberPick;
+  admitted: DirectAccount;
+}
+
 export class DirectMessageError extends Error {
   /** Whether trying again can help. It crosses IPC as the error's code, so a notice offers Try again only then. */
   readonly wireCode: typeof DIRECT_FINAL | typeof DIRECT_RETRY | typeof DIRECT_SIGNED_OUT;
@@ -130,10 +136,16 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     if (!credentials?.relayUrl) throw new DirectMessageError("signed-out", SIGNED_OUT);
     return credentials;
   };
-  /** The one door for a window's call: it names the account it read, and acts only while that account is signed in. */
-  const as = async (viewerId: string): Promise<Credentials> => {
+  /**
+   * The one door for a window's call: it names the account it read, and acts only while that account is signed in.
+   * A member pick names its workspace's member ids, which mean someone else on another server, so it also needs the
+   * server main admitted the pick on.
+   */
+  const as = async (viewerId: string, admitted?: DirectAccount): Promise<Credentials> => {
     const credentials = await signedIn();
     if (credentials.userId !== viewerId) throw new DirectMessageError("refused", OTHER_ACCOUNT);
+    if (admitted && accountKey(admitted) !== accountKey(credentials))
+      throw new DirectMessageError("refused", OTHER_ACCOUNT);
     return credentials;
   };
 
@@ -329,9 +341,11 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       return page;
     },
 
-    async resolve(viewerId: string, person: DirectMemberPick): Promise<DirectResolution> {
+    async resolve(viewerId: string, pick: DirectPick): Promise<DirectResolution> {
       const resolved = parseDirectResolution(
-        await post(await as(viewerId), DIRECT_ROUTES.resolve, { person }),
+        await post(await as(viewerId, pick.admitted), DIRECT_ROUTES.resolve, {
+          person: pick.person,
+        }),
       );
       if (!resolved)
         throw new DirectMessageError(
@@ -349,14 +363,25 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       viewerId: string,
       input: { messageId: string; body: string } & (
         | { conversationId: string }
-        | { person: DirectMemberPick }
+        | { pick: DirectPick }
       ),
     ): Promise<DirectSendResult> {
       // A direct message belongs to no workspace, so it links no file.
       if (extractChatFileReferences(input.body).length > 0)
         throw new DirectMessageError("refused", "Files can't be linked in a direct message.");
+      const { messageId, body } = input;
       const result = parseDirectSendResult(
-        await post(await as(viewerId), DIRECT_ROUTES.send, input),
+        "pick" in input
+          ? await post(await as(viewerId, input.pick.admitted), DIRECT_ROUTES.send, {
+              messageId,
+              body,
+              person: input.pick.person,
+            })
+          : await post(await as(viewerId), DIRECT_ROUTES.send, {
+              messageId,
+              body,
+              conversationId: input.conversationId,
+            }),
       );
       if (!result)
         throw new DirectMessageError(

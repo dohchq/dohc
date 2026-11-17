@@ -117,7 +117,10 @@ describe("direct messages for the signed-in account", () => {
       h.service.history("ann", "c1"),
       h.service.read("ann", "c1", 1),
       h.service.block("ann", "c1", true),
-      h.service.resolve("ann", { workspaceId: "w", memberId: "owner" }),
+      h.service.resolve("ann", {
+        person: { workspaceId: "w", memberId: "owner" },
+        admitted: { relayUrl: "https://relay.test", userId: "ann" },
+      }),
     ];
     for (const call of calls) await expect(call).rejects.toMatchObject({ failure: "refused" });
     expect(h.requests).toEqual([]);
@@ -125,6 +128,28 @@ describe("direct messages for the signed-in account", () => {
     expect(
       await h.service.send("cat", { conversationId: "c1", messageId: "m2", body: "hi" }),
     ).toEqual({ conversationId: "c1", seq: 1 });
+  });
+
+  it("sends a member pick only to the server main admitted it on", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/send", () => Response.json({ conversationId: "c1", seq: 1 }));
+    const pick = {
+      person: { workspaceId: "w", memberId: "owner" },
+      admitted: { relayUrl: "https://relay.test", userId: "ann" },
+    };
+    // Main admitted the pick for Ann on one server. Before the send read the
+    // account, Ann signed in on another server that has the same ids.
+    h.signInAs({ relayUrl: "https://other.test", userId: "ann" });
+    await expect(
+      h.service.send("ann", { pick, messageId: "m1", body: "for the first server's owner" }),
+    ).rejects.toMatchObject({ failure: "refused" });
+    await expect(h.service.resolve("ann", pick)).rejects.toMatchObject({ failure: "refused" });
+    expect(h.requests).toEqual([]);
+    h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
+    await expect(h.service.send("ann", { pick, messageId: "m2", body: "hi" })).resolves.toEqual({
+      conversationId: "c1",
+      seq: 1,
+    });
   });
 
   it("refuses as signed out without calling the server", async () => {
@@ -170,7 +195,10 @@ describe("direct messages for the signed-in account", () => {
     expect(h.requests).toEqual([]);
     await expect(
       h.service.send("ann", {
-        person: { workspaceId: "w", memberId: "bob" },
+        pick: {
+          person: { workspaceId: "w", memberId: "bob" },
+          admitted: { relayUrl: "https://relay.test", userId: "ann" },
+        },
         messageId: "m2",
         body: "Hello Bob",
       }),

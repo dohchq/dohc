@@ -281,7 +281,11 @@ import {
   createWorkspaceMembersActions,
   membersPlace,
 } from "./ipc/workspaceMembersActions";
-import { createDirectMessages, DirectMessageError } from "./workspaces/directMessages";
+import {
+  createDirectMessages,
+  DirectMessageError,
+  type DirectPick,
+} from "./workspaces/directMessages";
 import { directNoticeRead, directNoticeRows } from "./notices/directNotices";
 import { directMessageOperations } from "./ipc/directMessageOperations";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
@@ -9060,22 +9064,24 @@ function registerIpcHandlers(): void {
   directMessages.listen();
   // A member list names people by its workspace's member ids. The relay checks
   // both accounts are in that workspace; here main only checks the window's
-  // workspace belongs to the signed-in account.
-  const directPick = async (workspace: RegistryEntry, memberId: string) => {
+  // workspace belongs to the signed-in account, and names that account so the
+  // request goes nowhere else.
+  const directPick = async (workspace: RegistryEntry, memberId: string): Promise<DirectPick> => {
     const place = membersPlace(workspace);
     if (place === null || place === "joined-unknown")
       throw new DirectMessageError(
         "refused",
         "Open the workspace you share with this person to message them.",
       );
+    const person = { workspaceId: place.workspaceId, memberId };
     if (shareViewIsPresent(workspace.shareView)) {
       await warmCredentialCache();
-      if (!cachedCredentials || !joinedByAccount(workspace.shareView, cachedCredentials))
+      const admitted = cachedCredentials;
+      if (!admitted || !joinedByAccount(workspace.shareView, admitted))
         throw new DirectMessageError("refused", JOINED_BY_ANOTHER_ACCOUNT);
-    } else {
-      await remoteForWorkspace(workspace);
+      return { person, admitted };
     }
-    return { workspaceId: place.workspaceId, memberId };
+    return { person, admitted: (await remoteForWorkspace(workspace)).credentials };
   };
   registerOperations(operationBoundary, directMessageOperations, {
     directConversations: async () => {
@@ -9091,7 +9097,7 @@ function registerIpcHandlers(): void {
       directMessages.send(viewerId, {
         messageId,
         body,
-        person: await directPick(operation.workspace, memberId),
+        pick: await directPick(operation.workspace, memberId),
       }),
     directSend: ({ viewerId, conversationId, messageId, body }) =>
       directMessages.send(viewerId, { conversationId, messageId, body }),
