@@ -1097,6 +1097,132 @@ it("refuses an edit that adds what a note can't hold, before it writes or passes
   expect(unsaved(f)).toHaveLength(1);
 });
 
+// Proves: the room checks each edit on its copy of the note, which holds the owner's changes too.
+it("checks an edit on the owner's changes the room took", async () => {
+  const f = note();
+  const outside: Uint8Array[] = [];
+  const room = rooms(f, {}, { outside });
+  const a = editor(f, room, ana);
+  await a.open();
+  // The owner adds a list of days; the page gets it.
+  const owner = new Y.Doc();
+  Y.applyUpdate(owner, Y.encodeStateAsUpdate(a.doc));
+  const start = Y.encodeStateVector(owner);
+  owner.getMap("frontmatter").set("days", new Y.Map());
+  outside.push(Y.encodeStateAsUpdate(owner, start));
+  await a.next();
+  const days = a.doc.getMap("frontmatter").get("days") as Y.Map<unknown>;
+  const edit = (change: () => void) => {
+    const before = Y.encodeStateVector(a.doc);
+    change();
+    return Y.encodeStateAsUpdate(a.doc, before);
+  };
+  expect((await a.submit(edit(() => days.set("one", "Lisbon")))).result).toBe("success");
+  expect(await a.submit(edit(() => days.set("two", new Y.XmlHook("h") as never)))).toEqual({
+    result: "refused",
+    reason: "invalid-update",
+  });
+  expect(unsaved(f)).toHaveLength(1);
+});
+
+// Proves: a resent part of an edit the note holds is not kept, so a save never compares a
+// different one with what the note holds.
+it("keeps only the part of an edit that Yjs takes", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  const sentBefore = Y.encodeStateAsUpdate(a.doc);
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  // The same change, by the same editor at the same place, holding other words.
+  const other = new Y.Doc();
+  other.clientID = a.doc.clientID;
+  Y.applyUpdate(other, sentBefore);
+  const start = Y.encodeStateVector(other);
+  other.getMap("frontmatter").set("title", "Porto");
+  const resent = Y.encodeStateAsUpdate(other, start);
+  expect((await a.submit(resent)).result).toBe("success");
+  const rows = unsaved(f);
+  expect(rows).toHaveLength(2);
+  expect(Y.decodeUpdate(rows[1]!.updateBytes).structs).toEqual([]);
+});
+
+// Proves: the room checks the bytes it keeps, which Yjs can place apart from the bytes as sent.
+it("checks the part of an edit it keeps, not the edit as sent", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  const note_ = new Y.Doc();
+  Y.applyUpdate(note_, Y.encodeStateAsUpdate(a.doc));
+  const edit = (clientID: number, change: (page: Y.Doc) => void, gc = false) => {
+    const page = new Y.Doc({ gc });
+    page.clientID = clientID;
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(note_));
+    const before = Y.encodeStateVector(page);
+    change(page);
+    return Y.encodeStateAsUpdate(page, before);
+  };
+  const take = async (bytes: Uint8Array) => {
+    expect((await a.submit(bytes)).result).toBe("success");
+    Y.applyUpdate(note_, bytes);
+  };
+  // An edit that lists editor 7 twice: Yjs applies its second list alone, which hides the first.
+  // Each list is an edit's bytes without its count of editors and its removals, which are none yet.
+  const listed = (bytes: Uint8Array) => bytes.slice(1, -1);
+  const bogus = listed(
+    edit(7, (page) => page.getXmlFragment("body").push([new Y.XmlElement("bogus")])),
+  );
+  const ok = listed(edit(7, (page) => page.getMap("frontmatter").set("k", "ok")));
+  const twice = new Uint8Array([2, ...bogus, ...ok, 0]);
+  expect(Y.decodeUpdate(twice).structs.map((struct) => struct.id.clock)).toEqual([0, 0]);
+  expect(await a.submit(twice)).toEqual({ result: "refused", reason: "invalid-update" });
+  // The same with editor 8 between them, which keeps editor 7's lists apart once trimmed.
+  const between = listed(edit(8, (page) => page.getMap("frontmatter").set("j", "ok")));
+  const apart = new Uint8Array([3, ...bogus, ...between, ...ok, 0]);
+  expect(Y.decodeUpdate(apart).structs.map((struct) => struct.id.client)).toEqual([7, 8, 7]);
+  expect(await a.submit(apart)).toEqual({ result: "refused", reason: "invalid-update" });
+  // Editors listed lowest first: merging the room's edits for a save would drop editor 8's.
+  expect(await a.submit(new Uint8Array([2, ...ok, ...between, 0]))).toEqual({
+    result: "refused",
+    reason: "invalid-update",
+  });
+  // Listed highest first, as Yjs writes them, the same two are taken.
+  await take(new Uint8Array([2, ...between, ...ok, 0]));
+  // Editor 5 adds a paragraph and removes it, and Yjs collects its words (5,1 to 5,3).
+  await take(
+    edit(
+      5,
+      (page) => {
+        const body = page.getXmlFragment("body");
+        const paragraph = new Y.XmlElement("paragraph");
+        paragraph.insert(0, [new Y.XmlText("zz")]);
+        body.insert(body.length, [paragraph]);
+        page.transact(() => body.delete(body.length - 1, 1));
+      },
+      true,
+    ),
+  );
+  // Editor 9 types "abc" (9,2 to 9,4) in a paragraph of its own.
+  await take(
+    edit(9, (page) => {
+      const paragraph = new Y.XmlElement("paragraph");
+      paragraph.insert(0, [new Y.XmlText("abc")]);
+      page.getXmlFragment("body").insert(0, [paragraph]);
+    }),
+  );
+  // Six values from (9,2), placed after the collected (5,1): as sent, Yjs collects the three it
+  // doesn't hold, but cut to them they follow "c" into the paragraph's text.
+  const value = [119, 1, 118];
+  const resent = new Uint8Array([1, 1, 9, 2, 0x88, 5, 1, 6, ...Array(6).fill(value).flat(), 0]);
+  expect(await a.submit(resent)).toEqual({ result: "refused", reason: "invalid-update" });
+  const rows = unsaved(f).map((row) => row.updateBytes);
+  expect(rows).toHaveLength(3);
+  // A save of them all keeps every editor's changes.
+  const saved = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(Y.mergeUpdates(rows)));
+  expect([7, 8, 5, 9].map((client) => saved.get(client))).toEqual([1, 1, 4, 5]);
+});
+
 it("saves every taken edit before a step that closes the note, taking none until the step ends, then ends the room", async () => {
   const f = note();
   let release!: () => void;

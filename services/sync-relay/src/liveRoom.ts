@@ -10,7 +10,7 @@
 // Each save tells it the last position the save holds, so it can let go of those.
 import { createHash, randomUUID } from "node:crypto";
 import * as Y from "yjs";
-import { liveEditFitsNote } from "@dohc/ydoc-projection/live-journal-validation";
+import { liveEditFitsCopy } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import {
   liveAuthorIdentity,
@@ -160,6 +160,8 @@ interface Room {
   failingSince?: number;
   /** How many callers are saving everything first; while any is, the room takes no edits. */
   closing: number;
+  /** A copy of `doc` that each edit is checked on before the room takes it. Built when needed. */
+  copy?: Y.Doc;
 }
 
 /** Why a note that paused takes no edits. Its owner's Resume lifts it. */
@@ -228,9 +230,16 @@ export function roomAdmissible(doc: Y.Doc, update: Uint8Array): { clients: numbe
   const have = Y.decodeStateVector(Y.encodeStateVector(doc));
   const reach = new Map(have);
   const clients = new Set<number>();
+  // Yjs writes each editor's list once, highest editor first. Applying keeps only an editor's last
+  // list, and merging the room's edits for a save drops a list that comes after a lower editor's.
+  let last: number | undefined;
   for (const struct of decoded.structs) {
     if (struct instanceof Y.Skip) return null;
     const { client, clock } = struct.id;
+    if (client !== last) {
+      if (last !== undefined && client > last) return null;
+      last = client;
+    }
     const at = reach.get(client) ?? 0;
     if (clock > at) return null;
     const end = clock + struct.length;
@@ -352,6 +361,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       room.doc.off("update", observe);
     }
     if (!changed) return;
+    if (room.copy) Y.applyUpdate(room.copy, changed);
     room.bytes += changed.byteLength;
     passOn(
       room,
@@ -579,6 +589,28 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.members || room.unsaved.length || room.saving) return;
     dispose(room);
   }
+  /**
+   * Applies an edit to the room's copy of the note and says whether it fits there. The copy is
+   * built again whenever it may differ from the note, as after an edit the room did not take.
+   */
+  function fitsCopy(room: Room, bytes: Uint8Array) {
+    if (
+      room.copy &&
+      Buffer.compare(Y.encodeStateVector(room.copy), Y.encodeStateVector(room.doc)) !== 0
+    )
+      dropCopy(room);
+    if (!room.copy) {
+      room.copy = new Y.Doc({ gc: false });
+      Y.applyUpdate(room.copy, Y.encodeStateAsUpdate(room.doc));
+    }
+    if (liveEditFitsCopy(room.copy, bytes)) return true;
+    dropCopy(room);
+    return false;
+  }
+  function dropCopy(room: Room) {
+    room.copy?.destroy();
+    room.copy = undefined;
+  }
   function dispose(room: Room, reason: Error = new Error("Live room closed.")) {
     clearTimeout(room.timer);
     room.timer = undefined;
@@ -587,6 +619,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     for (const subscriber of room.subscribers) subscriber.wake?.();
     room.subscribers.clear();
     room.doc.destroy();
+    dropCopy(room);
     if (rooms.get(room.key) === room) rooms.delete(room.key);
   }
 
@@ -952,12 +985,23 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           // From here to the answer nothing waits, so the room cannot change under the checks.
           const sender = host.room.sender(input.authorContext);
           if (!sender) return refused("provenance-refused");
-          const plan = roomAdmissible(held.doc, bytes);
-          if (!plan || !liveEditFitsNote(held.doc, bytes)) return refused("invalid-update");
+          const vector = Y.encodeStateVector(held.doc),
+            have = Y.decodeStateVector(vector);
+          // The room keeps only the part the note doesn't hold yet, and checks those same bytes. The
+          // save would compare a resent part with the note, and Yjs can place a trimmed edit, or
+          // one that lists an editor twice, apart from the bytes as sent.
+          let taken: Uint8Array;
+          try {
+            taken = Y.diffUpdate(bytes, vector);
+          } catch {
+            return refused("invalid-update");
+          }
+          const plan = roomAdmissible(held.doc, taken);
+          if (!plan) return refused("invalid-update");
           const seed = liveJournalSeedClientId(storage, held.document);
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");
-          const have = Y.decodeStateVector(Y.encodeStateVector(held.doc));
+          if (!fitsCopy(held, taken)) return refused("invalid-update");
           let written: ReturnType<typeof appendLiveRoomEdit>;
           try {
             written = appendLiveRoomEdit(storage, {
@@ -967,20 +1011,24 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
                 clientId,
                 inNote: (have.get(clientId) ?? 0) > 0,
               })),
-              updateBytes: bytes.slice(),
+              updateBytes: taken,
               receivedAtMs: Date.now(),
             });
           } catch (error) {
+            dropCopy(held);
             if (error instanceof SyncRelayQuotaExceededError) return refused("capacity-refused");
             throw error;
           }
-          if (written.kind === "refused") return refused("provenance-refused");
-          Y.applyUpdate(held.doc, bytes, subscriber);
-          held.bytes += bytes.byteLength;
-          held.unsaved.push({ position: written.position, sender, bytes });
+          if (written.kind === "refused") {
+            dropCopy(held);
+            return refused("provenance-refused");
+          }
+          Y.applyUpdate(held.doc, taken, subscriber);
+          held.bytes += taken.byteLength;
+          held.unsaved.push({ position: written.position, sender, bytes: taken });
           passOn(
             held,
-            { journalCursor: written.position, updateBytes: bytes },
+            { journalCursor: written.position, updateBytes: taken },
             { taken: true, except: subscriber },
           );
           scheduleSave(held, saveEveryMs);
