@@ -478,6 +478,21 @@ describe("the words for a stopped rebuild", () => {
     expect(stop!.detail.length).toBeLessThan(400);
   });
 
+  it("keeps a long path whole when no folder is between its first folder and its name", () => {
+    const path = `${"long folder ".repeat(10)}/${"a long name ".repeat(20)}.md`;
+    expect(path.length).toBeGreaterThan(300);
+    expect(stoppedAt("share-view-rebuild-disk-unreadable", path)?.detail).toBe(
+      `dohc could not read ${path}. If another program has it open, close it, then choose Try again.`,
+    );
+  });
+
+  it("cuts a path that is one long name in the middle, keeping its end and extension", () => {
+    const path = `${"draft ".repeat(60)}final (2).md`;
+    const stop = stoppedAt("share-view-rebuild-disk-unreadable", path);
+    expect(stop?.detail).toMatch(/^dohc could not read draft draft .*…l \(2\)\.md\. If another/u);
+    expect(stop!.detail.length).toBeLessThan(400);
+  });
+
   it("keeps an engine code it has no words for, for Copy details", () => {
     expect(
       shareViewRebuildStop({ kind: "failed", error: refused("share-view-rebuild-new-code") }),

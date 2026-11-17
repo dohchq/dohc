@@ -406,10 +406,23 @@ const REBUILD_STOPS_AT: Partial<Record<string, (path: string) => string>> = {
 // A stop's words fit the view's bound with room to spare.
 const STOP_PATH_MAX = 300;
 
-/** A long path as its first folder, "…", and as many of its last parts as fit. */
+/**
+ * A long path as its first folder, "…", and as many of its last parts as
+ * fit. A path with no folder between its first and its name stays whole. A
+ * path that is one long name is cut in the middle, as a row cuts it
+ * (`MiddleCutName`): its start gives way behind "…", and its last five
+ * characters and extension stay.
+ */
 function stopPath(path: string): string {
   if (path.length <= STOP_PATH_MAX) return path;
   const parts = path.split("/");
+  if (parts.length === 2) return path;
+  if (parts.length === 1) {
+    const chars = Array.from(path);
+    const extension = /\.[^.\s]{1,15}$/u.exec(path);
+    const kept = Array.from(extension && extension.index > 0 ? extension[0] : "").length + 5;
+    return `${chars.slice(0, STOP_PATH_MAX - kept - 1).join("")}…${chars.slice(-kept).join("")}`;
+  }
   let tail = parts.pop()!;
   while (
     parts.length > 1 &&
@@ -417,7 +430,7 @@ function stopPath(path: string): string {
   ) {
     tail = `${parts.pop()!}/${tail}`;
   }
-  return parts.length === 0 ? tail : `${parts[0]!}/…/${tail}`;
+  return `${parts[0]!}/…/${tail}`;
 }
 
 /** The code an engine refusal carries, through the errors that wrap it. */
