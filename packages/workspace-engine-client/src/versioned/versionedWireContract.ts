@@ -27,6 +27,7 @@ export const VERSIONED_METHOD = {
   versionsMerge: "versionedText.merge",
   versionsCompare: "versionedText.compare",
   versionsCompareFiles: "versions.compareFiles",
+  versionsRuleMergeOrder: "versions.ruleMergeOrder",
   secretsWrite: "secrets.write",
   secretsList: "secrets.list",
   secretsStateExists: "secrets.stateExists",
@@ -213,6 +214,14 @@ type VersionsCompareFilesParams = JsonObject & {
   targetVersionId: string;
   afterPath?: string;
   byteBudget?: number;
+};
+
+type VersionsRuleMergeOrderParams = JsonObject & {
+  workspaceId?: string;
+  sourceVersionId: string;
+  targetVersionId: string;
+  writes: string[];
+  deletes: string[];
 };
 
 type SecretsWriteParams = JsonObject & {
@@ -420,6 +429,8 @@ type VersionsCompareResult = typeof VersionedComparisonRecordSchema.Type;
 
 type VersionsCompareFilesResult = typeof VersionsCompareFilesResultSchema.Type;
 
+type VersionsRuleMergeOrderResult = typeof VersionsRuleMergeOrderResultSchema.Type;
+
 export type SecretMomentRecord = typeof SecretMomentRecordSchema.Type;
 
 type SecretWriteResult = typeof SecretWriteResultSchema.Type;
@@ -476,6 +487,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeParams;
   [VERSIONED_METHOD.versionsCompare]: VersionsCompareParams;
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesParams;
+  [VERSIONED_METHOD.versionsRuleMergeOrder]: VersionsRuleMergeOrderParams;
   [VERSIONED_METHOD.secretsWrite]: SecretsWriteParams;
   [VERSIONED_METHOD.secretsList]: SecretsListParams;
   [VERSIONED_METHOD.secretsStateExists]: WorkspaceOnlyParams;
@@ -524,6 +536,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeResult;
   [VERSIONED_METHOD.versionsCompare]: VersionsCompareResult;
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResult;
+  [VERSIONED_METHOD.versionsRuleMergeOrder]: VersionsRuleMergeOrderResult;
   [VERSIONED_METHOD.secretsWrite]: SecretWriteResult;
   [VERSIONED_METHOD.secretsList]: SecretsListResult;
   [VERSIONED_METHOD.secretsStateExists]: boolean;
@@ -889,6 +902,13 @@ const VersionsCompareFilesResultSchema = mutableStruct({
   nextCursor: NullableString,
 });
 
+// Both null when no order of single rule writes keeps reach within bounds.
+const RuleMergePathsSchema = Schema.NullOr(Schema.mutable(Schema.Array(Schema.String)));
+const VersionsRuleMergeOrderResultSchema = mutableStruct({
+  writes: RuleMergePathsSchema,
+  deletes: RuleMergePathsSchema,
+});
+
 const BinaryReadResultSchema = Schema.NullOr(
   Schema.Union([
     mutableStruct({
@@ -1128,6 +1148,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.versionsMerge]: VersionsMergeResultSchema,
   [VERSIONED_METHOD.versionsCompare]: VersionedComparisonRecordSchema,
   [VERSIONED_METHOD.versionsCompareFiles]: VersionsCompareFilesResultSchema,
+  [VERSIONED_METHOD.versionsRuleMergeOrder]: VersionsRuleMergeOrderResultSchema,
   [VERSIONED_METHOD.secretsWrite]: SecretWriteResultSchema,
   [VERSIONED_METHOD.secretsList]: SecretsListResultSchema,
   [VERSIONED_METHOD.secretsStateExists]: Schema.Boolean,

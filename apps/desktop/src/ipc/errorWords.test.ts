@@ -38,6 +38,7 @@ import {
   liveFolderTitle,
   LivePageOwnedError,
   MergeStoppedPartwayError,
+  MergeWidensAccessError,
   RestorePolicyRefusalError,
 } from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
@@ -691,6 +692,13 @@ describe("error words", () => {
     expect(
       isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version")),
     ).toBe(false);
+  });
+
+  it("says why a merge that would widen access midway merged nothing, with no Try again", () => {
+    const refused = new MergeWidensAccessError();
+    const words = readError(acrossIpc(refused, "desktop:merge-workspace-version"));
+    expect(words).toMatchObject({ words: refused.message, canRetry: false });
+    expect(words.words).toMatch(/^Nothing was merged\./);
   });
 
   it("keeps a shared live file's restore words within 500 characters, with what to do", () => {

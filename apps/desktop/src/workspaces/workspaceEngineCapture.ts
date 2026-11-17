@@ -1381,6 +1381,17 @@ export class MergeStoppedPartwayError extends Error {
   }
 }
 
+// No order of a merge's single rule writes keeps everyone within what Main
+// gives them before and after the merge, so nothing was merged.
+export class MergeWidensAccessError extends Error {
+  constructor() {
+    super(
+      "Nothing was merged. In any order, this Version's access rule changes would briefly give someone more access than they have before or after the merge. Change those rules in Main one folder at a time, then merge again.",
+    );
+    this.name = "MergeWidensAccessError";
+  }
+}
+
 // History's current rules refused a restore. An unreadable rules file's
 // message leads with the files dohc could not read, so the error map names
 // them after IPC turns the error into one string. The parser's text follows,
@@ -7682,11 +7693,13 @@ export function createWorkspaceEngineCapture(
         const respelled = new Set(
           deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
         );
-        // A folder's rule merges before the files it covers, outer folders
-        // first, and its delete after them, inner folders first, so Main
-        // never journals a file its rule does not cover yet. A respelled
-        // rule's old spelling goes with the deletes: the engine keeps a file
-        // on disk that another head still reaches.
+        // A folder's rule merges before the files it covers, and its delete
+        // after them, so Main never journals a file its rule does not cover
+        // yet. A respelled rule's old spelling goes with the deletes: the
+        // engine keeps a file on disk that another head still reaches. The
+        // engine orders the rule writes, and then the deletes, so that no
+        // single one gives anyone more than Main gives them before and after
+        // the merge, trying outer writes and inner deletes first.
         const depth = (path: string) => path.split("/").length;
         const ruleWrites = changedPaths
           .filter((path) => isAccessRulePath(path) && !deleted.has(path))
@@ -7694,13 +7707,43 @@ export function createWorkspaceEngineCapture(
         const ruleDeletes = deletedPaths
           .filter(isAccessRulePath)
           .sort((a, b) => depth(b) - depth(a));
+        const orderRules = async (writes: string[], deletes: string[]) =>
+          writes.length + deletes.length > 1
+            ? await engine.accessRuleMergeOrder({
+                workspaceId,
+                sourceVersionId,
+                targetVersionId: ENGINE_MAIN_VERSION_ID,
+                writes,
+                deletes,
+              })
+            : { writes, deletes };
+        const ruleOrder = await orderRules(ruleWrites, ruleDeletes);
+        if (ruleOrder === null) throw new MergeWidensAccessError();
         const mergeOrder = [
-          ...ruleWrites,
+          ...ruleOrder.writes,
           ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
             (path) => !isAccessRulePath(path),
           ),
-          ...ruleDeletes,
+          ...ruleOrder.deletes,
         ];
+        // A rule that conflicts keeps Main's, which the order assumed it
+        // replaced. The rule changes still to come are ordered again from
+        // Main as it is, and the merge stops if none of their orders is safe.
+        const reorderAfterRuleConflict = async (index: number) => {
+          const rest = mergeOrder.slice(index + 1);
+          const restWrites = rest.filter((path) => ruleOrder.writes.includes(path));
+          const restDeletes = rest.filter((path) => ruleOrder.deletes.includes(path));
+          if (restWrites.length + restDeletes.length === 0) return;
+          const reordered = await orderRules(restWrites, restDeletes);
+          if (reordered === null) throw new MergeWidensAccessError();
+          mergeOrder.splice(
+            index + 1,
+            rest.length,
+            ...reordered.writes,
+            ...rest.filter((path) => !isAccessRulePath(path)),
+            ...reordered.deletes,
+          );
+        };
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.
@@ -7730,9 +7773,11 @@ export function createWorkspaceEngineCapture(
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
         let unchangedFileCount = 0;
-        for (const path of mergeOrder) {
+        for (let index = 0; index < mergeOrder.length; index += 1) {
+          const path = mergeOrder[index]!;
           if (openConflictPaths.has(path)) {
             conflictCount += 1;
+            if (isAccessRulePath(path)) await reorderAfterRuleConflict(index);
             continue;
           }
           const result = await engine.mergeTextFileFromVersion({
@@ -7748,6 +7793,7 @@ export function createWorkspaceEngineCapture(
           }
           if (result.kind === "conflict") {
             conflictCount += 1;
+            if (isAccessRulePath(path)) await reorderAfterRuleConflict(index);
             continue;
           }
           mergedFileCount += 1;

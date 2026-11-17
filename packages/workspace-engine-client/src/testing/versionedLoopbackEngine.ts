@@ -328,6 +328,11 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.searchEnsureIndex]: {
     requiredStrings: ["workspaceId", "versionId"],
   },
+  [VERSIONED_METHOD.versionsRuleMergeOrder]: {
+    requiredStrings: ["sourceVersionId", "targetVersionId"],
+    optionalStrings: ["workspaceId"],
+    optionalJson: ["writes", "deletes"],
+  },
 } satisfies Record<VersionedMethod, SerdeParamShape>;
 
 interface LoopbackFile {
@@ -1200,6 +1205,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.compare(state, workspace, params);
       case VERSIONED_METHOD.versionsCompareFiles:
         return this.compareFiles(state, params);
+      // The loopback does not judge reach. It keeps the order it was given;
+      // the engine's order is tested in dohc-engine-files.
+      case VERSIONED_METHOD.versionsRuleMergeOrder:
+        return { writes: params.writes ?? [], deletes: params.deletes ?? [] };
       case VERSIONED_METHOD.secretsWrite:
         return this.secretWrite(state, workspace, params, parsedSecretWrite!);
       case VERSIONED_METHOD.secretsList:

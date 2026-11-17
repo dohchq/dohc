@@ -768,6 +768,29 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return { entries: page.entries, nextAfterPath: page.nextCursor };
   }
 
+  // The order a merge writes, then deletes, these rule files in, so that no
+  // step widens anyone's reach past both Main before and after it. Null when
+  // no such order exists.
+  async accessRuleMergeOrder(input: {
+    workspaceId: string;
+    sourceVersionId: string;
+    targetVersionId: string;
+    writes: string[];
+    deletes: string[];
+  }): Promise<{ writes: string[]; deletes: string[] } | null> {
+    this.assertWorkspace(input.workspaceId);
+    const order = await this.request(VERSIONED_METHOD.versionsRuleMergeOrder, {
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      writes: input.writes,
+      deletes: input.deletes,
+    });
+    return order.writes === null || order.deletes === null
+      ? null
+      : { writes: order.writes, deletes: order.deletes };
+  }
+
   async mergeTextFileFromVersion(input: {
     workspaceId: string;
     targetVersionId: string;

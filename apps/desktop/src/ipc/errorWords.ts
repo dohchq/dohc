@@ -529,6 +529,9 @@ export function readError(error: unknown): ReadError {
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
+  // Trying again gives the same answer until Main's rules change.
+  if (name === "MergeWidensAccessError")
+    return { words: message, mapped: false, cause: text, canRetry: false };
   if (
     name === "DaemonRefusalError" &&
     code === "INVALID_PARAMS" &&

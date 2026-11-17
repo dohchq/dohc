@@ -670,6 +670,16 @@ export interface VersionedTextStore {
     targetVersionId: VersionId;
     afterPath?: string;
   }): Promise<VersionFileChangeEntryPage>;
+  // The order a Version merge writes, then deletes, these access rule files
+  // in, so that no single step gives anyone more than the target gives them
+  // both before and after the merge. Null when no order of single writes does.
+  accessRuleMergeOrder(input: {
+    workspaceId: WorkspaceId;
+    sourceVersionId: VersionId;
+    targetVersionId: VersionId;
+    writes: string[];
+    deletes: string[];
+  }): Promise<{ writes: string[]; deletes: string[] } | null>;
   // Page-shaped on purpose: the engine pages `conflicts.list` under a
   // byte budget, and a drain here is what let one caller undo that. A caller
   // that needs every row loops pages; most callers need one.

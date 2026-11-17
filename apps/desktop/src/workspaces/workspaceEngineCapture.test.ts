@@ -36,6 +36,7 @@ import {
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
   MergeStoppedPartwayError,
+  MergeWidensAccessError,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
@@ -450,6 +451,73 @@ describe("merge materialization order", () => {
     } finally {
       await engine.stop();
     }
+  });
+});
+
+describe("merge rule order from the engine", () => {
+  // The engine judges the order (dohc-engine-files and the runtime's
+  // access_rule_order tests). Here it answers with a fixed order or none.
+  const VIEW_RULE = "members: view\n";
+  async function mergeWithRuleOrder(order: { writes: string[]; deletes: string[] } | null) {
+    const root = await createTestScratch("dohc-merge-rule-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const merged: string[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsRuleMergeOrder) {
+        return { id: request.id, result: order ?? { writes: null, deletes: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        merged.push((request.params as { path: string }).path);
+      }
+      return await send(request);
+    });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "team/access.yaml", text: VIEW_RULE });
+    await write(root, "team/access.yaml", VIEW_RULE);
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const [path, text] of [
+        ["team/access.yaml", "members: edit\n"],
+        ["team/private/access.yaml", VIEW_RULE],
+        ["team/private/a.md", "alpha\n"],
+      ] as const) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text });
+      }
+      await engine.switchVersion("main");
+      const failure = await engine.mergeVersionIntoMain(draftId).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      const onDisk = await readFile(join(root, "team/access.yaml"), "utf8");
+      return { failure, merged, onDisk };
+    } finally {
+      await engine.stop();
+    }
+  }
+
+  it("writes the rules in the engine's order before the files they cover", async () => {
+    const { failure, merged } = await mergeWithRuleOrder({
+      writes: ["team/private/access.yaml", "team/access.yaml"],
+      deletes: [],
+    });
+    expect(failure).toBeNull();
+    expect(merged).toEqual(["team/private/access.yaml", "team/access.yaml", "team/private/a.md"]);
+  });
+
+  it("refuses a merge with no safe rule order and writes nothing", async () => {
+    const { failure, merged, onDisk } = await mergeWithRuleOrder(null);
+    expect(failure).toBeInstanceOf(MergeWidensAccessError);
+    expect(merged).toEqual([]);
+    expect(onDisk).toBe(VIEW_RULE);
   });
 });
 
