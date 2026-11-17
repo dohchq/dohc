@@ -287,3 +287,36 @@ fn adds_to(
     kept.apply(&native).map_err(collab)?;
     Ok((bounded(&kept)? != before).then_some(native))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two notes' retired queues can each keep the same taken bytes.
+    #[test]
+    fn two_retired_queues_keep_the_same_taken_bytes() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("retired-taken").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let base = b"base";
+        store
+            .write_with(&NoFaults, |tx| {
+                put_binary_blob_with_sha(tx, base, &hex_sha256(base))?;
+                for object in ["first", "second"] {
+                    let binding = LiveObjectBinding {
+                        workspace_id: "workspace".into(),
+                        main_version_id: "main".into(),
+                        object_id: object.into(),
+                        lineage_claim_id: hex_sha256(base),
+                        current_path: format!("{object}.md"),
+                        selector_paths: vec![format!("{object}.md")],
+                        restore_fence_generation: 0,
+                    };
+                    let parent = open_closed_outbox_in_tx(tx, &binding, 1)?;
+                    close_generation_in_tx(tx, &binding, &hex_sha256(base))?;
+                    retain_in(tx, parent.as_ref(), 1, b"taken", 1)?;
+                }
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+    }
+}

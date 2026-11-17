@@ -371,8 +371,7 @@ async fn an_engine_hosts_live_editing_or_runs_owner_calls_not_both() {
                     ),
                 )
                 .await
-                .err()
-                .expect("a call without the owner's connection is refused");
+                .expect_err("a call without the owner's connection is refused");
             assert_eq!(stranger.code, ErrorCode::WorkspaceUnavailable);
             provision().await.unwrap();
             list().await.err()
