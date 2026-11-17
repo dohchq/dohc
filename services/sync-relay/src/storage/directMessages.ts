@@ -292,9 +292,9 @@ export function sendDirectMessage(
       }
       // A deleted account leaves its conversations.
       if (!isPerson(storage, conversationId, other)) return { ok: false, reason: "not_found" };
-    } else if (accountIsFenced(storage, other)) {
-      return { ok: false, reason: "not_found" };
     }
+    // An account being deleted keeps its rows until the purge, but reads nothing new.
+    if (accountIsFenced(storage, other)) return { ok: false, reason: "not_found" };
     if (blocks(storage, other, caller)) return { ok: false, reason: "blocked" };
     // Every limit is checked before anything is written, so a refusal leaves no empty conversation.
     const sentSince = (windowMs: number, firstOnly: boolean) =>
@@ -350,9 +350,7 @@ export function sendDirectMessage(
         `INSERT INTO ${USAGE} (user_id, stored_bytes) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET stored_bytes = stored_bytes + excluded.stored_bytes`,
       )
       .run(caller, bytes);
-    storage.db
-      .prepare(`UPDATE ${PEOPLE} SET read_seq = ? WHERE conversation_id = ? AND user_id = ?`)
-      .run(seq, id, caller);
+    // The sender's read mark stays: a message the other person sent just before may not have reached them.
     const wake = [caller, other];
     bump(storage, wake);
     return { ok: true, conversationId: id, seq, wake };

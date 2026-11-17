@@ -60,9 +60,14 @@ export function parseDirectMessageRoute(parts: readonly string[]): DirectMessage
     if (parts[2] === "send") return { route: "direct-send" };
     if (parts[2] === "activity") return { route: "direct-activity" };
   }
-  if (parts.length === 5 && parts[2] === "conversations" && isDirectId(parts[3])) {
+  if (
+    parts.length === 5 &&
+    parts[2] === "conversations" &&
+    isDirectId(parts[3]) &&
+    Object.hasOwn(CONVERSATION_ACTIONS, parts[4]!)
+  ) {
     const route = CONVERSATION_ACTIONS[parts[4] as keyof typeof CONVERSATION_ACTIONS];
-    if (route) return { route, conversationId: parts[3] };
+    return { route, conversationId: parts[3] };
   }
   throw notFound();
 }

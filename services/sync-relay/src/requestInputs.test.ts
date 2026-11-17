@@ -5,7 +5,7 @@ import {
 } from "../../../packages/workspace-core/src/metadata";
 import { parseWorkspaceId, RESERVED_WORKSPACE_IDS } from "./requestInputs";
 
-it.each(["shares", "notices", "link", "account"])(
+it.each(["shares", "notices", "link", "account", "direct"])(
   "refuses the reserved workspace ID %s",
   (workspaceId) => {
     expect(() => parseWorkspaceId(workspaceId)).toThrowError(

@@ -5,7 +5,7 @@ import {
   type DirectConversation,
   type DirectMemberPick,
 } from "@dohc/security-contract/direct-messages";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { parseRoute } from "./relayRoute";
 import type { SyncRelayHandler } from "./server";
@@ -152,6 +152,9 @@ describe("direct message routes", () => {
       "/sync/direct/conversations/c-1",
       "/sync/direct/conversations/c-1/other",
       "/sync/direct/conversations/c%201/read",
+      // Names an object inherits are not actions.
+      "/sync/direct/conversations/c-1/toString",
+      "/sync/direct/conversations/c-1/constructor",
     ]) {
       expect(() => parse(path)).toThrow();
     }
@@ -353,6 +356,17 @@ describe("direct message routes", () => {
     expect(only((await list(h, "ana")).conversations).unread).toBe(1);
   });
 
+  it("leaves a message the sender has not read unread when they send after it", async () => {
+    const { h } = await seed();
+    const ana = await member(h, "ana");
+    const conversationId = await sent(h, OWNER, pick(ana), "1");
+    await post(h, "ana", `/sync/direct/conversations/${conversationId}/read`, { seq: 1 });
+    await sent(h, OWNER, { conversationId }, "2");
+    // Ana answers before her window read "2".
+    await sent(h, "ana", { conversationId }, "3");
+    expect(only((await list(h, "ana")).conversations).unread).toBe(1);
+  });
+
   it("refuses the blocked person's sends, in the conversation and from the member list, until the block is undone", async () => {
     const { h } = await seed();
     const ana = await member(h, "ana");
@@ -405,9 +419,10 @@ describe("direct message routes", () => {
 
     expect((await block(h, "ana", conversationId, true)).status).toBe(200);
     const [ownerAt, blockedAt] = [await revision(OWNER), await revision("ana")];
-    const anaQuiet = h(request("ana", `/sync/direct/activity?since=${blockedAt}&waitMs=150`));
+    const wake = vi.spyOn(activity, "wake");
     expect((await send(h, OWNER, { conversationId })).status).toBe(403);
-    expect((await json(await anaQuiet)).revision).toBe(blockedAt);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await revision("ana")).toBe(blockedAt);
     expect(await revision(OWNER)).toBe(ownerAt);
   });
 
@@ -437,6 +452,21 @@ describe("direct message routes", () => {
     expect(
       context.db.prepare("SELECT count(*) AS n FROM sync_relay_direct_messages").get()!.n,
     ).toBe(0);
+  });
+
+  it("refuses a new message to an account whose deletion has begun, and still answers a retry", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, "ana");
+    const conversationId = await sent(h, OWNER, pick(ana), "before");
+    expect((await send(h, OWNER, { conversationId }, "kept", "before-fence")).status).toBe(200);
+    const context = storage as unknown as StorageContext;
+    const key = "account-deletion-key-at-least-32-bytes";
+    initializeAccountDeletion(context, key);
+    fenceAccount(context, key, "ana", "ana@dohc.test");
+    // Ana's row stays until the purge, but she can no longer read what arrives.
+    expect((await send(h, OWNER, { conversationId }, "after the fence")).status).toBe(404);
+    expect((await send(h, OWNER, { conversationId }, "kept", "before-fence")).status).toBe(200);
+    expect(await bodies(h, OWNER, conversationId)).toEqual(["before", "kept"]);
   });
 
   it("limits how fast one account sends, and still answers a retry", async () => {
