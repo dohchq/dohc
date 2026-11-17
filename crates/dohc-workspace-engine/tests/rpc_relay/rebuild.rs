@@ -1281,6 +1281,38 @@ async fn an_unsent_version_removed_while_the_rebuild_was_stopped_is_saved() {
     assert_no_old_store(&copy.scratch);
 }
 
+/// An unsent version the disk holds goes to recovery as the file the first
+/// wave moves. The plan writes no second copy of it, and once it is moved,
+/// recovery holds it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_version_on_disk_gets_no_saved_copy() {
+    let copy = edited_copy("rpc-rebuild-no-saved-copy").await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("rename-0");
+    rebuild_on(&service, &copy).await.expect_err("crashed");
+    drop(service);
+    let saved = copy.scratch.path().join(".dohc/local/rebuild/saved");
+    if saved.exists() {
+        assert_eq!(names_in(&saved), Vec::<String>::new());
+    }
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let recovery = copy
+        .scratch
+        .path()
+        .join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 a.md")).expect("edit"),
+        b"my edit"
+    );
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
 /// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
 async fn edited_copy(workspace_id: &str) -> ClosedCopy {
     closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {

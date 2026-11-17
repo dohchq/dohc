@@ -11,15 +11,16 @@
 //! - `closed`: read the old store's unsent work; build a new store from the
 //!   relay under `.dohc/local/rebuild/`; plan each path on disk against the
 //!   new store; write the copies the plan saves under that folder, reading
-//!   each unsent version from the old store; write `planned`.
+//!   each unsent version the disk lacks from the old store; write `planned`.
 //! - `planned`: move those copies and the old store's `displaced` folder into
 //!   the recovery folder, write its `contents.md`, make the aside folder
 //!   empty, then `swapping`.
 //! - `swapping`: rename the old store aside and the new one into place, as
 //!   the three folders on disk say is left to do, then `swapped`.
 //! - `swapped`: converge the files in three waves, then `converged`. The
-//!   first places a saved version the disk held when planned only if the
-//!   disk no longer does, then drops the staging folder.
+//!   first writes an unsent version the disk held when planned from the
+//!   aside store, only if the disk no longer holds it, then drops the aside
+//!   store and the staging folder.
 //!
 //! `share.view.rebuildFinish` deletes what the rebuild left once main has
 //! stored the new reach, and the manifest last. `share.view.rebuildStatus`
@@ -940,10 +941,6 @@ impl EngineService {
         mut manifest: RebuildManifest,
     ) -> Result<(), Halt> {
         self.rebuild_crash_point("swapped")?;
-        // The aside store still holds the hidden History. A delete that
-        // fails is tried again by finish, and the answer says it is left.
-        // The first wave drops the staging folder once it places its copies.
-        let _ = remove_folder(&aside(root));
         let handle = self
             .rebuild_open(ctx, root, workspace_id, None, None)
             .await?;
@@ -972,9 +969,12 @@ impl EngineService {
             // Every file from disk comes before the versions saved in case
             // the disk changed, which the plan numbers last.
             for item in &plan.recovery {
-                let source = match (item.source, &item.if_disk_changed) {
+                let destination = folder.join(&item.destination);
+                let found = match (item.source, &item.if_disk_changed) {
                     _ if item.done => continue,
-                    (RecoverySource::Disk, _) => root.join(&item.path),
+                    (RecoverySource::Disk, _) => {
+                        recover(root, &root.join(&item.path), &destination)?
+                    }
                     (RecoverySource::Saved, Some(sha)) => {
                         if moved_from_disk(&plan, &folder, &item.path, sha) {
                             if let Some(plan) = manifest.plan.as_mut() {
@@ -983,11 +983,10 @@ impl EngineService {
                             write_manifest(root, manifest)?;
                             continue;
                         }
-                        saved_copies(root).join(&item.destination)
+                        place_version(root, sha, &item.destination, &destination)?
                     }
                     _ => continue,
                 };
-                let found = recover(root, &source, &folder.join(&item.destination))?;
                 if let Some(done) = manifest.plan.as_mut().and_then(|plan| {
                     plan.recovery
                         .iter_mut()
@@ -998,6 +997,9 @@ impl EngineService {
                 }
                 write_manifest(root, manifest)?;
             }
+            // The aside store still holds the hidden History. A delete that
+            // fails is tried again by finish, and the answer says it is left.
+            let _ = remove_folder(&aside(root));
             let _ = remove_folder(&staging_root(root));
             self.rebuild_wave_jobs(&actor, root, workspace_id, manifest, 1)
                 .await?;
@@ -1270,10 +1272,12 @@ fn plan(
             (None, None) => {}
         }
     }
-    // A version on disk that the first wave moves to recovery is saved too,
-    // in case the disk changes before then: the swap drops the old store.
-    // One the new store holds, or that is on disk where the plan replaces
-    // it with bytes the new store holds, is kept there.
+    // A version on disk that the first wave moves to recovery is listed too,
+    // in case the disk changes before then. The first wave writes it from
+    // the old store, which stays aside until then, only if the file it
+    // moved no longer holds it. One the new store holds, or that is on disk
+    // where the plan replaces it with bytes the new store holds, is kept
+    // there.
     let from_disk: HashSet<String> = saves
         .iter()
         .map(|(_, path, _, _, _)| path.clone())
@@ -1294,12 +1298,11 @@ fn plan(
             WHY_VERSION,
             on_disk.then(|| version.sha256.clone()),
         );
-        let copy = Contents::Version(version.sha256.clone());
         if on_disk {
-            in_case.push((save, copy));
+            in_case.push(save);
         } else {
             saves.push(save);
-            copies.push(copy);
+            copies.push(Contents::Version(version.sha256.clone()));
         }
     }
     for (title, text) in chat_files(&old.unsent) {
@@ -1336,10 +1339,7 @@ fn plan(
     }
     // Last, so a version the first wave drops leaves no gap in the numbers
     // before it.
-    for (save, copy) in in_case {
-        saves.push(save);
-        copies.push(copy);
-    }
+    saves.extend(in_case);
     let undone: Vec<UndoneChange> = old
         .unsent
         .removals
@@ -1362,6 +1362,7 @@ fn plan(
     for ((source, path, name, why, if_disk_changed), number) in saves.into_iter().zip(1..) {
         let destination = numbered_name(number, &name);
         if source == RecoverySource::Saved
+            && if_disk_changed.is_none()
             && let Some(copy) = copies.next()
         {
             named.push((destination.clone(), copy));
@@ -1602,6 +1603,35 @@ fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, Halt>
         })
     })?;
     Ok(true)
+}
+
+/// Write the unsent version `sha256` to its recovery destination without
+/// replacing anything, reading it from the old store, which stays aside
+/// until the first wave's moves are done. It is written under staging as
+/// `name` first, then moved. Answers whether the store held it.
+fn place_version(root: &Path, sha256: &str, name: &str, destination: &Path) -> Result<bool, Halt> {
+    link_free(root, destination)?;
+    if destination.exists() {
+        return Ok(true);
+    }
+    let store = aside(root).join("engine").join("engine.db");
+    if !store.exists() {
+        return Ok(false);
+    }
+    let store = dohc_engine_storage::EngineStore::open_read_only(&store)
+        .map_err(|_| failed("share-view-rebuild-store-unreadable"))?;
+    let Some(bytes) = store
+        .get_materialization_blob(sha256)
+        .map_err(|_| failed("share-view-rebuild-store-unreadable"))?
+    else {
+        return Ok(false);
+    };
+    drop(store);
+    let copy = saved_copies(root).join(name);
+    std::fs::create_dir_all(saved_copies(root))
+        .and_then(|()| write_synced(&copy, &bytes))
+        .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
+    recover(root, &copy, destination)
 }
 
 /// Whether the file the first wave moved from `path` into `folder` holds the
