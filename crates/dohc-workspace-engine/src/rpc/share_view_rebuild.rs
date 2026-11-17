@@ -1616,6 +1616,8 @@ fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, Halt>
 fn place_version(root: &Path, sha256: &str, name: &str, destination: &Path) -> Result<bool, Halt> {
     link_free(root, destination)?;
     if destination.exists() {
+        // A try that stopped after the move may not have synced it.
+        sync_placed(destination)?;
         return Ok(true);
     }
     let store = aside(root).join("engine").join("engine.db");
