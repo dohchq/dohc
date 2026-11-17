@@ -10,6 +10,7 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
 import { cursorCodec } from "./requestInputs";
 import {
+  isOldDirectMessageShare,
   resolveReceivedShareAuthority,
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
@@ -87,20 +88,16 @@ export function createShareInventoryRoutes(
       ? await lookupUserEmail(share.granterUserId)
       : null;
   }
-  // An old direct message stays out of Received when it ends too. A share
-  // whose row is already purged can't be told apart, so it still lists.
-  function removedReceivedShares(userId: string) {
-    return storage.listRemovedSharesForRecipient(userId).filter((row) => {
-      const share = storage.getShare(row.shareId);
-      const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
-      return !(
-        share &&
-        selector &&
-        "kind" in selector &&
-        selector.kind === "chat" &&
-        storage.findChannelCreateKind(share.workspaceId, selector.channelWireId) === "dm"
-      );
-    });
+  // An ended old direct message stays out too. One whose owner deleted their
+  // account got no ended row (`fenceAccount`), since its share row is gone.
+  function removedReceivedShares(userId: string, pageIds?: ReadonlySet<string>) {
+    return storage
+      .listRemovedSharesForRecipient(userId)
+      .filter((row) => !pageIds || pageIds.has(row.shareId))
+      .filter((row) => {
+        const share = storage.getShare(row.shareId);
+        return !share || !isOldDirectMessageShare(storage, share);
+      });
   }
   async function receivedSummaries(
     rows: readonly SyncRelayShareWithGrantRow[],
@@ -248,9 +245,7 @@ export function createShareInventoryRoutes(
         const received = await receivedSummaries(active, actor.userId);
         // Re-read removals after asynchronous serialization; a grant can end during a page.
         const pageIds = new Set(page.shareIds);
-        const removed = removedReceivedShares(actor.userId).filter((row) =>
-          pageIds.has(row.shareId),
-        );
+        const removed = removedReceivedShares(actor.userId, pageIds);
         return jsonResponse({
           ok: true,
           received,

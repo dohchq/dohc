@@ -12,6 +12,12 @@ import {
 } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import {
+  fenceAccount,
+  initializeAccountDeletion,
+  purgeAccountRows,
+} from "./storage/accountDeletion";
+import type { StorageContext } from "./storage/context";
+import {
   appendLog,
   chatChannelCreate,
   chatThreadCreate,
@@ -699,6 +705,24 @@ describe("DM grants over the relay", () => {
     expect(listing.removed).toEqual([]);
     const page = await json(await h(request(MEMBER, "/sync/shares?received=true")));
     expect(page.removed).toEqual([]);
+  });
+
+  it("leaves an old direct message out of Received when its owner deletes their account", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate()]);
+    await createDmGrant(h);
+    const context = storage as unknown as StorageContext;
+    const key = "account-deletion-key-at-least-32-bytes";
+    initializeAccountDeletion(context, key);
+    const { manifest } = fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
+    purgeAccountRows(context, OWNER, `${OWNER}@dohc.test`, manifest!);
+    for (const path of ["/sync/shares", "/sync/shares?received=true"]) {
+      const listing = await json(await h(request(MEMBER, path)));
+      expect(listing.received).toEqual([]);
+      expect(listing.removed).toEqual([]);
+    }
   });
 
   it("refuses appends through a read-only chat grant and through a PATH grant", async () => {

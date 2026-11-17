@@ -8,6 +8,8 @@ import { noticeIdFrom } from "./notices";
 import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
+import { findChannelCreateKind } from "./objectIndex";
+import { isOldDirectMessageShare } from "../shareAuthorization";
 import { dropEndedWorkspaceInvitesInTransaction } from "./workspaceMembers";
 import { dropUnheldDirectConversations } from "./directMessages";
 import {
@@ -168,12 +170,28 @@ export function fenceAccount(
       storage.db
         .prepare("INSERT OR IGNORE INTO sync_relay_deleted_workspaces VALUES(?)")
         .run(accountDeletionIdentity(key, "workspace:" + row.workspaceId));
+    const channelKinds = {
+      findChannelCreateKind: (workspaceId: string, channelWireId: string) =>
+        findChannelCreateKind(storage, workspaceId, channelWireId),
+    };
     for (const shareId of shareIds) {
-      const recipients = storage.db
-        .prepare(
-          "SELECT DISTINCT principal_user_id FROM sync_relay_share_grants WHERE share_id=? AND principal_kind='user' AND principal_user_id<>?",
-        )
-        .all(shareId, userId);
+      // The purge erases what says a share is an old direct message, so its
+      // recipients get no ended row now that Received would list.
+      const share = storage.db
+        .prepare("SELECT workspace_id, selector_json FROM sync_relay_shares WHERE share_id=?")
+        .get(shareId);
+      const recipients =
+        share &&
+        isOldDirectMessageShare(channelKinds, {
+          workspaceId: String(share.workspace_id),
+          selectorJson: String(share.selector_json),
+        })
+          ? []
+          : storage.db
+              .prepare(
+                "SELECT DISTINCT principal_user_id FROM sync_relay_share_grants WHERE share_id=? AND principal_kind='user' AND principal_user_id<>?",
+              )
+              .all(shareId, userId);
       for (const recipient of recipients)
         storage.db
           .prepare("INSERT OR IGNORE INTO sync_relay_ended_shares VALUES(?,?,?)")

@@ -102,6 +102,21 @@ export function authorizeNamedLiveEditShareGrant(input: {
   return { ...validated, effectiveSelector: validated.effectiveSelector };
 }
 
+// Direct messages are relay conversations now. A share of an old engine one
+// stays out of Received, even after it ends.
+export function isOldDirectMessageShare(
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
+  share: { workspaceId: string; selectorJson: string },
+): boolean {
+  const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+  return (
+    selector !== null &&
+    "kind" in selector &&
+    selector.kind === "chat" &&
+    storage.findChannelCreateKind(share.workspaceId, selector.channelWireId) === "dm"
+  );
+}
+
 export function selectorTargetsBlockedChannel(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
   workspaceId: string,
