@@ -428,7 +428,7 @@ describe("useAccessRuleHoldNotices", () => {
     const inner = h.row("team/sub")!.id;
     act(() => h.errors().runShellErrorAction(inner));
     const waits = () =>
-      h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team/sub:waits");
+      h.errors().shellErrors.find((error) => error.identity === "waits-access-rule:main:team/sub");
     await waitFor(() =>
       expect(waits()).toMatchObject({
         tone: "warning",
@@ -450,6 +450,26 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.showNotice).toHaveBeenCalledExactlyOnceWith("access-rule:main:team");
   });
 
+  // A folder may be named like another row's "waits" row.
+  it("keeps the row of a folder named like another folder's waiting choice", async () => {
+    const h = harness([
+      WIDENED,
+      REMOVED,
+      { ...WIDENED, folder: "team/sub:waits", rulePath: "team/sub:waits/access.yaml" },
+    ]);
+    await waitFor(() => expect(h.errors().shellErrors).toHaveLength(3));
+    h.bridge.decideAccessRule.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [CONFLICT]: access-rule-held: widened team",
+      ),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id));
+    await waitFor(() => expect(h.errors().shellErrors).toHaveLength(4));
+    expect(h.row("team/sub:waits")!.title).toBe(
+      "Access to team/sub:waits was widened outside dohc",
+    );
+  });
+
   it("names the workspace's rule when the choice waits for it, and drops that row once the outer rule is decided", async () => {
     const h = harness([WIDENED, ROOT_REMOVED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
@@ -460,7 +480,7 @@ describe("useAccessRuleHoldNotices", () => {
     );
     act(() => h.errors().runShellErrorAction(h.row("team")!.id));
     const waits = () =>
-      h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:waits");
+      h.errors().shellErrors.find((error) => error.identity === "waits-access-rule:main:team");
     await waitFor(() =>
       expect(waits()).toMatchObject({
         title: "Decide on the workspace's access rule first",
@@ -497,7 +517,7 @@ describe("useAccessRuleHoldNotices", () => {
     );
     act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
     const said = () =>
-      h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:decided");
+      h.errors().shellErrors.find((error) => error.identity === "decided-access-rule:main:team");
     await waitFor(() =>
       expect(said()).toMatchObject({
         tone: "warning",
@@ -537,7 +557,7 @@ describe("useAccessRuleHoldNotices", () => {
     });
     // Beside it, the press says why nothing ran.
     expect(h.errors().shellErrors.map((error) => error.identity)).toEqual(
-      expect.arrayContaining(["access-rule:main:team:decided"]),
+      expect.arrayContaining(["decided-access-rule:main:team"]),
     );
     expect(h.errors().shellErrors).toHaveLength(2);
     act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
@@ -574,7 +594,7 @@ describe("useAccessRuleHoldNotices", () => {
       if (order === "list first") await act(async () => refuse(changed()));
       await waitFor(() => expect(h.row("team")).toBeUndefined());
       const said = () =>
-        h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:decided");
+        h.errors().shellErrors.find((error) => error.identity === "decided-access-rule:main:team");
       await waitFor(() =>
         expect(said(), order).toMatchObject({
           tone: "warning",
@@ -600,7 +620,7 @@ describe("useAccessRuleHoldNotices", () => {
     );
     act(() => h.errors().runShellErrorAction(h.row("")!.id));
     const said = () =>
-      h.errors().shellErrors.find((error) => error.identity === "access-rule:main::decided");
+      h.errors().shellErrors.find((error) => error.identity === "decided-access-rule:main:");
     await waitFor(() =>
       expect(said()).toMatchObject({
         tone: "warning",

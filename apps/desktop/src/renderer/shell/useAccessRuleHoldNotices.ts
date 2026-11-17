@@ -16,8 +16,9 @@ export type MemberLevel = Extract<AccessRuleReach, "view" | "comment" | "edit"> 
 
 const identityOf = (hold: Pick<AccessRuleHold, "versionId" | "folder">) =>
   `access-rule:${hold.versionId}:${hold.folder}`;
-const waitsOf = (identity: string) => `${identity}:waits`;
-const decidedOf = (identity: string) => `${identity}:decided`;
+// Each kind of row has its own prefix, since a folder name may contain ":waits".
+const waitsOf = (identity: string) => `waits-${identity}`;
+const decidedOf = (identity: string) => `decided-${identity}`;
 // A hold the engine judged again, such as after a decision on a rule that
 // changed since, reads as a new notice.
 const judgedKey = (hold: AccessRuleHold) => `${hold.reason}|${hold.observedSha256 ?? ""}`;
