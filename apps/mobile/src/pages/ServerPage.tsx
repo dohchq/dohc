@@ -89,7 +89,7 @@ function PageScreen({ path }: { path: string }) {
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
-  const markdown =
+  const read =
     state.value?.kind === "page"
       ? state.value.markdown
       : state.value?.kind === "missing"
@@ -135,14 +135,17 @@ function PageScreen({ path }: { path: string }) {
   const holding = live !== null && holdsPage(liveState);
 
   // Text that changes after the first mounts a fresh editor, which covers itself with the loading lines until it paints.
-  const shown = useRef(markdown);
+  const shown = useRef(read);
   useEffect(() => {
-    if (holding || shown.current === markdown) return;
+    if (holding || shown.current === read) return;
     const first = shown.current === null;
-    shown.current = markdown;
-    if (first || markdown === null) return;
+    shown.current = read;
+    if (first || read === null) return;
     host.gone();
-  }, [markdown, holding]);
+  }, [read, holding]);
+  // A page a live session holds keeps the text its editor mounted with. A later read the phone can't show (too large,
+  // missing) never takes the editor away, with edits only its provider has.
+  const markdown = holding ? shown.current : read;
   const reopen = () => {
     setLostPage(false);
     setUri(null);
@@ -232,9 +235,9 @@ function PageScreen({ path }: { path: string }) {
   const gap = useWorkspaceGap();
   const failure = gap ? (
     <NoWorkspace />
-  ) : state.value?.kind === "missing" && !deleted ? (
+  ) : state.value?.kind === "missing" && !deleted && !holding ? (
     <ScreenFailure text={documentWords.noLongerAvailable} />
-  ) : state.value?.kind === "too-large" ? (
+  ) : state.value?.kind === "too-large" && !holding ? (
     <ScreenFailure text={documentWords.tooLargeToOpen} />
   ) : markdown === null && state.problem === "restoring" ? (
     <ScreenFailure text={documentWords.restoring} onRetry={retry} />
