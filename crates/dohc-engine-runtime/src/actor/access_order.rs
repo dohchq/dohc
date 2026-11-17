@@ -1277,6 +1277,9 @@ fn every_step_narrows(
                 files.remove(path.as_str());
             }
         }
+        // Zero files inherits from above, rather than hiding the folder.
+        // Writes precede deletes, so zero can occur only at the final delete.
+        // Decisions omit that step; capture judges removals separately.
         let rule = match files.len() {
             1 => files.values().next().and_then(Option::as_ref),
             _ => None,
@@ -1285,34 +1288,43 @@ fn every_step_narrows(
     })
 }
 
-/// Try at most the six orders of a three-file change. Larger changes keep
-/// their proposed order and are refused if that order is unsafe.
+/// Writes precede deletes. Only the first write into an empty folder or
+/// the last remaining file before removal can expose one readable rule.
 fn safe_rule_order(
     before: ReachBefore<'_>,
     committed: Option<&Committed>,
-    changes: Vec<RuleChange>,
+    mut changes: Vec<RuleChange>,
     include_final: bool,
 ) -> Option<Vec<RuleChange>> {
-    let safe = |changes: &[RuleChange]| {
-        let end = if include_final {
-            changes.len()
-        } else {
-            changes.len().saturating_sub(1)
-        };
-        every_step_narrows(before, committed, &changes[..end])
-    };
-    if safe(&changes) {
-        return Some(changes);
+    if changes.len() > 1 {
+        if committed.is_none() {
+            let first = changes.iter().position(|(_, bytes)| {
+                let rule = bytes
+                    .as_deref()
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .and_then(parse_access_rule);
+                rule_change_narrows(before, rule.as_ref())
+            })?;
+            changes.swap(0, first);
+        } else if let Some(own) = committed.filter(|own| {
+            own.files.len() == changes.len() && changes.iter().all(|(_, bytes)| bytes.is_none())
+        }) {
+            let last = changes.iter().position(|(path, _)| {
+                rule_change_narrows(
+                    before,
+                    own.files.get(path).and_then(|file| file.rule.as_ref()),
+                )
+            })?;
+            let end = changes.len() - 1;
+            changes.swap(last, end);
+        }
     }
-    let orders: &[&[usize]] = match changes.len() {
-        2 => &[&[1, 0]],
-        3 => &[&[0, 2, 1], &[1, 0, 2], &[1, 2, 0], &[2, 0, 1], &[2, 1, 0]],
-        _ => &[],
+    let end = if include_final {
+        changes.len()
+    } else {
+        changes.len().saturating_sub(1)
     };
-    orders.iter().find_map(|indices| {
-        let reordered: Vec<_> = indices.iter().map(|&i| changes[i].clone()).collect();
-        safe(&reordered).then_some(reordered)
-    })
+    every_step_narrows(before, committed, &changes[..end]).then_some(changes)
 }
 
 /// Accept authorizes the final reach, but no intermediate rule may exceed
@@ -3025,6 +3037,49 @@ mod tests {
             ReachBefore::Own(both.rule()),
             Some(&both),
             &[("T/ACCESS.yaml".to_owned(), None)]
+        ));
+    }
+
+    #[test]
+    fn four_rule_files_choose_a_safe_first_write_and_last_delete() {
+        let view = parse_access_rule("members: view\n").unwrap();
+        let disk = OnDisk::from([
+            ("T/ACCESS.yaml".to_owned(), b"members: edit\n".to_vec()),
+            ("T/Access.yaml".to_owned(), b"members: view\n".to_vec()),
+            ("T/aCcess.yaml".to_owned(), b"members: edit\n".to_vec()),
+            ("T/access.yaml".to_owned(), b"members: edit\n".to_vec()),
+        ]);
+        let changes = safe_rule_order(
+            ReachBefore::Inherited(Some(&view)),
+            None,
+            rule_changes(None, &disk),
+            false,
+        )
+        .expect("a safe first write");
+        assert_eq!(changes[0].0, "T/Access.yaml");
+        assert!(every_step_narrows(
+            ReachBefore::Inherited(Some(&view)),
+            None,
+            &changes
+        ));
+        let recorded = committed(&[
+            ("T/ACCESS.yaml", "members: edit\n"),
+            ("T/Access.yaml", "members: view\n"),
+            ("T/aCcess.yaml", "members: edit\n"),
+            ("T/access.yaml", "members: edit\n"),
+        ]);
+        let changes = safe_rule_order(
+            ReachBefore::Inherited(Some(&view)),
+            Some(&recorded),
+            rule_changes(Some(&recorded), &OnDisk::new()),
+            false,
+        )
+        .expect("a safe last deletion");
+        assert_eq!(changes.last().unwrap().0, "T/Access.yaml");
+        assert!(every_step_narrows(
+            ReachBefore::Inherited(Some(&view)),
+            Some(&recorded),
+            &changes[..3]
         ));
     }
 
