@@ -1843,6 +1843,28 @@ mod tests {
             .expect("free");
     }
 
+    /// Whether this test binary sees a cloud placeholder as a link. Windows
+    /// chooses for each program whether it sees placeholders exposed, as
+    /// reparse points, or disguised. Run by hand, with
+    /// `DOHC_PLACEHOLDER_ROOT` a synced folder and `DOHC_PLACEHOLDER` a
+    /// placeholder below it, relative, such as a folder or an online-only
+    /// file. It reads attributes only, so an online-only file stays online.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs a cloud placeholder on this machine"]
+    fn a_cloud_placeholder_below_the_root_is_not_a_link() {
+        use std::os::windows::fs::MetadataExt;
+        let root = PathBuf::from(std::env::var("DOHC_PLACEHOLDER_ROOT").expect("root"));
+        let path = root.join(std::env::var("DOHC_PLACEHOLDER").expect("placeholder"));
+        let metadata = std::fs::symlink_metadata(&path).expect("attributes");
+        println!(
+            "attributes {:#x}, is_symlink {}",
+            metadata.file_attributes(),
+            metadata.file_type().is_symlink()
+        );
+        assert!(link_free(&root, &path).is_ok(), "a link to the rebuild");
+    }
+
     #[test]
     fn a_title_becomes_one_safe_path_part() {
         assert_eq!(file_safe("Plans: a/b?"), "Plans  a b");
