@@ -2490,7 +2490,7 @@ impl EngineService {
                 plan: None,
                 share_refresh_existed: None,
             };
-            self.close_for_rebuild(&open.root, &manifest)?;
+            self.close_for_rebuild(&open.root, &manifest).await?;
             let mut result = relay_outcome_json(outcome)?;
             // The page applied nothing and a closed copy commits no cursor.
             if let Some(result) = result.as_object_mut() {

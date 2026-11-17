@@ -90,12 +90,15 @@ impl EngineService {
 
     /// Close a root's copy for a rebuild: write the manifest, flushed, and
     /// refuse the root from then on. The manifest is on disk before this
-    /// returns, so a restart refuses the root too.
-    pub(super) fn close_for_rebuild(
+    /// returns, so a restart refuses the root too. It holds the open lock,
+    /// as an open's admission does, so an admission that read no manifest
+    /// can't drop this refusal afterwards.
+    pub(super) async fn close_for_rebuild(
         &self,
         root: &Path,
         manifest: &RebuildManifest,
     ) -> Result<(), WireError> {
+        let _serial = self.open_lock.lock().await;
         // Refuse first: a request that slips in between would read the old
         // store, while a refusal with no manifest yet only delays it.
         lock(&self.rebuilding_roots).insert(root.to_path_buf(), manifest.rebuild_id.clone());
@@ -200,6 +203,7 @@ mod tests {
 
         first
             .close_for_rebuild(&root, &manifest("rebuild-1", RebuildPhase::Closed))
+            .await
             .expect("close");
         assert_updating_access(call(&first, &handle, "sync.remoteChanges", json!({})).await);
         assert_updating_access(
@@ -264,6 +268,42 @@ mod tests {
         call(&restarted, &handle, "workspace.close", json!({}))
             .await
             .expect("close");
+    }
+
+    /// A close that lands while an open admits the root waits for that open.
+    /// Otherwise the admission, which read no manifest, would drop the new
+    /// refusal, and the root's handles would read the old store.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_waits_for_an_open_under_way() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = root_binding::canonical_root(scratch.path()).expect("root");
+        std::fs::create_dir_all(root.join(".dohc").join("local")).expect("local");
+        let service = service();
+        let admitting = service.open_lock.lock().await;
+        let manifest = manifest("rebuild-1", RebuildPhase::Closed);
+        let mut closing = std::pin::pin!(service.close_for_rebuild(&root, &manifest));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            closing.as_mut().poll(&mut context).is_pending(),
+            "the close waits for the open"
+        );
+        assert!(!lock(&service.rebuilding_roots).contains_key(&root));
+        assert!(
+            crate::rebuild_manifest::read_manifest(&root)
+                .expect("read")
+                .is_none()
+        );
+        drop(admitting);
+        closing.await.expect("close");
+        assert_eq!(
+            lock(&service.rebuilding_roots).get(&root).map(String::as_str),
+            Some("rebuild-1")
+        );
+        assert!(
+            crate::rebuild_manifest::read_manifest(&root)
+                .expect("read")
+                .is_some()
+        );
     }
 
     /// A root with a manifest and no store opens for nobody, its rebuild
