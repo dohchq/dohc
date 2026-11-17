@@ -998,10 +998,6 @@ impl EngineService {
                 write_manifest(root, manifest)?;
                 self.rebuild_crash_point(&format!("recovered-{}", item.number))?;
             }
-            if let Some(recovery) = plan.recovery_folder.as_deref() {
-                sync_recovery(&root.join(recovery))
-                    .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
-            }
             // The aside store still holds the hidden History. A delete that
             // fails is tried again by finish, and the answer says it is left.
             let _ = remove_folder(&aside(root));
@@ -1591,6 +1587,8 @@ fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, Halt>
     link_free(root, source)?;
     link_free(root, destination)?;
     if destination.exists() {
+        // A try that stopped after the move may not have synced it.
+        sync_placed(destination)?;
         return Ok(true);
     }
     if !source.exists() {
@@ -1607,6 +1605,7 @@ fn recover(root: &Path, source: &Path, destination: &Path) -> Result<bool, Halt>
             "share-view-rebuild-recovery-move-failed"
         })
     })?;
+    sync_placed(destination)?;
     Ok(true)
 }
 
@@ -1679,30 +1678,58 @@ fn moved_from_disk(
     Ok(dohc_engine_storage::hex(&hasher.finalize()) == sha256)
 }
 
-/// Flush the recovery folder before the old store goes: after that, these
-/// files are the only copy of the member's unsent work. POSIX only, as the
+/// Flush a recovered item, every file and folder below it when it is the
+/// displaced folder, and the folder entries that name it, before the manifest
+/// marks it done. Once every item is done the old store goes, and these files
+/// become the only copy of the member's unsent work. POSIX only, as the
 /// materializer's parent sync is: std can't sync a folder on Windows, and
 /// flushing a file there needs write access the member's file may not give.
-fn sync_recovery(folder: &Path) -> std::io::Result<()> {
+fn sync_placed(path: &Path) -> Result<(), Halt> {
     #[cfg(unix)]
-    if folder.exists() {
-        for entry in std::fs::read_dir(folder)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                std::fs::File::open(entry.path())?.sync_all()?;
-            }
-        }
-        for dir in [Some(folder), folder.parent()].into_iter().flatten() {
-            std::fs::File::open(dir)?.sync_all()?;
-        }
+    {
+        let folder = path.parent();
+        let parent = folder.and_then(Path::parent);
+        sync_tree(path)
+            .and_then(|()| {
+                [folder, parent]
+                    .into_iter()
+                    .flatten()
+                    .try_for_each(|at| std::fs::File::open(at)?.sync_all())
+            })
+            .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
     }
     #[cfg(not(unix))]
-    let _ = folder;
+    let _ = path;
     Ok(())
 }
 
+/// Sync a file, or a folder and everything below it. A link is left alone:
+/// recovery moved it as a link, and its target isn't the member's work here.
+#[cfg(unix)]
+fn sync_tree(path: &Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(path)?.file_type();
+    if kind.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            sync_tree(&entry?.path())?;
+        }
+    } else if !kind.is_file() {
+        return Ok(());
+    }
+    std::fs::File::open(path)?.sync_all()
+}
+
+/// Write a new file at `path`, replacing one an earlier try left. It is
+/// created only if nothing is there, so a link put at `path` after the
+/// caller checked it fails the write instead of taking it elsewhere.
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = std::fs::File::create(path)?;
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
