@@ -4,9 +4,9 @@ use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker, scene
 use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
-    CaptureIngestBinary, CaptureRetire, DeleteTextFile, MergeTextFileFromVersion, NoFaults,
-    RenameTextFile, RollbackTextFileMutation, RuntimeError, WorkspaceSupervisor, WriteBinary,
-    WriteText,
+    CaptureIngestBinary, CaptureRetire, DeleteTextFile, FaultAction, FaultInjector, FaultPoint,
+    MergeTextFileFromVersion, NoFaults, RenameTextFile, RollbackTextFileMutation, RuntimeError,
+    WorkspaceSupervisor, WriteBinary, WriteText,
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::SyncError;
@@ -1367,39 +1367,140 @@ fn a_rule_rename_journals_a_create_then_a_delete() {
 }
 
 /// A rule rename tried again after its first try finished, as when its answer
-/// was lost, replays both halves instead of finding its source gone.
+/// was lost, returns its first answer from what it recorded. Whatever
+/// happened to either path since changes neither the answer, the files nor
+/// the journal.
 #[test]
 fn a_finished_rule_rename_tried_again_replays() {
+    for later in [
+        "nothing",
+        "destination edited",
+        "destination removed",
+        "source recreated",
+    ] {
+        let f = Fixture::new();
+        f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
+            .expect("write rule");
+        let first = rule_rename(&f, "crew", Arc::new(NoFaults)).expect("rename rule");
+        match later {
+            "destination edited" => f
+                .versioned_write(write("crew/access.yaml", NOBODY, "m-edit"))
+                .expect("edit the destination"),
+            "destination removed" => f
+                .versioned_delete(delete("crew/access.yaml", "m-gone"))
+                .expect("remove the destination"),
+            "source recreated" => f
+                .versioned_write(write("team/access.yaml", EDIT, "m-again"))
+                .expect("recreate the source"),
+            _ => {}
+        }
+        let files = rule_files(&f);
+        let journal = f.journal();
+        let again = rule_rename(&f, "crew", Arc::new(NoFaults))
+            .unwrap_or_else(|error| panic!("{later}: the same rename tried again: {error:?}"));
+        assert!(again.deduped, "{later}: {again:?}");
+        assert_eq!(again.moment.moment_id, first.moment.moment_id, "{later}");
+        assert_eq!(again.after.text, first.after.text, "{later}");
+        assert_eq!(again.object.object_id, first.object.object_id, "{later}");
+        assert_eq!(rule_files(&f), files, "{later}");
+        assert_eq!(f.journal(), journal, "{later}");
+        let elsewhere = rule_rename(&f, "else", Arc::new(NoFaults));
+        assert!(
+            matches!(
+                elsewhere,
+                Err(RuntimeError::Domain(
+                    DomainError::IdempotencyKeyReuseMismatch
+                ))
+            ),
+            "{later}: {elsewhere:?}"
+        );
+        assert_eq!(f.journal(), journal, "{later}");
+    }
+}
+
+/// A rule rename whose first half finished and second didn't writes the
+/// first half again from the text it recorded, then finishes the second.
+#[test]
+fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
+    struct CrashOnceMoved(PathBuf, std::sync::atomic::AtomicBool);
+    impl FaultInjector for CrashOnceMoved {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point != FaultPoint::StorageBeforePersist
+                || self.1.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return FaultAction::Continue;
+            }
+            let conn = rusqlite::Connection::open(&self.0).expect("open db");
+            let moved: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id='r-move-to')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read requests");
+            if moved {
+                self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+                FaultAction::Crash
+            } else {
+                FaultAction::Continue
+            }
+        }
+    }
     let f = Fixture::new();
     f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
         .expect("write rule");
-    let rename = || {
-        f.runtime.block_on(f.actor.versioned_text_rename(
-            RenameTextFile {
-                workspace_id: WS.to_owned(),
-                version_id: "main".to_owned(),
-                from_path: "team/access.yaml".to_owned(),
-                to_path: "crew/access.yaml".to_owned(),
-                moment_id: "m-move".to_owned(),
-                request_id: Some("r-move".to_owned()),
-                metadata_origin: "cli".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 40,
-            },
-            f.root().to_path_buf(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        ))
-    };
-    let first = rename().expect("rename rule");
-    let journal = f.journal();
-    let again = rename().expect("the same rename tried again");
-    assert!(again.deduped, "{again:?}");
-    assert_eq!(again.moment.moment_id, first.moment.moment_id);
-    assert_eq!(f.journal(), journal);
+    let crash = Arc::new(CrashOnceMoved(f.db.clone(), Default::default()));
+    let halfway = rule_rename(&f, "crew", crash);
+    assert!(
+        matches!(halfway, Err(RuntimeError::OperationCrashed)),
+        "{halfway:?}"
+    );
+    f.versioned_write(write("team/access.yaml", EDIT, "m-later"))
+        .expect("edit the source");
+    let again = rule_rename(&f, "crew", Arc::new(NoFaults)).expect("the same rename tried again");
+    assert_eq!(again.after.text, VIEW);
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write crew/access.yaml",
+            "write team/access.yaml",
+            "delete team/access.yaml",
+        ])
+    );
+}
+
+/// Move `team/access.yaml` into folder `to` as request `r-move`.
+fn rule_rename(
+    f: &Fixture,
+    to: &str,
+    faults: Arc<dyn FaultInjector>,
+) -> Result<dohc_engine_domain::RenameResult, RuntimeError> {
+    f.runtime.block_on(f.actor.versioned_text_rename(
+        RenameTextFile {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            from_path: "team/access.yaml".to_owned(),
+            to_path: format!("{to}/access.yaml"),
+            moment_id: "m-move".to_owned(),
+            request_id: Some("r-move".to_owned()),
+            metadata_origin: "cli".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 40,
+        },
+        f.root().to_path_buf(),
+        Arc::new(()),
+        faults,
+        CancellationToken::new(),
+    ))
+}
+
+/// What both rename paths hold on disk.
+fn rule_files(f: &Fixture) -> [Option<String>; 2] {
+    ["team/access.yaml", "crew/access.yaml"]
+        .map(|path| std::fs::read_to_string(f.root().join(path)).ok())
 }
 
 /// A rule rename onto another folder's rule is refused, as any rename onto

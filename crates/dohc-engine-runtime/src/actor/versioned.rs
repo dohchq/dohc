@@ -1402,7 +1402,34 @@ fn rename_access_rule_on_store(
 ) -> Result<RenameResult, RuntimeError> {
     let suffixed = |id: &str, side: &str| format!("{id}-{side}");
     let to_request = input.request_id.as_deref().map(|id| suffixed(id, "to"));
-    let (source, target, retried) = store.read_with(|conn| {
+    let to_moment = suffixed(&input.moment_id, "to");
+    let text = store.read_with(|conn| -> Result<String, RuntimeError> {
+        let retried = match &to_request {
+            Some(id) => conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StorageError::corrupt_public)?,
+            None => false,
+        };
+        // A retry replays from the text its first try wrote, whatever either
+        // path holds now. The halves' own request checks refuse a reused id
+        // whose payload differs.
+        if retried {
+            return conn
+                .query_row(
+                    "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+                     WHERE m.workspace_id=?1 AND m.moment_id=?2",
+                    [&input.workspace_id, &to_moment],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(StorageError::corrupt_public)?
+                .flatten()
+                .ok_or(DomainError::IdempotencyKeyReuseMismatch.into());
+        }
         let snapshot_at = |path: &str| {
             dohc_engine_domain::select_snapshot_by_path_in_tx(
                 conn,
@@ -1411,33 +1438,16 @@ fn rename_access_rule_on_store(
                 path,
             )
         };
-        let retried = match &to_request {
-            Some(id) => conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
-                    [id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-            None => false,
-        };
-        Ok::<_, RuntimeError>((
-            snapshot_at(&input.from_path)?,
-            snapshot_at(&input.to_path)?,
-            retried,
-        ))
+        // Like any rename, never onto another file.
+        let target = snapshot_at(&input.to_path)?;
+        if target.snapshot.is_some() || target.binary_sha256.is_some() {
+            return Err(DomainError::TargetPathExists.into());
+        }
+        snapshot_at(&input.from_path)?
+            .snapshot
+            .map(|source| source.text)
+            .ok_or(DomainError::FileNotFound.into())
     })?;
-    // Like any rename, never onto another file; a retry finds its own write.
-    if !retried && (target.snapshot.is_some() || target.binary_sha256.is_some()) {
-        return Err(DomainError::TargetPathExists.into());
-    }
-    // A retry whose first try finished finds its source gone: its write
-    // carried the text that is now at the destination, so both halves replay.
-    let text = match (source.snapshot, target.snapshot) {
-        (Some(source), _) => source.text,
-        (None, Some(written)) if retried => written.text,
-        (None, _) => return Err(DomainError::FileNotFound.into()),
-    };
     let written = versioned_text_write_on_store(
         store,
         &WriteText {
@@ -1450,7 +1460,7 @@ fn rename_access_rule_on_store(
             ),
             path: input.to_path.clone(),
             text,
-            moment_id: suffixed(&input.moment_id, "to"),
+            moment_id: to_moment,
             metadata_origin: input.metadata_origin.clone(),
             metadata_summary: input.metadata_summary.clone(),
             metadata_correlation_id: input.metadata_correlation_id.clone(),
