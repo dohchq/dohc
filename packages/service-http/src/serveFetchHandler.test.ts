@@ -57,6 +57,8 @@ describe("serveFetchHandler", () => {
     for (const { server } of [ordinary, streaming]) {
       expect(server.requestTimeout).toBe(0);
       expect(server.headersTimeout).toBe(60_000);
+      // Caddy, the gateway in front, keeps an unused connection for 120 s. The server must outlast it.
+      expect(server.keepAliveTimeout).toBeGreaterThan(120_000);
     }
   });
 
