@@ -589,6 +589,28 @@ describe("useAccessRuleHoldNotices", () => {
     }
   });
 
+  // The engine names the workspace's own rule with an empty folder.
+  it("says why nothing ran when the workspace's own rule changed again", async () => {
+    const h = harness([{ ...WIDENED, folder: "", rulePath: "access.yaml" }]);
+    await waitFor(() => expect(h.row("")).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [CONFLICT]: access-rule-changed: ",
+      ),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("")!.id));
+    const said = () =>
+      h.errors().shellErrors.find((error) => error.identity === "access-rule:main::decided");
+    await waitFor(() =>
+      expect(said()).toMatchObject({
+        tone: "warning",
+        message:
+          "dohc didn't apply your choice because the workspace's access rule changed again outside dohc.",
+        retry: null,
+      }),
+    );
+  });
+
   it("says when a decision failed for another reason, with Try again", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));

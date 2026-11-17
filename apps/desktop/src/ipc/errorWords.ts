@@ -1044,10 +1044,11 @@ export function heldOuterAccessRuleFolder(error: unknown): string | null {
 /** The access rule changed again since the owner saw its Notice. The Notice already shows it as it is now. */
 export function isAccessRuleChangedRefusal(error: unknown): boolean {
   const { name, code, message } = parse(error);
+  // The workspace's own rule names no folder, and `parse` trims the trailing space.
   return (
     name === "DaemonRefusalError" &&
     code === "CONFLICT" &&
-    message.startsWith("access-rule-changed: ")
+    (message === "access-rule-changed:" || message.startsWith("access-rule-changed: "))
   );
 }
 
