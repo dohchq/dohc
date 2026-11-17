@@ -269,6 +269,23 @@ describe("useAccessRuleHoldNotices", () => {
     }
   });
 
+  it("names the inherited rule when removing an unreadable recorded rule", async () => {
+    const h = harness([
+      {
+        ...REMOVED,
+        unreadable: "recorded",
+        canAccept: false,
+        recordedRule: null,
+        changes: [{ who: "members", before: "none", after: "view" }],
+      },
+    ]);
+    await waitFor(() => expect(h.row("team/sub")).toBeDefined());
+    expect(h.row("team/sub")!.message).toBe(
+      "Until you choose, dohc doesn't record or share changes in team/sub. Without it, team/sub follows the access rule for team.",
+    );
+    expect(h.row("team/sub")!.rows).toEqual(["Members: No access \u2192 View"]);
+  });
+
   it("reads as working while a decision runs, then says what took effect with Open History", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.row("team")).toBeDefined());

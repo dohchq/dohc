@@ -3444,6 +3444,11 @@ fn removing_a_hidden_edit_pair_cannot_publish_a_widening_prefix() {
     }
     f.settle();
     assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let view = &f.hold_views()[0];
+    assert_eq!(view.falls_back_to.as_deref(), Some(""));
+    assert!(view.changes.iter().any(|change| change.who == "members"
+        && change.before == "none"
+        && change.after == "view"));
     assert!(!f.hold_views()[0].can_accept);
     let before = f.journal();
     let result = f.decided_at(

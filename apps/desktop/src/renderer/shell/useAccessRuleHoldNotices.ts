@@ -149,7 +149,7 @@ export function accessRuleHoldWords(
         : `members get the level ${IN_SETTINGS}.${level === null ? " dohc can't read that level now." : ""}`;
     return {
       title: `${ruleOf(hold.folder)} was removed outside dohc`,
-      message: `${until} Without it, ${without}${recordedUnread}`,
+      message: `${until} Without it, ${without}`,
       rows,
       openMembers,
       accept: hold.canAccept ? { label: "Remove rule", busy: "Removing…" } : null,

@@ -2042,7 +2042,6 @@ fn hold_view(
         .is_some_and(|committed| committed.rule().is_none())
     {
         view.unreadable = Some("recorded");
-        return Ok(view);
     }
     let outer: Chain<'_> = above
         .iter()
@@ -2054,6 +2053,9 @@ fn hold_view(
     if view.hold.reason == access_rule_holds::REMOVED {
         view.falls_back_to = above.first().map(|(at, _)| at.clone());
         view.changes = level_changes(&before, &outer);
+        return Ok(view);
+    }
+    if view.unreadable.is_some() {
         return Ok(view);
     }
     let now = match rule_now(&disk) {
