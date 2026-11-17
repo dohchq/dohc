@@ -131,6 +131,7 @@ export function createNamedShareTransportRoutes(
     | "putBlob"
     | "listWorkReferences"
     | "shareLogHead"
+    | "readShareTx"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string, signal?: AbortSignal, maxAgeMs?: number) => Promise<void>,
@@ -331,7 +332,8 @@ export function createNamedShareTransportRoutes(
           if (levelChanged || page.ops.length > 0 || page.hasMore) break;
         }
         if (levelChanged) {
-          authorizeRead();
+          // The reach and the head, from one read, as a page's are.
+          storage.readShareTx(authorizeRead);
           return jsonResponse({
             ok: true,
             ops: [],

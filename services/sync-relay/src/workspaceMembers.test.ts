@@ -1922,6 +1922,41 @@ describe("ending access", () => {
     }
   });
 
+  it("reads a held levelChanged answer's reach and log head in one transaction", async () => {
+    const activity = new DiscussionActivityHub();
+    const { h, storage } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    const context = storage as StorageContext;
+    const inTransaction: boolean[] = [];
+    const shareLogHead = storage.shareLogHead.bind(storage);
+    storage.shareLogHead = (workspaceId) => {
+      inTransaction.push(context.db.isTransaction === true);
+      return shareLogHead(workspaceId);
+    };
+    const controller = new AbortController();
+    const held = h(
+      request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000`, {
+        signal: controller.signal,
+      }),
+    );
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      inTransaction.length = 0;
+      expect(
+        (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" })).status,
+      ).toBe(200);
+      const answer = await json(await held);
+      expect(answer).toMatchObject({ levelChanged: true, logHead: expect.any(Number) });
+      expect(inTransaction.length).toBeGreaterThan(0);
+      expect(inTransaction).not.toContain(false);
+    } finally {
+      controller.abort();
+      await held.catch(() => undefined);
+    }
+  });
+
   // A level change that lands while no read waits: the next held read says
   // the level it knew, and the relay compares that with its own record.
   it("answers a held read at once when the level it knew is not the stored level", async () => {
