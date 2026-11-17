@@ -194,13 +194,15 @@ describe("useAccessRuleHoldNotices", () => {
       [
         "on-disk",
         "team/access.yaml",
-        "dohc could not read the access rule for team. Check that you can open it.",
+        "Check that you can open team/access.yaml.",
         { to: "file", path: "team/access.yaml" },
       ],
     ] as const) {
       cleanup();
       const h = harness([{ ...WIDENED, rulePath, changes: [], unreadable }]);
       await waitFor(() => expect(h.row("team")).toBeDefined());
+      // Unread, the rule may widen access or not, so the title doesn't say.
+      expect(h.row("team")!.title).toBe("dohc could not read the access rule for team");
       expect(h.row("team")!.message).toBe(`${lead} ${until}`);
       expect(h.row("team")!.rows).toBeUndefined();
       expect(h.row("team")!.target).toEqual(target);

@@ -114,7 +114,7 @@ const ruleOfLower = (folder: string) =>
 const ON_DISK: Record<"locked" | "on-disk", (folder: string, path: string | null) => string> = {
   locked: (folder, path) =>
     `Close ${path ?? ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
-  "on-disk": (folder) => `dohc could not read ${ruleOfLower(folder)}. Check that you can open it.`,
+  "on-disk": (folder, path) => `Check that you can open ${path ?? ruleOfLower(folder)}.`,
 };
 
 export function accessRuleHoldWords(
@@ -175,11 +175,18 @@ export function accessRuleHoldWords(
       accept: hold.canAccept ? { label: "Hide from members", busy: "Hiding…" } : null,
     };
   }
-  const title = `Access to ${place} was widened outside dohc`;
+  // dohc can't read the rule, so it can't say whether access widened.
   if (hold.unreadable === "locked" || hold.unreadable === "on-disk") {
     const lead = ON_DISK[hold.unreadable](hold.folder, hold.rulePath);
-    return { title, message: `${lead} ${until}`, rows, openMembers, accept: null };
+    return {
+      title: `dohc could not read ${ruleOfLower(hold.folder)}`,
+      message: `${lead} ${until}`,
+      rows,
+      openMembers,
+      accept: null,
+    };
   }
+  const title = `Access to ${place} was widened outside dohc`;
   return {
     title,
     message: `${until} Restoring keeps the rule from outside dohc as a copy.${recordedUnread}`,
