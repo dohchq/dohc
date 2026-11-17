@@ -207,15 +207,23 @@ describe("useAccessRuleHoldNotices", () => {
   });
 
   // Two readable spellings record as one rule members can't read, so
-  // keeping them hides the folder, and the row says that is the choice.
+  // keeping them hides the folder. The row says what's wrong, and that
+  // Restore keeps the files from outside dohc.
   it("offers to hide the folder when the rule on disk is several files", async () => {
-    const h = harness([
-      { ...WIDENED, observedSha256: null, changes: [], unreadable: "several-files" },
-    ]);
+    const several = {
+      ...WIDENED,
+      observedSha256: null,
+      changes: [],
+      unreadable: "several-files",
+    } as const;
+    const h = harness([several, { ...several, folder: "" }]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
-    expect(h.row("team")!.message).toBe(
-      "Keep one access rule file in team and delete the others, or hide team from members. Until you choose, dohc doesn't record or share changes in team.",
-    );
+    expect(h.row("team")).toMatchObject({
+      title: "team has more than one access rule file",
+      message:
+        "Until you choose, dohc doesn't record or share changes in team. Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.",
+    });
+    expect(h.row("")!.title).toBe("This workspace has more than one access rule file");
     expect(h.row("team")!.action).toMatchObject({
       label: "Restore rule",
       additional: [{ label: "Hide from members" }],

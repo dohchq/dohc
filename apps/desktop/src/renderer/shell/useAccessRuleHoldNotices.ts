@@ -105,32 +105,15 @@ const ruleOf = (folder: string) =>
 const ruleOfLower = (folder: string) =>
   folder ? `the access rule for ${folder}` : "the workspace's access rule";
 
-// While dohc can't show the widened rule on disk, the row leads with what the
+// While dohc can't read the widened rule on disk, the row leads with what the
 // owner does about it, so the row's three lines show it without Show more.
 // Neither choice can read a locked or unreadable file, so they offer no
-// change to allow. Several readable spellings record as one rule members
-// can't read, which hides the folder.
-// A locked rule names its file, as it is spelled on disk, so the owner can
-// find it in the program that has it open.
-const ON_DISK: Record<
-  "locked" | "on-disk" | "several-files",
-  (
-    folder: string,
-    path: string | null,
-  ) => { lead: string; accept: { label: string; busy: string } | null }
-> = {
-  locked: (folder, path) => ({
-    lead: `Close ${path ?? ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
-    accept: null,
-  }),
-  "on-disk": (folder) => ({
-    lead: `dohc could not read ${ruleOfLower(folder)}. Check that you can open it.`,
-    accept: null,
-  }),
-  "several-files": (folder) => ({
-    lead: `Keep one access rule file in ${placeOf(folder)} and delete the others, or hide ${placeOf(folder)} from members.`,
-    accept: { label: "Hide from members", busy: "Hiding…" },
-  }),
+// change to allow. A locked rule names its file, as it is spelled on disk, so
+// the owner can find it in the program that has it open.
+const ON_DISK: Record<"locked" | "on-disk", (folder: string, path: string | null) => string> = {
+  locked: (folder, path) =>
+    `Close ${path ?? ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
+  "on-disk": (folder) => `dohc could not read ${ruleOfLower(folder)}. Check that you can open it.`,
 };
 
 export function accessRuleHoldWords(
@@ -171,10 +154,22 @@ export function accessRuleHoldWords(
       accept: { label: "Remove rule", busy: "Removing…" },
     };
   }
+  // Several readable spellings record as one rule members can't read, so
+  // recording them hides the folder. Restore keeps each file from outside
+  // dohc as a copy, so it loses nothing.
+  if (hold.unreadable === "several-files") {
+    return {
+      title: `${placeOpening(hold.folder)} has more than one access rule file`,
+      message: `${until} Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.`,
+      rows,
+      openMembers,
+      accept: { label: "Hide from members", busy: "Hiding…" },
+    };
+  }
   const title = `Access to ${place} was widened outside dohc`;
-  if (hold.unreadable !== null && hold.unreadable !== "recorded") {
-    const onDisk = ON_DISK[hold.unreadable](hold.folder, hold.rulePath);
-    return { title, message: `${onDisk.lead} ${until}`, rows, openMembers, accept: onDisk.accept };
+  if (hold.unreadable === "locked" || hold.unreadable === "on-disk") {
+    const lead = ON_DISK[hold.unreadable](hold.folder, hold.rulePath);
+    return { title, message: `${lead} ${until}`, rows, openMembers, accept: null };
   }
   return {
     title,
