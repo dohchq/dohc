@@ -1102,6 +1102,36 @@ describe("registered received-view handlers", () => {
       expect(h.rebuild).toHaveBeenCalledOnce();
     });
 
+    // The panel shows while the engine may still be starting, as refresh can.
+    it("waits for the engine to start before Try again reaches it", async () => {
+      const h = await harness();
+      Object.assign(h.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+        rebuild: {
+          rebuildId: "rebuild-1",
+          stopped: { reason: "failed", detail: "dohc could not update access." },
+        },
+      });
+      h.withoutRendererSession();
+      let started!: () => void;
+      h.startup.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            started = resolve;
+          }),
+      );
+      const retry = h.invoke(sharedViewAccessOperations.retryShareViewRebuild.channel, {
+        workspaceId: "existing",
+      });
+      await vi.waitFor(() => expect(h.startup).toHaveBeenCalled());
+      expect(h.readRebuild).not.toHaveBeenCalled();
+      expect(h.rebuild).not.toHaveBeenCalled();
+      started();
+      await retry;
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-1");
+    });
+
     it("tells the window why an update of access stopped", async () => {
       const h = await harness();
       Object.assign(h.workspace.shareView!, {

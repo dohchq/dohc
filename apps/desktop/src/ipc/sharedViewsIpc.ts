@@ -1171,6 +1171,8 @@ export function registerSharedViewsIpcHandlers<
       retryShareViewRebuild: async (input) => {
         const view = requireWorkspace(input.workspaceId).shareView;
         if (!view || view.ended || !shareViewIdentityIsIntact(view)) return;
+        // The panel shows during startup too, and the engine reads the rebuild.
+        await engineDaemonStartup();
         await recoverRebuild(input.workspaceId);
         startRebuild(input.workspaceId);
       },
