@@ -1266,8 +1266,13 @@ fn recover(source: &Path, destination: &Path) -> Result<bool, WireError> {
         std::fs::create_dir_all(folder)
             .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
     }
-    dohc_engine_files::move_file_no_replace(source, destination)
-        .map_err(|_| failed("share-view-rebuild-recovery-move-failed"))?;
+    dohc_engine_files::move_file_no_replace(source, destination).map_err(|error| {
+        failed(if maybe_held(&error) {
+            "share-view-rebuild-file-held"
+        } else {
+            "share-view-rebuild-recovery-move-failed"
+        })
+    })?;
     Ok(true)
 }
 
@@ -1326,6 +1331,18 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
     written.map_err(|_| failed("share-view-rebuild-recovery-unavailable"))
 }
 
+/// Whether another program's open file may be what stopped a move. Windows
+/// reports a rename blocked by a held file as access denied (5), as it does
+/// a real denial, so this can't be sure.
+fn maybe_held(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::ResourceBusy {
+        return true;
+    }
+    // ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32) and
+    // ERROR_LOCK_VIOLATION (33). On Unix these numbers mean other things.
+    cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
 /// Rename, trying again with backoff: on Windows a handle another program
 /// holds blocks a rename for a moment.
 async fn rename_retrying(from: &Path, to: &Path) -> Result<(), WireError> {
@@ -1337,6 +1354,7 @@ async fn rename_retrying(from: &Path, to: &Path) -> Result<(), WireError> {
                 tokio::time::sleep(delay).await;
                 delay *= 4;
             }
+            Err(error) if maybe_held(&error) => return Err(failed("share-view-rebuild-file-held")),
             Err(_) => break,
         }
     }
@@ -1364,6 +1382,31 @@ mod tests {
             named.starts_with("0001 é") && named.ends_with("é.md"),
             "{named}"
         );
+    }
+
+    /// A rename another program's open file blocks names the held file, so
+    /// main can tell the member what to close.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_rename_a_held_file_blocks_says_the_file_is_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let from = scratch.path().join("engine");
+        std::fs::create_dir(&from).expect("folder");
+        std::fs::write(from.join("engine.db"), b"store").expect("file");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(from.join("engine.db"))
+            .expect("hold");
+        let error = rename_retrying(&from, &scratch.path().join("aside"))
+            .await
+            .expect_err("held");
+        assert_eq!(error.message, "share-view-rebuild-file-held");
+        drop(held);
+        rename_retrying(&from, &scratch.path().join("aside"))
+            .await
+            .expect("free");
     }
 
     #[test]

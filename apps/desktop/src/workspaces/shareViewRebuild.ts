@@ -318,6 +318,42 @@ export function parseShareViewRebuildAnswer(
   throw new Error("dohc could not read the engine's rebuild answer.");
 }
 
+const CHANGE_FAILED =
+  "dohc could not update access because it could not change files in this workspace. Check that no other program has them open and the disk has room, then choose Try again.";
+
+// What the person can do about each code the engine stops a rebuild with.
+const REBUILD_REFUSALS: Partial<Record<string, string>> = {
+  // On Windows a rename that a held file blocks fails as access denied, as
+  // a real denial does, so the words can't be sure.
+  "share-view-rebuild-file-held":
+    "dohc could not update access because another program may have a file in this workspace open. Close it, then choose Try again.",
+  "share-view-rebuild-rename-failed": CHANGE_FAILED,
+  "share-view-rebuild-recovery-move-failed": CHANGE_FAILED,
+  "share-view-rebuild-recovery-unavailable": CHANGE_FAILED,
+  "share-view-rebuild-staging-unavailable": CHANGE_FAILED,
+  "share-view-rebuild-staging-left": CHANGE_FAILED,
+  "share-view-rebuild-aside-unavailable": CHANGE_FAILED,
+  "share-view-rebuild-aside-left": CHANGE_FAILED,
+  "share-view-rebuild-manifest-unwritable": CHANGE_FAILED,
+  "share-view-rebuild-filesystem-unreadable": CHANGE_FAILED,
+  "share-view-rebuild-disk-unreadable": CHANGE_FAILED,
+  "share-view-rebuild-jobs-unfinished": CHANGE_FAILED,
+  "share-view-rebuild-filesystems-differ":
+    "dohc could not update access because this workspace's .dohc folder is spread over more than one disk.",
+  "share-view-rebuild-swap-unrecognized":
+    "dohc could not update access because its data for this workspace is in a state dohc doesn't recognize.",
+  "share-view-rebuild-root-open":
+    "dohc could not update access because this workspace was still open.",
+};
+
+/** The code an engine refusal carries, through the errors that wrap it. */
+function engineRefusalCode(error: unknown): string | null {
+  for (let at = error, depth = 0; at instanceof Error && depth < 4; at = at.cause, depth += 1) {
+    if (at instanceof EngineRequestError && at.wireError) return at.wireError.message;
+  }
+  return null;
+}
+
 /** What the view records about a stopped rebuild, or null once it runs or finished. */
 export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewRebuildStop | null {
   switch (notice.kind) {
@@ -331,6 +367,12 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
     case "failed": {
       if (notice.error instanceof LivePageUnkeptError)
         return { reason: "failed", detail: notice.error.message };
+      const code = engineRefusalCode(notice.error);
+      if (code !== null)
+        return {
+          reason: "failed",
+          detail: REBUILD_REFUSALS[code] ?? "dohc could not update access.",
+        };
       const cause = notice.error instanceof Error ? notice.error.message : String(notice.error);
       return {
         reason: "failed",

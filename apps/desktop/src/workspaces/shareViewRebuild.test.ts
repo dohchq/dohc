@@ -385,6 +385,50 @@ describe("rebuilding a joined copy", () => {
   });
 });
 
+// The engine stops a rebuild with a code. The person reads what to do.
+describe("the words for a stopped rebuild", () => {
+  const refused = (code: string) =>
+    new Error(code, {
+      cause: new EngineRequestError(1, { code: "CONFLICT", message: code, retry: "no" }),
+    });
+  const HELD =
+    "dohc could not update access because another program may have a file in this workspace open. Close it, then choose Try again.";
+  const UNCHANGED =
+    "dohc could not update access because it could not change files in this workspace. Check that no other program has them open and the disk has room, then choose Try again.";
+  it.each([
+    ["share-view-rebuild-file-held", HELD],
+    ["share-view-rebuild-rename-failed", UNCHANGED],
+    ["share-view-rebuild-recovery-move-failed", UNCHANGED],
+    ["share-view-rebuild-staging-unavailable", UNCHANGED],
+    ["share-view-rebuild-disk-unreadable", UNCHANGED],
+    ["share-view-rebuild-jobs-unfinished", UNCHANGED],
+    [
+      "share-view-rebuild-filesystems-differ",
+      "dohc could not update access because this workspace's .dohc folder is spread over more than one disk.",
+    ],
+    [
+      "share-view-rebuild-swap-unrecognized",
+      "dohc could not update access because its data for this workspace is in a state dohc doesn't recognize.",
+    ],
+    [
+      "share-view-rebuild-root-open",
+      "dohc could not update access because this workspace was still open.",
+    ],
+    ["share-view-rebuild-new-code", "dohc could not update access."],
+  ])("%s", (code, detail) => {
+    expect(shareViewRebuildStop({ kind: "failed", error: refused(code) })).toEqual({
+      reason: "failed",
+      detail,
+    });
+  });
+
+  it("keeps a sentence that already says what failed", () => {
+    expect(shareViewRebuildStop({ kind: "failed", error: new Error("the disk is full.") })).toEqual(
+      { reason: "failed", detail: "dohc could not update access: the disk is full." },
+    );
+  });
+});
+
 // Main's hold, against the real session gate. The engine closed the copy
 // before main holds it, so it refuses every request but close.
 describe("holding a copy for its rebuild", () => {
