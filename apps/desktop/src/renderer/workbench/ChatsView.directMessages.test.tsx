@@ -390,6 +390,65 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 3 }));
   });
 
+  it("reads the history again when a send skips past the other person's message, and marks nothing read past the gap", async () => {
+    const user = userEvent.setup();
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
+    });
+    signedIn([conversation({ last: sent(1, VIEWER, "Dinner Friday?"), unread: 0 })]);
+    let reread: (page: unknown) => void = () => {};
+    // Every later read answers once Sam's message is in, whichever read the view keeps.
+    bridgeMock.directHistory
+      .mockResolvedValueOnce({
+        conversationId: "conversation-sam",
+        messages: [sent(1, VIEWER, "Dinner Friday?")],
+        more: false,
+      })
+      .mockReturnValue(
+        new Promise((resolve) => {
+          reread = resolve;
+        }),
+      );
+    // Sam's message took seq 2 on the server before this send's answer came back.
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 3 });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(1));
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    await waitFor(() => expect(bridgeMock.directSend).toHaveBeenCalledTimes(1));
+    signedIn([conversation({ last: sent(3, VIEWER, "On my way"), unread: 1 })]);
+    act(() => changed());
+    await waitFor(() =>
+      expect(bridgeMock.directHistory.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    // Sam's message is not on screen yet, so nothing past it is marked read.
+    expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 3 }));
+    await act(async () =>
+      reread({
+        conversationId: "conversation-sam",
+        messages: [
+          sent(1, VIEWER, "Dinner Friday?"),
+          sent(2, "sam", "Booked for eight"),
+          sent(3, VIEWER, "On my way"),
+        ],
+        more: false,
+      }),
+    );
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(3));
+    expect(within(view).getAllByTestId("chats-dm-message")[1]!.textContent).toContain(
+      "Booked for eight",
+    );
+    await waitFor(() =>
+      expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        viewerId: VIEWER,
+        conversationId: "conversation-sam",
+        seq: 3,
+      }),
+    );
+  });
+
   it("names the account that wrote a message when Try again outlives a change of account, so main refuses it", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);

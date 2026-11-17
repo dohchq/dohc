@@ -292,6 +292,19 @@ export function mergeDirectPage(
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/**
+ * The newest seq shown with every message before it, back to the first shown. A send answered after
+ * someone else's message took the seq before it leaves a gap; what is past the gap is not read yet.
+ */
+export function directShownThrough(shown: readonly DirectMessage[]): number {
+  let through = shown[0]?.seq ?? 0;
+  for (const message of shown.slice(1)) {
+    if (message.seq !== through + 1) break;
+    through = message.seq;
+  }
+  return through;
+}
+
 /** How a shown conversation is named to chatsOnScreen, so its Notice reads while it shows. */
 export function directScreenKey(conversationId: string): string {
   return `direct:${conversationId}`;

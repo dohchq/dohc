@@ -46,6 +46,7 @@ import {
   directPresentation,
   directScreenKey,
   mergeDirectPage,
+  directShownThrough,
   useDirectConversations,
   type DirectListState,
   type DirectStore,
@@ -464,12 +465,13 @@ function ConversationForAccount(props: ConversationProps) {
       request.current += 1;
     };
   }, [load]);
-  // The server says something new arrived: read the newest page again.
+  // The server says something new arrived, or a send skipped past a message: read the newest page again.
   const lastSeq = conversation?.last.seq ?? 0;
-  const shownSeq = shown.status === "ready" ? (shown.messages.at(-1)?.seq ?? 0) : null;
+  const shownSeq = shown.status === "ready" ? directShownThrough(shown.messages) : null;
+  const endSeq = shown.status === "ready" ? (shown.messages.at(-1)?.seq ?? 0) : 0;
   useEffect(() => {
-    if (shownSeq !== null && lastSeq > shownSeq) void load();
-  }, [lastSeq, shownSeq, load]);
+    if (shownSeq !== null && Math.max(lastSeq, endSeq) > shownSeq) void load();
+  }, [lastSeq, endSeq, shownSeq, load]);
 
   const records = useMemo(
     () =>
