@@ -456,6 +456,69 @@ async fn a_widened_clean_copy_is_rebuilt_and_writes_the_new_file() {
     close(&transport, &handle, &mut id).await;
 }
 
+/// A member who can edit sends Collection changes from the rebuilt copy as
+/// soon as it opens, before main records anything for it: the rebuild gave
+/// the new store an identity to send under.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_editor_s_rebuilt_copy_sends_collection_changes_when_it_opens() {
+    let copy = closed_copy("rpc-rebuild-editor-sends", true, false).await;
+    let mut edit = grant("r2", "v2");
+    edit["access"] = json!("edit");
+    edit["reach"]["rootLevel"] = json!("edit");
+    let mut params = rebuild_params(&copy);
+    params["grantedSelector"] = edit.clone();
+    let rebuilt = InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(90, "share.view.rebuild", None, params),
+        )
+        .await
+        .expect("rebuild")
+        .result;
+    assert_eq!(rebuilt["state"], "rebuilt", "{rebuilt}");
+    finish(&copy).await;
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": copy.scratch.path().to_string_lossy(),
+                    "workspaceId": copy.workspace_id,
+                    "relay": {
+                        "baseUrl": copy.relay.base_url,
+                        "bearerToken": BEARER,
+                        "allowInsecureLoopbackForTests": true,
+                    },
+                }),
+            ),
+        )
+        .await
+        .expect("reopen");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let pushed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "share.direct.push",
+                Some(handle.clone()),
+                json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": edit }),
+            ),
+        )
+        .await
+        .map(|response| response.result)
+        .map_err(|error| (error.code, error.message));
+    assert!(pushed.is_ok(), "{pushed:?}");
+    let mut id = 10;
+    close(&transport, &handle, &mut id).await;
+}
+
 /// The names in a folder, sorted.
 fn names_in(folder: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(folder)

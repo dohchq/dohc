@@ -1013,7 +1013,7 @@ fn recovered_origin_id() -> Result<String, WireError> {
     sync_identifier("origin")
 }
 
-fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
+pub(super) fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
     let mut entropy = [0_u8; 16];
     getrandom::fill(&mut entropy)
         .map_err(|_| WireError::new(ErrorCode::Internal, "sync-identity-generation-failed"))?;

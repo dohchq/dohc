@@ -47,7 +47,7 @@ use crate::rebuild_manifest::{
 use crate::root_binding::{self, LOCAL_STATE_RELATIVE_PATH};
 use crate::rpc::error::map_runtime;
 use crate::rpc::rebuild::updating_access;
-use crate::rpc::relay::{GrantedSelectorParams, share_grant};
+use crate::rpc::relay::{GrantedSelectorParams, share_grant, sync_identifier};
 use crate::rpc::request::{now_ms, parse};
 use crate::{EngineService, lock};
 
@@ -593,6 +593,24 @@ impl EngineService {
                 break;
             }
         }
+        // The new store sends as a replica of its own, as a fresh join does:
+        // a Collection change made after the swap has an origin to go out
+        // under. Reusing the old origin would restart its sequence.
+        self.relay_execute(
+            ctx,
+            &open,
+            configuration.clone(),
+            RelayOperation::RecordShareViewIdentity {
+                workspace_id: params.workspace_id.clone(),
+                access: share_grant(parse(params.granted_selector.clone())?)?.highest(),
+                origin_id: sync_identifier("origin")?,
+                replication_epoch: sync_identifier("epoch")?,
+                stream_identity: sync_identifier("stream")?,
+                created_at_ms: now_ms()?,
+            },
+            "share.view.rebuild",
+        )
+        .await?;
         // A thread, message or channel the new reach hides takes none of it.
         open.actor
             .rebuild_carry(old.carried.clone())
