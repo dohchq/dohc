@@ -1576,6 +1576,10 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
         "View posts nothing"
     );
     // A member's lane opens on the highest level its reach lists anywhere.
+    // The engine sends every Group post on it and leaves levels to the relay.
+    // This test relay takes them all; a real one refuses a Group post at View,
+    // and the engine sets it aside with a Notice, as the refusal test below
+    // shows. Skipping it here would move the cursor past it and lose it.
     let listed = |level| ShareGrant {
         reach: Some(crate::ShareReach {
             signature: "r1".to_owned(),
