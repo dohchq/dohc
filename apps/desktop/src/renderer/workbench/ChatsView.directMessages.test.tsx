@@ -7,6 +7,7 @@ import type { DirectConversation, DirectMessage } from "@dohc/security-contract/
 import { bridgeMock, emitCloudSessionChanged, renderView } from "./ChatsView.testHarness";
 import { chatTabPath } from "./workbenchState";
 import { directStore } from "./directConversations";
+import { initWindowFocus } from "../windowFocus";
 
 // Direct messages live on the account's server, so every workspace lists the
 // same People. Each conversation is between two people. Nothing is kept on
@@ -102,6 +103,17 @@ function members(
   });
 }
 
+// Main's focus events for this window, on the bridge the direct store already holds.
+function windowFocus(): (focused: boolean) => void {
+  let tell: (event: { focused: boolean }) => void = () => {};
+  window.dohcDesktop!.onWindowFocused = (listener) => {
+    tell = listener;
+    return () => undefined;
+  };
+  initWindowFocus();
+  return (focused) => act(() => tell({ focused }));
+}
+
 async function openSam() {
   fireEvent.click(await screen.findByTestId("chats-dm-item"));
   return screen.findByTestId("chats-dm-view");
@@ -110,6 +122,7 @@ async function openSam() {
 describe("ChatsView direct messages", () => {
   beforeEach(() => {
     bridgeMock.directMarkRead.mockResolvedValue(undefined);
+    windowFocus()(true);
   });
 
   it("hides People while signed out of the server", async () => {
@@ -311,6 +324,27 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
     // No one else is in a conversation of two, so its composer offers no Mention.
     expect(within(view).queryByRole("button", { name: "Mention" })).toBeNull();
+  });
+
+  it("marks nothing read while the window is in the background, and marks it once the window has focus", async () => {
+    const focus = windowFocus();
+    focus(false);
+    signedIn([conversation({ unread: 1 })]);
+    history([sent(1, VIEWER, "Dinner Friday?"), sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
+    // The list mounts its scroller after a frame; give it that frame.
+    await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    expect(bridgeMock.directMarkRead).not.toHaveBeenCalled();
+    focus(true);
+    await waitFor(() =>
+      expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        viewerId: VIEWER,
+        conversationId: "conversation-sam",
+        seq: 2,
+      }),
+    );
   });
 
   it("drops a list read for the account signed in before, even on the first session event", async () => {
@@ -620,6 +654,46 @@ describe("ChatsView direct messages", () => {
     expect(
       bridgeMock.directBlock.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId),
     ).toEqual([VIEWER, VIEWER]);
+  });
+
+  it("picks no one with the Enter that ends an IME composition in To", async () => {
+    signedIn([]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    await screen.findAllByTestId("chats-dm-new-member");
+    const to = screen.getByTestId("chats-dm-recipients");
+    fireEvent.keyDown(to, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(to, { key: "Enter", keyCode: 229 });
+    expect(screen.queryAllByTestId("chats-dm-new-pick")).toEqual([]);
+    fireEvent.keyDown(to, { key: "Enter" });
+    expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
+      ["sam"],
+    );
+  });
+
+  it("keeps words written after a first message failed when its Try again goes through", async () => {
+    const user = userEvent.setup();
+    signedIn([]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
+    bridgeMock.directStart.mockRejectedValueOnce(UNREACHABLE("direct-start"));
+    history([sent(1, VIEWER, "First")]);
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
+    const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
+    await user.type(composer, "First{Enter}");
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    await user.clear(composer);
+    await user.type(composer, "Second");
+    bridgeMock.directStart.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 1 });
+    const [, , tryAgain] = onError.mock.calls.at(-1)!;
+    await act(async () => (tryAgain as () => void)());
+    expect(bridgeMock.directStart.mock.calls[1]![0]).toMatchObject({ body: "First" });
+    expect(directStore().draft("new")).toBe("Second");
   });
 
   it("starts a new message with one person picked from the workspace's members", async () => {

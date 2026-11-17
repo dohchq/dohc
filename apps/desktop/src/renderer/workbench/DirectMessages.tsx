@@ -26,6 +26,7 @@ import {
   WORKSPACE_NOT_SYNCED,
 } from "../../ipc/errorWords";
 import { EmptyState, FieldError, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { isComposingKey } from "../ui/keys";
 import { MENU_ACTIVE_OPTION, Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -35,7 +36,7 @@ import { ChatHeader, UnreadPill } from "./ChatsControls";
 import { NavRow, SectionActionButton } from "./ChatNavRow";
 import { chatRowMenuItems } from "./chatRowMenu";
 import { ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
-import { showChat } from "./chatsOnScreen";
+import { chatOnScreen, showChat, watchChatsOnScreen } from "./chatsOnScreen";
 import { EMPTY_ART } from "./EmptyArt";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
 import type { ChatErrorNotice } from "./ChatsView";
@@ -316,7 +317,12 @@ async function blockPerson(input: {
 }
 
 /** Whether the list's newest message is on screen: scrolled to the end, in a window that shows. */
-function useNewestInView(list: RefObject<ChatMessageListHandle | null>, ready: boolean): boolean {
+// The newest message shows to the person: the conversation is on screen in a focused window, scrolled to its end.
+function useNewestInView(
+  list: RefObject<ChatMessageListHandle | null>,
+  conversationId: string,
+  ready: boolean,
+): boolean {
   const [inView, setInView] = useState(false);
   useEffect(() => {
     if (!ready) return;
@@ -324,7 +330,7 @@ function useNewestInView(list: RefObject<ChatMessageListHandle | null>, ready: b
     const check = () => {
       node ??= list.current?.getScrollableNode() ?? null;
       const atEnd = !node || node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-      setInView(atEnd && document.visibilityState === "visible");
+      setInView(atEnd && chatOnScreen(directScreenKey(conversationId)));
     };
     // The list mounts its scroller after the first layout.
     const frame = requestAnimationFrame(() => {
@@ -332,13 +338,13 @@ function useNewestInView(list: RefObject<ChatMessageListHandle | null>, ready: b
       node?.addEventListener("scroll", check, { passive: true });
     });
     check();
-    document.addEventListener("visibilitychange", check);
+    const unwatch = watchChatsOnScreen(check);
     return () => {
       cancelAnimationFrame(frame);
       node?.removeEventListener("scroll", check);
-      document.removeEventListener("visibilitychange", check);
+      unwatch();
     };
-  }, [list, ready]);
+  }, [conversationId, list, ready]);
   return inView;
 }
 
@@ -474,7 +480,7 @@ function ConversationForAccount(props: ConversationProps) {
   );
 
   const listRef = useRef<ChatMessageListHandle | null>(null);
-  const newestInView = useNewestInView(listRef, shown.status === "ready");
+  const newestInView = useNewestInView(listRef, conversationId, shown.status === "ready");
   const newestSeq = shownSeq ?? 0;
   useEffect(() => {
     if (!conversation || conversation.unread === 0 || !newestInView || newestSeq === 0) return;
@@ -959,6 +965,8 @@ function NewMessageForAccount(props: NewMessageProps) {
         ?.scrollIntoView?.({ block: "nearest" });
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // Enter, the arrows and Backspace work an IME's candidates while it composes.
+    if (isComposingKey(event)) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveTo(Math.min(activeIndex + 1, matches.length - 1));
@@ -1058,7 +1066,11 @@ function NewMessageForAccount(props: NewMessageProps) {
         });
         if (session !== store.session()) return;
         store.sent(`new:${memberId}`, messageId);
-        store.setDraft("new", "");
+        // A Try again can land after the person wrote something else here.
+        if (store.draft("new").trim() === body) {
+          store.setDraft("new", "");
+          setDraftState((current) => (current.trim() === body ? "" : current));
+        }
         reporting.current.onClearError?.(sendIdentity);
         void store.refresh();
         openConversation.current(result.conversationId, to);

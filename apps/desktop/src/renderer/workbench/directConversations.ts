@@ -161,6 +161,8 @@ export function createDirectStore(api: Api) {
     refresh,
     /** Marks the conversation read up to `seq`, once per seq. A failed mark reads the list again. */
     markRead(conversationId: string, seq: number): void {
+      // A read mark never waits on a list: one made before the list read is dropped with nothing lost.
+      if (state.status !== "ready") return;
       if ((readSent.get(conversationId) ?? -1) >= seq) return;
       readSent.set(conversationId, seq);
       patch(conversationId, (conversation) =>
@@ -169,8 +171,6 @@ export function createDirectStore(api: Api) {
           : { ...conversation, unread: 0 },
       );
       const mine = session;
-      // A read mark never waits on a list: one made before the list read is dropped with nothing lost.
-      if (state.status !== "ready") return;
       api.directMarkRead({ viewerId: state.viewerId, conversationId, seq }).catch(() => {
         if (mine !== session) return;
         if (readSent.get(conversationId) === seq) readSent.delete(conversationId);

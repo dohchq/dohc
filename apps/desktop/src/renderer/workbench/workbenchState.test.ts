@@ -1381,6 +1381,16 @@ describe("direct tab names", () => {
     const restored = parseUiState({ ...serializeUiState(withTabs(...paths)), directNames: flood });
     expect(Object.keys(restored.directNames).length).toBeLessThanOrEqual(MAX_DIRECT_NAMES);
   });
+
+  it("keeps an open tab's name behind a file's worth of names for closed tabs", () => {
+    const names: Record<string, unknown> = {};
+    for (let i = 0; i < MAX_DIRECT_NAMES; i++)
+      names[`c-closed-${i}`] = { account: ann, name: `Person ${i}` };
+    names["c-alice"] = { account: ann, name: "Alice Moreno" };
+    expect(
+      parseUiState({ ...serializeUiState(withTabs(alice)), directNames: names }).directNames,
+    ).toEqual({ "c-alice": { account: ann, name: "Alice Moreno" } });
+  });
 });
 
 describe("collection views", () => {

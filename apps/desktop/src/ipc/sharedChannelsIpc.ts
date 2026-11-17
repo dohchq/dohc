@@ -477,7 +477,9 @@ export function createSharedChannelsIpc<
         recipientUserId: joinedRecipientUserId,
         relayUrl: joinedRelayUrl,
         serverUrl: joinCredentials.serverUrl,
+        // A re-grant has a new share id for a channel another workspace may still hold.
         preWrite: (info) => {
+          assertShareNotHeldElsewhere(info.shareId, workspace.workspaceId, info.channelWireId);
           grant.info = info;
         },
       });
@@ -599,7 +601,6 @@ export function createSharedChannelsIpc<
       leaveSharedChannel: leaveSharedChannelHandler,
       dismissShareSkips: dismissShareSkipsHandler,
     },
-    assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,
     endWorkspaceJoinedChannel,
   };

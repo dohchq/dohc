@@ -255,6 +255,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(
   async function ensureFollowing(): Promise<void> {
     if (listeners === 0) return;
     const credentials = await dependencies.credentials().catch(() => null);
+    // The last listener may have stopped while the account was read.
+    if (listeners === 0) return;
     const key = credentials?.relayUrl ? accountKey(credentials) : null;
     if (listed && listed.key !== key) setListed(null);
     if (following?.key === key) return;

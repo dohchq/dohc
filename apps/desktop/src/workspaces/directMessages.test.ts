@@ -35,10 +35,16 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   const tokens: string[] = [];
   let changes = 0;
   let listedChanges = 0;
+  let held: Promise<void> | null = null;
+  const signals: Array<AbortSignal | null | undefined> = [];
   const service = createDirectMessages<Account>({
-    credentials: async () => account,
+    credentials: async () => {
+      await held;
+      return account;
+    },
     relayResponse: async (credentials, path, init) => {
       requests.push(`${init.method ?? "GET"} ${path}`);
+      signals.push(init.signal);
       tokens.push(credentials.token ?? "");
       if (offline) throw new TypeError("fetch failed");
       // Like a server, answer on a later turn so a follow loop yields.
@@ -59,7 +65,19 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
     service,
     routes,
     requests,
+    signals,
     tokens,
+    /** Holds every credential read until the returned function runs. */
+    holdCredentials: () => {
+      let release = () => {};
+      held = new Promise<void>((resolve) => {
+        release = () => {
+          held = null;
+          resolve();
+        };
+      });
+      return release;
+    },
     changes: () => changes,
     listedChanges: () => listedChanges,
     goOffline: () => {
@@ -258,43 +276,63 @@ describe("direct messages for the signed-in account", () => {
   });
 
   it("tells listeners when the account's revision moves, and stops when nobody listens", async () => {
-    const h = harness();
-    let revision = 1;
-    let polls = 0;
-    h.routes.set("/sync/direct/activity", () => {
-      polls += 1;
-      if (polls === 3) revision = 2;
-      return Response.json({ revision });
-    });
-    h.routes.set("/sync/direct/conversations", () =>
-      Response.json({ revision, conversations: [] }),
-    );
-    const stop = h.service.listen();
-    // The first answer, then the move to revision 2.
-    await expect.poll(() => h.changes()).toBe(2);
-    stop();
-    const after = polls;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(polls - after).toBeLessThanOrEqual(1);
-    expect(h.requests[0]).toBe("GET /sync/direct/activity?since=0&waitMs=0");
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      let revision = 1;
+      let polls = 0;
+      h.routes.set("/sync/direct/activity", () => {
+        polls += 1;
+        if (polls === 3) revision = 2;
+        return Response.json({ revision });
+      });
+      h.routes.set("/sync/direct/conversations", () =>
+        Response.json({ revision, conversations: [] }),
+      );
+      const stop = h.service.listen();
+      // The first answer, then the move to revision 2.
+      while (h.changes() < 2) await vi.advanceTimersByTimeAsync(1);
+      expect(h.changes()).toBe(2);
+      stop();
+      // Every activity request carries the loop's one signal, and stopping aborts it.
+      const signals = h.signals.filter((signal) => signal !== undefined && signal !== null);
+      expect(signals.length).toBeGreaterThan(0);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      const after = h.requests.length;
+      // A loop still running would keep setting timers, and this would never finish.
+      await vi.runAllTimersAsync();
+      expect(h.requests.length).toBe(after);
+      expect(h.requests[0]).toBe("GET /sync/direct/activity?since=0&waitMs=0");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not spin when the server answers at once with nothing new", async () => {
-    const h = harness({ retryMs: 50 });
-    let polls = 0;
-    h.routes.set("/sync/direct/activity", () => {
-      polls += 1;
-      return Response.json({ revision: 7 });
-    });
-    h.routes.set("/sync/direct/conversations", () =>
-      Response.json({ revision: 7, conversations: [] }),
-    );
-    const stop = h.service.listen();
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    stop();
-    expect(polls).toBeGreaterThanOrEqual(2);
-    expect(polls).toBeLessThanOrEqual(5);
-    expect(h.changes()).toBe(1);
+    vi.useFakeTimers();
+    try {
+      const h = harness({ retryMs: 50 });
+      let polls = 0;
+      h.routes.set("/sync/direct/activity", () => {
+        polls += 1;
+        return Response.json({ revision: 7 });
+      });
+      h.routes.set("/sync/direct/conversations", () =>
+        Response.json({ revision: 7, conversations: [] }),
+      );
+      const stop = h.service.listen();
+      // The first answer is a change; the second has nothing new.
+      while (polls < 2) await vi.advanceTimersByTimeAsync(1);
+      // The next poll waits out the retry delay.
+      await vi.advanceTimersByTimeAsync(45);
+      expect(polls).toBe(2);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(polls).toBe(3);
+      expect(h.changes()).toBe(1);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("tells listeners on each failure while the server is away, and once when it answers again", async () => {
@@ -334,6 +372,24 @@ describe("direct messages for the signed-in account", () => {
     await expect.poll(() => h.tokens.slice(at).includes("new")).toBe(true);
     stop();
     expect(h.tokens.slice(at + 2).every((token) => token === "new")).toBe(true);
+  });
+
+  it("starts no follow for a listener that stopped while the account was still being read", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 1, conversations: [] }),
+    );
+    const release = h.holdCredentials();
+    h.service.listen()();
+    release();
+    // Everything the follow loop would do before its first request runs on this turn's microtasks.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.requests).toEqual([]);
+    // A listener that stays still starts following.
+    const stop = h.service.listen();
+    await expect.poll(() => h.requests.length).toBeGreaterThan(0);
+    stop();
   });
 
   it("forgets the last account's list once another signs in", async () => {

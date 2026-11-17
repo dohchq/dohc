@@ -44,4 +44,42 @@ describe("direct store", () => {
     expect(store.session()).toBeGreaterThan(firstSession);
     expect(store.snapshot().status).toBe("loading");
   });
+
+  it("keeps no read mark made before the list reads, so the same mark sends once it has", async () => {
+    const { api } = fakeApi();
+    api.directConversations.mockResolvedValue({
+      available: true,
+      viewerId: "ana",
+      conversations: [
+        {
+          conversationId: "c1",
+          person: { personId: "bob", name: "Bob", blocked: false },
+          last: {
+            seq: 7,
+            messageId: "m7",
+            authorId: "bob",
+            authorName: "Bob",
+            body: "hi",
+            createdAtMs: 1,
+          },
+          unread: 1,
+        },
+      ] as never,
+    });
+    const store = createDirectStore(api as unknown as Parameters<typeof createDirectStore>[0]);
+    store.markRead("c1", 7);
+    expect(api.directMarkRead).not.toHaveBeenCalled();
+    // The first view reads the list; no change of account clears anything in between.
+    const stop = store.subscribe(() => {});
+    await vi.waitFor(() => expect(store.snapshot().status).toBe("ready"));
+    const ready = store.snapshot();
+    expect(ready.status === "ready" ? ready.conversations[0]!.unread : null).toBe(1);
+    store.markRead("c1", 7);
+    expect(api.directMarkRead).toHaveBeenCalledWith({
+      viewerId: "ana",
+      conversationId: "c1",
+      seq: 7,
+    });
+    stop();
+  });
 });

@@ -1254,9 +1254,9 @@ export function setDirectTabName(
   return { ...state, directNames: { ...state.directNames, [conversationId]: { account, name } } };
 }
 
-function openDirectIds(state: WorkbenchState): Set<string> {
+function openDirectIds(state: Pick<WorkbenchState, "editorGroups">): Set<string> {
   const ids = new Set<string>();
-  for (const tab of allTabs(state)) {
+  for (const tab of state.editorGroups.flatMap((group) => group.tabs)) {
     const parsed = parseTab(tab.path);
     if (parsed.kind === "chat" && parsed.target.kind === "dm") ids.add(parsed.target.id);
   }
@@ -1602,15 +1602,22 @@ export function parseUiState(raw: unknown): WorkbenchState {
         ? clampRecordPanelWidth(rawRecordPanelWidth)
         : defaults.recordPanelWidth,
   };
-  return keepOpenDirectNames({ ...parsed, directNames: collectDirectNames(own("directNames")) });
+  return {
+    ...parsed,
+    directNames: collectDirectNames(own("directNames"), openDirectIds(parsed)),
+  };
 }
 
-function collectDirectNames(raw: unknown): Record<string, DirectTabName> {
+// The collectOpenRecords posture: only a restored tab's name is read, so names for closed tabs can't crowd it out.
+function collectDirectNames(
+  raw: unknown,
+  open: ReadonlySet<string>,
+): Record<string, DirectTabName> {
   const out: Record<string, DirectTabName> = Object.create(null);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
   const record = raw as Record<string, unknown>;
   let collected = 0;
-  for (const id in record) {
+  for (const id of open) {
     if (collected >= MAX_DIRECT_NAMES) break;
     if (!Object.hasOwn(record, id) || !isDirectId(id)) continue;
     const entry = record[id];
