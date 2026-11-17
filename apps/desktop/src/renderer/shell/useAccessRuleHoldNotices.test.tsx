@@ -210,12 +210,12 @@ describe("useAccessRuleHoldNotices", () => {
   // keeping them hides the folder. The row says what's wrong, and that
   // Restore keeps the files from outside dohc.
   it("offers to hide the folder when the rule on disk is several files", async () => {
-    const several = {
+    const several: AccessRuleHold = {
       ...WIDENED,
       observedSha256: null,
       changes: [],
       unreadable: "several-files",
-    } as const;
+    };
     const h = harness([several, { ...several, folder: "" }]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
     expect(h.row("team")).toMatchObject({
