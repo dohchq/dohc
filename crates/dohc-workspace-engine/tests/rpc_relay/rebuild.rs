@@ -351,6 +351,12 @@ async fn a_narrowed_clean_copy_is_rebuilt_and_the_hidden_file_keeps_only_its_cop
     finish(&copy).await;
     assert!(manifest(&copy).is_none());
     assert_no_old_store(&copy.scratch);
+    // A View copy sends nothing, so the new store has no identity to send under.
+    let identities: i64 = Connection::open(engine_db_path(&copy.scratch).expect("engine db"))
+        .expect("open db")
+        .query_row("SELECT COUNT(*) FROM sync_identity", [], |row| row.get(0))
+        .expect("identities");
+    assert_eq!(identities, 0);
 
     // No read of the new store knows the hidden file.
     for needle in ["hidden/b.md", "moment-b", "object-b", &hex_sha256(B_BYTES)] {
