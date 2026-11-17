@@ -129,7 +129,8 @@ struct OldRead {
     /// Read markers, bookmarks, follows and feed read state.
     carried: RebuildCarried,
     /// The files the old store last captured, which the disk scan starts
-    /// from: a file a cloud provider evicted is then not downloaded.
+    /// from: on macOS, a file a cloud provider evicted is then not
+    /// downloaded.
     scan_seed: dohc_engine_files::ScanManifest,
 }
 
@@ -323,9 +324,10 @@ fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<S
 }
 
 /// Every file the engine tracks on disk, with its hash, as the disk spells
-/// its path. One scan reads each file once. A file the old store captured
-/// that a cloud provider evicted keeps the hash it was captured with, so it
-/// isn't downloaded.
+/// its path. One scan reads each file once. On macOS, a file the old store
+/// captured that a cloud provider evicted keeps the hash it was captured
+/// with, so it isn't downloaded. The scan sees no eviction elsewhere, so it
+/// reads such a file, which downloads it.
 ///
 /// A path the scan couldn't read may be the member's own file that no store
 /// recorded, so the rebuild stops with the copy closed and names the first
