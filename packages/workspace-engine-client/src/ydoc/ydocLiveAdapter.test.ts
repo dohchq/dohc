@@ -587,6 +587,138 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await reopened.close();
 });
 
+it("records the owner's typing while a resync is pending, without failing the session", async () => {
+  const engine = new YdocLoopbackEngine();
+  const path = "notes/owner.md";
+  engine.seedFile({
+    workspace: WORKSPACE,
+    versionId: VERSION,
+    path,
+    objectId: "owner-object",
+    content: "seed",
+    contentKind: "richdoc",
+  });
+  const seedAdapter = new YdocLiveAdapter(engine);
+  const seed = await seedAdapter.openSession({
+    workspace: WORKSPACE,
+    versionId: VERSION,
+    path,
+    contentKind: "richdoc",
+  });
+  engine.markSessionReplicated(seed.sessionId);
+  const objectId = seed.objectId;
+  await seed.close({ settle: false });
+  seedAdapter.dispose();
+  const claim = "a".repeat(64);
+  let release!: () => void,
+    resyncs = 0;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const draft = {
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: VERSION,
+      objectId,
+      lineageClaimId: claim,
+      currentPath: path,
+      selectorPaths: [path],
+      restoreFenceGeneration: 0,
+    },
+    relayDatabaseNamespace: "relay",
+    revision: 1,
+    acceptedCursor: 0,
+    nativeHeadSequence: 1,
+    nativeUnsettled: false,
+    outboxId: "outbox",
+    pendingBytes: 0,
+    state: "active",
+  };
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: (handler) => engine.onEvent(handler),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.recordUpdate) {
+        const response = await recordUnderClaim(engine, request, claim);
+        return {
+          ...response,
+          result: {
+            lineageClaimId: claim,
+            lineageOriginatedHere: false,
+            ownerDraft: {
+              outboxId: "outbox",
+              sequence: 1,
+              deliveryId: "delivery",
+              updateDigest: "b".repeat(64),
+              pendingBytes: 10,
+              state: "active",
+            },
+          },
+        };
+      }
+      if (request.method === YDOC_METHOD.resync) {
+        resyncs++;
+        await held;
+      }
+      const response = await engine.sendRequest(request);
+      if (request.method !== YDOC_METHOD.open && request.method !== YDOC_METHOD.resync)
+        return response;
+      return {
+        ...response,
+        result: {
+          ...(response.result as Record<string, JsonValue>),
+          lineageClaimId: claim,
+          ownerDraft: draft,
+        },
+      };
+    },
+  };
+  const localEditErrors: unknown[] = [],
+    sessionErrors: unknown[] = [];
+  const provider = await openEngineYdocProviderSession({
+    transport,
+    workspace: WORKSPACE,
+    versionId: VERSION,
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    scheduleSettle: settleScheduler().schedule,
+    onLocalEditError: (error) => localEditErrors.push(error),
+    onSessionError: (error) => sessionErrors.push(error),
+  });
+  // A collaborator's edit reached the owner's queue, so the engine asks the editor to read it.
+  engine.emitEvent({
+    name: YDOC_EVENT.remoteUpdate,
+    seq: 100,
+    sessionGeneration: 1,
+    payload: { sessionId: provider.nativeOwner!.sessionId, resyncRequired: true },
+  });
+  await drain();
+  expect(resyncs).toBe(1);
+
+  await provider.applyLocalUpdate(
+    richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "typed while reading"),
+  );
+  release();
+  await drain();
+  await provider.applyLocalUpdate(
+    richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "typed after reading"),
+  );
+  expect(
+    engine.requests.filter(
+      (request) =>
+        request.method === YDOC_METHOD.recordUpdate &&
+        (request.params as { sessionId: string }).sessionId === provider.nativeOwner!.sessionId,
+    ),
+  ).toHaveLength(2);
+  const markdown = ydocProjection.yDocToMarkdown(provider.doc);
+  expect(markdown).toContain("typed while reading");
+  expect(markdown).toContain("typed after reading");
+  expect(localEditErrors).toEqual([]);
+  expect(sessionErrors).toEqual([]);
+  await provider.evict();
+});
+
 it("forwards settlement requests only to their open native session", async () => {
   const engine = seedPlaintextEngine("seed"),
     adapter = new YdocLiveAdapter(engine);

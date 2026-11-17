@@ -1686,17 +1686,16 @@ export class YdocAdapterSession {
     if (this.staleError !== null) throw this.staleError;
   }
 
-  // A pending resync does not stop an ordinary session from journaling. The
-  // engine appends a local update only to the lineage its expected claim
-  // names, so the resync merges both sides. A keystroke refused here would instead tear
-  // the session down and rebuild it. An owner draft still waits, because its
-  // append names the draft revision the resync renews.
+  // A pending resync does not stop a session from journaling. The engine
+  // appends a local update only to the lineage its expected claim names, and
+  // an owner's edit only to its draft's binding, so the resync merges both
+  // sides. A keystroke refused here would instead tear the session down and
+  // rebuild it, and each of the room's rows asks the owner's editor to resync.
   private assertRecordable(): void {
     if (this.closed) {
       throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     }
     if (this.quarantinedError !== null) throw this.quarantinedError;
-    if (this.ownerDraft !== undefined && this.staleError !== null) throw this.staleError;
   }
 }
 
