@@ -1,4 +1,5 @@
 import { constants, type DatabaseSync } from "node:sqlite";
+import * as preparedStatements from "./storage/preparedStatements";
 import { afterEach, expect, it, vi } from "vitest";
 import { binding, fixture as ticketFixture, scope, seedLinkAgent } from "./liveTickets.test-helper";
 import { cleanups, fixture as namedLiveFixture } from "./namedLiveRoutes.test-helper";
@@ -216,6 +217,8 @@ it("rechecks every live connection when a chat append's transaction also writes 
 // Guard: a table a live check reads that this list misses would let a chat
 // append's write to it skip the recheck.
 it("lists every table the live checks read, and watches each for writes", async () => {
+  // The authorizer observes statement compilation, so each read compiles here.
+  vi.spyOn(preparedStatements, "reusePreparedStatements").mockImplementation((db) => db);
   const read = new Set<string>();
   const capture = (storage: StorageContext, actor: CurrentLiveBindingRequest["actor"]) => {
     const db = storage.db as unknown as DatabaseSync;
