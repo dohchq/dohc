@@ -335,7 +335,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")).toMatchObject({ seen: true });
   });
 
-  it("files nothing new when the hold was decided already", async () => {
+  it("says why nothing ran when the hold was decided or judged again already, and its row goes with the list", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(1));
     h.bridge.decideAccessRule.mockRejectedValueOnce(
@@ -343,9 +343,21 @@ describe("useAccessRuleHoldNotices", () => {
         "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [INVALID_PARAMS]: access-rule-not-held",
       ),
     );
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
-    await waitFor(() => expect(h.row("team")!.action?.busy).toBeUndefined());
-    expect(h.errors().shellErrors).toHaveLength(1);
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
+    const said = () =>
+      h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:decided");
+    await waitFor(() =>
+      expect(said()).toMatchObject({
+        tone: "warning",
+        message:
+          "The access rule for team no longer waits for your choice, so dohc didn't apply it.",
+        retry: null,
+      }),
+    );
+    expect(h.row("team")!.action?.busy).toBeUndefined();
+    h.list([]);
+    await waitFor(() => expect(h.row("team")).toBeUndefined());
+    expect(said()).toBeDefined();
   });
 
   it("shows the rule as it is now when it changed since the owner saw it", async () => {

@@ -2022,7 +2022,32 @@ fn decide_on_store(
         }
     }
     release_hold(store, order, folder)?;
+    rejudge_holds_under(store, order, folder);
     Ok(decided)
+}
+
+/// Judge each hold under `folder` again, outer first, now that its rule is
+/// decided: an inner rule the decided one now covers records, and its hold
+/// goes with this decision rather than on some later capture pass.
+fn rejudge_holds_under(store: &mut EngineStore, order: &Order<'_>, folder: &str) {
+    let Ok(holds) = store.read_with(|conn| access_rule_holds::list_in(conn, order.workspace_id))
+    else {
+        return;
+    };
+    let mut under: Vec<String> = holds
+        .into_iter()
+        .filter(|hold| hold.version_id == order.version_id)
+        .map(|hold| hold.folder)
+        .filter(|inner| {
+            inner != folder && (folder.is_empty() || inner.starts_with(&format!("{folder}/")))
+        })
+        .collect();
+    under.sort_by_key(|inner| inner.matches('/').count());
+    for inner in under {
+        // The decision already took effect, so a judgment that fails leaves
+        // this hold for capture to judge again; it doesn't fail the decision.
+        let _ = judge_one(store, order, &inner, &[], false, &[]);
+    }
 }
 
 fn version_is_active(store: &mut EngineStore, order: &Order<'_>) -> Result<bool, RuntimeError> {

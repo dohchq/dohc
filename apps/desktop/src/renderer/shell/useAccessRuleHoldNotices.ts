@@ -438,14 +438,20 @@ export function useAccessRuleHoldNotices(
         },
         (error: unknown) => {
           if (currentWorkspace.current !== asked) return;
-          // A changed rule comes back as its notice, judged again, and a hold
-          // decided already leaves with the list that follows.
-          if (
-            !putBack(asked, identity) ||
-            isAccessRuleChangedRefusal(error) ||
-            isAccessRuleNotHeldRefusal(error)
-          )
+          const listed = putBack(asked, identity);
+          // A hold decided already, or judged again since, leaves with the list
+          // that follows; the press still says why nothing ran.
+          if (isAccessRuleNotHeldRefusal(error)) {
+            latest.current.reportShellFailure({
+              identity: decidedOf(identity),
+              tone: "warning",
+              message: `${ruleOf(hold.folder)} no longer waits for your choice, so dohc didn't apply it.`,
+              retry: null,
+            });
             return;
+          }
+          // A changed rule comes back as its notice, judged again.
+          if (!listed || isAccessRuleChangedRefusal(error)) return;
           const outer = heldOuterAccessRuleFolder(error);
           if (outer !== null && outer !== hold.folder) {
             waitFor(hold, outer);

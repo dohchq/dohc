@@ -555,6 +555,62 @@ fn a_widened_rule_holds_its_folder_until_the_owner_accepts_it() {
     assert_eq!(f.journal(), expected);
 }
 
+/// Allowing an outer rule judges the rules held under it again at once: one
+/// the outer rule now gives as much records with it and its hold goes, so no
+/// notice stays for a rule that no longer widens anything.
+#[test]
+fn allowing_an_outer_rule_records_an_inner_rule_it_now_covers() {
+    let f = ruled_team();
+    let before = f.journal();
+    f.put("team/sub/access.yaml", EDIT);
+    f.put("team/sub/b.md", "beta");
+    f.settle();
+    assert!(held(&f.capture(&["team/sub/access.yaml"])[0], "team/sub"));
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
+    assert_eq!(f.holds().len(), 2);
+
+    f.decide("team", AccessRuleDecision::Accept)
+        .expect("accept");
+    assert!(f.holds().is_empty(), "{:?}", f.holds());
+    f.capture_ok(&["team/sub/b.md"]);
+    let mut expected = before;
+    expected.extend(lines(&[
+        "write team/access.yaml",
+        "write team/sub/access.yaml",
+        "write team/sub/b.md",
+    ]));
+    assert_eq!(f.journal(), expected);
+}
+
+/// Restoring an outer rule leaves an inner rule that still widens held.
+#[test]
+fn restoring_an_outer_rule_keeps_an_inner_widening_held() {
+    let f = ruled_team();
+    f.put("team/sub/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/sub/access.yaml"])[0], "team/sub"));
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
+    let sub = f
+        .runtime
+        .block_on(f.actor.access_rule_holds(WS.to_owned()))
+        .expect("holds")
+        .into_iter()
+        .find(|hold| hold.folder == "team/sub")
+        .expect("sub hold");
+
+    f.decide("team", AccessRuleDecision::Restore)
+        .expect("restore");
+    let after = f
+        .runtime
+        .block_on(f.actor.access_rule_holds(WS.to_owned()))
+        .expect("holds");
+    assert_eq!(after, vec![sub]);
+}
+
 /// The owner decides on the rule they saw. One changed on disk since is
 /// refused, and the folder's hold shows the rule there now.
 #[test]
