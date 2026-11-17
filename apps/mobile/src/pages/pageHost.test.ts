@@ -60,7 +60,7 @@ describe("a page's web view and its session", () => {
     expect(t.host.state().live).toBeNull();
 
     // Try again mounts a new web view; its session opens once it draws, and connects to it alone.
-    t.host.remount();
+    t.host.gone();
     t.open();
     expect(t.host.state().live).toBeNull();
     t.painted();
@@ -68,7 +68,7 @@ describe("a page's web view and its session", () => {
     await vi.waitFor(() => expect(t.sockets).toHaveLength(2));
     t.latest().open();
     expect(t.injected.at(-1)).toEqual({
-      mount: 1,
+      mount: 2,
       message: expect.objectContaining({ type: "connect", gen: 1, seq: 1 }),
     });
     const live = t.host.state().live!;
@@ -79,7 +79,7 @@ describe("a page's web view and its session", () => {
 
   it("ignores a late painted report from a web view it replaced", () => {
     const t = setup({ signIn: {}, workspaceId: "ws-1" }, createLivePages(), ready());
-    t.host.remount();
+    t.host.gone();
     t.host.painted(0);
     t.open();
     expect(t.host.state()).toMatchObject({ mount: 1, painted: false, live: null });

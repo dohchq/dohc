@@ -36,13 +36,8 @@ export function createPageHost(options: {
     painted(mount: number) {
       if (mount === state.mount && !state.painted) set({ painted: true });
     },
-    /** The mounted web view failed or left the screen. */
+    /** The mounted web view failed, left the screen, or is replaced. The next one is a new mount. */
     gone() {
-      state.live?.end();
-      if (state.painted || state.live) set({ painted: false, live: null });
-    },
-    /** A new web view replaces the mounted one. */
-    remount() {
       state.live?.end();
       set({ mount: state.mount + 1, painted: false, live: null });
     },

@@ -141,13 +141,13 @@ function PageScreen({ path }: { path: string }) {
     const first = shown.current === null;
     shown.current = markdown;
     if (first || markdown === null) return;
-    host.remount();
+    host.gone();
   }, [markdown, holding]);
   const reopen = () => {
     setLostPage(false);
     setUri(null);
     setAttempt((value) => value + 1);
-    host.remount();
+    host.gone();
   };
 
   const markKey: MarkKey = deleted
