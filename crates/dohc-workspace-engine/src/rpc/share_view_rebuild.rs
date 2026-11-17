@@ -647,12 +647,13 @@ impl EngineService {
             }
         }
         // A file neither store holds is the member's, which the old store
-        // never recorded because the copy closed first.
-        disk.extend(
-            scanned
-                .into_iter()
-                .filter(|(path, _)| !stored.contains(path.as_str())),
-        );
+        // never recorded because the copy closed first. A file
+        // `.dohc/files.toml` keeps out of dohc is never sent, so it stays.
+        let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
+        disk.extend(scanned.into_iter().filter(|(path, _)| {
+            !stored.contains(path.as_str())
+                && !crate::capture_driver::policy_excludes(&policy, path)
+        }));
         let held = open
             .actor
             .rebuild_held_blobs(disk.values().cloned().collect())

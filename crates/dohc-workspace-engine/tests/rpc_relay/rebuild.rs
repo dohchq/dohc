@@ -718,6 +718,38 @@ async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
     finish(&copy).await;
 }
 
+/// `.dohc/files.toml` keeps a folder out of dohc, so no store holds its files
+/// and dohc never sends them. The rebuild leaves them where they are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_dohc_does_not_track_stays_in_place() {
+    let copy = closed_copy_with("rpc-rebuild-untracked", true, false, |_, _, scratch| {
+        Box::pin(async move {
+            let root = scratch.path();
+            std::fs::write(
+                root.join(".dohc/files.toml"),
+                "[[rule]]
+path = \"private/**\"
+tracked = false
+",
+            )
+            .expect("policy");
+            std::fs::create_dir_all(root.join("private")).expect("private");
+            std::fs::write(root.join("private/journal.md"), "personal").expect("journal");
+        })
+    })
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(
+        std::fs::read(root.join("private/journal.md")).expect("journal"),
+        b"personal"
+    );
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(names_in(&recovery), ["0001 b.md", "contents.md"]);
+    finish(&copy).await;
+}
+
 /// A file no other program can read until this drops: on Windows a handle
 /// open on it that shares nothing, elsewhere a file with no permissions.
 #[cfg(windows)]
