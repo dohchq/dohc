@@ -1036,8 +1036,34 @@ mod generated {
             }
         }
 
+        /// The repository's own Markdown under `docs/`, as real notes.
+        fn repository_notes() -> Vec<(String, String)> {
+            fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+                let mut entries: Vec<_> = std::fs::read_dir(dir)
+                    .expect("docs folder")
+                    .map(|entry| entry.expect("entry").path())
+                    .collect();
+                entries.sort();
+                for path in entries {
+                    if path.is_dir() {
+                        walk(&path, out);
+                    } else if path.extension().is_some_and(|ext| ext == "md") {
+                        let source = std::fs::read_to_string(&path).expect("note");
+                        out.push((path.display().to_string(), source));
+                    }
+                }
+            }
+            let mut notes = Vec::new();
+            walk(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs"),
+                &mut notes,
+            );
+            notes
+        }
+
         /// The mutation run: `DOHC_MUTATION_SEEDS` (a JSON list of
-        /// `{id, source}`), `DOHC_MUTATION_OUT` (a folder), and
+        /// `{id, source}`, the repository's notes without it),
+        /// `DOHC_MUTATION_OUT` (a folder), and
         /// `DOHC_MUTATION_SECONDS`, `DOHC_MUTATION_SEED`,
         /// `DOHC_MUTATION_THREADS`. Before each read a thread writes its
         /// input to `current-<thread>.md`, so a stack overflow, which ends
@@ -1046,7 +1072,6 @@ mod generated {
         #[ignore = "a timed random run"]
         fn mutation_run() {
             let env = |name: &str| std::env::var(name).ok();
-            let seeds_path = env("DOHC_MUTATION_SEEDS").expect("DOHC_MUTATION_SEEDS");
             let out =
                 std::path::PathBuf::from(env("DOHC_MUTATION_OUT").expect("DOHC_MUTATION_OUT"));
             let seconds: u64 =
@@ -1057,17 +1082,23 @@ mod generated {
             std::fs::create_dir_all(&out).expect("out folder");
             // A panic is a finding, counted; its message is noise here.
             std::panic::set_hook(Box::new(|_| {}));
-            let mut seeds: Vec<(String, String)> = serde_json::from_str::<Vec<Value>>(
-                &std::fs::read_to_string(seeds_path).expect("seeds"),
-            )
-            .expect("seeds json")
-            .into_iter()
-            .map(|seed| {
-                (
-                    seed["id"].as_str().unwrap_or_default().to_owned(),
-                    quote_words(seed["source"].as_str().unwrap_or_default()),
+            let mut seeds: Vec<(String, String)> = match env("DOHC_MUTATION_SEEDS") {
+                Some(path) => serde_json::from_str::<Vec<Value>>(
+                    &std::fs::read_to_string(path).expect("seeds"),
                 )
-            })
+                .expect("seeds json")
+                .into_iter()
+                .map(|seed| {
+                    (
+                        seed["id"].as_str().unwrap_or_default().to_owned(),
+                        seed["source"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect(),
+                None => repository_notes(),
+            }
+            .into_iter()
+            .map(|(id, source)| (id, quote_words(&source)))
             .collect();
             // The named cases, without this round's two: the run must find
             // those by itself.

@@ -47,6 +47,19 @@ Run `pnpm qa:artifacts` to prove that an intentional failure retains its evidenc
 
 Run `pnpm test:together` after a change to shared editing. See [Editing together](#editing-together).
 
+After a change to the engine's Markdown reader or writer, run the random test for 30 minutes on Linux.
+The gate runs only a short fixed-seed run of it.
+Record the seed, the number of notes judged, and each finding in the pull request.
+
+```sh
+DOHC_MUTATION_OUT=/tmp/mutation DOHC_MUTATION_SECONDS=1800 DOHC_MUTATION_SEED=<seed> DOHC_MUTATION_THREADS=8 \
+  cargo test --release -p dohc-engine-collab --lib -- --ignored --exact \
+  ydoc::markdown_judge_tests::generated::mutation::mutation_run --nocapture
+```
+
+The test reads the repository's notes under `docs/` and mutates them. `summary-<seed>.json` in the out folder lists each finding with an example.
+A stack overflow ends the process. Its input stays in `current-<thread>.md`; record it as a crash.
+
 The runner writes a result, step logs, and desktop evidence under `.agent-artifacts/verification/<run>`.
 Each Electron instance records its process, profile, workspace, and prepared build.
 Read the failing assertion and its logs together. Inspect the screenshot and Playwright trace when the behavior is unclear.
