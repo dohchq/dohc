@@ -849,6 +849,64 @@ async fn an_unsent_rename_by_case_alone_is_undone_after_a_stop_before_its_wave_r
     finish(&copy).await;
 }
 
+/// The member renames the folder `open` to `Open` and doesn't send it. On a
+/// file system that ignores case, each file reads under both spellings, so
+/// none of them may go to the recovery folder: the moves are undone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_folder_rename_by_case_alone_is_undone() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-unsent-folder-case",
+        true,
+        false,
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                for name in ["a.md", "c.md", "d.md"] {
+                    call(
+                        transport,
+                        handle,
+                        &mut id,
+                        "versionedText.rename",
+                        json!({
+                            "versionId": "main", "fromPath": format!("open/{name}"),
+                            "toPath": format!("Open/{name}"), "origin": "api",
+                        }),
+                    )
+                    .await;
+                }
+                let root = scratch.path();
+                if root.join("open").exists() {
+                    std::fs::rename(root.join("open"), root.join("Open")).expect("rename");
+                }
+            })
+        },
+    )
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    for (name, bytes) in [("a.md", A_BYTES), ("c.md", C_BYTES), ("d.md", D_BYTES)] {
+        assert_eq!(
+            std::fs::read(root.join("open").join(name)).expect(name),
+            bytes
+        );
+    }
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(names_in(&recovery), ["0001 b.md", "contents.md"]);
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("- `Open/a.md` moved back to `open/a.md`"),
+        "{contents}"
+    );
+    // The disk names the folder as the new store does.
+    assert!(
+        names_in(root).contains(&"open".to_owned()),
+        "{:?}",
+        names_in(root)
+    );
+    finish(&copy).await;
+}
+
 /// The member edits `open/a.md` and doesn't send it, then changes the file
 /// again while the rebuild downloads. The plan sees the newer bytes on disk,
 /// so the stored edit is neither on disk nor in the new store: both go to the

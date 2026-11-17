@@ -25,7 +25,7 @@
 //!
 //! The caller closes every handle on the root first.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -193,16 +193,39 @@ fn link_free(root: &Path, path: &Path) -> Result<(), WireError> {
     }
 }
 
+/// The paths among `paths` that a disk ignoring case or Unicode form could
+/// take for another of them.
+fn case_twins<'a>(paths: impl Iterator<Item = &'a str>) -> HashSet<String> {
+    let mut by_key: HashMap<String, Vec<&str>> = HashMap::new();
+    for path in paths.collect::<BTreeSet<_>>() {
+        by_key
+            .entry(dohc_engine_files::floor::path_collision_key(path))
+            .or_default()
+            .push(path);
+    }
+    by_key
+        .into_values()
+        .filter(|paths| paths.len() > 1)
+        .flatten()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The hash of the file at `path`, or `None` when no file is there. On a disk
-/// that ignores case, a file stored under another spelling of its name is not
-/// at `path`: the member renamed it, and the plan must not take it for a
-/// second file.
-fn disk_sha(root: &Path, path: &str) -> Result<Option<String>, WireError> {
+/// that ignores case, a path among `twins` whose file the disk names as
+/// another of them is not at `path`: the member renamed the file or a folder
+/// above it, and the plan must not take it for a second file.
+fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<String>, WireError> {
     link_free(root, &root.join(path))?;
     let Ok(bytes) = std::fs::read(root.join(path)) else {
         return Ok(None);
     };
-    if dohc_engine_files::stored_under_other_spelling(root, path) {
+    if twins.contains(path)
+        && dohc_engine_files::disk_spelling(root, path)
+            .ok()
+            .flatten()
+            .is_some_and(|spelling| spelling != path && twins.contains(&spelling))
+    {
         return Ok(None);
     }
     Ok(Some(dohc_engine_storage::hex_sha256(&bytes)))
@@ -586,17 +609,23 @@ impl EngineService {
             .chain(&heads)
             .map(|head| head.path.as_str())
             .collect();
+        let scanned = files_on_disk(root).await?;
+        let twins = case_twins(
+            stored
+                .iter()
+                .copied()
+                .chain(scanned.iter().map(|(path, _)| path.as_str())),
+        );
         let mut disk = BTreeMap::new();
         for path in &stored {
-            if let Some(sha) = disk_sha(root, path)? {
+            if let Some(sha) = disk_sha(root, path, &twins)? {
                 disk.insert((*path).to_owned(), sha);
             }
         }
         // A file neither store holds is the member's, which the old store
         // never recorded because the copy closed first.
         disk.extend(
-            files_on_disk(root)
-                .await?
+            scanned
                 .into_iter()
                 .filter(|(path, _)| !stored.contains(path.as_str())),
         );
@@ -733,6 +762,45 @@ impl EngineService {
             self.rebuild_crash_point("wave-1")?;
         }
         if waves_done < 2 {
+            // A folder whose files all left the disk goes too, so a hidden folder
+            // doesn't stay behind empty, and a folder the member renamed by
+            // case alone is gone before the writes name it again. Each call
+            // is safe to repeat.
+            let removed: BTreeSet<String> = manifest
+                .plan
+                .iter()
+                .flat_map(|plan| {
+                    let deletes = plan
+                        .jobs
+                        .iter()
+                        .filter(|job| job.delete)
+                        .map(|job| &job.path);
+                    let saved = plan
+                        .recovery
+                        .iter()
+                        .filter(|item| item.source == RecoverySource::Disk)
+                        .map(|item| &item.path);
+                    deletes.chain(saved)
+                })
+                .flat_map(|path| {
+                    let mut folders = Vec::new();
+                    let mut at = path.as_str();
+                    while let Some((parent, _)) = at.rsplit_once('/') {
+                        folders.push(parent.to_owned());
+                        at = parent;
+                    }
+                    folders
+                })
+                .collect();
+            // Deepest first, so a parent is empty once its children are gone.
+            let mut removed: Vec<String> = removed.into_iter().collect();
+            removed.sort_by_key(|folder| std::cmp::Reverse(folder.matches('/').count()));
+            for folder in removed {
+                actor
+                    .rebuild_remove_empty_folder(root.to_path_buf(), folder)
+                    .await
+                    .map_err(map_runtime)?;
+            }
             let writes: Vec<String> = manifest
                 .plan
                 .iter()
@@ -756,43 +824,6 @@ impl EngineService {
         if waves_done < 3 {
             self.rebuild_wave_jobs(&actor, root, workspace_id, manifest, 3)
                 .await?;
-        }
-        // A folder whose files all left the disk goes too, so a hidden folder
-        // doesn't stay behind empty. Each call is safe to repeat.
-        let removed: BTreeSet<String> = manifest
-            .plan
-            .iter()
-            .flat_map(|plan| {
-                let deletes = plan
-                    .jobs
-                    .iter()
-                    .filter(|job| job.delete)
-                    .map(|job| &job.path);
-                let saved = plan
-                    .recovery
-                    .iter()
-                    .filter(|item| item.source == RecoverySource::Disk)
-                    .map(|item| &item.path);
-                deletes.chain(saved)
-            })
-            .flat_map(|path| {
-                let mut folders = Vec::new();
-                let mut at = path.as_str();
-                while let Some((parent, _)) = at.rsplit_once('/') {
-                    folders.push(parent.to_owned());
-                    at = parent;
-                }
-                folders
-            })
-            .collect();
-        // Deepest first, so a parent is empty once its children are gone.
-        let mut removed: Vec<String> = removed.into_iter().collect();
-        removed.sort_by_key(|folder| std::cmp::Reverse(folder.matches('/').count()));
-        for folder in removed {
-            actor
-                .rebuild_remove_empty_folder(root.to_path_buf(), folder)
-                .await
-                .map_err(map_runtime)?;
         }
         Ok(())
     }
