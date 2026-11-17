@@ -1573,6 +1573,33 @@ fn a_paragraph_past_the_size_limit_keeps_its_source() {
     }
 }
 
+/// Two lists of different markers read alone, but the writer gives them one
+/// marker and joins them. Both keep their source, on this read and the
+/// next, and the rest of the note stays editable.
+#[test]
+fn neighbours_the_writer_joins_keep_their_source() {
+    let source = "# qh\n\n- qa\n\n+ qb\n\nqtail\n";
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+        .unwrap();
+    let tags = |doc: &Ydoc| {
+        doc.canonical_content()["body"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["tag"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tags(&doc), ["heading", "rawBlock", "rawBlock", "paragraph"]);
+    let written = doc.project_richdoc().unwrap();
+    assert_eq!(written, source);
+    let again = Ydoc::wire();
+    again
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &written)
+        .unwrap();
+    assert_eq!(tags(&again), tags(&doc));
+}
+
 /// The sixth review round's findings, each checked as the generated cases
 /// are, and against a CommonMark renderer's reading of the source.
 #[test]

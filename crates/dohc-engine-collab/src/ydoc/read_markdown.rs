@@ -174,7 +174,7 @@ pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
                     let again = if reads_whole(&again, &written) {
                         again.blocks
                     } else {
-                        sealed(&again, &written, false)
+                        sealed(&again, &written, with_neighbours)
                     };
                     alike(&blocks, &again)
                 })
