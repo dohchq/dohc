@@ -868,6 +868,36 @@ describe("registered received-view handlers", () => {
       expect(h.workspace.shareView).not.toHaveProperty("rebuild");
     });
 
+    it("enrolls for sending when installed levels list Edit where the member had none", async () => {
+      const h = await harness();
+      const viewer = { ...member.selector!, access: "view" as const };
+      h.fetchInfo.mockResolvedValue({ ...member, selector: viewer });
+      const viewOnly = { ...stored, rootLevel: "view" as const };
+      Object.assign(h.workspace.shareView!, { grantedSelector: viewer, reach: viewOnly });
+      const listed = {
+        ...viewOnly,
+        signature: "r2",
+        folders: [{ path: "Notes", level: "edit" as const }],
+      };
+      h.fetchReach.mockResolvedValue(listed);
+      h.reconcile.mockImplementationOnce(async () =>
+        stoppedPull({ signature: "r2", visibilitySignature: "v1" }),
+      );
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({
+        grantedSelector: viewer,
+        reach: listed,
+      });
+      expect(h.narrow.mock.invocationCallOrder[0]).toBeLessThan(
+        h.recordIdentity.mock.invocationCallOrder[0]!,
+      );
+      expect(h.recordIdentity.mock.invocationCallOrder[0]).toBeLessThan(
+        h.reconcile.mock.invocationCallOrder[1]!,
+      );
+    });
+
     // The engine closed the copy before the pull answered. The view records
     // the rebuild and the window shows "Updating access"; nothing reads the
     // copy again, and its levels wait for the rebuild.

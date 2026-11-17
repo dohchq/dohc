@@ -3085,6 +3085,26 @@ describe("shareViewIdentitySelector", () => {
     }
   });
 
+  it("enrols a membership by the highest level its stored reach lists", () => {
+    const member = { paths: [], versionId: null, access: "view", wholeWorkspace: true };
+    const reach = (level: "view" | "edit") => ({
+      signature: "sig",
+      visibilitySignature: "vis",
+      rootLevel: "view",
+      folders: [{ path: "team", level }],
+    });
+    expect(
+      decide({ grantedSelector: member, reach: reach("edit"), relayUrl: "https://relay.example" }),
+    ).toEqual({ paths: [], versionId: null, access: "view", wholeWorkspace: true });
+    expect(
+      decide({ grantedSelector: member, reach: reach("view"), relayUrl: "https://relay.example" }),
+    ).toBeNull();
+    // A reach dohc can't read lists no level.
+    expect(
+      decide({ grantedSelector: { ...member, access: "edit" }, reach: { signature: "sig" } }),
+    ).toBeNull();
+  });
+
   it("skips a share view whose pinned grant is damaged", () => {
     // One damaged field per case, each already refused by
     // `recordedShareSelector`. A record this build cannot read completely is

@@ -4,7 +4,11 @@ import {
   isValidShareVersionId,
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
-import type { ListedReach } from "@dohc/security-contract/listed-reach";
+import {
+  highestListedLevel,
+  parseListedReach,
+  type ListedReach,
+} from "@dohc/security-contract/listed-reach";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
   formatSize,
@@ -217,6 +221,7 @@ export function shareViewIdentitySelector(input: {
         grantedSelector?: unknown;
         ended?: boolean;
         relayUrl?: string | null;
+        reach?: unknown;
       }
     | null
     | undefined;
@@ -227,7 +232,14 @@ export function shareViewIdentitySelector(input: {
   if (!shareView || shareView.ended === true) return null;
   const grantedSelector = recordedShareSelector(shareView.grantedSelector);
   if (!grantedSelector) return null;
-  if (grantedSelector.access !== "edit") return null;
+  // A membership can send file changes wherever its stored reach lists Edit,
+  // whatever its member level. A reach dohc can't read lists no level.
+  const reach =
+    grantedSelector.wholeWorkspace === true && shareView.reach !== undefined
+      ? parseListedReach(shareView.reach)
+      : undefined;
+  const highest = reach === undefined ? grantedSelector.access : reach && highestListedLevel(reach);
+  if (highest !== "edit") return null;
   if (!relayUrl) return null;
   if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
     return null;

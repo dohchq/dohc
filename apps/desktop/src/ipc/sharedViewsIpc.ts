@@ -996,13 +996,23 @@ export function registerSharedViewsIpcHandlers<
               return reconciled.outcome;
             };
             const reachRelay = membershipRelay(workspace.shareView);
-            if (reachRelay && lacksReach(workspace.workspaceId)) {
-              await followShareViewReach(
+            // Installed levels can list Edit where the member had none, so the
+            // copy enrolls for sending before anything is written under them.
+            const enrollInstalled = () =>
+              recordShareViewIdentity(currentShareViewWorkspace()).catch((error) => {
+                console.error("[desktop] share view enrolment:", error);
+              });
+            if (
+              reachRelay &&
+              lacksReach(workspace.workspaceId) &&
+              (await followShareViewReach(
                 workspace.workspaceId,
                 workspace.rootPath,
                 reachRelay,
                 () => operation.assertCurrent(),
-              );
+              )) === "installed"
+            ) {
+              await enrollInstalled();
             }
             outcome = await reconcile();
             if (!("ok" in outcome && !outcome.ok) && outcome.rebuildId !== undefined) {
@@ -1016,8 +1026,10 @@ export function registerSharedViewsIpcHandlers<
                 () => operation.assertCurrent(),
               );
               // Pull again under the installed levels. A second change waits for the next refresh.
-              if (followed === "installed") outcome = await reconcile();
-              else if (followed === "visibility-changed") settledReach = outcome.reachChanged;
+              if (followed === "installed") {
+                await enrollInstalled();
+                outcome = await reconcile();
+              } else if (followed === "visibility-changed") settledReach = outcome.reachChanged;
             }
             if (settledReach === undefined) {
               const stored = storedShareViewReach(
