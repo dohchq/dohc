@@ -71,6 +71,7 @@ describe("useKeptCopyNotices", () => {
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
+        read: true,
       },
       {
         message:
@@ -78,10 +79,13 @@ describe("useKeptCopyNotices", () => {
         action: { label: "Save copy" },
         tone: "success",
         seen: true,
+        read: true,
       },
       { message: keptCopyMessage("notes/a.md"), seen: false },
     ]);
+    // A collided save is a failure the person hasn't read yet.
     expect(h.result.current.shellErrors[2]!.tone).toBeUndefined();
+    expect(h.result.current.shellErrors[2]!.read).toBeUndefined();
   });
 
   it("shows each kept copy as a row whose Save copy saves it, clears the row, and opens the copy", async () => {

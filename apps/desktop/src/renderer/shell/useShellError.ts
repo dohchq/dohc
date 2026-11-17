@@ -1300,7 +1300,7 @@ export function useShellError(
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
     // A copy the owner's Restore rule kept is the result they chose, and the
-    // Restore's own toast names it, so its row is quiet and not a failure.
+    // Restore's own toast names it, so its row is quiet, read, and not a failure.
     const collided = arrived.filter((copy) => !copy.accessRule);
     const summarized = collided.length > 1;
     const fresh: ShellError[] = arrived.map((copy) =>
@@ -1310,7 +1310,7 @@ export function useShellError(
         action: { label: "Save copy", run: copy.save },
         keptCopyId: copy.id,
         seen: copy.accessRule || summarized,
-        ...(copy.accessRule ? { tone: "success" as const } : {}),
+        ...(copy.accessRule ? { tone: "success" as const, read: true } : {}),
       }),
     );
     if (summarized) {
