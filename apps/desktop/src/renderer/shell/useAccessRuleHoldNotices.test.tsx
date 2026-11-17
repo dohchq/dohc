@@ -288,7 +288,7 @@ describe("useAccessRuleHoldNotices", () => {
       "Without it, team/sub follows the access rule for team.",
     );
     expect(h.row("team/sub")!.message).toContain(
-      "To remove the rule, restore, delete one file, choose here, then delete the other.",
+      "To remove the rule, restore it. Edit one file so it gives no one more access than the list above. Then delete the files and choose Remove rule.",
     );
     expect(h.row("team/sub")!.rows).toEqual(["Members: No access \u2192 View"]);
   });
