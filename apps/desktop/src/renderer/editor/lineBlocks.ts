@@ -213,6 +213,18 @@ function mathBlockEnd(lines: string[], start: number, maxIndent = 3): number | n
   return null;
 }
 
+/** Whether a setext underline ends the paragraph run starting at `start`.
+ *  marked reads a setext heading before display math, so a `$$` line inside
+ *  that run is the heading's text. */
+function underlinedAhead(lines: string[], start: number): boolean {
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (BLANK_RE.test(line)) return false;
+    if (SETEXT_RE.test(line)) return true;
+  }
+  return false;
+}
+
 /** The last line of a link reference definition starting at `start`, or null
  *  when there is none. The destination may sit on the line under the label
  *  and the title under that; the whole run is one block. A label with
@@ -360,6 +372,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openKind: BlockKind = "other";
   let openMarker = "";
   let openIndent = 1;
+  let openHtml = false;
   let previousEndsLazy = false;
   let quoteOpen = false;
   let quoteCallout = false;
@@ -458,10 +471,16 @@ export function blockForLine(body: string, line: number): LineBlock {
     // those continuations, which is why this is read before the starts below.
     const indent = leadingColumns(text);
     // Display math opens after up to three spaces where a block can start. A
-    // line that continues a list or quote keeps reading it at column 0 only.
+    // line that continues a list, quote, table or HTML block keeps reading it
+    // at column 0 only.
     const continues =
-      (listOpen && (open || indent >= openIndent)) || (openKind === "quote" && (open || quoteOpen));
-    const mathClose = mathBlockEnd(lines, index, continues ? 0 : 3);
+      (listOpen && (open || indent >= openIndent)) ||
+      (openKind === "quote" && (open || quoteOpen)) ||
+      (open && (openKind === "table" || openHtml));
+    const mathClose =
+      open && openKind === "other" && underlinedAhead(lines, index + 1)
+        ? null
+        : mathBlockEnd(lines, index, continues ? 0 : 3);
     const resumes =
       (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");
@@ -530,6 +549,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       holderStart = index + 1;
       blocks += 1;
       openKind = kind;
+      openHtml = kind === "other" && HTML_BLOCK_RE.test(text);
       openMarker = marker;
       quoteOpen = false;
       quoteCallout = kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));

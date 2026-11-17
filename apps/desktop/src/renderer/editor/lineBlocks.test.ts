@@ -1034,6 +1034,30 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
+      name: "an HTML block keeps its indented $$",
+      body: '<div align="center">\n  $$\n  E = mc^2\n  $$\n</div>\n\nAfter',
+      lands: [
+        [3, "E = mc^2"],
+        [7, "After"],
+      ],
+    },
+    {
+      name: "a setext underline takes the $$ lines above it into the heading",
+      body: "Intro\n  $$x$$\n---\nAfter",
+      lands: [
+        [2, "$$x$$"],
+        [4, "After"],
+      ],
+    },
+    {
+      name: "a table keeps an indented $$ as a row",
+      body: "| a | b |\n| - | - |\n| 1 | 2 |\n  $$\n  x\n  $$\n\nAfter",
+      lands: [
+        [4, "$$"],
+        [8, "After"],
+      ],
+    },
+    {
       name: "an unclosed $$ is not math",
       body: "Intro\n\n$$x\n\nAfter",
       lands: [
