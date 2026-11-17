@@ -2552,6 +2552,246 @@ async fn a_move_marked_after_a_first_pulls_first_page_closes_the_copy() {
     close(&transport, &handle, &mut id).await;
 }
 
+/// The owner's move of `path` out of the member's reach, marked at `seq`.
+fn departure(seq: i64, path: &str) -> Value {
+    let mut row = share_row(
+        seq,
+        "granter",
+        seq,
+        "moment.append",
+        json!({
+            "operation": "delete", "versionId": "main", "path": path,
+            "payloadBeforePath": path, "payloadBeforeBlobSha256": null,
+        }),
+    );
+    row["reachMove"] = json!("departure");
+    row
+}
+
+/// The owner moves `open/a.md` out of the member's reach at seq 5. The relay
+/// withholds its write at seq 1 and serves the departure.
+fn move_a_out(state: &mut RelayState) {
+    let ops = state.share_ops.get_mut(SHARE).expect("ops");
+    ops.retain(|op| op["relaySeq"] != json!(1));
+    ops.push(departure(5, "open/a.md"));
+}
+
+/// A new copy over a relay that serves two ops a page.
+async fn paged_copy(
+    workspace_id: &str,
+) -> (
+    FakeRelay,
+    ScratchDir,
+    InProcessTransport<EngineService>,
+    WorkspaceHandle,
+    Value,
+) {
+    let relay = FakeRelay::start(RelayState {
+        share_page_limit: Some(2),
+        ..RelayState::default()
+    });
+    serve(&relay, "r1", "v1", false);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r1", "v1") });
+    (relay, scratch, transport, handle, pull)
+}
+
+/// A page that marks a move closed the copy: it applied nothing, so the copy
+/// still holds the moved file's write and no delete.
+fn assert_closed_at_the_move(closed: &Value, scratch: &ScratchDir) {
+    assert!(closed["rebuildId"].is_string(), "{closed}");
+    assert!(closed.get("pendingCursor").is_none(), "{closed}");
+    let db = Connection::open(engine_db_path(scratch).expect("engine db")).expect("open db");
+    let operations: Vec<String> = db
+        .prepare("SELECT operation FROM moments WHERE path = 'open/a.md' ORDER BY moment_order")
+        .expect("moments")
+        .query_map([], |row| row.get(0))
+        .expect("moment rows")
+        .map(|row| row.expect("moment"))
+        .collect();
+    assert_eq!(operations, ["write"], "the move applied");
+}
+
+/// A first page is read again before its cursor commits, after the owner
+/// moved a file it brought in out of the member's reach. The copy stored the
+/// head the first page named, so the page that marks the move closes it,
+/// although the cursor is still at the start. With `restart`, the engine
+/// restarts between the two reads.
+async fn first_page_read_again(workspace_id: &str, restart: bool) {
+    let (relay, scratch, mut transport, mut handle, pull) = paged_copy(workspace_id).await;
+    let mut id = 10;
+    // The first page, seq 1 and 2, names the head at 3.
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert!(first.get("rebuildId").is_none(), "{first}");
+    assert_eq!(first["hasMore"], json!(true), "{first}");
+    {
+        let mut state = relay.state.lock().expect("relay state");
+        move_a_out(&mut state);
+        // One page: seq 2, 3 and the move at 5.
+        state.share_page_limit = Some(3);
+    }
+    if restart {
+        close(&transport, &handle, &mut id).await;
+        transport = InProcessTransport::new(Arc::new(EngineService::new()));
+        handle = open_workspace(&transport, &scratch, &relay, 20, workspace_id).await;
+    }
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert_closed_at_the_move(&closed, &scratch);
+    close(&transport, &handle, &mut id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_page_read_again_closes_the_copy_at_a_later_move() {
+    first_page_read_again("rpc-relay-first-page-again", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_page_read_again_after_a_restart_closes_the_copy_at_a_later_move() {
+    first_page_read_again("rpc-relay-first-page-restart", true).await;
+}
+
+/// Two pulls of a new copy run at once. The first reads its page at a head of
+/// 3. The owner then moves `open/a.md` out of the member's reach, and the
+/// second reads from the start at a head of 5, past the move, and answers
+/// last. The copy keeps the first page's head, so the page that marks the
+/// move closes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_first_pulls_at_once_keep_the_first_pages_head() {
+    let workspace_id = "rpc-relay-first-pulls-at-once";
+    let (relay, scratch, transport, handle, pull) = paged_copy(workspace_id).await;
+    let (second_read, second_arrived) = std::sync::mpsc::channel::<()>();
+    let (release_second, second_released) = std::sync::mpsc::channel::<()>();
+    {
+        let mut state = relay.state.lock().expect("relay state");
+        // The first page's answer waits until the second pull reads.
+        state.share_log_hold = Some(Box::new(move || {
+            let _ = second_arrived.recv_timeout(Duration::from_secs(30));
+        }));
+        state.on_share_log = Some(Box::new(move |state: &mut RelayState| {
+            state.on_share_log = Some(Box::new(move |state: &mut RelayState| {
+                move_a_out(state);
+                // The second answer waits until the first pull has answered.
+                state.share_log_hold = Some(Box::new(move || {
+                    let _ = second_read.send(());
+                    let _ = second_released.recv_timeout(Duration::from_secs(30));
+                }));
+            }));
+        }));
+    }
+    // Either pull may reach the relay first. Whichever answers first releases
+    // the other.
+    let pulled = |id: u64| {
+        let release = release_second.clone();
+        let answer = call_with_busy_retry(
+            &transport,
+            RequestContext::unbounded(),
+            request(id, "share.view.pull", Some(handle.clone()), pull.clone()),
+        );
+        async move {
+            let answer = answer.await.expect("pull").result;
+            let _ = release.send(());
+            answer
+        }
+    };
+    let (one, other) = tokio::join!(pulled(50), pulled(51));
+    let (first, second) = if one["nextCursor"] == json!(2) {
+        (one, other)
+    } else {
+        (other, one)
+    };
+    assert_eq!(first["nextCursor"], json!(2), "{first}");
+    assert!(first.get("rebuildId").is_none(), "{first}");
+    assert!(second.get("rebuildId").is_none(), "{second}");
+    assert_eq!(second["nextCursor"], json!(3), "{second}");
+    let mut id = 60;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": second["pendingCursor"] }),
+    )
+    .await;
+    // The page from seq 3 holds the move at 5.
+    let closed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_closed_at_the_move(&closed, &scratch);
+    close(&transport, &handle, &mut id).await;
+}
+
+/// The owner changes only the member's levels while a first pull is paging.
+/// The next page carries a move marked at or below the first page's head,
+/// which the copy can take in place, so the page is a change of levels: the
+/// copy stays open, and the caller reads the reach again and pulls on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_of_levels_with_an_old_mark_keeps_the_copy() {
+    let workspace_id = "rpc-relay-levels-old-mark";
+    let (relay, _scratch, transport, handle, pull) = paged_copy(workspace_id).await;
+    // Seq 3 marks a move made before the pull began.
+    relay
+        .state
+        .lock()
+        .expect("relay state")
+        .share_ops
+        .get_mut(SHARE)
+        .expect("ops")[2]["reachMove"] = json!("arrival");
+    let mut id = 10;
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert_eq!(first["hasMore"], json!(true), "{first}");
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": first["pendingCursor"] }),
+    )
+    .await;
+    relay
+        .state
+        .lock()
+        .expect("relay state")
+        .share_signatures
+        .insert(SHARE.to_owned(), ("r2".to_owned(), "v1".to_owned()));
+    let changed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert_eq!(
+        changed["reachChanged"],
+        json!({ "signature": "r2", "visibilitySignature": "v1" }),
+        "{changed}"
+    );
+    assert!(changed.get("rebuildId").is_none(), "{changed}");
+    // Under the new levels, the page with the old mark applies.
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r2", "v1") });
+    let applied = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert!(applied.get("rebuildId").is_none(), "{applied}");
+    assert_eq!(applied["reachChanged"], Value::Null, "{applied}");
+    assert_eq!(applied["nextCursor"], json!(3), "{applied}");
+    close(&transport, &handle, &mut id).await;
+}
+
 /// A rebuild's own pull reads every page from the start, and the relay
 /// selects each under the reach the member has now. A move the owner marked
 /// before the build began is at or below its first page's head, so the build

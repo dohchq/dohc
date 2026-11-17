@@ -1154,7 +1154,7 @@ impl RelayTransport for HttpRelayTransport {
             }
         }
         // Only a membership's pages list a reach and the log's head, and only
-        // theirs mark moves. Every op on the page is at or below that head.
+        // theirs mark moves. Every marked op must be at or below that head.
         let reach_signatures = match (page.reach, page.log_head) {
             (Some(reach), Some(log_head)) if newest_move.is_none_or(|seq| seq <= log_head) => {
                 Some(ShareReachSignatures {

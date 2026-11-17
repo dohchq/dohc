@@ -389,8 +389,8 @@ pub struct ShareViewResponse {
 pub struct ShareReachSignatures {
     pub signature: String,
     pub visibility_signature: String,
-    /// The relay log's newest seq when the relay read this page. Every op on
-    /// the page is at or below it.
+    /// The relay log's newest seq when the relay read this page. The client
+    /// checks that every marked op on the page is at or below it.
     pub log_head: i64,
     /// The relay seq of the page's newest op that marks an owner's move
     /// across the edge of the reach, which it serves as a delete or a write.
@@ -705,11 +705,11 @@ pub struct ShareViewPullOutcome {
     /// carries. The page then applied nothing and the cursor stays where it
     /// was: the caller reads the reach again before it pulls on.
     pub reach_changed: Option<ShareReachSignatures>,
-    /// The relay log's head when this page was read from the start of the
-    /// share, as a copy's first pull begins. That pull reads on through moves
-    /// marked at or below it. None for a later page, or one that lists no
-    /// reach.
-    pub first_head: Option<i64>,
+    /// The page marks a move across the reach's edge past the head the
+    /// copy's first page named, or was read before that page. The copy may
+    /// hold History the relay no longer serves, so it rebuilds. Set only with
+    /// `reach_changed`.
+    pub stopped_at_move: bool,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -5287,10 +5287,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// required, and one that selects nothing admits nothing.
     ///
     /// A membership's page that marks a move across the edge of its reach
-    /// applies nothing, as one under another reach does, unless it is the
-    /// copy's first page: a new copy starts from what the reach serves now.
-    /// A first pull longer than a page goes on through
-    /// `pull_share_view_through_moves`.
+    /// applies nothing, as one under another reach does, and reports
+    /// `stopped_at_move`: the copy may hold History of the moved file that the
+    /// relay no longer serves. The relay selects each object by what the reach
+    /// serves when it reads the page, so a move marked at or below the log's
+    /// head that the copy's first page named is already in what every page of
+    /// that pull reads, and applies. The store keeps that head
+    /// (`share_view_fences`), written before the first page applies. Only a
+    /// page read at cursor 0 with no head stored is that first page. A copy
+    /// that has a cursor but no head stops at any marked move.
+    ///
+    /// A page whose head is below the stored one was read before the page
+    /// that stored it, as when two pulls of one share overlap. It may hold
+    /// History of a file whose move an applied page already marked, so it
+    /// stops too.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
@@ -5299,49 +5309,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         granted: &crate::ShareGrant,
         faults: &dyn FaultInjector,
     ) -> Result<ShareViewPullOutcome, RelayError> {
-        self.pull_share_view_page(store, workspace_id, share_id, granted, None, faults)
-    }
-
-    /// Pull one page of a membership that applies a page marking a move
-    /// across the reach's edge at or below `first_head`, the log's head when
-    /// the pull read its first page (`ShareViewPullOutcome::first_head`). For
-    /// a pull that began at the start of the share, such as a rebuild's or a
-    /// copy's first: the relay selects each object by what the reach serves
-    /// now, so a move marked before that pull began is already in what it
-    /// reads. A move marked later stops the pull, as it stops any other.
-    pub fn pull_share_view_through_moves(
-        &self,
-        store: &mut EngineStore,
-        workspace_id: &str,
-        share_id: &str,
-        granted: &crate::ShareGrant,
-        first_head: i64,
-        faults: &dyn FaultInjector,
-    ) -> Result<ShareViewPullOutcome, RelayError> {
-        self.pull_share_view_page(
-            store,
-            workspace_id,
-            share_id,
-            granted,
-            Some(first_head),
-            faults,
-        )
-    }
-
-    fn pull_share_view_page(
-        &self,
-        store: &mut EngineStore,
-        workspace_id: &str,
-        share_id: &str,
-        granted: &crate::ShareGrant,
-        moves_through: Option<i64>,
-        faults: &dyn FaultInjector,
-    ) -> Result<ShareViewPullOutcome, RelayError> {
         let mut cursor =
             crate::read_share_cursor(store, workspace_id, share_id, crate::CursorKind::ShareView)
                 .map_err(local)?;
-        let from_start = cursor == 0;
-        let mut first_head = None;
         let scope_id = format!("view:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
@@ -5356,18 +5326,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // The relay selected this page under the member's reach at its own
         // signatures. A page selected under another reach than the one stored
         // here applies nothing, whether the levels or the visible paths moved,
-        // and nor does one that marks a move across the reach's edge.
+        // and nor does one that marks a move the copy can't take in place.
         if let Some(known) = &granted.reach {
             let Some(served) = page.reach_signatures else {
                 return Err(RelayError::InvalidResponse);
             };
-            let stops_at_move = !from_start
-                && served
-                    .newest_move
-                    .is_some_and(|seq| moves_through.is_none_or(|head| seq > head));
+            // Read after the page: the actor runs one store operation at a
+            // time, so no other pull can store a head between this read and
+            // the write below.
+            let fence = crate::cursor::read_share_view_fence(store, workspace_id, share_id)
+                .map_err(local)?;
+            let from_start = cursor == 0 && fence.is_none();
+            let stopped_at_move = match fence {
+                Some(fence) => {
+                    served.log_head < fence || served.newest_move.is_some_and(|seq| seq > fence)
+                }
+                None => !from_start && served.newest_move.is_some(),
+            };
             if served.signature != known.signature
                 || served.visibility_signature != known.visibility_signature
-                || stops_at_move
+                || stopped_at_move
             {
                 return Ok(ShareViewPullOutcome {
                     fetched: 0,
@@ -5382,11 +5360,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         cursor,
                     },
                     reach_changed: Some(served),
-                    first_head: None,
+                    stopped_at_move,
                 });
             }
             if from_start {
-                first_head = Some(served.log_head);
+                match crate::cursor::record_share_view_fence(
+                    store,
+                    workspace_id,
+                    share_id,
+                    served.log_head,
+                    faults,
+                )
+                .map_err(local)?
+                {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => {
+                        return Err(RelayError::Local("injected-crash".to_owned()));
+                    }
+                }
             }
         }
         let fetched = page.ops.len();
@@ -5538,7 +5529,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 cursor,
             },
             reach_changed: None,
-            first_head,
+            stopped_at_move: false,
         })
     }
 

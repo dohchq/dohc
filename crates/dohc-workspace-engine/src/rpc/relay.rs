@@ -2441,7 +2441,6 @@ impl EngineService {
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let share_id = params.share_id.clone();
-        let first_pull = lock(&self.first_pull_roots).get(&open.root).copied();
         let outcome = self
             .relay_execute(
                 ctx,
@@ -2451,32 +2450,19 @@ impl EngineService {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
                     granted,
-                    through_moves: first_pull,
                 },
                 "share.view.pull",
             )
             .await?;
-        // A copy's first pull reads on through moves marked by its first
-        // page's head until it has read every page.
-        if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome {
-            let mut roots = lock(&self.first_pull_roots);
-            match first_pull.or(pulled.first_head) {
-                Some(head) if pulled.reach_changed.is_none() && pulled.has_more => {
-                    roots.insert(open.root.clone(), head);
-                }
-                _ => {
-                    roots.remove(&open.root);
-                }
-            }
-        }
         // The relay now selects other items for this member, or moved one
-        // across the edge of their reach. The copy may hold History the relay
-        // withholds, so it closes before this answers: from here on only its
-        // rebuild reads it.
+        // across the edge of their reach after the copy's first page. The copy
+        // may hold History the relay withholds, so it closes before this
+        // answers: from here on only its rebuild reads it. A change of levels
+        // alone keeps the copy: the caller reads the reach again and pulls on.
         if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome
             && let Some(served) = &pulled.reach_changed
             && let Some(stored) = stored_visibility
-            && (served.visibility_signature != stored || served.newest_move.is_some())
+            && (served.visibility_signature != stored || pulled.stopped_at_move)
         {
             let manifest = crate::rebuild_manifest::RebuildManifest {
                 rebuild_id: crate::rebuild_manifest::new_rebuild_id().map_err(|_| {

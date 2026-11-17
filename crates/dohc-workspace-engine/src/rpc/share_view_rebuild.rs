@@ -756,9 +756,9 @@ impl EngineService {
             .relay
             .clone()
             .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "relay-not-configured"))?;
-        // A move marked after the first page's head stops the build, and the
-        // runner builds again.
-        let mut first_head = None;
+        // The staging store starts empty, so its first page stores the log's
+        // head. A move marked after it stops the build, and the runner builds
+        // again.
         loop {
             let granted = share_grant(parse(params.granted_selector.clone())?)?;
             let pulled = self
@@ -770,7 +770,6 @@ impl EngineService {
                         workspace_id: params.workspace_id.clone(),
                         share_id: params.share_id.clone(),
                         granted,
-                        through_moves: first_head,
                     },
                     "share.view.rebuild",
                 )
@@ -784,7 +783,6 @@ impl EngineService {
                     "visibilitySignature": served.visibility_signature,
                 })));
             }
-            first_head = first_head.or(pulled.first_head);
             let has_more = pulled.has_more;
             self.relay_execute(
                 ctx,

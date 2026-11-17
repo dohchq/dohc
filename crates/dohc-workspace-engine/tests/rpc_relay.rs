@@ -109,6 +109,9 @@ impl TestResponse {
 /// Changes the fake relay's state as a share log page is read.
 type ShareLogHook = Box<dyn FnOnce(&mut RelayState) + Send>;
 
+/// Holds a share log page's answer after the relay has read it.
+type ShareLogHold = Box<dyn FnOnce() + Send>;
+
 #[derive(Default)]
 struct RelayState {
     workspace_ops: Vec<Value>,
@@ -132,6 +135,9 @@ struct RelayState {
     refuse_claims: bool,
     // Runs once, as the next share log page is read, before the relay reads it.
     on_share_log: Option<ShareLogHook>,
+    // Runs once, after the next share log page is read and before it is
+    // answered, with the relay free to answer other requests.
+    share_log_hold: Option<ShareLogHold>,
 }
 
 struct FakeRelay {
@@ -159,10 +165,15 @@ impl FakeRelay {
                         if stream.set_nonblocking(false).is_err() {
                             continue;
                         }
-                        if let Ok(request) = read_request(&mut stream) {
-                            let response = handle_request(&thread_state, request);
-                            let _ = write_response(&mut stream, response);
-                        }
+                        // Each request on its own thread, so a held answer
+                        // doesn't hold the others.
+                        let state = Arc::clone(&thread_state);
+                        thread::spawn(move || {
+                            if let Ok(request) = read_request(&mut stream) {
+                                let response = handle_request(&state, request);
+                                let _ = write_response(&mut stream, response);
+                            }
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
@@ -305,6 +316,10 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                     .max()
                     .unwrap_or(0)
             );
+        }
+        if let Some(hold) = state.share_log_hold.take() {
+            drop(state);
+            hold();
         }
         return TestResponse::json(page);
     }

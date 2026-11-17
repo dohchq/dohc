@@ -4341,95 +4341,142 @@ fn a_membership_page_selected_under_another_reach_applies_nothing() {
 /// A membership page that marks an owner's move across the edge of the
 /// member's reach applies nothing once the copy holds earlier pages: the copy
 /// may hold History the relay no longer serves, so it closes for a rebuild.
-/// A new copy's first page applies it. So does each later page of a pull that
-/// began at the start of the share, a rebuild's or a copy's first, for a move
-/// marked at or below the log's head that its first page named: the relay
-/// already selected that page under the moved reach. A move marked after that
-/// head stops it too.
+/// A new copy's first page applies it and stores the log's head it names.
+/// Every later page applies a move marked at or below that head, whether it is
+/// read at a committed cursor or again at cursor 0: the relay already selected
+/// it under the moved reach. A move marked after that head stops the pull, and
+/// so does a page read before the head was stored. A copy with a cursor and no
+/// stored head stops at any marked move.
 #[test]
 fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages() {
     let body = b"Day one
 "
     .to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
-    // One marked op at `seq`, on a page whose read saw the log's head at `head`.
-    let page = |seq: i64, path: &str, head: i64| ShareViewResponse {
+    // One op at `seq`, marked when `marked`, on a page whose read saw the log's
+    // head at `head`, under the levels `signature`.
+    let page = |marked: bool, seq: i64, head: i64, signature: &str| ShareViewResponse {
         reach_signatures: Some(crate::ShareReachSignatures {
-            signature: "r1".to_owned(),
+            signature: signature.to_owned(),
             visibility_signature: "v1".to_owned(),
             log_head: head,
-            newest_move: Some(seq),
+            newest_move: marked.then_some(seq),
         }),
         work_references: Vec::new(),
         next_reference_after: None,
         reference_has_more: false,
-        ops: vec![share_view_write_op(seq, path, &sha)],
+        ops: vec![share_view_write_op(seq, &format!("plans/{seq}.md"), &sha)],
         next_cursor: seq + 1,
-        has_more: false,
+        has_more: true,
     };
-    // The first page's read saw the head at 4. The second page's move is
-    // marked at `second`. Answers what each pull applied.
-    let pulls = |first_pull: bool, second: i64| {
+    // Pulls each page in turn from one store, at the cursor it has then, and
+    // commits the cursor after each page marked to. Answers what each applied,
+    // whether a move stopped it, whether the reach changed, and its cursor.
+    let pulls = |committed: Option<i64>, pages: Vec<(ShareViewResponse, bool)>| {
         let (scratch, path, mut engine) = open_store();
-        let client = RelaySyncClient::new(
-            PagedShareRelay::new(
-                [],
-                [
-                    (0, page(0, "plans/a.md", 4)),
-                    (1, page(second, "plans/b.md", second.max(4))),
-                ],
-            )
-            .with_view_blobs([(sha.clone(), body.clone())]),
-        );
         let grant = reach_grant("r1", "v1");
-        let mut first_head = None;
+        let mut cursor = 0;
+        if let Some(committed) = committed {
+            cursor = committed;
+            crate::commit_share_cursor(
+                &mut engine,
+                "ws",
+                &crate::ShareCursor {
+                    kind: crate::CursorKind::ShareView,
+                    share_id: "share".to_owned(),
+                    cursor,
+                },
+                &NoFaults,
+            )
+            .expect("commit");
+        }
         let mut answers = Vec::new();
-        for _ in 0..2 {
-            let pull = match first_head.filter(|_| first_pull) {
-                Some(head) => client.pull_share_view_through_moves(
-                    &mut engine,
-                    "ws",
-                    "share",
-                    &grant,
-                    head,
-                    &NoFaults,
-                ),
-                None => client.pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults),
-            }
-            .expect("a marked page is an answer");
-            first_head = first_head.or(pull.first_head);
+        for (served, commit) in pages {
+            let client = RelaySyncClient::new(
+                PagedShareRelay::new([], [(cursor, served)])
+                    .with_view_blobs([(sha.clone(), body.clone())]),
+            );
+            let pull = client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .expect("a marked page is an answer");
             answers.push((
                 pull.applied,
-                pull.reach_changed
-                    .as_ref()
-                    .and_then(|served| served.newest_move),
+                pull.stopped_at_move,
+                pull.reach_changed.is_some(),
                 pull.pending_cursor.cursor,
             ));
-            client
-                .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
-                .expect("commit");
+            if commit {
+                client
+                    .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+                    .expect("commit");
+                cursor = pull.pending_cursor.cursor;
+            }
         }
         drop((scratch, path));
-        (first_head, answers)
+        answers
     };
+    let first = |head| (page(false, 0, head, "r1"), true);
     assert_eq!(
-        pulls(false, 3),
-        (Some(4), vec![(1, None, 1), (0, Some(3), 1)]),
-        "the first page applies; a later marked one stops where the copy was"
+        pulls(Some(1), vec![(page(true, 3, 4, "r1"), true)]),
+        vec![(0, true, true, 1)],
+        "a copy with a cursor and no stored head stops at a marked move"
     );
     assert_eq!(
-        pulls(true, 3),
-        (Some(4), vec![(1, None, 1), (1, None, 4)]),
+        pulls(None, vec![(page(true, 0, 4, "r1"), true)]),
+        vec![(1, false, false, 1)],
+        "a new copy's first page applies its move"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 3, 4, "r1"), true)]),
+        vec![(1, false, false, 1), (1, false, false, 4)],
         "a first pull applies a move marked at or below its first head"
     );
     assert_eq!(
-        pulls(true, 4),
-        (Some(4), vec![(1, None, 1), (1, None, 5)]),
+        pulls(None, vec![first(4), (page(true, 4, 4, "r1"), true)]),
+        vec![(1, false, false, 1), (1, false, false, 5)],
         "the head itself is a move the first page saw"
     );
     assert_eq!(
-        pulls(true, 5),
-        (Some(4), vec![(1, None, 1), (0, Some(5), 1)]),
+        pulls(None, vec![first(4), (page(true, 5, 5, "r1"), true)]),
+        vec![(1, false, false, 1), (0, true, true, 1)],
         "a move marked after the first page's head stops the pull"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 4, "r1"), false),
+                (page(true, 5, 5, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (0, true, true, 0)],
+        "a first page read again before its cursor commits stops at a later move"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 4, "r1"), false),
+                (page(true, 3, 4, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (1, false, false, 4)],
+        "a first page read again applies a move marked at or below the stored head"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 5, "r1"), false),
+                (page(false, 1, 4, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (0, true, true, 0)],
+        "a page read before the stored head's page stops the pull"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 3, 4, "r2"), true)]),
+        vec![(1, false, false, 1), (0, false, true, 1)],
+        "an old mark on a page under other levels is a change of levels, not a move"
     );
 }

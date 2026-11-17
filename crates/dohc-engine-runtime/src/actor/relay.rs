@@ -113,10 +113,6 @@ pub enum RelayOperation {
         /// The selector the relay stated for this share, pinned by the
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
-        /// For a pull that began at the start of the share, the log's head
-        /// its first page named: a page that marks a move across the reach's
-        /// edge at or below it applies instead of stopping.
-        through_moves: Option<i64>,
     },
     /// Send a membership view's own posts in Groups through the share append
     /// lane. The grant must name the whole workspace at Comment or Edit.
@@ -3312,21 +3308,10 @@ fn run_relay_operation(
             workspace_id,
             share_id,
             granted,
-            through_moves,
-        } => if let Some(first_head) = through_moves {
-            client.pull_share_view_through_moves(
-                store,
-                &workspace_id,
-                &share_id,
-                &granted,
-                first_head,
-                &NoFaults,
-            )
-        } else {
-            client.pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
-        }
-        .map(RelayOperationOutcome::ShareViewPulled)
-        .map_err(RuntimeError::from),
+        } => client
+            .pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
+            .map(RelayOperationOutcome::ShareViewPulled)
+            .map_err(RuntimeError::from),
         RelayOperation::RecordShareViewIdentity {
             workspace_id,
             access,
@@ -4217,7 +4202,6 @@ mod hosted_refusal_tests {
                 workspace_id: ws(),
                 share_id: "share".into(),
                 granted: granted(),
-                through_moves: None,
             },
             RelayOperation::RecordShareViewIdentity {
                 workspace_id: ws(),

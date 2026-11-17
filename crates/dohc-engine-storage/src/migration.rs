@@ -3755,6 +3755,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               ON replication_log(workspace_id, origin_id, origin_seq) WHERE imported=0;",
         sets_user_version: None,
     },
+    // The log head a share view's first page named.
+    Migration {
+        ordinal: 105,
+        id: "v2-share-view-fences",
+        sql: include_str!("share_view_fences.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5734,6 +5741,10 @@ mod tests {
             (
                 "v2-replication-own-operations-index",
                 "ea76da045f98b5a34e4d623b3ad18b1fb96301a331292c67a0e11182c75bd383",
+            ),
+            (
+                "v2-share-view-fences",
+                "106779c42c404b7cb144a53d3f7394ecf24da6458f1e391466b1967ea66b5315",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
