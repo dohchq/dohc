@@ -408,7 +408,7 @@ describe("useAccessRuleHoldNotices", () => {
       expect(said()).toMatchObject({
         tone: "warning",
         message:
-          "dohc didn't apply your choice because it already recorded the access rule for team.",
+          "dohc didn't apply your choice because the access rule for team no longer waits for it in the open Version.",
         retry: null,
         action: { label: "Open History", ends: true },
       }),

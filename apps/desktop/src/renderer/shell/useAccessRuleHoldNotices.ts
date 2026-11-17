@@ -481,14 +481,15 @@ export function useAccessRuleHoldNotices(
           if (currentWorkspace.current !== asked) return;
           const listed = putBack(asked, identity);
           // A hold decided already leaves with the list that follows; the press
-          // still says why nothing ran. With no hold, the rule on disk is the
-          // one dohc recorded, as History shows: decided elsewhere, recorded
-          // with its outer rule, or put back outside dohc.
+          // still says why nothing ran. The engine refuses alike when the hold
+          // is gone (decided elsewhere, recorded with its outer rule, or put
+          // back outside dohc) and when its Version is no longer open, so the
+          // words hold for both. History shows what dohc recorded.
           if (isAccessRuleNotHeldRefusal(error)) {
             latest.current.reportShellFailure({
               identity: decidedOf(identity),
               tone: "warning",
-              message: `dohc didn't apply your choice because it already recorded ${ruleOfLower(hold.folder)}.`,
+              message: `dohc didn't apply your choice because ${ruleOfLower(hold.folder)} no longer waits for it in the open Version.`,
               retry: null,
               action: { label: "Open History", run: latest.current.openHistory, ends: true },
             });
