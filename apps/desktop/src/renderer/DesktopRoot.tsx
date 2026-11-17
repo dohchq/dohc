@@ -171,7 +171,9 @@ function UpdatingAccess(props: { workspace: Workspace }) {
     >
       <RegistryErrorTitlebar />
       <LockKeyhole size={20} strokeWidth={1.75} aria-hidden className="text-muted" />
-      <p className="dohc-section-label m-0">{ended ? "Access ended" : "Updating access"}</p>
+      <p className="dohc-section-label m-0">
+        {ended ? "Access ended" : failed ? "Access update stopped" : "Updating access"}
+      </p>
       <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
         {workspaceName(props.workspace)}
       </h2>

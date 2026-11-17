@@ -210,6 +210,9 @@ describe("workspace summary changes", () => {
     const panel = screen.getByTestId("workspace-updating-access");
     expect(within(panel).getByText(detail)).toBeTruthy();
     expect(within(panel).getByRole("button", { name: "Details" })).toBeTruthy();
+    // Nothing is updating now, so the label doesn't say it is.
+    expect(within(panel).getByText("Access update stopped")).toBeTruthy();
+    expect(within(panel).queryByText("Updating access")).toBeNull();
     // A stopped update is one thing that failed: a toast and a Notices row with Try again.
     const [toast] = await waitFor(() => {
       const found = toastsWith(detail);
