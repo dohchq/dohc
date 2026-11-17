@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { dohcMarkdownExtensions } from "./dohc-markdown-extensions.js";
+import { dohcMarkdownExtensions, readInline } from "./dohc-markdown-extensions.js";
 import { parseRichdocMarkdown } from "./import-export.js";
 
 function startFor(name: string): (source: string) => number {
@@ -14,8 +14,8 @@ describe("block start searches", () => {
   // ends at the first line holding only spaces. A marker past that line cuts
   // nothing, so the search stops there.
   it.each([
-    ["callout", /(?:^|\n)( {0,3}>\s?\[!)/],
-    ["mathBlock", /(?:^|\n)(\$\$)/],
+    ["callout", /\n( {0,3}>\s?\[!)/],
+    ["mathBlock", /\n(\$\$)/],
   ] as const)("finds %s markers in the paragraph marked reads", (name, pattern) => {
     const start = startFor(name);
     const check = (source: string) => {
@@ -80,40 +80,104 @@ describe("block start searches", () => {
     expect(positions).toEqual([-1, -1]);
     expect(scanned).toBeLessThanOrEqual(8192);
   });
+
+  // marked asks a block start about the text after its first character, which
+  // never begins a line.
+  it("reads a block marker one character into a line as text", () => {
+    for (const line of ["a$$b$$", "a> [!note] x"]) {
+      expect(parseRichdocMarkdown(`${line}\n`).content).toEqual([
+        { type: "paragraph", content: [{ type: "text", text: line }] },
+      ]);
+    }
+  });
 });
 
-describe("wikilink start search", () => {
-  it("finds the wikilinks the earlier pattern found", () => {
-    const start = startFor("wikilink");
-    const pattern = /(^|[^\\])\[\[(?:\\.|[^\]\n\\])+\]\]/;
-    const check = (source: string) => {
-      const match = pattern.exec(source);
-      const expected = match ? match.index + match[1]!.length : -1;
-      expect(start(source), JSON.stringify(source)).toBe(expected);
+describe("inline searches", () => {
+  type Tokenize = (src: string, tokens: unknown[]) => { raw?: string } | undefined;
+  const tokenizerFor = (name: string) => {
+    const tokenize = dohcMarkdownExtensions.find((extension) => extension.name === name)?.config
+      .markdownTokenizer?.tokenize;
+    if (typeof tokenize !== "function") throw new Error(`Missing tokenizer: ${name}`);
+    return tokenize as unknown as Tokenize;
+  };
+  const firstIndex = (src: string, pattern: RegExp) => {
+    const match = pattern.exec(src);
+    return match ? match.index + match[1]!.length : -1;
+  };
+
+  // marked asks about ever shorter ends of the source a read began with. Asked
+  // in that order inside the read, each search finds what the earlier,
+  // whole-rest search found.
+  it("find inside a read what a search of the whole rest finds", () => {
+    const starts = [
+      ["highlight", (src: string) => firstIndex(src, /(^|[^\\=])==(?!\s)(?!=)/)],
+      ["mathInline", (src: string) => firstIndex(src, /(^|[^\\$])\$(?=[^\s$])/)],
+      ["inlineAtom", (src: string) => src.indexOf("{{atom:")],
+    ] as const;
+    const wikilink = tokenizerFor("wikilink");
+    const atom = tokenizerFor("inlineAtom");
+    const earlierAtom = (src: string) => {
+      const match = /^\{\{atom:([^}\s]+)([^}]*)\}\}/.exec(src);
+      return match
+        ? {
+            type: "inlineAtom",
+            raw: match[0],
+            atomId: match[1],
+            params: match[2]!.trim(),
+            source: match[0].slice(2, -2),
+          }
+        : undefined;
     };
-    const lineEnds = ["\n", "\r", String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
-    for (const inner of ["", "a", "\\]", "\\|", "\\\\", "[", "a|b", "\\", ...lineEnds]) {
-      for (const prefix of ["", "x", "\\", "\\\\", "[", "]"]) check(`${prefix}[[${inner}]]`);
-      for (const end of lineEnds) check(`[[a\\${end}b]]`);
-    }
-    let seed = 7;
-    const chunks = ["[", "[[", "]", "]]", "\\", "a", "|", ...lineEnds];
-    for (let sample = 0; sample < 4000; sample += 1) {
+    const chunks = ["a", " ", "\n", "\\", "\\\\", "$", "$$", "=", "==", "[[", "]]", "]", "{{atom:"];
+    chunks.push("}", "}}", "x y", "\t");
+    let seed = 11;
+    const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+    for (let sample = 0; sample < 3000; sample += 1) {
       let source = "";
-      for (let index = 0; index < 16; index += 1) {
-        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-        source += chunks[seed % chunks.length];
-      }
-      check(source);
+      for (let index = 0; index < 24; index += 1) source += chunks[next() % chunks.length];
+      const lexer = {};
+      const tokens: unknown[] = [];
+      readInline(lexer, tokens, source, () => {
+        for (let at = 0; at < source.length; at += 1 + (next() % 3)) {
+          const rest = source.slice(at);
+          const label = JSON.stringify([source, at]);
+          for (const [name, expected] of starts) {
+            expect(startFor(name).call({ lexer }, rest.slice(1)), `${name} ${label}`).toBe(
+              expected(rest.slice(1)),
+            );
+          }
+          expect(wikilink(rest, tokens), label).toEqual(wikilink(rest, []));
+          expect(atom(rest, tokens), label).toEqual(earlierAtom(rest));
+          // A tokenizer can read its token's text in a read of its own.
+          if (next() % 4 === 0) {
+            const inner = readInline(lexer, [], "==a==", () =>
+              startFor("highlight").call({ lexer }, "=a=="),
+            );
+            expect(inner).toBe(starts[0][1]("=a=="));
+          }
+        }
+      });
     }
   });
 
-  it("reads a paragraph of typed brackets without rescanning each one", () => {
-    const started = performance.now();
-    const doc = parseRichdocMarkdown("[".repeat(4096));
-    const elapsed = performance.now() - started;
-    expect(doc.content?.[0]?.content?.[0]?.text).toBe("[".repeat(4096));
-    // The earlier pattern took about 25 s here; a single pass takes well under 1 s.
-    expect(elapsed).toBeLessThan(2_000);
-  }, 60_000);
+  // Each start once read the rest of the text at every typed character; before
+  // this fix these took 2.3 to 4.7 s, and the atoms 17 s.
+  it.each([
+    ["[", 32_768],
+    ["$", 32_768],
+    ["{{atom:", 8_192],
+  ])(
+    "reads a paragraph of typed %j once",
+    (unit, size) => {
+      const markdown = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      const started = performance.now();
+      const doc = parseRichdocMarkdown(markdown);
+      const elapsed = performance.now() - started;
+      expect(doc.content?.map((block) => block.content?.map((node) => node.text).join(""))).toEqual(
+        [markdown],
+      );
+      expect(elapsed).toBeLessThan(1_500);
+    },
+    60_000,
+  );
 });
