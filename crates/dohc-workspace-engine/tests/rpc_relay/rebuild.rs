@@ -885,7 +885,18 @@ async fn a_member_s_new_files_stay_where_they_can_still_edit() {
 /// of it to send again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_s_new_file_the_relay_took_goes_to_recovery() {
-    let copy = closed_copy_with("rpc-rebuild-keeps-taken", true, false, |_, _, scratch| {
+    a_taken_new_file_goes_to_recovery("rpc-rebuild-keeps-taken", false).await;
+}
+
+/// The same when the relay took the file but its answer never came back: the
+/// copy can't tell that the relay has it, so it doesn't keep it as unsent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_s_new_file_whose_answer_was_lost_goes_to_recovery() {
+    a_taken_new_file_goes_to_recovery("rpc-rebuild-keeps-lost", true).await;
+}
+
+async fn a_taken_new_file_goes_to_recovery(name: &str, lose_answer: bool) {
+    let copy = closed_copy_with(name, true, false, |_, _, scratch| {
         Box::pin(async move {
             std::fs::write(scratch.path().join("open/new.md"), "my new file").expect("new");
         })
@@ -906,14 +917,23 @@ async fn a_member_s_new_file_the_relay_took_goes_to_recovery() {
     flush_capture(&transport, &handle, &mut id).await;
     let send =
         json!({ "workspaceId": copy.workspace_id, "shareId": SHARE, "grantedSelector": granted });
-    call(
-        &transport,
-        &handle,
-        &mut id,
-        "share.direct.push",
-        send.clone(),
-    )
-    .await;
+    if lose_answer {
+        copy.relay
+            .state
+            .lock()
+            .expect("relay state")
+            .lose_share_write_answer = true;
+        id += 1;
+        // The push fails on the lost answer, and its plan stays unanswered.
+        let _ = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "share.direct.push", Some(handle.clone()), send),
+            )
+            .await;
+    } else {
+        call(&transport, &handle, &mut id, "share.direct.push", send).await;
+    }
     let taken = |relay: &FakeRelay| {
         relay
             .state

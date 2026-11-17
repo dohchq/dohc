@@ -54,7 +54,8 @@ pub struct RebuildUnsent {
     pub versions: Vec<RebuildHead>,
     /// The object ids among `versions` that only the member's own moments
     /// wrote and the relay never accepted a write of: a file they made that
-    /// the relay has neither served nor taken.
+    /// the relay has neither served nor taken. A planned write still waiting
+    /// for its answer may have been taken, so it counts as taken.
     pub created: BTreeSet<String>,
     /// Own deletes and moves that are each file's newest moment.
     pub removals: Vec<RebuildRemoval>,
@@ -211,6 +212,11 @@ impl ActorHandle {
                          AND NOT EXISTS (SELECT 1 FROM share_direct_write_marks k \
                            WHERE k.workspace_id = ?1 AND k.share_id = ?2 \
                            AND k.object_id = m.object_id AND k.delivered_through > -1) \
+                         AND NOT EXISTS (SELECT 1 FROM share_direct_write_plan p, \
+                           json_each(p.objects_json) o \
+                           WHERE p.workspace_id = ?1 AND p.share_id = ?2 \
+                           AND p.result_json IS NULL \
+                           AND json_extract(o.value, '$[0]') = m.object_id) \
                          FROM moments m WHERE m.workspace_id = ?1 AND {own_m} \
                          AND m.moment_order = (SELECT MAX(o.moment_order) FROM moments o \
                            WHERE o.workspace_id = ?1 AND o.object_id = m.object_id) \

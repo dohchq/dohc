@@ -138,6 +138,9 @@ struct RelayState {
     // Runs once, after the next share log page is read and before it is
     // answered, with the relay free to answer other requests.
     share_log_hold: Option<ShareLogHold>,
+    // Takes the next direct write, then answers 500, as when its answer is
+    // lost on the way back.
+    lose_share_write_answer: bool,
 }
 
 struct FakeRelay {
@@ -258,6 +261,11 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 .map(Value::from)
                 .collect();
             state.share_written.extend(changes);
+            if std::mem::take(&mut state.lose_share_write_answer) {
+                let mut lost = TestResponse::json(json!({ "error": "lost" }));
+                lost.status = 500;
+                return lost;
+            }
             return TestResponse::json(json!({ "paths": paths }));
         }
         assert_eq!(suffix, "log");
