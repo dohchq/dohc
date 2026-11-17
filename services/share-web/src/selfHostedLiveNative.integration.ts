@@ -2284,6 +2284,7 @@ async function openSelfHostProof(name: string) {
           tickets,
           sessions: createPostgresAccountSessions(pool),
           nowMs: Date.now,
+          editorLimits: profile.editor,
         });
         const scope = {
           kind: "owner",
