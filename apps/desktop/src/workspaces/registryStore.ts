@@ -270,7 +270,11 @@ export interface ShareViewIdentity {
 
 export interface ShareViewRebuildStop {
   reason: "waiting" | "failed" | "ended";
+  // What failed, when `detail` says only why and what to do.
+  title?: string;
   detail: string;
+  // The engine's code, for Copy details only.
+  cause?: string;
 }
 
 // A shared channel this workspace joined through a chat grant:

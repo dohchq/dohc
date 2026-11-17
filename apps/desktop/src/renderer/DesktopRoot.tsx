@@ -119,12 +119,23 @@ function UpdatingAccess(props: { workspace: Workspace }) {
   // A stopped update is one thing that failed. Waiting for the server shows
   // here only, as an ended membership does. A new try or an ended
   // membership takes the failure back.
-  const failedDetail = stopped?.reason === "failed" ? stopped.detail : null;
+  // The toast holds two lines, so a title says what failed and the body
+  // says why and what to do.
+  const failed = stopped?.reason === "failed" ? stopped : null;
+  const failedTitle = failed?.title,
+    failedDetail = failed?.detail ?? null,
+    failedCause = failed?.cause;
   useEffect(() => {
-    if (failedDetail !== null)
-      reportFailure?.({ message: failedDetail, retry: tryAgain, identity });
-    else clearNotice?.(identity);
-  }, [failedDetail, reportFailure, clearNotice, tryAgain, identity]);
+    if (failedDetail !== null) {
+      reportFailure?.({
+        ...(failedTitle ? { title: failedTitle } : {}),
+        message: failedDetail,
+        ...(failedCause ? { cause: failedCause } : {}),
+        retry: tryAgain,
+        identity,
+      });
+    } else clearNotice?.(identity);
+  }, [failedTitle, failedDetail, failedCause, reportFailure, clearNotice, tryAgain, identity]);
   return (
     <div
       data-testid="workspace-updating-access"
@@ -144,8 +155,18 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       )}
       {stopped ? (
         <div className="flex max-w-md items-start gap-2 text-left">
-          <p className="m-0 select-text text-[13px] leading-relaxed text-ink">{stopped.detail}</p>
-          <CopyButton label="Copy" pinName iconOnly getText={() => stopped.detail} />
+          <div className="m-0 select-text text-[13px] leading-relaxed text-ink">
+            {stopped.title ? <p className="m-0 font-medium">{stopped.title}</p> : null}
+            <p className="m-0">{stopped.detail}</p>
+          </div>
+          <CopyButton
+            label="Copy"
+            pinName
+            iconOnly
+            getText={() =>
+              [stopped.title, stopped.detail, stopped.cause].filter(Boolean).join("\n")
+            }
+          />
         </div>
       ) : null}
       <div className="flex flex-wrap justify-center gap-2">

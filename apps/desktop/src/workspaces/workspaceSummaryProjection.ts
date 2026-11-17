@@ -181,7 +181,12 @@ function accessSaved(raw: unknown): { accessSaved?: { folder: string; count: num
 
 // Why a joined copy's rebuild stopped, when the record says so readably.
 function rebuildStop(raw: unknown): {
-  updatingAccessStopped?: { reason: "waiting" | "failed" | "ended"; detail: string };
+  updatingAccessStopped?: {
+    reason: "waiting" | "failed" | "ended";
+    title?: string;
+    detail: string;
+    cause?: string;
+  };
 } {
   if (
     !isRecord(raw) ||
@@ -189,5 +194,16 @@ function rebuildStop(raw: unknown): {
   )
     return {};
   const detail = boundedString(raw.detail, 0, 2_000);
-  return detail === null ? {} : { updatingAccessStopped: { reason: raw.reason, detail } };
+  const title = boundedString(raw.title, 1, 200);
+  const cause = boundedString(raw.cause, 1, 200);
+  return detail === null
+    ? {}
+    : {
+        updatingAccessStopped: {
+          reason: raw.reason,
+          ...(title === null ? {} : { title }),
+          detail,
+          ...(cause === null ? {} : { cause }),
+        },
+      };
 }

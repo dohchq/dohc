@@ -392,38 +392,58 @@ describe("the words for a stopped rebuild", () => {
     new Error(code, {
       cause: new EngineRequestError(1, { code: "CONFLICT", message: code, retry: "no" }),
     });
-  const HELD =
-    "dohc could not update access because another program may have a file in this workspace open. Close it, then choose Try again.";
+  // A title says what failed. The body says why, if dohc knows, and what to
+  // do, one instruction to a sentence. Copy details keep the engine's code.
   const UNCHANGED =
-    "dohc could not update access because it could not change files in this workspace. Check that no other program has them open and the disk has room, then choose Try again.";
+    "dohc could not change files in this workspace. Check that no other program has them open and the disk has room.";
+  const UNREAD =
+    "dohc could not read a file in this workspace. If another program has it open, close it, then choose Try again.";
   it.each([
-    ["share-view-rebuild-file-held", HELD],
+    [
+      "share-view-rebuild-file-held",
+      "Another program may have a file in this workspace open. Close it, then choose Try again.",
+    ],
     [
       "share-view-rebuild-linked-folder",
-      "dohc could not update access because a folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
+      "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
     ],
     ["share-view-rebuild-rename-failed", UNCHANGED],
     ["share-view-rebuild-recovery-move-failed", UNCHANGED],
     ["share-view-rebuild-staging-unavailable", UNCHANGED],
-    ["share-view-rebuild-disk-unreadable", UNCHANGED],
-    ["share-view-rebuild-jobs-unfinished", UNCHANGED],
+    ["share-view-rebuild-disk-unreadable", UNREAD],
+    [
+      "share-view-rebuild-filesystem-unreadable",
+      "dohc could not read which disk this workspace's .dohc folder is on.",
+    ],
+    [
+      "share-view-rebuild-jobs-unfinished",
+      "dohc could not finish writing the files in this workspace.",
+    ],
     [
       "share-view-rebuild-filesystems-differ",
-      "dohc could not update access because this workspace's .dohc folder is spread over more than one disk.",
+      "This workspace's .dohc folder is spread over more than one disk. Move it onto one disk, then choose Try again.",
     ],
     [
       "share-view-rebuild-swap-unrecognized",
-      "dohc could not update access because its data for this workspace is in a state dohc doesn't recognize.",
+      "dohc's data for this workspace is in a state it doesn't recognize.",
     ],
-    [
-      "share-view-rebuild-root-open",
-      "dohc could not update access because this workspace was still open.",
-    ],
-    ["share-view-rebuild-new-code", "dohc could not update access."],
+    ["share-view-rebuild-root-open", "This workspace was still open."],
   ])("%s", (code, detail) => {
     expect(shareViewRebuildStop({ kind: "failed", error: refused(code) })).toEqual({
       reason: "failed",
+      title: "dohc could not update access",
       detail,
+      cause: code,
+    });
+  });
+
+  it("keeps an engine code it has no words for, for Copy details", () => {
+    expect(
+      shareViewRebuildStop({ kind: "failed", error: refused("share-view-rebuild-new-code") }),
+    ).toEqual({
+      reason: "failed",
+      detail: "dohc could not update access.",
+      cause: "share-view-rebuild-new-code",
     });
   });
 

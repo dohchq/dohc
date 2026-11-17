@@ -321,16 +321,17 @@ export function parseShareViewRebuildAnswer(
 }
 
 const CHANGE_FAILED =
-  "dohc could not update access because it could not change files in this workspace. Check that no other program has them open and the disk has room, then choose Try again.";
+  "dohc could not change files in this workspace. Check that no other program has them open and the disk has room.";
 
-// What the person can do about each code the engine stops a rebuild with.
+// Why each code the engine stops a rebuild with stopped it, if dohc knows,
+// and what the person can do. A title says what failed.
 const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   // On Windows a rename that a held file blocks fails as access denied, as
   // a real denial does, so the words can't be sure.
   "share-view-rebuild-file-held":
-    "dohc could not update access because another program may have a file in this workspace open. Close it, then choose Try again.",
+    "Another program may have a file in this workspace open. Close it, then choose Try again.",
   "share-view-rebuild-linked-folder":
-    "dohc could not update access because a folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
+    "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.",
   "share-view-rebuild-rename-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-move-failed": CHANGE_FAILED,
   "share-view-rebuild-recovery-unavailable": CHANGE_FAILED,
@@ -339,15 +340,19 @@ const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   "share-view-rebuild-aside-unavailable": CHANGE_FAILED,
   "share-view-rebuild-aside-left": CHANGE_FAILED,
   "share-view-rebuild-manifest-unwritable": CHANGE_FAILED,
-  "share-view-rebuild-filesystem-unreadable": CHANGE_FAILED,
-  "share-view-rebuild-disk-unreadable": CHANGE_FAILED,
-  "share-view-rebuild-jobs-unfinished": CHANGE_FAILED,
+  // The scan could not read a path. A file another program holds is one
+  // cause, a permission another, so the words don't say which.
+  "share-view-rebuild-disk-unreadable":
+    "dohc could not read a file in this workspace. If another program has it open, close it, then choose Try again.",
+  "share-view-rebuild-filesystem-unreadable":
+    "dohc could not read which disk this workspace's .dohc folder is on.",
+  "share-view-rebuild-jobs-unfinished":
+    "dohc could not finish writing the files in this workspace.",
   "share-view-rebuild-filesystems-differ":
-    "dohc could not update access because this workspace's .dohc folder is spread over more than one disk.",
+    "This workspace's .dohc folder is spread over more than one disk. Move it onto one disk, then choose Try again.",
   "share-view-rebuild-swap-unrecognized":
-    "dohc could not update access because its data for this workspace is in a state dohc doesn't recognize.",
-  "share-view-rebuild-root-open":
-    "dohc could not update access because this workspace was still open.",
+    "dohc's data for this workspace is in a state it doesn't recognize.",
+  "share-view-rebuild-root-open": "This workspace was still open.",
 };
 
 /** The code an engine refusal carries, through the errors that wrap it. */
@@ -372,11 +377,12 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
       if (notice.error instanceof LivePageUnkeptError)
         return { reason: "failed", detail: notice.error.message };
       const code = engineRefusalCode(notice.error);
-      if (code !== null)
-        return {
-          reason: "failed",
-          detail: REBUILD_REFUSALS[code] ?? "dohc could not update access.",
-        };
+      if (code !== null) {
+        const why = REBUILD_REFUSALS[code];
+        return why === undefined
+          ? { reason: "failed", detail: "dohc could not update access.", cause: code }
+          : { reason: "failed", title: "dohc could not update access", detail: why, cause: code };
+      }
       const cause = notice.error instanceof Error ? notice.error.message : String(notice.error);
       return {
         reason: "failed",

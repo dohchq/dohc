@@ -223,6 +223,48 @@ describe("workspace summary changes", () => {
     );
   });
 
+  it("titles a stop that says only why, and keeps its code out of the toast", async () => {
+    const h = setup();
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const title = "dohc could not update access";
+    const detail =
+      "A folder in this workspace is a link. Put what it links to in its place, then choose Try again.";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: {
+        reason: "failed" as const,
+        title,
+        detail,
+        cause: "share-view-rebuild-linked-folder",
+      },
+    };
+    h.replace([{ ...workspace("a"), shareView }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText(title)).toBeTruthy();
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    const [toast] = await waitFor(() => {
+      const found = screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((t) => t.textContent?.includes(title));
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    expect(toast!.textContent).toContain(detail);
+    expect(toast!.textContent).not.toContain("share-view-rebuild-linked-folder");
+  });
+
   // A new try clears the stop, and an ended membership offers no Try again:
   // the stop's toast and Notices row go with it.
   it.each([

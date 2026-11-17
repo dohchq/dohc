@@ -412,7 +412,11 @@ export const WorkspaceSummary = z.object({
       updatingAccessStopped: z
         .object({
           reason: z.enum(["waiting", "failed", "ended"]),
+          // What failed, when `detail` says only why and what to do.
+          title: z.string().optional(),
           detail: z.string(),
+          // The engine's code, for Copy details only.
+          cause: z.string().optional(),
         })
         .optional(),
       // The recovery folder the last update of access saved items into, until
