@@ -3,6 +3,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ReactNode } from "react";
+import { deferred } from "../../testing/deferred";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { useSharingSearch } from "./SharingSearchResults";
 
@@ -83,6 +84,44 @@ it("finds a share on a lane's second page", async () => {
     cursor: "page-2",
   });
 });
+
+it.each([false, true])(
+  "drops a previous workspace's sharing search after a paced refresh: %s",
+  async (paced) => {
+    const pending = deferred<AccessAnswer>();
+    const refreshed = deferred<{ status: string }>();
+    requestAccessRefresh.mockImplementation(async (input) => {
+      if (input.workspaceId !== "ws-1" || !paced) return undefined;
+      return input.wait ? refreshed.promise : { status: "paced" };
+    });
+    let workspaceId = "ws-1";
+    listSharingAccess.mockImplementation(async (input) => {
+      if (input.lane === "received") return page([], null, "received-account");
+      if (input.workspaceId === "ws-2") return page([share(2)], null);
+      return paced ? page([share(1)], null) : pending.promise;
+    });
+    const { result, rerender } = renderHook(() => useSharingSearch(workspaceId, false, "file"), {
+      wrapper: ({ children }) => (
+        <WorkspaceSessionProvider workspaceId={workspaceId}>{children}</WorkspaceSessionProvider>
+      ),
+    });
+    await waitFor(() =>
+      expect(
+        paced
+          ? requestAccessRefresh.mock.calls.some(([input]) => input.wait)
+          : listSharingAccess.mock.calls.some(([input]) => input.workspaceId === "ws-1"),
+      ).toBe(true),
+    );
+    workspaceId = "ws-2";
+    rerender();
+    await waitFor(() => expect(result.current.map((found) => found.shareId)).toEqual(["share-2"]));
+    await act(async () => {
+      pending.resolve(page([share(1)], null));
+      refreshed.resolve({ status: "joined" });
+    });
+    expect(result.current.map((found) => found.shareId)).toEqual(["share-2"]);
+  },
+);
 
 it("keeps what it read when main refuses a later page", async () => {
   listSharingAccess.mockImplementation(async ({ lane, cursor }) =>

@@ -8,6 +8,7 @@ import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter } from "../shell/useShellError";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import type { AccessFacts } from "./accessReason";
 import { SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
@@ -191,26 +192,28 @@ function View(props: {
   );
   if (props.open === false) return null;
   return (
-    <SharingView
-      sharesRevision={sharesRevision}
-      workspaceId={props.workspaceId ?? "workspace-a"}
-      shareView={props.shareView ?? false}
-      context={contextFor(props.facts ?? SYNCED)}
-      notices={notices}
-      conflictCount={props.conflictCount ?? null}
-      onReviewConflicts={callbacks.onReviewConflicts}
-      proposals={props.proposals ?? []}
-      onReviewChanges={callbacks.onReviewChanges}
-      mounts={props.mounts ?? []}
-      onMountsChanged={callbacks.onMountsChanged}
-      onUnmount={callbacks.onUnmount}
-      shareRemovals={removals}
-      reportError={callbacks.reportError}
-      focus={props.focus ?? null}
-      onFocused={callbacks.onFocused}
-      notSentWhileOpen={props.notSentWhileOpen ?? []}
-      onOpenShare={callbacks.onOpenShare}
-    />
+    <WorkspaceSessionProvider workspaceId={props.workspaceId ?? "workspace-a"}>
+      <SharingView
+        sharesRevision={sharesRevision}
+        workspaceId={props.workspaceId ?? "workspace-a"}
+        shareView={props.shareView ?? false}
+        context={contextFor(props.facts ?? SYNCED)}
+        notices={notices}
+        conflictCount={props.conflictCount ?? null}
+        onReviewConflicts={callbacks.onReviewConflicts}
+        proposals={props.proposals ?? []}
+        onReviewChanges={callbacks.onReviewChanges}
+        mounts={props.mounts ?? []}
+        onMountsChanged={callbacks.onMountsChanged}
+        onUnmount={callbacks.onUnmount}
+        shareRemovals={removals}
+        reportError={callbacks.reportError}
+        focus={props.focus ?? null}
+        onFocused={callbacks.onFocused}
+        notSentWhileOpen={props.notSentWhileOpen ?? []}
+        onOpenShare={callbacks.onOpenShare}
+      />
+    </WorkspaceSessionProvider>
   );
 }
 
@@ -569,7 +572,41 @@ describe("the actions Settings offers on a share", () => {
       "The owner removed your access.",
     );
     expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+    const share = { shareId: "member", shareCode: "member-code" };
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share });
+    act(() => callbacks.reportError.mock.calls[0]![2]());
+    await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledWith(share));
   });
+
+  it.each(["success", "failure"])(
+    "drops a late membership Open %s after switching workspaces",
+    async (outcome) => {
+      answerWith({
+        received: answer("received", {
+          rows: [
+            received({
+              shareId: "member",
+              subjectName: "Community",
+              selector: { kind: "workspace", role: "member" },
+            }),
+          ],
+        }),
+      });
+      const pending = deferred<unknown>();
+      bridgeMock.getRelayReceivedShare.mockReturnValueOnce(pending.promise);
+      const { rerender } = render(<View />);
+      const row = await screen.findByTestId("sharing-received-row");
+      await userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name: "Open" }));
+      rerender(<View workspaceId="workspace-b" />);
+      await act(async () => {
+        if (outcome === "success")
+          pending.resolve({ found: true, share: { shareId: "member", shareCode: "member-code" } });
+        else pending.reject(new Error("Workspace A is unavailable."));
+      });
+      expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+      expect(callbacks.reportError).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports a share that could not be added, with Try again", async () => {
     answerWith({ received: answer("received", { rows: [received()] }) });

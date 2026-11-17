@@ -39,6 +39,8 @@ import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -1129,6 +1131,37 @@ export function SharingView(props: {
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  const [openTarget, setOpenTarget] = useState<{
+    workspaceId: string;
+    shareId: string;
+    name: string;
+  } | null>(null);
+  if (openTarget && openTarget.workspaceId !== workspaceId) setOpenTarget(null);
+  const opening = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${workspaceId}\0${openTarget?.shareId ?? ""}`,
+    manual: openTarget === null || openTarget.workspaceId !== workspaceId,
+    load: async () => {
+      if (!openTarget) return null;
+      const found = await bridge().getRelayReceivedShare({ shareId: openTarget.shareId });
+      if (!found.found)
+        throw new Error(found.removed?.message ?? "This workspace is no longer shared with you.");
+      if ("chats" in found) throw new Error("Join this from Chats.");
+      return found.share;
+    },
+  });
+  const { onOpenShare, reportError } = props;
+  useEffect(() => {
+    if (!openTarget || openTarget.workspaceId !== workspaceId) return;
+    if (opening.value) {
+      setOpenTarget(null);
+      onOpenShare(opening.value);
+    } else if (opening.error !== null) {
+      setOpenTarget(null);
+      reportError(`dohc could not open ${openTarget.name}.`, opening.error, () =>
+        setOpenTarget(openTarget),
+      );
+    }
+  }, [onOpenShare, openTarget, opening.error, opening.value, reportError, workspaceId]);
   const [skipView, setSkipView] = useState<SkipView>(new Map());
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
@@ -1297,22 +1330,6 @@ export function SharingView(props: {
     }
   }
 
-  async function open(shareId: string, name: string) {
-    const token = epoch.current();
-    setBusyShareId(shareId);
-    try {
-      const found = await bridge().getRelayReceivedShare({ shareId });
-      if (!found.found)
-        throw new Error(found.removed?.message ?? "This workspace is no longer shared with you.");
-      if ("chats" in found) throw new Error("Join this from Chats.");
-      if (epoch.isCurrent(token)) props.onOpenShare(found.share);
-    } catch (cause) {
-      props.reportError(`dohc could not open ${name}.`, cause, () => void open(shareId, name));
-    } finally {
-      if (epoch.isCurrent(token)) setBusyShareId(null);
-    }
-  }
-
   async function unmount(target: ShareMount) {
     const token = epoch.current();
     setBusyShareId(target.shareId);
@@ -1385,7 +1402,7 @@ export function SharingView(props: {
     cancelEnd: () => setConfirmShareId(null),
     end: (group) => void end(group),
     mount: (shareId) => void mount(shareId),
-    open: (shareId, name) => void open(shareId, name),
+    open: (shareId, name) => setOpenTarget({ workspaceId, shareId, name }),
     unmount: (target) => void unmount(target),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
@@ -1405,7 +1422,7 @@ export function SharingView(props: {
       skipView={skipView}
       invitations={invitations}
       confirmShareId={confirmShareId}
-      busyShareId={busyShareId}
+      busyShareId={openTarget?.shareId ?? busyShareId}
       actions={actions}
       ref={panel}
     />

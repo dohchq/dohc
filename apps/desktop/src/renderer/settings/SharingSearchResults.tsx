@@ -46,6 +46,20 @@ async function readLane(
   return found;
 }
 
+async function readAll(
+  sharedView: boolean,
+  list: (lane: SharingLane, cursor: string | null) => Promise<AccessAnswer>,
+  signal: AbortSignal,
+): Promise<Found[]> {
+  // Someone else's shared workspace grants nothing from here.
+  const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
+  const answers = await Promise.all(
+    lanes.map((lane) => readLane(lane, (cursor) => list(lane, cursor), signal)),
+  );
+  if (answers.every((answer) => answer === null)) throw new Error("No sharing list could be read.");
+  return answers.flatMap((answer) => answer ?? []);
+}
+
 // Both lists, read once per workspace on the first search.
 export function useSharingSearch(
   workspaceId: string,
@@ -53,30 +67,18 @@ export function useSharingSearch(
   query: string,
 ): SharingResult[] {
   const session = useWorkspaceSession();
-  const readAll = async (signal: AbortSignal) => {
-    // Someone else's shared workspace grants nothing from here.
-    const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
-    const answers = await Promise.all(
-      lanes.map((lane) =>
-        readLane(
-          lane,
-          (cursor) =>
-            bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) }),
-          signal,
-        ),
-      ),
-    );
-    if (answers.every((answer) => answer === null))
-      throw new Error("No sharing list could be read.");
-    return answers.flatMap((answer) => answer ?? []);
-  };
   const follow = useWorkspaceQuery(session, {
     key: workspaceId,
     manual: true,
     load: async (signal) => {
       await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open", wait: true });
       signal.throwIfAborted();
-      return readAll(signal);
+      return readAll(
+        sharedView,
+        (lane, cursor) =>
+          bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) }),
+        signal,
+      );
     },
   });
   const read = useWorkspaceQuery(session, {
@@ -86,7 +88,15 @@ export function useSharingSearch(
       const refreshed = await bridge()
         .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
         .catch(() => undefined);
-      return { rows: await readAll(signal), paced: refreshed?.status === "paced" };
+      return {
+        rows: await readAll(
+          sharedView,
+          (lane, cursor) =>
+            bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) }),
+          signal,
+        ),
+        paced: refreshed?.status === "paced",
+      };
     },
   });
   const { retry: followRetry } = follow;
