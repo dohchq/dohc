@@ -712,7 +712,11 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         settlement,
       };
       const wrong = await desktop(0, "wrong-bearer", { token: tokens[1] });
-      const failedOpen = { state: "failed", message: "dohc could not open this file for editing." };
+      const failedOpen = {
+        state: "failed",
+        message: "dohc could not open this file for editing.",
+        reason: "The server did not start live editing for this page.",
+      };
       expect(wrong.mirror.available).toBe(false);
       expect(wrong.mirror.doc).toBeNull();
       expect(wrong.mirror.liveHostUnavailable).toBe(false);
