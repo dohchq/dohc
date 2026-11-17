@@ -36,12 +36,13 @@ const LIMITS = {
   maxPendingAgeMs: 86_400_000,
 } as const;
 
-it("maps an interrupted outbox snapshot to caller-scheduled retry without authority, delivery, or ACK", async () => {
+it("reads an interrupted outbox snapshot again, and gives retry without authority, delivery, or ACK once disposed", async () => {
   const methods: string[] = [];
   const outbox = new OwnerYDocOutbox(
     {
       async sendRequest(request) {
         methods.push(request.method);
+        if (methods.length === 3) drainer.dispose();
         return { id: request.id, result: { kind: "readChanged" } };
       },
     },
@@ -65,7 +66,7 @@ it("maps an interrupted outbox snapshot to caller-scheduled retry without author
   );
   try {
     await expect(drainer.drainOnce()).resolves.toBe("retry");
-    expect(methods).toEqual(["ydoc.ownerOutbox.readPending"]);
+    expect(methods).toEqual(Array(3).fill("ydoc.ownerOutbox.readPending"));
     expect(calls).toEqual([]);
   } finally {
     drainer.dispose();
