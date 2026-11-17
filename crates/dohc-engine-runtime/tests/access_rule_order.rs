@@ -901,8 +901,8 @@ fn merge_a_respelled_rule(restart_between: bool) {
 
 /// A rule gone and a rule spelled twice both record no bytes, so the owner's
 /// decision on a removal names its reason too. A second spelling saved since
-/// is refused, and stays on disk. Judged again, two spellings hide the
-/// folder at every step, so dohc records them and the hold goes.
+/// is refused, and stays on disk. The hold now shows the several files and
+/// waits for a new choice.
 #[test]
 fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
     for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
@@ -923,8 +923,8 @@ fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
         );
         assert!(f.root().join("team/access.yaml").exists());
         assert!(f.root().join(other).exists());
-        assert!(f.holds().is_empty());
-        assert_eq!(recorded_reach(&f, "members"), None);
+        assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
+        assert_eq!(recorded_reach(&f, "members"), Some(Level::View));
     }
 }
 
@@ -3468,4 +3468,39 @@ fn removing_a_hidden_pair_deletes_the_wider_spelling_first() {
     );
     f.decide("team", AccessRuleDecision::Accept).unwrap();
     assert_rule_prefixes_at_most_view(&f);
+}
+
+#[test]
+fn a_held_widening_with_several_files_still_waits_after_later_capture() {
+    for decision in [AccessRuleDecision::Restore, AccessRuleDecision::Accept] {
+        let f = ruled_team();
+        f.put("team/access.yaml", EDIT);
+        f.settle();
+        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+        f.put("team/\u{FF41}ccess.yaml", EDIT);
+        f.settle();
+        let before = f.journal();
+        let later = f.capture(&["team/access.yaml", "team/\u{FF41}ccess.yaml", "team/a.md"]);
+        assert!(later.iter().all(|result| held(result, "team")), "{later:?}");
+        assert_eq!(f.journal(), before);
+        assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
+        let views = f.hold_views();
+        assert_eq!(views[0].unreadable, Some("several-files"));
+        assert_eq!(views[0].recorded.as_deref(), Some(VIEW));
+        assert!(views[0].can_accept);
+        let result = f.decided_on("team", decision, None, "widened").unwrap();
+        assert!(f.holds().is_empty());
+        if decision == AccessRuleDecision::Restore {
+            assert_eq!(result.kept.len(), 2);
+            assert_eq!(
+                std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
+                VIEW
+            );
+            assert!(!f.root().join("team/\u{FF41}ccess.yaml").exists());
+            assert_eq!(f.journal(), before);
+        } else {
+            assert_eq!(recorded_reach(&f, "members"), None);
+            assert_rule_prefixes_at_most_view(&f);
+        }
+    }
 }
