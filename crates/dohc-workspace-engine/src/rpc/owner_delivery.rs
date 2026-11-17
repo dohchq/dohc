@@ -354,6 +354,8 @@ impl EngineService {
         if !ctx.capabilities.iter().any(|c| c == "blobs") {
             return Err(invalid());
         }
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(&ctx);
         let reservation = self.reserve_owner_delivery(&cancellation).await?;
         let guard = self.owner_delivery_guard(
@@ -412,6 +414,8 @@ impl EngineService {
             writes: Option<Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>>,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(&ctx);
         let reservation = self.reserve_owner_delivery(&cancellation).await?;
         let guard =
@@ -770,6 +774,8 @@ impl EngineService {
             binding: LiveObjectBinding,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(&ctx);
         let reservation = self.reserve_owner_delivery(&cancellation).await?;
         let guard = self.owner_delivery_guard(
@@ -821,6 +827,8 @@ impl EngineService {
         if !ctx.capabilities.iter().any(|c| c == "blobs") {
             return Err(invalid());
         }
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, request.workspace.as_ref())?;
         let cancellation = OperationCancellation::new(&ctx);
         let reservation = self.reserve_owner_delivery(&cancellation).await?;
         let guard =

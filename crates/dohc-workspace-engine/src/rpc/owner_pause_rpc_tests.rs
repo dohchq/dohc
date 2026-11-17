@@ -311,7 +311,8 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
 
 /// One engine hosts live editing or runs owner calls, never both, so a
 /// host's uploads never hold room that an owner call holding the session
-/// serial waits for. Whichever role comes second is refused.
+/// serial waits for. Whichever role comes second is refused. An owner call
+/// refused for its connection takes no role.
 #[tokio::test]
 async fn an_engine_hosts_live_editing_or_runs_owner_calls_not_both() {
     for host_first in [true, false] {
@@ -359,6 +360,20 @@ async fn an_engine_hosts_live_editing_or_runs_owner_calls_not_both() {
             )
         };
         let refused = if host_first {
+            let stranger = service
+                .owner_delivery_list_drafts(
+                    RequestContext::unbounded(),
+                    request(
+                        1,
+                        "ydoc.ownerDelivery.listDrafts",
+                        &handle,
+                        json!({"limit":10}),
+                    ),
+                )
+                .await
+                .err()
+                .expect("a call without the owner's connection is refused");
+            assert_eq!(stranger.code, ErrorCode::WorkspaceUnavailable);
             provision().await.unwrap();
             list().await.err()
         } else {
