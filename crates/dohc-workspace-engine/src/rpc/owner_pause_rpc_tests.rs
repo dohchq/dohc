@@ -308,3 +308,49 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         .unwrap();
     assert_eq!(copy.response.result, json!({"status":"empty","stop":null}));
 }
+
+/// An owner call that fits the budget waits while other work holds the room
+/// it needs, and runs once that room is released.
+#[tokio::test]
+async fn owner_call_waits_for_room_that_other_work_holds() {
+    let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+    // One owner reservation fits this budget, but not beside the held settlement.
+    let config = serde_json::from_value(json!({
+        "ingress":{"aggregateBytes":500_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+        "maxRegistrations":2,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,
+        "maxApplicationsPerSettlement":100,
+        "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":100_000},
+        "sync":{"policy":{"maxClientVectorBytes":100_000,"maxHostVectorBytes":100_000,"maxOutputBytes":1_000_000,"maxReadBytes":4_000_000},"workingReserveBytes":4_000_000}
+    })).unwrap();
+    let (service, connection, ingress) = EngineService::ordinary_live_host(config).unwrap();
+    let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":"workspace","captureMode":"none"});
+    let opened = service
+        .workspace_open(&RequestContext::unbounded(), params)
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+    let mut ctx = RequestContext::unbounded();
+    ctx.connection = Some(connection.handle());
+    let held = ingress
+        .settlement_admission(20_000)
+        .unwrap()
+        .reserve()
+        .unwrap();
+    let list = service.owner_delivery_list_drafts(
+        ctx,
+        request(
+            1,
+            "ydoc.ownerDelivery.listDrafts",
+            &handle,
+            json!({"limit":10}),
+        ),
+    );
+    tokio::pin!(list);
+    tokio::select! {
+        biased;
+        result = &mut list => panic!("the owner call ended while its room was held: {:?}", result.err()),
+        () = std::future::ready(()) => {}
+    }
+    drop(held);
+    list.await.unwrap();
+}
