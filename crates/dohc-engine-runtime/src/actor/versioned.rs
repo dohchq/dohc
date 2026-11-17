@@ -1414,11 +1414,19 @@ fn rename_access_rule_on_store(
                 .map_err(StorageError::corrupt_public)?,
             None => false,
         };
+        let snapshot_at = |path: &str| {
+            dohc_engine_domain::select_snapshot_by_path_in_tx(
+                conn,
+                &input.workspace_id,
+                &input.version_id,
+                path,
+            )
+        };
         // A retry replays from the text its first try wrote, whatever either
         // path holds now. The halves' own request checks refuse a reused id
         // whose payload differs.
         if retried {
-            return conn
+            let text = conn
                 .query_row(
                     "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
                      WHERE m.workspace_id=?1 AND m.moment_id=?2",
@@ -1428,16 +1436,26 @@ fn rename_access_rule_on_store(
                 .optional()
                 .map_err(StorageError::corrupt_public)?
                 .flatten()
-                .ok_or(DomainError::IdempotencyKeyReuseMismatch.into());
+                .ok_or(DomainError::IdempotencyKeyReuseMismatch)?;
+            // A delete still to run removes only the text this rename moved:
+            // a source changed since is someone's later edit.
+            let from_request = input.request_id.as_deref().map(|id| suffixed(id, "from"));
+            let deleted = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                    [&from_request],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            if !deleted
+                && snapshot_at(&input.from_path)?
+                    .snapshot
+                    .is_some_and(|source| source.text != text)
+            {
+                return Err(DomainError::IdempotencyKeyReuseMismatch.into());
+            }
+            return Ok(text);
         }
-        let snapshot_at = |path: &str| {
-            dohc_engine_domain::select_snapshot_by_path_in_tx(
-                conn,
-                &input.workspace_id,
-                &input.version_id,
-                path,
-            )
-        };
         // Like any rename, never onto another file.
         let target = snapshot_at(&input.to_path)?;
         if target.snapshot.is_some() || target.binary_sha256.is_some() {

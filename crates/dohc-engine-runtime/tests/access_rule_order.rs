@@ -1534,7 +1534,9 @@ fn a_finished_rule_rename_tried_again_replays() {
 }
 
 /// A rule rename whose first half finished and second didn't writes the
-/// first half again from the text it recorded, then finishes the second.
+/// first half again from the text it recorded, then finishes the second,
+/// unless its source changed since: that later edit stays, and the retry is
+/// refused.
 #[test]
 fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
     struct CrashOnceMoved(PathBuf, std::sync::atomic::AtomicBool);
@@ -1561,28 +1563,56 @@ fn a_half_finished_rule_rename_tried_again_replays_its_first_half() {
             }
         }
     }
-    let f = Fixture::new();
-    f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
-        .expect("write rule");
-    let crash = Arc::new(CrashOnceMoved(f.db.clone(), Default::default()));
-    let halfway = rule_rename(&f, "crew", crash);
-    assert!(
-        matches!(halfway, Err(RuntimeError::OperationCrashed)),
-        "{halfway:?}"
-    );
-    f.versioned_write(write("team/access.yaml", EDIT, "m-later"))
-        .expect("edit the source");
-    let again = rule_rename(&f, "crew", Arc::new(NoFaults)).expect("the same rename tried again");
-    assert_eq!(again.after.text, VIEW);
-    assert_eq!(
-        f.journal(),
-        lines(&[
-            "write team/access.yaml",
-            "write crew/access.yaml",
-            "write team/access.yaml",
-            "delete team/access.yaml",
-        ])
-    );
+    for source_edited in [false, true] {
+        let f = Fixture::new();
+        f.versioned_write(write("team/access.yaml", VIEW, "m-rule"))
+            .expect("write rule");
+        let crash = Arc::new(CrashOnceMoved(f.db.clone(), Default::default()));
+        let halfway = rule_rename(&f, "crew", crash);
+        assert!(
+            matches!(halfway, Err(RuntimeError::OperationCrashed)),
+            "{halfway:?}"
+        );
+        if !source_edited {
+            let again =
+                rule_rename(&f, "crew", Arc::new(NoFaults)).expect("the same rename tried again");
+            assert_eq!(again.after.text, VIEW);
+            assert_eq!(
+                f.journal(),
+                lines(&[
+                    "write team/access.yaml",
+                    "write crew/access.yaml",
+                    "delete team/access.yaml",
+                ])
+            );
+            continue;
+        }
+        f.versioned_write(write("team/access.yaml", EDIT, "m-later"))
+            .expect("edit the source");
+        let journal = f.journal();
+        let again = rule_rename(&f, "crew", Arc::new(NoFaults));
+        assert!(
+            matches!(
+                again,
+                Err(RuntimeError::Domain(
+                    DomainError::IdempotencyKeyReuseMismatch
+                ))
+            ),
+            "{again:?}"
+        );
+        assert_eq!(f.journal(), journal);
+        let conn = rusqlite::Connection::open(&f.db).expect("open db");
+        let source = dohc_engine_domain::select_snapshot_by_path_in_tx(
+            &conn,
+            WS,
+            "main",
+            "team/access.yaml",
+        )
+        .expect("read the source")
+        .snapshot
+        .map(|snapshot| snapshot.text);
+        assert_eq!(source.as_deref(), Some(EDIT), "the later edit stays");
+    }
 }
 
 /// Move `team/access.yaml` into folder `to` as request `r-move`.
