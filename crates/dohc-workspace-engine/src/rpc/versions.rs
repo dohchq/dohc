@@ -32,6 +32,7 @@ use dohc_engine_protocol::wire::Request;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
+use dohc_engine_runtime::RuleMergeOrder;
 use dohc_engine_runtime::RuntimeError;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1267,9 +1268,10 @@ impl EngineService {
         }))
     }
 
-    /// The order a merge writes, then deletes, its rule files in, or
-    /// `null` orders when no order keeps every step within the reach before
-    /// and after the merge.
+    /// The order a merge writes, then deletes, its rule files in, judged by
+    /// what each rule's merge would write. A rule the merge would leave as
+    /// the target has it, or that conflicts, is in neither list. When the
+    /// engine can't order them, `refused` says why and `rules` which.
     pub(super) async fn versions_rule_merge_order(
         &self,
         ctx: &RequestContext,
@@ -1304,8 +1306,12 @@ impl EngineService {
         )
         .await?;
         Ok(match order {
-            Some((writes, deletes)) => json!({ "writes": writes, "deletes": deletes }),
-            None => json!({ "writes": null, "deletes": null }),
+            RuleMergeOrder::Ordered { writes, deletes } => {
+                json!({ "writes": writes, "deletes": deletes })
+            }
+            RuleMergeOrder::Refused { reason, rules } => {
+                json!({ "refused": reason.as_str(), "rules": rules })
+            }
         })
     }
 

@@ -508,8 +508,31 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
+        self.versioned_text_merge_in_rule_order(input, None, root_dir, self_writes, faults, token)
+            .await
+    }
+
+    /// Merges one file. For a rule, `rule_order` names the rule changes still
+    /// to merge, this one first, in the order planned for them: the merge
+    /// writes nothing and fails with [`RuntimeError::RuleMergeOrderChanged`]
+    /// unless that order, judged from the store as it is now, still keeps
+    /// everyone within what the target gives them before and after.
+    pub async fn versioned_text_merge_in_rule_order(
+        &self,
+        input: MergeTextFileFromVersion,
+        rule_order: Option<Vec<String>>,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<MergeExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
             access_order::ordered(store, |store| {
+                if let Some(order) = &rule_order {
+                    store.read_with(|conn| {
+                        access_order::check_rule_merge_order(conn, &input, order)
+                    })?;
+                }
                 with_local_file_mutation_cache_reset(cache, || {
                     versioned_text_merge_on_store(
                         store,

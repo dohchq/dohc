@@ -40,10 +40,10 @@ pub use actor::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
     PostCommitMaterializeOutcome, REBUILD_JOB_PREFIX, RebuildCarried, RebuildHead, RebuildJob,
     RebuildRemoval, RebuildUnsent, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    TextWriteExecutionResult, WORKSPACE_FOLDER_MOVED, WorkspaceActor, WorkspaceRootGuard,
-    WriteConditions, YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState,
-    YdocSettleOutcome, YdocSettlement, YdocWriteState,
+    RollbackExecutionResult, RuleMergeOrder, RuleMergeRefusal, SelfWriteRecorder,
+    ShareViewIdentityRecord, SharingDeclined, TextWriteExecutionResult, WORKSPACE_FOLDER_MOVED,
+    WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend, YdocCloseMaterialization,
+    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement, YdocWriteState,
 };
 #[cfg(unix)]
 pub use actor::{

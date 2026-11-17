@@ -67,6 +67,7 @@ dohc-linux-files = { path = "../dohc-linux-files" }
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+dohc-engine-files = { path = "../dohc-engine-files", features = ["test-support"] }
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-runtime = { path = ".", features = ["test-support"] }

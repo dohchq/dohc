@@ -1312,6 +1312,7 @@ export function createCaptureLiveStores(
       targetVersionId: string;
       sourceVersionId: string;
       path: string;
+      ruleOrder?: string[];
       metadata: ActorNeutralWriteMetadata;
     }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({

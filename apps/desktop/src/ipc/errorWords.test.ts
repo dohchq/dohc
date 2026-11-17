@@ -37,6 +37,7 @@ import {
   LiveFolderError,
   liveFolderTitle,
   LivePageOwnedError,
+  MergeRuleConflictError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   RestorePolicyRefusalError,
@@ -694,11 +695,43 @@ describe("error words", () => {
     ).toBe(false);
   });
 
-  it("says why a merge that would widen access midway merged nothing, with no Try again", () => {
-    const refused = new MergeWidensAccessError();
-    const words = readError(acrossIpc(refused, "desktop:merge-workspace-version"));
-    expect(words).toMatchObject({ words: refused.message, canRetry: false });
-    expect(words.words).toMatch(/^Nothing was merged\./);
+  it.each([
+    ["widens", /In any order/],
+    ["too-many", /too many related access rules/],
+    ["folded-names", /differ only in case/],
+  ] as const)(
+    "says a merge whose %s rules dohc could not order merged nothing, with the rules in Details",
+    (reason, cause) => {
+      const refused = new MergeWidensAccessError(reason, [
+        "team/access.yaml",
+        "team/sub/access.yaml",
+      ]);
+      const words = readError(acrossIpc(refused, "desktop:merge-workspace-version"));
+      expect(words).toMatchObject({
+        words:
+          "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
+        canRetry: false,
+      });
+      expect(words.cause).toMatch(cause);
+      expect(words.cause).toContain("\nteam/access.yaml\nteam/sub/access.yaml");
+    },
+  );
+
+  it("says a merge stopped at a rule's conflict, and to resolve it first", () => {
+    const stopped = new MergeRuleConflictError("team/access.yaml", [
+      "team/sub/access.yaml",
+      "team/x/access.yaml",
+    ]);
+    const words = readError(acrossIpc(stopped, "desktop:merge-workspace-version"));
+    expect(words).toMatchObject({
+      words:
+        "dohc stopped the merge at a conflict in team/access.yaml. Resolve that conflict, then merge again.",
+      canRetry: false,
+    });
+    expect(words.cause).toContain("\nteam/sub/access.yaml\nteam/x/access.yaml");
+    expect(isMergeStoppedPartway(acrossIpc(stopped, "desktop:merge-workspace-version"))).toBe(
+      false,
+    );
   });
 
   it("keeps a shared live file's restore words within 500 characters, with what to do", () => {

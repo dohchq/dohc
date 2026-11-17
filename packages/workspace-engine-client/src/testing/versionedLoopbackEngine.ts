@@ -1,5 +1,6 @@
 import type { HistoryCursor, VersionRecord } from "../versioned/versionedWireContract";
 import { createHash, randomUUID } from "node:crypto";
+import { isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
@@ -245,7 +246,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
     optionalStrings: MUTATION_OPTIONAL_STRINGS,
     optionalI64: ["nowMs"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "ruleOrder"],
   },
   [VERSIONED_METHOD.versionsCompare]: {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
@@ -2147,6 +2148,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
+    // As the engine does, a rule's merge carries its planned order, itself
+    // first, and no other file's does. The loopback checks only the shape.
+    const ruleOrder = params.ruleOrder;
+    if (isAccessRulePath(path)) {
+      if (!Array.isArray(ruleOrder) || ruleOrder[0] !== path) {
+        throw new Error("a rule merge takes ruleOrder");
+      }
+    } else if (ruleOrder !== undefined) {
+      throw new Error("ruleOrder is for rule files only");
+    }
     // Rust merge validates the addressable-path classification without
     // normalizing the lookup key. Run that check before generated ids and
     // request replay, then keep the caller's raw path below.

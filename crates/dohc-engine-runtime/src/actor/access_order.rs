@@ -46,11 +46,14 @@ use crate::EngineDbIdentity;
 use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::store::CAPTURE_ORIGIN;
-use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
+use dohc_engine_domain::{
+    CaptureIngest, CaptureIngestBinary, CaptureRetire, CompareTextFileVersions, DomainError,
+    FileMergePlan, MergeTextFileFromVersion, compare_text_file_versions_in_db, plan_file_merge,
+};
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, ReachBefore, RuleFileStep, access_rule_folder,
+    ACCESS_RULE_FILE, AccessRule, ReachBefore, RuleFileOrder, RuleFileStep, access_rule_folder,
     is_access_rule_path, is_rule_of, level_for_email, parse_access_rule, rule_change_narrows,
-    safe_rule_file_order,
+    rule_file_order_is_safe, safe_rule_file_order,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -2490,8 +2493,48 @@ fn remove_rule(
     if removed { Ok(()) } else { Err(waits()) }
 }
 
-/// The rule files a merge writes, then deletes, in the order it does.
-pub type RuleMergeOrder = (Vec<String>, Vec<String>);
+/// Why the engine refused to order a merge's rule changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleMergeRefusal {
+    /// No order of single writes keeps everyone within what the target gives
+    /// them before and after the merge.
+    Widens,
+    /// The search reached its work limit before it found an order. One may
+    /// still exist.
+    TooMany,
+    /// A rule changes in a folder whose name differs from another folder's
+    /// only as a disk that ignores case or Unicode form would read it. The
+    /// relay hides both folders when either rule leaves a member out, which
+    /// the order doesn't judge.
+    FoldedNames,
+}
+
+impl RuleMergeRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Widens => "widens",
+            Self::TooMany => "too-many",
+            Self::FoldedNames => "folded-names",
+        }
+    }
+}
+
+/// The order a merge makes its rule changes in, or why it can't.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleMergeOrder {
+    /// Write these rules, merge the other files, then delete these. A rule
+    /// the merge leaves as the target has it, or that conflicts, is in
+    /// neither list: its merge writes nothing.
+    Ordered {
+        writes: Vec<String>,
+        deletes: Vec<String>,
+    },
+    /// The merge must write nothing. `rules` are the ones it could not order.
+    Refused {
+        reason: RuleMergeRefusal,
+        rules: Vec<String>,
+    },
+}
 
 /// A rule file dohc can't read as text. It hides its folder, as an
 /// unreadable rule does.
@@ -2542,26 +2585,48 @@ fn rule_paths_under(
     Ok(rules)
 }
 
-/// The order a merge from `source` into `target` writes `writes`, then
-/// deletes `deletes`, so that no single step gives any member more anywhere
-/// than `target` before and after the merge do. `None` when no such order
-/// exists. It judges the source's text of each rule it writes.
-fn merge_rule_order(
+/// What a merge's rule changes would do to the target as the store holds it
+/// now: the target's rules around them, and, for each rule the merge would
+/// write or delete, its path with the bytes it would write, or `None` for a
+/// delete. Each rule's outcome is the one the per-file merge acts on.
+struct RuleMergeSteps {
+    before: BTreeMap<String, Vec<u8>>,
+    steps: Vec<(String, Option<Vec<u8>>)>,
+}
+
+fn rule_merge_steps(
     conn: &Connection,
     workspace: &str,
     source: &str,
     target: &str,
-    writes: &[String],
-    deletes: &[String],
-) -> Result<Option<RuleMergeOrder>, RuntimeError> {
+    paths: &[String],
+) -> Result<RuleMergeSteps, RuntimeError> {
+    let mut steps = Vec::new();
+    for path in paths {
+        let comparison = compare_text_file_versions_in_db(
+            conn,
+            &CompareTextFileVersions {
+                workspace_id: workspace.to_owned(),
+                target_version_id: target.to_owned(),
+                source_version_id: source.to_owned(),
+                path: path.clone(),
+            },
+        )?;
+        let bytes = match plan_file_merge(&comparison) {
+            FileMergePlan::WriteText(text) => Some(text.into_bytes()),
+            FileMergePlan::WriteBinary => Some(UNREADABLE_RULE.to_vec()),
+            FileMergePlan::Delete => None,
+            FileMergePlan::Unchanged(_) | FileMergePlan::Conflict => continue,
+        };
+        steps.push((path.clone(), bytes));
+    }
     // Reach changes only at and under a changed folder, and there it also
     // depends on the rules above.
-    let mut paths = BTreeSet::new();
-    let folders: BTreeSet<&str> = writes
+    let folders: BTreeSet<&str> = steps
         .iter()
-        .chain(deletes)
-        .map(|path| access_rule_folder(path))
+        .map(|(path, _)| access_rule_folder(path))
         .collect();
+    let mut paths = BTreeSet::new();
     for folder in folders {
         paths.extend(rule_paths_under(conn, workspace, target, folder)?);
         let mut above = folder;
@@ -2576,36 +2641,170 @@ fn merge_rule_order(
             before.insert(path, bytes);
         }
     }
-    let mut written = Vec::with_capacity(writes.len());
-    for path in writes {
-        written.push(
-            version_rule_bytes(conn, workspace, source, path)?
-                .unwrap_or_else(|| UNREADABLE_RULE.to_vec()),
-        );
+    Ok(RuleMergeSteps { before, steps })
+}
+
+impl RuleMergeSteps {
+    fn rule_steps(&self) -> Vec<RuleFileStep<'_>> {
+        self.steps
+            .iter()
+            .map(|(path, bytes)| match bytes {
+                Some(bytes) => RuleFileStep::Write(path, bytes),
+                None => RuleFileStep::Delete(path),
+            })
+            .collect()
     }
-    let write_steps: Vec<_> = writes
-        .iter()
-        .zip(&written)
-        .map(|(path, bytes)| RuleFileStep::Write(path, bytes))
-        .collect();
-    let delete_steps: Vec<_> = deletes
-        .iter()
-        .map(|path| RuleFileStep::Delete(path))
-        .collect();
+
+    /// The steps in a folder whose name folds together with another
+    /// folder's that `versions` hold a path in, or that another step names.
+    /// One step alone passes through no state between before and after, so
+    /// it needs no order.
+    fn in_folded_folders(
+        &self,
+        conn: &Connection,
+        workspace: &str,
+        versions: [&str; 2],
+    ) -> Result<Vec<String>, RuntimeError> {
+        if self.steps.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let mut spellings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (path, _) in &self.steps {
+            let folder = access_rule_folder(path);
+            if !folder.is_empty() {
+                spellings
+                    .entry(path_collision_key(folder))
+                    .or_default()
+                    .insert(folder.to_owned());
+            }
+        }
+        if spellings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let depths: BTreeSet<usize> = spellings
+            .values()
+            .flatten()
+            .map(|folder| folder.split('/').count())
+            .collect();
+        let mut scan = conn
+            .prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2")
+            .map_err(StorageError::corrupt_public)?;
+        let mut seen = HashSet::new();
+        for version in versions {
+            let paths = scan
+                .query_map(params![workspace, version], |row| row.get::<_, String>(0))
+                .map_err(StorageError::corrupt_public)?;
+            for path in paths {
+                let path = path.map_err(StorageError::corrupt_public)?;
+                for &depth in &depths {
+                    let Some((slash, _)) = path.match_indices('/').nth(depth - 1) else {
+                        continue;
+                    };
+                    let folder = &path[..slash];
+                    if !seen.insert(folder.to_owned()) {
+                        continue;
+                    }
+                    if let Some(names) = spellings.get_mut(&path_collision_key(folder)) {
+                        names.insert(folder.to_owned());
+                    }
+                }
+            }
+        }
+        Ok(self
+            .steps
+            .iter()
+            .filter(|(path, _)| {
+                let folder = access_rule_folder(path);
+                spellings
+                    .get(&path_collision_key(folder))
+                    .is_some_and(|names| names.len() > 1)
+            })
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+}
+
+/// The order a merge from `source` into `target` makes its rule changes in,
+/// so that no single step gives any member more anywhere than `target`
+/// before and after the merge do. `writes` and `deletes` are the rule paths
+/// that differ between the two. Each is judged by what its merge would write.
+fn merge_rule_order(
+    conn: &Connection,
+    workspace: &str,
+    source: &str,
+    target: &str,
+    writes: &[String],
+    deletes: &[String],
+) -> Result<RuleMergeOrder, RuntimeError> {
+    let paths: Vec<String> = writes.iter().chain(deletes).cloned().collect();
+    let merge = rule_merge_steps(conn, workspace, source, target, &paths)?;
+    let folded = merge.in_folded_folders(conn, workspace, [target, source])?;
+    if !folded.is_empty() {
+        return Ok(RuleMergeOrder::Refused {
+            reason: RuleMergeRefusal::FoldedNames,
+            rules: folded,
+        });
+    }
+    let steps = merge.rule_steps();
+    let (write_steps, delete_steps): (Vec<_>, Vec<_>) = steps
+        .into_iter()
+        .partition(|step| matches!(step, RuleFileStep::Write(..)));
+    let path = |step: &RuleFileStep<'_>| match *step {
+        RuleFileStep::Write(path, _) | RuleFileStep::Delete(path) => path.to_owned(),
+    };
+    let paths = |list: &[RuleFileStep<'_>], indexes: Vec<usize>| -> Vec<String> {
+        indexes
+            .into_iter()
+            .map(|index| path(&list[index]))
+            .collect()
+    };
+    let refused = |reason, writes: Vec<usize>, deletes: Vec<usize>| RuleMergeOrder::Refused {
+        reason,
+        rules: paths(&write_steps, writes)
+            .into_iter()
+            .chain(paths(&delete_steps, deletes))
+            .collect(),
+    };
     Ok(
-        safe_rule_file_order(&before, &write_steps, &delete_steps).map(|(write, delete)| {
-            (
-                write
-                    .into_iter()
-                    .map(|index| writes[index].clone())
-                    .collect(),
-                delete
-                    .into_iter()
-                    .map(|index| deletes[index].clone())
-                    .collect(),
-            )
-        }),
+        match safe_rule_file_order(&merge.before, &write_steps, &delete_steps) {
+            RuleFileOrder::Safe { writes, deletes } => RuleMergeOrder::Ordered {
+                writes: paths(&write_steps, writes),
+                deletes: paths(&delete_steps, deletes),
+            },
+            RuleFileOrder::Widens { writes, deletes } => {
+                refused(RuleMergeRefusal::Widens, writes, deletes)
+            }
+            RuleFileOrder::TooMany { writes, deletes } => {
+                refused(RuleMergeRefusal::TooMany, writes, deletes)
+            }
+        },
     )
+}
+
+/// Refuses a merge's rule write unless making the rule changes in `order`,
+/// the rule being merged first, one at a time from the store as it is now
+/// still keeps everyone within what the target gives them before and after.
+/// Main or the version may have changed since the order was planned.
+pub(super) fn check_rule_merge_order(
+    conn: &Connection,
+    input: &MergeTextFileFromVersion,
+    order: &[String],
+) -> Result<(), RuntimeError> {
+    let (workspace, source, target) = (
+        input.workspace_id.as_str(),
+        input.source_version_id.as_str(),
+        input.target_version_id.as_str(),
+    );
+    let merge = rule_merge_steps(conn, workspace, source, target, order)?;
+    if merge
+        .in_folded_folders(conn, workspace, [target, source])?
+        .is_empty()
+        && rule_file_order_is_safe(&merge.before, &merge.rule_steps())
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::RuleMergeOrderChanged)
+    }
 }
 
 impl ActorHandle {
@@ -2627,9 +2826,9 @@ impl ActorHandle {
         .await
     }
 
-    /// The order a merge from `source_version_id` writes, then deletes, these
+    /// The order a merge from `source_version_id` makes the changes to these
     /// rule files in, so that no step widens anyone's reach past both the
-    /// target before and after it. `None` when no order of single writes does.
+    /// target before and after it, judged by what each rule's merge writes.
     pub async fn access_rule_merge_order(
         &self,
         workspace_id: String,
@@ -2637,7 +2836,7 @@ impl ActorHandle {
         target_version_id: String,
         writes: Vec<String>,
         deletes: Vec<String>,
-    ) -> Result<Option<RuleMergeOrder>, RuntimeError> {
+    ) -> Result<RuleMergeOrder, RuntimeError> {
         self.run(move |store, _| {
             store.read_with(|conn| {
                 merge_rule_order(

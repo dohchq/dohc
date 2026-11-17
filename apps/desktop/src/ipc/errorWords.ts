@@ -529,9 +529,12 @@ export function readError(error: unknown): ReadError {
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
-  // Trying again gives the same answer until Main's rules change.
-  if (name === "MergeWidensAccessError")
-    return { words: message, mapped: false, cause: text, canRetry: false };
+  // Trying again gives the same answer until Main's rules change or the
+  // conflict is resolved. The first line is the words; the rest, with the
+  // rules dohc could not order, is for Details.
+  if (name === "MergeWidensAccessError" || name === "MergeRuleConflictError") {
+    return { words: message.split("\n")[0]!, mapped: false, cause: text, canRetry: false };
+  }
   if (
     name === "DaemonRefusalError" &&
     code === "INVALID_PARAMS" &&

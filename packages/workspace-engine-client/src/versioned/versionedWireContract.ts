@@ -199,6 +199,9 @@ type VersionsMergeParams = MutationMetadata & {
   path: string;
   sourceVersionId: string;
   targetVersionId: string;
+  // A rule file's merge carries the rule changes still to merge, itself
+  // first, in the order versions.ruleMergeOrder planned.
+  ruleOrder?: string[];
 };
 
 type VersionsCompareParams = JsonObject & {
@@ -902,12 +905,14 @@ const VersionsCompareFilesResultSchema = mutableStruct({
   nextCursor: NullableString,
 });
 
-// Both null when no order of single rule writes keeps reach within bounds.
-const RuleMergePathsSchema = Schema.NullOr(Schema.mutable(Schema.Array(Schema.String)));
-const VersionsRuleMergeOrderResultSchema = mutableStruct({
-  writes: RuleMergePathsSchema,
-  deletes: RuleMergePathsSchema,
-});
+const RuleMergePathsSchema = Schema.mutable(Schema.Array(Schema.String));
+const VersionsRuleMergeOrderResultSchema = Schema.Union([
+  mutableStruct({ writes: RuleMergePathsSchema, deletes: RuleMergePathsSchema }),
+  mutableStruct({
+    refused: Schema.Literals(["widens", "too-many", "folded-names"]),
+    rules: RuleMergePathsSchema,
+  }),
+]);
 
 const BinaryReadResultSchema = Schema.NullOr(
   Schema.Union([

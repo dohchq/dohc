@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { outsideWriteCopies } from "./outsideWriteCopies";
 import { protectedWriteCopies } from "./protectedWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readError } from "../ipc/errorWords";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -35,6 +36,7 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  MergeRuleConflictError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   YDocOpenRacedError,
@@ -456,68 +458,201 @@ describe("merge materialization order", () => {
 
 describe("merge rule order from the engine", () => {
   // The engine judges the order (dohc-engine-files and the runtime's
-  // access_rule_order tests). Here it answers with a fixed order or none.
+  // access_rule_order tests). Here it answers with fixed orders, in turn.
   const VIEW_RULE = "members: view\n";
-  async function mergeWithRuleOrder(order: { writes: string[]; deletes: string[] } | null) {
+  const TEAM = "team/access.yaml";
+  const OTHER = "team/other/access.yaml";
+  const PRIVATE = "team/private/access.yaml";
+  type Order = { writes: string[]; deletes: string[] } | { refused: string; rules: string[] };
+  type ConflictPage = Awaited<ReturnType<CaptureVersionedTextStore["listTextConflicts"]>>;
+  type MergeResult = Awaited<ReturnType<CaptureVersionedTextStore["mergeTextFileFromVersion"]>>;
+  async function mergeWithRuleOrder(options: {
+    orders: Order[];
+    // Team's rule merge conflicts, and its conflict stays open.
+    conflict?: boolean;
+    // A rule whose first merge the engine refuses because Main changed.
+    staleAt?: string;
+    runs?: number;
+  }) {
     const root = await createTestScratch("dohc-merge-rule-order-");
     const loopback = new VersionedLoopbackEngine();
     const send = loopback.sendRequest.bind(loopback);
-    const merged: string[] = [];
+    const orders = [...options.orders];
+    let staleAt = options.staleAt;
+    const asked: unknown[] = [];
+    const merged: { path: string; ruleOrder?: string[] }[] = [];
     vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
-      if (request.method === "conflicts.list") {
-        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
-      }
       if (request.method === VERSIONED_METHOD.versionsRuleMergeOrder) {
-        return { id: request.id, result: order ?? { writes: null, deletes: null } };
+        const { writes, deletes } = request.params as { writes: string[]; deletes: string[] };
+        asked.push({ writes, deletes });
+        const order = orders.shift();
+        if (order) return { id: request.id, result: order };
       }
       if (request.method === VERSIONED_METHOD.versionsMerge) {
-        merged.push((request.params as { path: string }).path);
+        const { path, ruleOrder } = request.params as { path: string; ruleOrder?: string[] };
+        if (path === staleAt) {
+          staleAt = undefined;
+          throw Object.assign(new Error("rule-merge-order-changed"), {
+            wireError: { code: "CONFLICT", message: "rule-merge-order-changed", retry: "no" },
+          });
+        }
+        merged.push({ path, ...(ruleOrder ? { ruleOrder } : {}) });
       }
       return await send(request);
     });
-    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: "team/access.yaml", text: VIEW_RULE });
-    await write(root, "team/access.yaml", VIEW_RULE);
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: TEAM, text: VIEW_RULE });
+    await write(root, TEAM, VIEW_RULE);
     const sessions = mockLiveSessions(loopback);
     const stores = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
       sessions,
     );
+    // The loopback keeps no conflict ledger. The merge reads only these
+    // fields of an open conflict.
+    const open: string[] = [];
+    let draftId = "";
+    vi.spyOn(stores.store, "listTextConflicts").mockImplementation(async () => ({
+      conflicts: open.map((path) => ({
+        id: `conflict-${path}`,
+        path,
+        sourceVersionId: draftId,
+        targetVersionId: "main",
+      })) as unknown as ConflictPage["conflicts"],
+      nextAfterConflictId: null,
+    }));
+    const mergeFile = stores.store.mergeTextFileFromVersion.bind(stores.store);
+    vi.spyOn(stores.store, "mergeTextFileFromVersion").mockImplementation(async (input) => {
+      if (!options.conflict || input.path !== TEAM) return await mergeFile(input);
+      merged.push({ path: input.path, ...(input.ruleOrder ? { ruleOrder: input.ruleOrder } : {}) });
+      open.push(input.path);
+      return { kind: "conflict" } as unknown as MergeResult;
+    });
     const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
     try {
-      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      draftId = (await engine.createVersion("Draft")).activeVersionId;
       for (const [path, text] of [
-        ["team/access.yaml", "members: edit\n"],
-        ["team/private/access.yaml", VIEW_RULE],
+        [TEAM, "members: edit\n"],
+        [OTHER, VIEW_RULE],
+        [PRIVATE, VIEW_RULE],
         ["team/private/a.md", "alpha\n"],
       ] as const) {
         loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text });
       }
       await engine.switchVersion("main");
-      const failure = await engine.mergeVersionIntoMain(draftId).then(
-        () => null,
-        (error: unknown) => error,
-      );
-      const onDisk = await readFile(join(root, "team/access.yaml"), "utf8");
-      return { failure, merged, onDisk };
+      const failures: unknown[] = [];
+      const runs: (typeof merged)[] = [];
+      for (let run = 0; run < (options.runs ?? 1); run += 1) {
+        merged.length = 0;
+        failures.push(
+          await engine.mergeVersionIntoMain(draftId).then(
+            () => null,
+            (error: unknown) => error,
+          ),
+        );
+        runs.push([...merged]);
+      }
+      const onDisk = await readFile(join(root, TEAM), "utf8");
+      return { failure: failures[0], failures, asked, merged: runs[0]!, runs, onDisk };
     } finally {
       await engine.stop();
     }
   }
+  const paths = (merged: { path: string }[]) => merged.map(({ path }) => path);
 
-  it("writes the rules in the engine's order before the files they cover", async () => {
-    const { failure, merged } = await mergeWithRuleOrder({
-      writes: ["team/private/access.yaml", "team/access.yaml"],
-      deletes: [],
+  it("writes the rules in the engine's order before the files they cover, each with the rules still to come", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      orders: [{ writes: [PRIVATE, OTHER, TEAM], deletes: [] }],
     });
     expect(failure).toBeNull();
-    expect(merged).toEqual(["team/private/access.yaml", "team/access.yaml", "team/private/a.md"]);
+    expect(asked).toEqual([{ writes: [TEAM, OTHER, PRIVATE], deletes: [] }]);
+    expect(merged).toEqual([
+      { path: PRIVATE, ruleOrder: [PRIVATE, OTHER, TEAM] },
+      { path: OTHER, ruleOrder: [OTHER, TEAM] },
+      { path: TEAM, ruleOrder: [TEAM] },
+      { path: "team/private/a.md" },
+    ]);
   });
 
-  it("refuses a merge with no safe rule order and writes nothing", async () => {
-    const { failure, merged, onDisk } = await mergeWithRuleOrder(null);
+  it("refuses a merge whose rules the engine can't order, and writes nothing", async () => {
+    const { failure, merged, onDisk } = await mergeWithRuleOrder({
+      orders: [{ refused: "too-many", rules: [TEAM, PRIVATE] }],
+    });
     expect(failure).toBeInstanceOf(MergeWidensAccessError);
+    expect(failure).toMatchObject({ reason: "too-many", rules: [TEAM, PRIVATE] });
+    expect(readError(failure)).toMatchObject({
+      words:
+        "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
+      canRetry: false,
+    });
+    expect(String(readError(failure).cause)).toContain(`\n${TEAM}\n${PRIVATE}`);
     expect(merged).toEqual([]);
     expect(onDisk).toBe(VIEW_RULE);
+  });
+
+  it("orders the rules after a conflicting one again, from Main as it is", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      conflict: true,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { writes: [PRIVATE, OTHER], deletes: [] },
+      ],
+    });
+    expect(failure).toBeNull();
+    expect(asked[1]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
+    expect(paths(merged)).toEqual([TEAM, PRIVATE, OTHER, "team/private/a.md"]);
+  });
+
+  it("stops at a rule's conflict when the rules after it can't be ordered, and says to resolve it", async () => {
+    const { failure, merged } = await mergeWithRuleOrder({
+      conflict: true,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { refused: "widens", rules: [OTHER, PRIVATE] },
+      ],
+    });
+    expect(failure).toBeInstanceOf(MergeRuleConflictError);
+    expect(readError(failure)).toMatchObject({
+      words: `dohc stopped the merge at a conflict in ${TEAM}. Resolve that conflict, then merge again.`,
+      canRetry: false,
+    });
+    expect(paths(merged)).toEqual([TEAM]);
+  });
+
+  it("leaves a rule whose conflict is open out of the order", async () => {
+    const { failures, asked, runs } = await mergeWithRuleOrder({
+      conflict: true,
+      runs: 2,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { refused: "widens", rules: [OTHER, PRIVATE] },
+        { writes: [PRIVATE, OTHER], deletes: [] },
+      ],
+    });
+    expect(failures[1]).toBeNull();
+    expect(asked[2]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
+    expect(runs[1]).toEqual([
+      { path: PRIVATE, ruleOrder: [PRIVATE, OTHER] },
+      { path: OTHER, ruleOrder: [OTHER] },
+      { path: "team/private/a.md" },
+    ]);
+  });
+
+  it("orders the rules again when Main changed under the order", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      staleAt: PRIVATE,
+      orders: [
+        { writes: [PRIVATE, OTHER, TEAM], deletes: [] },
+        { writes: [OTHER, PRIVATE, TEAM], deletes: [] },
+      ],
+    });
+    expect(failure).toBeNull();
+    expect(asked[1]).toEqual({ writes: [TEAM, PRIVATE, OTHER], deletes: [] });
+    expect(merged).toEqual([
+      { path: OTHER, ruleOrder: [OTHER, PRIVATE, TEAM] },
+      { path: PRIVATE, ruleOrder: [PRIVATE, TEAM] },
+      { path: TEAM, ruleOrder: [TEAM] },
+      { path: "team/private/a.md" },
+    ]);
   });
 });
 

@@ -47,6 +47,7 @@ import {
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentWriteAuthor,
+  type AccessRuleMergeRefusal,
   type MomentMetadata,
   type SecretFileComparePage,
   type SecretFileMoment,
@@ -1381,16 +1382,53 @@ export class MergeStoppedPartwayError extends Error {
   }
 }
 
-// No order of a merge's single rule writes keeps everyone within what Main
-// gives them before and after the merge, so nothing was merged.
+const RULE_REFUSAL_CAUSE: Record<AccessRuleMergeRefusal, string> = {
+  widens:
+    "In any order, these access rule changes would briefly give someone more access than Main gives them before or after the merge.",
+  "too-many": "This version changes too many related access rules for dohc to check together.",
+  "folded-names":
+    "These access rules are in folders whose names differ only in case, which dohc cannot order safely.",
+};
+
+// The engine could not order a merge's rule changes so that none gives
+// anyone more than Main gives them before and after the merge. The first
+// line is the words; the cause and the rules follow, for Details.
 export class MergeWidensAccessError extends Error {
-  constructor() {
-    super(
-      "Nothing was merged. In any order, this Version's access rule changes would briefly give someone more access than they have before or after the merge. Change those rules in Main one folder at a time, then merge again.",
-    );
+  constructor(
+    readonly reason: AccessRuleMergeRefusal,
+    readonly rules: readonly string[],
+    stage: "before" | "during" = "before",
+  ) {
+    const words =
+      stage === "before"
+        ? "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again."
+        : "Main's access rules changed during the merge, so dohc stopped it. Merge again.";
+    super([words, RULE_REFUSAL_CAUSE[reason], ...rules].join("\n"));
     this.name = "MergeWidensAccessError";
   }
 }
+
+// A rule conflicted partway through a merge, and the rule changes after it
+// can no longer be made safely while Main keeps its copy. The first line is
+// the words; the rules that could not be ordered follow, for Details.
+export class MergeRuleConflictError extends Error {
+  constructor(
+    readonly path: string,
+    readonly rules: readonly string[],
+  ) {
+    super(
+      [
+        `dohc stopped the merge at a conflict in ${path}. Resolve that conflict, then merge again.`,
+        ...rules,
+      ].join("\n"),
+    );
+    this.name = "MergeRuleConflictError";
+  }
+}
+
+// How many times one rule's merge plans its order again when the engine
+// finds Main changed under it, before the merge gives up.
+const RULE_ORDER_TRIES = 3;
 
 // History's current rules refused a restore. An unreadable rules file's
 // message leads with the files dohc could not read, so the error map names
@@ -7693,57 +7731,6 @@ export function createWorkspaceEngineCapture(
         const respelled = new Set(
           deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
         );
-        // A folder's rule merges before the files it covers, and its delete
-        // after them, so Main never journals a file its rule does not cover
-        // yet. A respelled rule's old spelling goes with the deletes: the
-        // engine keeps a file on disk that another head still reaches. The
-        // engine orders the rule writes, and then the deletes, so that no
-        // single one gives anyone more than Main gives them before and after
-        // the merge, trying outer writes and inner deletes first.
-        const depth = (path: string) => path.split("/").length;
-        const ruleWrites = changedPaths
-          .filter((path) => isAccessRulePath(path) && !deleted.has(path))
-          .sort((a, b) => depth(a) - depth(b));
-        const ruleDeletes = deletedPaths
-          .filter(isAccessRulePath)
-          .sort((a, b) => depth(b) - depth(a));
-        const orderRules = async (writes: string[], deletes: string[]) =>
-          writes.length + deletes.length > 1
-            ? await engine.accessRuleMergeOrder({
-                workspaceId,
-                sourceVersionId,
-                targetVersionId: ENGINE_MAIN_VERSION_ID,
-                writes,
-                deletes,
-              })
-            : { writes, deletes };
-        const ruleOrder = await orderRules(ruleWrites, ruleDeletes);
-        if (ruleOrder === null) throw new MergeWidensAccessError();
-        const mergeOrder = [
-          ...ruleOrder.writes,
-          ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
-            (path) => !isAccessRulePath(path),
-          ),
-          ...ruleOrder.deletes,
-        ];
-        // A rule that conflicts keeps Main's, which the order assumed it
-        // replaced. The rule changes still to come are ordered again from
-        // Main as it is, and the merge stops if none of their orders is safe.
-        const reorderAfterRuleConflict = async (index: number) => {
-          const rest = mergeOrder.slice(index + 1);
-          const restWrites = rest.filter((path) => ruleOrder.writes.includes(path));
-          const restDeletes = rest.filter((path) => ruleOrder.deletes.includes(path));
-          if (restWrites.length + restDeletes.length === 0) return;
-          const reordered = await orderRules(restWrites, restDeletes);
-          if (reordered === null) throw new MergeWidensAccessError();
-          mergeOrder.splice(
-            index + 1,
-            rest.length,
-            ...reordered.writes,
-            ...rest.filter((path) => !isAccessRulePath(path)),
-            ...reordered.deletes,
-          );
-        };
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.
@@ -7770,30 +7757,116 @@ export function createWorkspaceEngineCapture(
             afterConflictId = page.nextAfterConflictId ?? undefined;
           } while (afterConflictId !== undefined);
         }
+        // A folder's rule merges before the files it covers, and its delete
+        // after them, so Main never journals a file its rule does not cover
+        // yet. A respelled rule's old spelling goes with the deletes: the
+        // engine keeps a file on disk that another head still reaches. The
+        // engine orders the rule writes, and then the deletes, by what each
+        // merge writes, so that no single one gives anyone more than Main
+        // gives them before and after the merge. It tries outer writes and
+        // inner deletes first. A rule whose conflict is open writes nothing.
+        const depth = (path: string) => path.split("/").length;
+        const isRuleStep = (path: string) => isAccessRulePath(path) && !openConflictPaths.has(path);
+        const ruleDeletes = new Set(deletedPaths.filter(isRuleStep));
+        const orderRules = async (rules: string[], stage: "before" | "during") => {
+          const writes = rules
+            .filter((path) => !ruleDeletes.has(path))
+            .sort((a, b) => depth(a) - depth(b));
+          const deletes = rules
+            .filter((path) => ruleDeletes.has(path))
+            .sort((a, b) => depth(b) - depth(a));
+          if (rules.length < 2) return { first: [], writes, deletes };
+          const order = await engine.accessRuleMergeOrder({
+            workspaceId,
+            sourceVersionId,
+            targetVersionId: ENGINE_MAIN_VERSION_ID,
+            writes,
+            deletes,
+          });
+          if (order.kind === "refused")
+            throw new MergeWidensAccessError(order.reason, order.rules, stage);
+          // A rule the engine expects to stay as Main has it, or to conflict,
+          // writes nothing. It merges first, to record its conflict, and still
+          // carries the order, in case Main changed since.
+          const planned = new Set([...order.writes, ...order.deletes]);
+          return {
+            first: rules.filter((path) => !planned.has(path)),
+            writes: order.writes,
+            deletes: order.deletes,
+          };
+        };
+        const initial = await orderRules(changedPaths.filter(isRuleStep), "before");
+        const mergeOrder = [
+          ...changedPaths.filter((path) => isAccessRulePath(path) && openConflictPaths.has(path)),
+          ...initial.first,
+          ...initial.writes,
+          ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
+            (path) => !isAccessRulePath(path),
+          ),
+          ...initial.deletes,
+        ];
+        // Orders the rule changes from `index` on again, from Main as it is
+        // now, keeping the other files where they were.
+        const replan = async (index: number) => {
+          const rest = mergeOrder.slice(index);
+          const order = await orderRules(rest.filter(isRuleStep), "during");
+          mergeOrder.splice(
+            index,
+            rest.length,
+            ...order.first,
+            ...order.writes,
+            ...rest.filter((path) => !isRuleStep(path)),
+            ...order.deletes,
+          );
+        };
         const materializations: MaterializeOperation[] = [];
         let conflictCount = 0;
         let unchangedFileCount = 0;
+        let tries = 0;
         for (let index = 0; index < mergeOrder.length; index += 1) {
           const path = mergeOrder[index]!;
           if (openConflictPaths.has(path)) {
             conflictCount += 1;
-            if (isAccessRulePath(path)) await reorderAfterRuleConflict(index);
             continue;
           }
-          const result = await engine.mergeTextFileFromVersion({
-            workspaceId,
-            targetVersionId: ENGINE_MAIN_VERSION_ID,
-            sourceVersionId,
-            path,
-            metadata,
-          });
+          // The engine checks this order against Main as it writes the rule,
+          // and refuses, writing nothing, when Main changed under it.
+          const ruleOrder = isAccessRulePath(path)
+            ? { ruleOrder: mergeOrder.slice(index).filter(isRuleStep) }
+            : {};
+          let result: Awaited<ReturnType<typeof engine.mergeTextFileFromVersion>>;
+          try {
+            result = await engine.mergeTextFileFromVersion({
+              workspaceId,
+              targetVersionId: ENGINE_MAIN_VERSION_ID,
+              sourceVersionId,
+              path,
+              ...ruleOrder,
+              metadata,
+            });
+          } catch (error) {
+            const changed =
+              error instanceof DaemonRefusalError && error.message === "rule-merge-order-changed";
+            if (!changed || ++tries >= RULE_ORDER_TRIES) throw error;
+            await replan(index);
+            index -= 1;
+            continue;
+          }
+          tries = 0;
           if (result.kind === "unchanged") {
             unchangedFileCount += 1;
             continue;
           }
           if (result.kind === "conflict") {
             conflictCount += 1;
-            if (isAccessRulePath(path)) await reorderAfterRuleConflict(index);
+            // The rule keeps Main's copy, which the order assumed it replaced.
+            if (isAccessRulePath(path)) {
+              await replan(index + 1).catch((error: unknown) => {
+                throw error instanceof MergeWidensAccessError
+                  ? new MergeRuleConflictError(path, error.rules)
+                  : error;
+              });
+            }
             continue;
           }
           mergedFileCount += 1;
@@ -7865,7 +7938,10 @@ export function createWorkspaceEngineCapture(
       };
       return enqueueResult("merge version into Main", () =>
         merge().catch((error: unknown) => {
-          throw mergedFileCount > 0 ? new MergeStoppedPartwayError(error) : error;
+          // A rule conflict says itself what to do, wherever the merge got to.
+          throw mergedFileCount > 0 && !(error instanceof MergeRuleConflictError)
+            ? new MergeStoppedPartwayError(error)
+            : error;
         }),
       );
     },

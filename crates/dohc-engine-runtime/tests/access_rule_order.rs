@@ -2,17 +2,20 @@
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker, scene_asset_ref};
 use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
-use dohc_engine_files::access_rules::{Level, level_for_email, parse_access_rule};
+use dohc_engine_files::access_rules::{
+    Level, is_access_rule_path, level_for_email, parse_access_rule, relay_reach,
+};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
     CaptureIngestBinary, CaptureRetire, DeleteTextFile, FaultAction, FaultInjector, FaultPoint,
-    MergeTextFileFromVersion, NoFaults, RenameTextFile, RollbackTextFileMutation, RuntimeError,
-    WorkspaceSupervisor, WriteBinary, WriteText,
+    MergeTextFileFromVersion, NoFaults, RenameTextFile, RollbackTextFileMutation, RuleMergeOrder,
+    RuleMergeRefusal, RuntimeError, WorkspaceSupervisor, WriteBinary, WriteText,
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::SyncError;
 use dohc_engine_testkit::capture::ExistingRootGuard;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -4034,13 +4037,10 @@ fn a_merge_orders_its_rule_writes_from_what_main_and_the_version_hold() {
     }
     assert_eq!(
         order("wider", &["team/access.yaml", "team/private/access.yaml"]),
-        Some((
-            vec![
-                "team/private/access.yaml".to_owned(),
-                "team/access.yaml".to_owned()
-            ],
-            Vec::new()
-        ))
+        RuleMergeOrder::Ordered {
+            writes: owned(&["team/private/access.yaml", "team/access.yaml"]),
+            deletes: Vec::new()
+        }
     );
     // No order works: team first gives the person Edit in team/sub, and
     // team/sub first gives members Edit there, where they end hidden.
@@ -4065,6 +4065,358 @@ fn a_merge_orders_its_rule_writes_from_what_main_and_the_version_hold() {
     }
     assert_eq!(
         order("tangle", &["team/access.yaml", "team/sub/access.yaml"]),
-        None
+        RuleMergeOrder::Refused {
+            reason: RuleMergeRefusal::Widens,
+            rules: owned(&["team/access.yaml", "team/sub/access.yaml"]),
+        }
     );
+}
+
+fn owned(paths: &[&str]) -> Vec<String> {
+    paths.iter().map(|path| (*path).to_owned()).collect()
+}
+
+fn create_version_from(f: &Fixture, id: &str, from: &str) {
+    f.runtime
+        .block_on(f.actor.create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: id.to_owned(),
+                name: id.to_owned(),
+                from_version_id: from.to_owned(),
+                now_ms: 41,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("version");
+}
+
+/// Main's access rule files and their text, as the store holds them.
+fn main_rules(f: &Fixture) -> BTreeMap<String, String> {
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let paths: Vec<String> = conn
+        .prepare("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id='main'")
+        .unwrap()
+        .query_map([WS], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|path: &String| is_access_rule_path(path))
+        .collect();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let snapshot =
+                dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", &path)
+                    .unwrap()
+                    .snapshot?;
+            Some((path, snapshot.text))
+        })
+        .collect()
+}
+
+fn rule_order_into(
+    f: &Fixture,
+    source: &str,
+    target: &str,
+    writes: &[&str],
+    deletes: &[&str],
+) -> RuleMergeOrder {
+    f.runtime
+        .block_on(f.actor.access_rule_merge_order(
+            WS.to_owned(),
+            source.to_owned(),
+            target.to_owned(),
+            owned(writes),
+            owned(deletes),
+        ))
+        .expect("order")
+}
+
+fn rule_order(f: &Fixture, version: &str, writes: &[&str], deletes: &[&str]) -> RuleMergeOrder {
+    rule_order_into(f, version, "main", writes, deletes)
+}
+
+/// Merges one rule from `version` into Main, carrying the rule changes still
+/// to merge, this one first.
+fn merge_rule(
+    f: &Fixture,
+    version: &str,
+    order: &[String],
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    f.runtime
+        .block_on(f.actor.versioned_text_merge_in_rule_order(
+            MergeTextFileFromVersion {
+                workspace_id: WS.to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: version.to_owned(),
+                path: order[0].clone(),
+                object_id: format!("merged-{}", order[0]),
+                moment_id: format!("merge-{now_ms}"),
+                request_id: None,
+                conflict_id: format!("conflict-{now_ms}"),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+            },
+            Some(order.to_vec()),
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .map(drop)
+}
+
+/// Makes a planned order's rule merges one at a time, then judges Main's
+/// rules after each with the relay's own reach, not the planner's: nobody may
+/// reach more at the root, in a ruled folder, or in `folders` than Main gave
+/// them both before the first merge and after the last.
+fn merge_judged(f: &Fixture, version: &str, order: RuleMergeOrder, folders: &[&str]) {
+    let RuleMergeOrder::Ordered { writes, deletes } = order else {
+        panic!("no order: {order:?}");
+    };
+    let all: Vec<String> = writes.into_iter().chain(deletes).collect();
+    let before = main_rules(f);
+    let mut states = Vec::new();
+    for index in 0..all.len() {
+        merge_rule(f, version, &all[index..], 50 + index as i64)
+            .unwrap_or_else(|error| panic!("merge {}: {error}", all[index]));
+        states.push(main_rules(f));
+    }
+    let after = states.last().cloned().unwrap_or_else(|| before.clone());
+    for (index, state) in states.iter().enumerate() {
+        assert_eq!(
+            relay_reach::widening(&before, state, &after, folders),
+            None,
+            "after merging {:?}",
+            &all[..=index]
+        );
+    }
+}
+
+fn version_write(f: &Fixture, version: &str, path: &str, text: &str, moment: &str) {
+    f.versioned_write(WriteText {
+        version_id: version.to_owned(),
+        ..write(path, text, moment)
+    })
+    .unwrap_or_else(|error| panic!("{version} {path}: {error}"));
+}
+
+/// Sol's case from review: the middle rule merges cleanly from both sides'
+/// lines and keeps Main's Edit for the person, where the Version's text
+/// alone says View. Judged by the Version's text, the order showed the
+/// person Edit in team/mid/deep, where they end with View.
+#[test]
+fn a_merge_orders_its_rules_by_what_a_clean_line_merge_writes() {
+    let f = Fixture::new();
+    let base = "members: view\n# base\npeople:\n  p@example.com: view\n";
+    let main_mid = "members: view\n# base\npeople:\n  p@example.com: edit\n";
+    let source_mid = "members: view\n# source\npeople:\n  p@example.com: view\n";
+    f.versioned_write(write("team/access.yaml", "people:\n", "m-team"))
+        .unwrap();
+    f.versioned_write(write("team/mid/access.yaml", base, "m-mid"))
+        .unwrap();
+    f.versioned_write(write("team/mid/deep/secret.md", "secret", "m-secret"))
+        .unwrap();
+    create_version(&f, "feature");
+    f.versioned_write(write("team/mid/access.yaml", main_mid, "m-mid-main"))
+        .unwrap();
+    version_write(&f, "feature", "team/access.yaml", VIEW, "v-team");
+    version_write(&f, "feature", "team/mid/access.yaml", source_mid, "v-mid");
+    version_write(&f, "feature", "team/mid/deep/access.yaml", VIEW, "v-deep");
+    let order = rule_order(
+        &f,
+        "feature",
+        &[
+            "team/access.yaml",
+            "team/mid/access.yaml",
+            "team/mid/deep/access.yaml",
+        ],
+        &[],
+    );
+    merge_judged(&f, "feature", order, &["team/mid/deep"]);
+    assert_eq!(
+        main_rules(&f)["team/mid/access.yaml"],
+        "members: view\n# source\npeople:\n  p@example.com: edit\n"
+    );
+}
+
+/// Opus's first case: a rule only Main changed merges as nothing, so it
+/// can't stand between two rules that have no safe order.
+#[test]
+fn a_rule_only_main_changed_is_no_step_in_a_merge_order() {
+    let f = Fixture::new();
+    let team = "people:\n  p@example.com: edit\n";
+    let sub = "members: edit\npeople:\n  p@example.com: view\n";
+    f.versioned_write(write("access.yaml", "people:\n", "m-root"))
+        .unwrap();
+    create_version(&f, "feature");
+    f.versioned_write(write("access.yaml", VIEW, "m-root-view"))
+        .unwrap();
+    version_write(&f, "feature", "team/access.yaml", team, "v-team");
+    version_write(&f, "feature", "team/sub/access.yaml", sub, "v-sub");
+    let journal = f.journal();
+    assert_eq!(
+        rule_order(
+            &f,
+            "feature",
+            &["access.yaml", "team/access.yaml", "team/sub/access.yaml"],
+            &[]
+        ),
+        RuleMergeOrder::Refused {
+            reason: RuleMergeRefusal::Widens,
+            rules: owned(&["team/access.yaml", "team/sub/access.yaml"]),
+        }
+    );
+    assert_eq!(f.journal(), journal);
+    // Neither order of the two is safe by the relay's reach either.
+    let before = main_rules(&f);
+    let with = |entries: &[(&str, &str)]| {
+        let mut state = before.clone();
+        for (path, text) in entries {
+            state.insert((*path).to_owned(), (*text).to_owned());
+        }
+        state
+    };
+    let after = with(&[("team/access.yaml", team), ("team/sub/access.yaml", sub)]);
+    for first in [("team/access.yaml", team), ("team/sub/access.yaml", sub)] {
+        let state = with(&[first]);
+        assert!(relay_reach::widening(&before, &state, &after, &["team/sub"]).is_some());
+    }
+}
+
+/// Opus's second case: both sides change team/sub's rule and its lines merge
+/// cleanly. The merged rule drops z and gives members Edit, so it waits until
+/// team hides z.
+#[test]
+fn a_rule_both_sides_changed_is_ordered_by_its_merged_text() {
+    let f = Fixture::new();
+    let people = "people:\n  a@example.com: view\n  y@example.com: view\n  \
+                  c@example.com: view\n  z@example.com: view\n";
+    f.versioned_write(write(
+        "team/access.yaml",
+        "people:\n  z@example.com: view\n",
+        "m-team",
+    ))
+    .unwrap();
+    f.versioned_write(write("team/sub/access.yaml", people, "m-sub"))
+        .unwrap();
+    f.versioned_write(write("team/sub/notes.md", "notes", "m-notes"))
+        .unwrap();
+    create_version(&f, "feature");
+    f.versioned_write(write(
+        "team/sub/access.yaml",
+        &format!("members: edit\n{people}"),
+        "m-sub-edit",
+    ))
+    .unwrap();
+    version_write(
+        &f,
+        "feature",
+        "team/access.yaml",
+        "people:\n  y@example.com: view\n",
+        "v-team",
+    );
+    version_write(
+        &f,
+        "feature",
+        "team/sub/access.yaml",
+        "people:\n  a@example.com: view\n  c@example.com: view\n",
+        "v-sub",
+    );
+    let order = rule_order(
+        &f,
+        "feature",
+        &["team/access.yaml", "team/sub/access.yaml"],
+        &[],
+    );
+    merge_judged(&f, "feature", order, &["team/sub"]);
+    assert_eq!(
+        main_rules(&f)["team/sub/access.yaml"],
+        "members: edit\npeople:\n  a@example.com: view\n  c@example.com: view\n"
+    );
+}
+
+/// Sol's case from review: Team and team swap which of them hides. The
+/// relay hides both while either does, so the first write of either order
+/// shows Team's file. The engine refuses to order rules in folders whose
+/// names fold together. Both spellings sit in a Version merged into another,
+/// as a disk that ignores case can't hold them in Main.
+#[test]
+fn a_merge_that_changes_rules_in_folders_whose_names_fold_is_refused() {
+    let f = Fixture::new();
+    create_version(&f, "base");
+    version_write(&f, "base", "Team/access.yaml", "people:\n", "b-upper");
+    version_write(&f, "base", "team/access.yaml", VIEW, "b-lower");
+    version_write(&f, "base", "Team/plan.md", "plan", "b-plan");
+    create_version_from(&f, "swap", "base");
+    version_write(&f, "swap", "Team/access.yaml", VIEW, "s-upper");
+    version_write(&f, "swap", "team/access.yaml", "people:\n", "s-lower");
+    let rules = ["Team/access.yaml", "team/access.yaml"];
+    assert_eq!(
+        rule_order_into(&f, "swap", "base", &rules, &[]),
+        RuleMergeOrder::Refused {
+            reason: RuleMergeRefusal::FoldedNames,
+            rules: owned(&rules),
+        }
+    );
+    let state = |upper: &str, lower: &str| {
+        BTreeMap::from([
+            (rules[0].to_owned(), upper.to_owned()),
+            (rules[1].to_owned(), lower.to_owned()),
+        ])
+    };
+    let (before, after) = (state("people:\n", VIEW), state(VIEW, "people:\n"));
+    // Either first write leaves both rules granting View.
+    let between = state(VIEW, VIEW);
+    assert!(relay_reach::widening(&before, &between, &after, &["Team"]).is_some());
+    // A single rule change needs no order, so a twin alone refuses nothing.
+    assert!(matches!(
+        rule_order_into(&f, "swap", "base", &rules[..1], &[]),
+        RuleMergeOrder::Ordered { .. }
+    ));
+}
+
+/// A rule merge checks its planned order against the store it writes: once
+/// Main changes under the plan, the merge writes nothing, and the order
+/// planned again keeps everyone within bounds.
+#[test]
+fn a_rule_merge_refuses_an_order_main_changed_under() {
+    let f = Fixture::new();
+    f.versioned_write(write("access.yaml", "people:\n", "m-root"))
+        .unwrap();
+    f.versioned_write(write("team/private/notes.md", "notes", "m-notes"))
+        .unwrap();
+    create_version(&f, "feature");
+    version_write(&f, "feature", "team/access.yaml", EDIT, "v-team");
+    version_write(&f, "feature", "team/private/access.yaml", VIEW, "v-private");
+    let rules = ["team/access.yaml", "team/private/access.yaml"];
+    // With the root hiding everything, the order given is safe.
+    let RuleMergeOrder::Ordered { writes, .. } = rule_order(&f, "feature", &rules, &[]) else {
+        panic!("no order");
+    };
+    assert_eq!(writes, owned(&rules));
+    f.versioned_write(write("access.yaml", VIEW, "m-root-view"))
+        .unwrap();
+    let journal = f.journal();
+    let stale = merge_rule(&f, "feature", &writes, 50);
+    assert!(
+        matches!(stale, Err(RuntimeError::RuleMergeOrderChanged)),
+        "{stale:?}"
+    );
+    assert_eq!(f.journal(), journal);
+    let again = rule_order(&f, "feature", &rules, &[]);
+    assert_eq!(
+        again,
+        RuleMergeOrder::Ordered {
+            writes: owned(&["team/private/access.yaml", "team/access.yaml"]),
+            deletes: Vec::new()
+        }
+    );
+    merge_judged(&f, "feature", again, &["team/private"]);
 }

@@ -12,6 +12,7 @@ import {
   LinksResolveResult,
 } from "@dohc/workspace-contracts/links";
 import type {
+  AccessRuleMergeOrder,
   HistoryOperationsStore,
   HistoryOperation,
   HistoryUndoResult,
@@ -777,7 +778,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     targetVersionId: string;
     writes: string[];
     deletes: string[];
-  }): Promise<{ writes: string[]; deletes: string[] } | null> {
+  }): Promise<AccessRuleMergeOrder> {
     this.assertWorkspace(input.workspaceId);
     const order = await this.request(VERSIONED_METHOD.versionsRuleMergeOrder, {
       workspaceId: input.workspaceId,
@@ -786,9 +787,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       writes: input.writes,
       deletes: input.deletes,
     });
-    return order.writes === null || order.deletes === null
-      ? null
-      : { writes: order.writes, deletes: order.deletes };
+    return "refused" in order
+      ? { kind: "refused", reason: order.refused, rules: order.rules }
+      : { kind: "ordered", writes: order.writes, deletes: order.deletes };
   }
 
   async mergeTextFileFromVersion(input: {
@@ -796,6 +797,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     targetVersionId: string;
     sourceVersionId: string;
     path: string;
+    ruleOrder?: string[];
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
@@ -806,6 +808,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         targetVersionId: input.targetVersionId,
         sourceVersionId: input.sourceVersionId,
         path: input.path,
+        ...(input.ruleOrder !== undefined ? { ruleOrder: input.ruleOrder } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined

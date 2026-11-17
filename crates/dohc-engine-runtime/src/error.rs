@@ -36,6 +36,11 @@ pub enum RuntimeError {
     /// active Version: decided already, or its Version is no longer active.
     #[error("access-rule-not-held")]
     AccessRuleNotHeld,
+    /// A merge's rule write, made in the order planned for it, would now
+    /// widen someone midway: Main or the version changed since. Nothing was
+    /// written; the caller plans the rest again.
+    #[error("rule-merge-order-changed")]
+    RuleMergeOrderChanged,
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -195,6 +200,7 @@ impl RuntimeError {
             RuntimeError::AccessRuleHeld { .. } => "access-rule-held",
             RuntimeError::AccessRuleChanged { .. } => "access-rule-changed",
             RuntimeError::AccessRuleNotHeld => "access-rule-not-held",
+            RuntimeError::RuleMergeOrderChanged => "rule-merge-order-changed",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",
