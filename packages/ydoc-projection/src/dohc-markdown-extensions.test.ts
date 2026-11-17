@@ -15,7 +15,7 @@ describe("block start searches", () => {
   // nothing, so the search stops there.
   it.each([
     ["callout", /\n( {0,3}>\s?\[!)/],
-    ["mathBlock", /\n(\$\$)/],
+    ["mathBlock", /\n( {0,3}\$\$)/],
   ] as const)("finds %s markers in the paragraph marked reads", (name, pattern) => {
     const start = startFor(name);
     const check = (source: string) => {
@@ -90,6 +90,14 @@ describe("block start searches", () => {
       ]);
     }
   });
+
+  it("reads `$$` after up to three spaces at a line start as math, as the engine does", () => {
+    const math = { type: "mathBlock", attrs: { tex: "x" } };
+    const paragraph = { type: "paragraph", content: [{ type: "text", text: "a" }] };
+    expect(parseRichdocMarkdown(" $$x$$\n").content).toEqual([math]);
+    expect(parseRichdocMarkdown("a\n   $$x$$\n").content).toEqual([paragraph, math]);
+    expect(parseRichdocMarkdown("    $$x$$\n").content?.[0]?.type).toBe("codeBlock");
+  });
 });
 
 describe("inline searches", () => {
@@ -163,13 +171,13 @@ describe("inline searches", () => {
   // Each start once read the rest of the text at every typed character; before
   // this fix these took 2.3 to 4.7 s, and the atoms 17 s.
   it.each([
-    ["[", 32_768],
-    ["$", 32_768],
-    ["{{atom:", 8_192],
+    ['"["', "[".repeat(32_768)],
+    ['"$"', "$".repeat(32_768)],
+    ['"[" then "$"', "[".repeat(16_384) + "$".repeat(16_384)],
+    ['"{{atom:"', "{{atom:".repeat(1_171)],
   ])(
-    "reads a paragraph of typed %j once",
-    (unit, size) => {
-      const markdown = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+    "reads a paragraph of typed %s once",
+    (_label, markdown) => {
       const started = performance.now();
       const doc = parseRichdocMarkdown(markdown);
       const elapsed = performance.now() - started;

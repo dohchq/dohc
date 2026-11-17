@@ -69,9 +69,10 @@ function indexAfter(src: string, tokens: unknown, character: string, from: numbe
 }
 
 // The first `marker` in `src` that `opens` accepts, given the characters before
-// and after it, or -1.
+// and after it, or -1. Tiptap types a start's `this` as the tokenizer, but
+// marked calls it with `{ lexer }`.
 function markerStart(
-  lexer: unknown,
+  context: unknown,
   src: string,
   marker: string,
   opens: (before: string | undefined, after: string | undefined) => boolean,
@@ -82,7 +83,7 @@ function markerStart(
     }
     return -1;
   };
-  const read = inlineRead(src, lexer, "lexer");
+  const read = inlineRead(src, (context as { lexer?: object } | undefined)?.lexer, "lexer");
   if (!read) return search(src, 0);
   const text = read.source;
   const from = text.length - src.length;
@@ -107,13 +108,18 @@ function paragraphRegion(src: string): string {
 }
 
 // marked gives the block starts below the paragraph's text less its first
-// character, so that text begins mid-line, never at the start of a line.
+// character, so that text begins mid-line, never at the start of a line. A
+// marker may follow up to three spaces, as in the engine.
 function lineMarkerStart(source: string, marker: string): number {
   const src = paragraphRegion(source);
   let markerIndex = src.indexOf(marker);
   while (markerIndex >= 0) {
-    if (markerIndex > 0 && src[markerIndex - 1] === "\n") {
-      return markerIndex <= 1 ? 0 : markerIndex;
+    let lineStart = markerIndex;
+    while (lineStart > 0 && markerIndex - lineStart < 3 && src[lineStart - 1] === " ") {
+      lineStart -= 1;
+    }
+    if (lineStart > 0 && src[lineStart - 1] === "\n") {
+      return lineStart <= 1 ? 0 : lineStart;
     }
     markerIndex = src.indexOf(marker, markerIndex + marker.length);
   }
@@ -980,8 +986,10 @@ export const DohcMathBlock = Node.create({
     level: "block",
     start: (src) => lineMarkerStart(src, "$$"),
     tokenize(src) {
-      if (!src.startsWith("$$")) return undefined;
-      const closing = src.indexOf("$$", 2);
+      let open = 0;
+      while (open < 3 && src[open] === " ") open += 1;
+      if (!src.startsWith("$$", open)) return undefined;
+      const closing = src.indexOf("$$", open + 2);
       if (closing === -1) return undefined;
       // The closing `$$` must end its line (or the document), so a mid-line
       // `$$x$$ trailing` is left as literal text instead of being sliced into
@@ -989,7 +997,7 @@ export const DohcMathBlock = Node.create({
       const afterClosing = src[closing + 2] ?? "\n";
       if (afterClosing !== "\n") return undefined;
       const raw = src.slice(0, closing + 2);
-      const tex = src.slice(2, closing);
+      const tex = src.slice(open + 2, closing);
       return { type: "mathBlock", raw, tex };
     },
   },
