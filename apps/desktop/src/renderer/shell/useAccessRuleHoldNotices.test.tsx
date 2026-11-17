@@ -149,8 +149,8 @@ describe("useAccessRuleHoldNotices", () => {
       expectedSha256: null,
       expectedReason: "removed",
     });
-    // The rows stay until the engine stops listing the holds.
-    expect(h.row("team")).toBeDefined();
+    // The decision's answer lists no holds, so the rows go as it lands.
+    await waitFor(() => expect([h.row("team"), h.row("")]).toEqual([undefined, undefined]));
     h.list([]);
     await waitFor(() =>
       expect(h.errors().shellErrors.filter((error) => error.tone === "warning")).toEqual([]),
@@ -175,14 +175,20 @@ describe("useAccessRuleHoldNotices", () => {
     });
   });
 
-  it("says when a rule cannot be read", async () => {
-    const h = harness([{ ...WIDENED, changes: [], unreadable: "on-disk" }]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
+  // Neither choice can read a rule another program holds, so there is no
+  // change to allow; Restore rule says why it failed.
+  it("says when the rule on disk cannot be read, and offers no change to allow", async () => {
+    const h = harness([
+      { ...WIDENED, changes: [], unreadable: "on-disk" },
+      { ...REMOVED, changes: [], unreadable: "on-disk" },
+    ]);
+    await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
     expect(h.row("team")!.message).toBe(
-      "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. Allowing it hides team from members.",
+      "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. If another program has it open, close it there.",
     );
     expect(h.row("team")!.rows).toBeUndefined();
-    expect(h.row("team")!.action).toMatchObject({ additional: [{ label: "Hide from members" }] });
+    expect(h.row("team")!.action).toMatchObject({ label: "Restore rule", additional: [] });
+    expect(h.row("team/sub")!.action).toMatchObject({ label: "Restore rule", additional: [] });
   });
 
   it("reads as working while a decision runs, then says what took effect with Open History", async () => {
@@ -400,6 +406,73 @@ describe("useAccessRuleHoldNotices", () => {
         "dohc still doesn't record or share changes in team. Members keep their earlier access.",
       retry: expect.any(Function),
     });
+    expect(h.row("team")!.action?.busy).toBeUndefined();
+  });
+
+  it("says another program has the rule open, with Try again", async () => {
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [OVERLOADED]: file-locked",
+      ),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    const failed = () =>
+      h
+        .errors()
+        .shellErrors.find(
+          (error) => error.title === "dohc could not restore the access rule for team",
+        );
+    await waitFor(() =>
+      expect(failed()).toMatchObject({
+        message: "Another program has this file open. Close it there, then try again.",
+        retry: expect.any(Function),
+      }),
+    );
+  });
+
+  // The shell's status can trail the decision, so the row stops reading as
+  // working when the decision lands, also after Try again.
+  it("stops reading as working when the decision lands, before the list follows", async () => {
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    await waitFor(() =>
+      expect(h.errors().shellErrors.find((error) => error.tone === "success")).toBeDefined(),
+    );
+    expect(h.row("team")).toBeUndefined();
+
+    h.list([{ ...WIDENED, recordedAtMs: 2 }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    h.bridge.decideAccessRule.mockRejectedValueOnce(new Error("engine stopped"));
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    const failed = () =>
+      h
+        .errors()
+        .shellErrors.find(
+          (error) => error.title === "dohc could not restore the access rule for team",
+        );
+    await waitFor(() => expect(failed()).toBeDefined());
+    act(() => h.errors().retryShellError(failed()!.id));
+    await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(h.row("team")).toBeUndefined());
+
+    // A choice the engine still lists afterwards goes back to its choices.
+    h.list([{ ...WIDENED, recordedAtMs: 3 }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    h.bridge.decideAccessRule.mockResolvedValueOnce({
+      heldAccessRules: [{ ...WIDENED, recordedAtMs: 3 }],
+      kept: [],
+    });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledTimes(4));
+    await waitFor(() =>
+      expect(h.row("team")!.action).toMatchObject({
+        label: "Restore rule",
+        additional: [{ label: "Allow new access" }],
+      }),
+    );
     expect(h.row("team")!.action?.busy).toBeUndefined();
   });
 

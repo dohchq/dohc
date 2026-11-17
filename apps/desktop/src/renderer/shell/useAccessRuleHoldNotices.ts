@@ -78,11 +78,12 @@ const reachWords = (reach: AccessRuleReach, level: MemberLevel) => {
   return resolved === null || resolved === "workspace" ? IN_SETTINGS : LEVEL[resolved];
 };
 
-// A refusal that trying again only repeats, such as a moved workspace
-// folder, says what to do instead, so its words replace the row's own.
-const finalWords = (error: unknown): string | null => {
+// A refusal dohc has words for, such as a rule file another program holds
+// or a moved workspace folder, says what to do, so its words replace the
+// row's own. `final` is one that trying again only repeats.
+const refusalWords = (error: unknown): { words: string; final: boolean } | null => {
   const read = readError(error);
-  return read.canRetry === false && read.mapped ? read.words : null;
+  return read.mapped && read.words ? { words: read.words, final: read.canRetry === false } : null;
 };
 
 /** Why a choice didn't run: the level read at the press differs from the one the row showed. */
@@ -111,9 +112,9 @@ export function accessRuleHoldWords(
   title: string;
   message: string;
   rows: string[];
-  accept: string;
-  accepting: string;
   openMembers: boolean;
+  // Null while dohc can't read the rule on disk, so there is nothing to accept.
+  accept: { label: string; busy: string } | null;
 } {
   const place = placeOf(hold.folder);
   const until = `Until you choose, dohc doesn't record or share changes in ${place}.`;
@@ -123,14 +124,13 @@ export function accessRuleHoldWords(
     return `${whoOf(change.who)}: ${before === after ? `${before}, no change` : `${before} → ${after}`}`;
   });
   const openMembers = level === null && usesMemberLevel(hold);
-  const hides = hold.unreadable === "on-disk";
+  const onDisk = hold.unreadable === "on-disk";
   const unreadable =
     hold.unreadable === "recorded"
       ? " dohc can't read the rule it recorded, so it can't list who gains access."
-      : hides
-        ? ` dohc can't read the access rule now on disk. Allowing it hides ${place} from members.`
+      : onDisk
+        ? " dohc can't read the access rule now on disk. If another program has it open, close it there."
         : "";
-  const accept = hides ? { accept: "Hide from members", accepting: "Hiding…" } : null;
   if (hold.reason === "removed") {
     const without =
       hold.fallsBackTo !== null
@@ -141,7 +141,7 @@ export function accessRuleHoldWords(
       message: `${until} Without it, ${without}${unreadable}`,
       rows,
       openMembers,
-      ...(accept ?? { accept: "Remove rule", accepting: "Removing…" }),
+      accept: onDisk ? null : { label: "Remove rule", busy: "Removing…" },
     };
   }
   return {
@@ -149,7 +149,7 @@ export function accessRuleHoldWords(
     message: `${until} Restoring keeps the rule from outside dohc as a copy.${unreadable}`,
     rows,
     openMembers,
-    ...(accept ?? { accept: "Allow new access", accepting: "Allowing…" }),
+    accept: onDisk ? null : { label: "Allow new access", busy: "Allowing…" },
   };
 }
 
@@ -311,7 +311,14 @@ export function useAccessRuleHoldNotices(
       label: busy === "restore" ? "Restoring…" : "Restore rule",
       run: decide("restore"),
       additional: [
-        { label: busy === "accept" ? words.accepting : words.accept, run: decide("accept") },
+        ...(words.accept
+          ? [
+              {
+                label: busy === "accept" ? words.accept.busy : words.accept.label,
+                run: decide("accept"),
+              },
+            ]
+          : []),
         ...(words.openMembers || lead
           ? [{ label: "Open Members", run: () => latest.current.openMembers() }]
           : []),
@@ -419,6 +426,11 @@ export function useAccessRuleHoldNotices(
       .then(
         (decided) => {
           if (currentWorkspace.current !== asked) return;
+          // The row read as working until now. The engine's list after the
+          // choice comes with it, ahead of the shell's status.
+          const still = decided.heldAccessRules.find((held) => identityOf(held) === identity);
+          if (still) show(asked, still, levelRef.current, undefined, true);
+          else latest.current.clearIdentity(identity);
           const message = accessRuleDecidedWords(hold, decision, decided.kept, now);
           // The earlier rule stays in History; Restore's says where its copy is.
           const step: ShellError["action"] =
@@ -456,17 +468,17 @@ export function useAccessRuleHoldNotices(
             return;
           }
           const place = placeOf(hold.folder);
-          const final = finalWords(error);
+          const refused = refusalWords(error);
           latest.current.reportShellFailure({
             title:
               decision === "restore"
                 ? `dohc could not restore ${ruleOfLower(hold.folder)}`
                 : `dohc could not change access to ${place}`,
             message:
-              final ??
+              refused?.words ??
               `dohc still doesn't record or share changes in ${place}. Members keep their earlier access.`,
             cause: error,
-            retry: final ? null : () => decideRef.current(asked, hold, decision),
+            retry: refused?.final ? null : () => decideRef.current(asked, hold, decision),
           });
         },
       );
