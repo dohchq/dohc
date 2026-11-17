@@ -1076,25 +1076,30 @@ fn with_touches(mut disk: OnDisk, touches: &[Touch<'_>]) -> OnDisk {
     disk
 }
 
-/// The rule files to commit so the store matches `disk`: writes first, in
-/// path order, then deletes, so no step holds fewer rule files than both
-/// ends do.
+/// The rule files to commit so the store matches `disk`: new files, then
+/// changed ones, each in path order, then deletes. No step holds fewer rule
+/// files than both ends do, and a folder that ends with several files hides
+/// from its first step, before a changed file can stand alone.
 fn rule_changes(committed: Option<&Committed>, disk: &OnDisk) -> Vec<(String, Option<Vec<u8>>)> {
     let committed_sha = |path: &str| {
         committed
             .and_then(|committed| committed.files.get(path))
             .map(|file| file.sha256.clone())
     };
-    let writes = disk
+    let mut writes: Vec<_> = disk
         .iter()
         .filter(|(path, bytes)| committed_sha(path) != Some(dohc_engine_storage::hex_sha256(bytes)))
-        .map(|(path, bytes)| (path.clone(), Some(bytes.clone())));
+        .map(|(path, bytes)| (path.clone(), Some(bytes.clone())))
+        .collect();
+    // A stable sort keeps path order within new files and changed ones.
+    writes.sort_by_key(|(path, _)| committed.is_some_and(|c| c.files.contains_key(path)));
     let deletes = committed
         .into_iter()
         .flat_map(|committed| committed.files.keys())
         .filter(|path| !disk.contains_key(*path))
         .map(|path| (path.clone(), None));
-    writes.chain(deletes).collect()
+    writes.extend(deletes);
+    writes
 }
 
 /// Whether the folder and its rule files have gone unchanged for the settle

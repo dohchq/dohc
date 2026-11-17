@@ -2,6 +2,7 @@
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker, scene_asset_ref};
 use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
+use dohc_engine_files::access_rules::{Level, level_for_email, parse_access_rule};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
     CaptureIngestBinary, CaptureRetire, DeleteTextFile, FaultAction, FaultInjector, FaultPoint,
@@ -802,20 +803,21 @@ fn merge_a_respelled_rule(restart_between: bool) {
 
 /// A rule gone and a rule spelled twice both record no bytes, so the owner's
 /// decision on a removal names its reason too. A second spelling saved since
-/// is refused, and stays on disk.
+/// is refused, and stays on disk. Judged again, two spellings hide the
+/// folder at every step, so dohc records them and the hold goes.
 #[test]
 fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
-    let f = ruled_team();
-    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
-    // A fullwidth letter folds to the same rule but is its own name on disk.
-    let other = "team/\u{FF41}ccess.yaml";
-    f.put("team/access.yaml", EDIT);
-    f.put(other, EDIT);
-    f.settle();
     for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+        let f = ruled_team();
+        std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+        f.settle();
+        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+        assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+        // A fullwidth letter folds to the same rule but is its own name on disk.
+        let other = "team/\u{FF41}ccess.yaml";
+        f.put("team/access.yaml", EDIT);
+        f.put(other, EDIT);
+        f.settle();
         let decided = f.decide_on("team", decision, None, "removed");
         assert!(
             matches!(&decided, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
@@ -823,6 +825,8 @@ fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
         );
         assert!(f.root().join("team/access.yaml").exists());
         assert!(f.root().join(other).exists());
+        assert!(f.holds().is_empty());
+        assert_eq!(recorded_reach(&f, "members"), None);
     }
 }
 
@@ -883,11 +887,108 @@ fn a_widened_hold_lists_who_reaches_the_folder_differently() {
     f.decide_on("team", AccessRuleDecision::Accept, None, "widened")
         .expect("record both spellings");
     assert!(f.holds().is_empty());
+    // The new spelling goes first, so the folder hides from the first step.
     expected.extend(lines(&[
-        "write team/access.yaml",
         "write team/\u{FF41}ccess.yaml",
+        "write team/access.yaml",
     ]));
     assert_eq!(f.journal(), expected);
+}
+
+/// Recording a widened rule beside a second spelling hides the folder, and
+/// every step of it does: stopped after its first moment, the journal gives
+/// nobody more than the rule recorded before.
+#[test]
+fn hiding_a_folder_spelled_twice_widens_nothing_at_any_step() {
+    struct CrashAfterOneMoment(PathBuf, i64, std::sync::atomic::AtomicBool);
+    impl FaultInjector for CrashAfterOneMoment {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point != FaultPoint::StorageBeforePersist
+                || self.2.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return FaultAction::Continue;
+            }
+            if moments(&self.0) > self.1 {
+                self.2.store(true, std::sync::atomic::Ordering::SeqCst);
+                return FaultAction::Crash;
+            }
+            FaultAction::Continue
+        }
+    }
+    fn moments(db: &Path) -> i64 {
+        rusqlite::Connection::open(db)
+            .expect("open db")
+            .query_row(
+                "SELECT count(*) FROM replication_log WHERE op_kind='moment.append'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count moments")
+    }
+    let f = ruled_team();
+    let other = "team/\u{FF41}ccess.yaml";
+    f.put(
+        "team/access.yaml",
+        "members: edit\npeople:\n  sam@example.com: edit\n",
+    );
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.put(other, EDIT);
+    let before = f.journal();
+    assert_eq!(recorded_reach(&f, "members"), Some(Level::View));
+    let crash = Arc::new(CrashAfterOneMoment(
+        f.db.clone(),
+        moments(&f.db),
+        Default::default(),
+    ));
+    let halfway = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "widened",
+        30,
+        crash,
+    );
+    assert!(
+        matches!(halfway, Err(RuntimeError::OperationCrashed)),
+        "{halfway:?}"
+    );
+    for who in ["members", "sam@example.com"] {
+        assert_eq!(recorded_reach(&f, who), None, "{who} after the first step");
+    }
+    let mut expected = before.clone();
+    expected.push(format!("write {other}"));
+    assert_eq!(f.journal(), expected, "one moment, then the stop");
+    f.decide_on("team", AccessRuleDecision::Accept, None, "widened")
+        .expect("finish hiding");
+    expected.push("write team/access.yaml".to_owned());
+    assert_eq!(f.journal(), expected);
+    for who in ["members", "sam@example.com"] {
+        assert_eq!(recorded_reach(&f, who), None, "{who} at the end");
+    }
+}
+
+/// What the recorded rule of `team` gives `who`, as the relay reads it: one
+/// readable spelling is the rule, and several hide the folder.
+fn recorded_reach(f: &Fixture, who: &str) -> Option<Level> {
+    let conn = rusqlite::Connection::open(&f.db).expect("open db");
+    let texts: Vec<String> = ["team/access.yaml", "team/\u{FF41}ccess.yaml"]
+        .into_iter()
+        .filter_map(|path| {
+            dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", path)
+                .expect("read snapshot")
+                .snapshot
+                .map(|snapshot| snapshot.text)
+        })
+        .collect();
+    let [text] = texts.as_slice() else {
+        return None;
+    };
+    let rule = parse_access_rule(text)?;
+    match who {
+        "members" => rule.members,
+        email => level_for_email(&rule, email),
+    }
 }
 
 /// A removed rule's notice lists each entry it recorded, with the reach the
