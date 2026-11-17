@@ -2876,6 +2876,38 @@ fn write_blocks(blocks: &[read_markdown::Element], note: bool) -> Option<String>
     }
 }
 
+/// Each run of `blocks` as [`write_blocks`] writes it outside a note, from
+/// one document, so a note of a thousand parts builds one document, not a
+/// thousand.
+fn write_runs(
+    blocks: &[read_markdown::Element],
+    runs: &[std::ops::Range<usize>],
+) -> Vec<Option<String>> {
+    let doc = yrs::Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment(ROOT_BODY);
+    {
+        let mut txn = doc.transact_mut();
+        for block in blocks.iter().rev() {
+            read_markdown::insert_element(&mut txn, &fragment, 0, block);
+        }
+    }
+    let txn = doc.transact();
+    let children: Vec<XmlOut> = fragment.children(&txn).collect();
+    runs.iter()
+        .map(|run| {
+            let mut remaining = MAX_PROJECTION_NODES;
+            let mut bytes = 0;
+            let nodes = children
+                .get(run.clone())?
+                .iter()
+                .map(|child| markdown_node(&txn, child.clone(), 0, &mut remaining, &mut bytes))
+                .collect::<ProjectionResult<Vec<_>>>()
+                .ok()?;
+            render_nodes(&nodes, "doc", &BTreeMap::new(), "\n\n", false).ok()
+        })
+        .collect()
+}
+
 /// How many of `body`'s blocks at the start and at the end are already what
 /// `blocks` would insert there, compared without overlapping.
 fn unchanged_ends<T: ReadTxn>(

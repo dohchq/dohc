@@ -134,41 +134,56 @@ pub(super) enum Unreadable {
 }
 
 /// The longest run of text in one paragraph, heading or table cell that the
-/// reader parses, in bytes. pulldown-cmark scans a link title that runs over
-/// many lines in time that grows with the square of the paragraph's length,
-/// so a longer paragraph is kept as written. A limit, not a Markdown rule.
-pub(super) const MAX_PARAGRAPH: usize = 16 * 1024;
+/// reader parses, in bytes. pulldown-cmark scans the title of a link or a
+/// link definition that runs over many lines in time that grows with the
+/// square of the paragraph's length, so a longer paragraph is kept as
+/// written. A limit, not a Markdown rule: at 8 KiB the slowest such title
+/// reads in about 100 ms, and no paragraph of the real files measured is
+/// longer than 5.2 KiB.
+pub(super) const MAX_PARAGRAPH: usize = 8 * 1024;
 
 /// The body's blocks as the editor reads them, checked by writing them and
 /// reading them back. A part of the note that would lose a word or read back
-/// differently keeps its source, which the writer writes back exactly. If
-/// the note with those parts kept still fails the check, the whole note
-/// keeps its source.
+/// differently keeps its source, which the writer writes back exactly; if
+/// that is not enough, so do the neighbours it fails with. If the note with
+/// those parts kept still fails the check, the whole note keeps its source.
 pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
-    let mut reading = sealed(body)?;
-    if reading.whole {
-        return Ok(reading.blocks);
+    let parts = read_parts(body, 0, 0, &HashMap::new())?;
+    if reads_whole(&parts, body) {
+        return Ok(parts.blocks);
     }
     // A part that keeps its source is written byte for byte, but the writer
     // trims the white space that ends the note. Read as the writer leaves
     // it, a part at the end keeps the bytes the next read sees.
     let trimmed = super::trim_js_end(body);
-    if trimmed.len() < body.len() {
-        reading = sealed(trimmed)?;
-        if reading.whole {
-            return Ok(reading.blocks);
+    let parts = if trimmed.len() < body.len() {
+        let parts = read_parts(trimmed, 0, 0, &HashMap::new())?;
+        if reads_whole(&parts, trimmed) {
+            return Ok(parts.blocks);
+        }
+        parts
+    } else {
+        parts
+    };
+    let body = trimmed;
+    for with_neighbours in [false, true] {
+        let blocks = sealed(&parts, body, with_neighbours);
+        let kept = super::write_blocks(&blocks, true).is_some_and(|written| {
+            keeps_words(&written, body)
+                && read_parts(&written, 0, 0, &HashMap::new()).is_ok_and(|again| {
+                    let again = if reads_whole(&again, &written) {
+                        again.blocks
+                    } else {
+                        sealed(&again, &written, false)
+                    };
+                    alike(&blocks, &again)
+                })
+        });
+        if kept {
+            return Ok(blocks);
         }
     }
-    let body = trimmed;
-    let kept = super::write_blocks(&reading.blocks, true).is_some_and(|written| {
-        keeps_words(&written, body)
-            && sealed(&written).is_ok_and(|again| alike(&reading.blocks, &again.blocks))
-    });
-    Ok(if kept {
-        reading.blocks
-    } else {
-        vec![raw_block(body)]
-    })
+    Ok(vec![raw_block(body)])
 }
 
 fn raw_block(source: &str) -> Element {
@@ -176,64 +191,74 @@ fn raw_block(source: &str) -> Element {
     element("rawBlock", vec![("source", Any::from(source))], Vec::new())
 }
 
-struct Reading {
-    blocks: Vec<Element>,
-    /// Whether the whole note read back, so no part keeps its source.
-    whole: bool,
+/// Whether the whole note reads back, with no part held back by its size.
+fn reads_whole(parts: &Parts, body: &str) -> bool {
+    parts.held.is_empty() && reads_back(&parts.blocks, body, &HashMap::new(), true)
 }
 
-/// The note's reading if the whole note reads back. Otherwise each part
-/// that fails the check alone keeps its source, and so does each pair of
-/// neighbours that pass alone but fail together: the writer can join two
-/// neighbours into one, such as a `-` list and a `+` list.
-fn sealed(body: &str) -> Result<Reading, Unreadable> {
+/// The note's blocks with each part that fails the check alone keeping its
+/// source. `with_neighbours` also seals each pair of neighbours that pass
+/// alone but fail together: the writer can join two neighbours into one,
+/// such as a `-` list and a `+` list.
+fn sealed(parts: &Parts, body: &str, with_neighbours: bool) -> Vec<Element> {
     let Parts {
-        mut blocks,
+        blocks,
         parts,
         definitions,
         held,
-    } = read_parts(body, 0, 0, &HashMap::new())?;
-    if held.is_empty() && reads_back(&blocks, body, &HashMap::new(), true) {
-        return Ok(Reading {
-            blocks,
-            whole: true,
-        });
-    }
-    let passes = |first: &Part, last: &Part| {
-        let source = first.source.start..last.source.end;
-        !held
-            .iter()
-            .any(|held| held.start < source.end && source.start < held.end)
-            && reads_back(
-                &blocks[first.blocks.start..last.blocks.end],
-                &body[source],
-                &definitions,
-                false,
-            )
+    } = parts;
+    // Whether each run of neighbouring parts, from its first to its last,
+    // reads back alone.
+    let pass = |runs: &[(usize, usize)]| -> Vec<bool> {
+        let blocks_of = |&(first, last): &(usize, usize)| -> Range<usize> {
+            parts[first].blocks.start..parts[last].blocks.end
+        };
+        let written = super::write_runs(blocks, &runs.iter().map(blocks_of).collect::<Vec<_>>());
+        runs.iter()
+            .zip(written)
+            .map(|(run, written)| {
+                let source = parts[run.0].source.start..parts[run.1].source.end;
+                let blocks = &blocks[blocks_of(run)];
+                !held
+                    .iter()
+                    .any(|held| held.start < source.end && source.start < held.end)
+                    && written.is_some_and(|written| {
+                        keeps_words(&written, &body[source])
+                            && read_blocks(&written, 0, 0, definitions)
+                                .is_ok_and(|again| alike(blocks, &again))
+                    })
+            })
+            .collect()
     };
-    let mut keep: Vec<bool> = parts.iter().map(|part| !passes(part, part)).collect();
-    for at in 1..parts.len() {
-        if !keep[at - 1] && !keep[at] && !passes(&parts[at - 1], &parts[at]) {
-            keep[at - 1] = true;
-            keep[at] = true;
+    let alone: Vec<_> = (0..parts.len()).map(|at| (at, at)).collect();
+    let mut keep: Vec<bool> = pass(&alone).into_iter().map(|passes| !passes).collect();
+    if with_neighbours {
+        let pairs: Vec<_> = (1..parts.len())
+            .filter(|&at| !keep[at - 1] && !keep[at])
+            .map(|at| (at - 1, at))
+            .collect();
+        for (&(first, last), passes) in pairs.iter().zip(pass(&pairs)) {
+            if !passes {
+                keep[first] = true;
+                keep[last] = true;
+            }
         }
     }
-    for (at, part) in parts.iter().enumerate().rev().filter(|(at, _)| keep[*at]) {
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut next = 0;
+    for (at, part) in parts.iter().enumerate().filter(|(at, _)| keep[*at]) {
         // The writer writes nothing for blank lines that start the note, so
         // the first part keeps them, or a `---` line could start the file.
         let (blocks_at, source_at) = match at {
             0 => (0, 0),
             _ => (part.blocks.start, part.source.start),
         };
-        blocks.splice(
-            blocks_at..part.blocks.end,
-            [raw_block(&body[source_at..part.source.end])],
-        );
+        out.extend_from_slice(&blocks[next..blocks_at]);
+        out.push(raw_block(&body[source_at..part.source.end]));
+        next = part.blocks.end;
     }
-    Ok(Reading {
-        blocks,
-        whole: false,
-    })
+    out.extend_from_slice(&blocks[next..]);
+    out
 }
 
 /// Whether the writer writes `blocks` to text that keeps each word of
