@@ -124,7 +124,7 @@ const ON_DISK: Record<
     accept: null,
   }),
   "on-disk": (folder) => ({
-    lead: `Check that you can open ${ruleOfLower(folder)}. dohc could not read it.`,
+    lead: `dohc could not read ${ruleOfLower(folder)}. Check that you can open it.`,
     accept: null,
   }),
   "several-files": (folder) => ({

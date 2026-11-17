@@ -192,7 +192,7 @@ describe("useAccessRuleHoldNotices", () => {
       [
         "on-disk",
         "team/access.yaml",
-        "Check that you can open the access rule for team. dohc could not read it.",
+        "dohc could not read the access rule for team. Check that you can open it.",
         { to: "file", path: "team/access.yaml" },
       ],
     ] as const) {
