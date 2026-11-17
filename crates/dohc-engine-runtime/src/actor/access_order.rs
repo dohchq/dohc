@@ -1833,7 +1833,9 @@ pub struct AccessRuleHoldView {
     /// level at the folder changes, as the relay works it out from every
     /// rule above the folder as well as its own.
     pub changes: Vec<AccessRuleLevelChange>,
-    /// `on-disk` or `recorded`, when that rule cannot be read.
+    /// Why dohc can't show a rule, when it can't: `recorded` for the rule
+    /// it recorded, and for the rule on disk `locked` (another program
+    /// holds it), `several-files` (more than one spelling), or `on-disk`.
     pub unreadable: Option<&'static str>,
     /// For a removal, the folder whose rule then applies; `None` when no
     /// rule above does, so members hold their workspace level.
@@ -1913,9 +1915,10 @@ fn hold_view(
                 .and_then(|file| file.text.clone()),
             _ => None,
         });
-    let disk = read_disk_rule(root, folder).ok();
+    let disk = read_disk_rule(root, folder);
     let rule_path = disk
         .as_ref()
+        .ok()
         .filter(|disk| disk.len() == 1)
         .and_then(|disk| disk.keys().next().cloned());
     let mut view = AccessRuleHoldView {
@@ -1945,22 +1948,32 @@ fn hold_view(
         view.changes = level_changes(&before, &outer);
         return Ok(view);
     }
-    let now = disk.as_ref().and_then(|disk| match disk.len() {
-        1 => disk
-            .values()
-            .next()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(parse_access_rule),
-        _ => None,
-    });
-    let Some(now) = now else {
-        view.unreadable = Some("on-disk");
-        return Ok(view);
+    let now = match rule_now(&disk) {
+        Ok(now) => now,
+        Err(why) => {
+            view.unreadable = Some(why);
+            return Ok(view);
+        }
     };
     let mut after = outer;
     after.push(Some(&now));
     view.changes = level_changes(&before, &after);
     Ok(view)
+}
+
+/// The rule on disk a widened hold's notice compares, or why it can't.
+fn rule_now(disk: &Result<OnDisk, Unread>) -> Result<AccessRule, &'static str> {
+    match disk {
+        Err(Unread::Locked) => Err("locked"),
+        Err(Unread::Other) => Err("on-disk"),
+        Ok(disk) if disk.len() > 1 => Err("several-files"),
+        Ok(disk) => disk
+            .values()
+            .next()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(parse_access_rule)
+            .ok_or("on-disk"),
+    }
 }
 
 /// What the owner saw in a folder's hold when they decided.
@@ -2899,6 +2912,20 @@ mod tests {
             Some(&both),
             &[("T/ACCESS.yaml".to_owned(), None)]
         ));
+    }
+
+    #[test]
+    fn a_notice_says_why_it_cannot_show_the_rule_on_disk() {
+        let one = |text: &[u8]| OnDisk::from([("T/access.yaml".to_owned(), text.to_vec())]);
+        assert!(rule_now(&Ok(one(b"members: edit\n"))).is_ok());
+        assert_eq!(rule_now(&Err(Unread::Locked)).err(), Some("locked"));
+        assert_eq!(rule_now(&Err(Unread::Other)).err(), Some("on-disk"));
+        assert_eq!(rule_now(&Ok(one(&[0xff]))).err(), Some("on-disk"));
+        let both = OnDisk::from([
+            ("T/ACCESS.yaml".to_owned(), b"members: edit\n".to_vec()),
+            ("T/access.yaml".to_owned(), b"members: view\n".to_vec()),
+        ]);
+        assert_eq!(rule_now(&Ok(both)).err(), Some("several-files"));
     }
 
     #[test]

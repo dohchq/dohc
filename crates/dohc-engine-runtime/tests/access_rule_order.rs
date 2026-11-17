@@ -586,7 +586,7 @@ fn allowing_an_outer_rule_records_an_inner_rule_it_now_covers() {
 
 /// A decision while another program holds the rule file open says the file
 /// is held, as a write to any held file does, and changes nothing; once the
-/// file is free the same decision runs.
+/// file is free the same decision runs. Its notice says the file is held.
 #[cfg(windows)]
 #[test]
 fn a_decision_on_a_rule_another_program_holds_says_it_is_held() {
@@ -601,6 +601,9 @@ fn a_decision_on_a_rule_another_program_holds_says_it_is_held() {
         .share_mode(0)
         .open(f.root().join("team/access.yaml"))
         .expect("hold the rule open");
+    // The notice says why it can't show the rule.
+    let views = f.hold_views();
+    assert_eq!(views[0].unreadable, Some("locked"), "{views:?}");
     for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
         let decided = f.decide("team", decision);
         assert!(
@@ -872,8 +875,19 @@ fn a_widened_hold_lists_who_reaches_the_folder_differently() {
 
     // Two spellings are one unreadable rule.
     f.put("team/\u{FF41}ccess.yaml", EDIT);
-    assert_eq!(f.hold_views()[0].unreadable, Some("on-disk"));
+    assert_eq!(f.hold_views()[0].unreadable, Some("several-files"));
     assert!(f.hold_views()[0].changes.is_empty());
+    // Both files can be read, so recording them, which hides the folder,
+    // runs.
+    let mut expected = f.journal();
+    f.decide_on("team", AccessRuleDecision::Accept, None, "widened")
+        .expect("record both spellings");
+    assert!(f.holds().is_empty());
+    expected.extend(lines(&[
+        "write team/access.yaml",
+        "write team/\u{FF41}ccess.yaml",
+    ]));
+    assert_eq!(f.journal(), expected);
 }
 
 /// A removed rule's notice lists each entry it recorded, with the reach the

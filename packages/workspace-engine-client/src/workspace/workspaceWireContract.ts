@@ -1155,8 +1155,12 @@ const AccessRuleHoldSchema = mutableStruct({
       }),
     ),
   ),
-  /** Which rule dohc cannot read, if either. */
-  unreadable: Schema.NullOr(Schema.Union([Schema.Literal("on-disk"), Schema.Literal("recorded")])),
+  /**
+   * Why dohc cannot show a rule, if it can't: `recorded` for the rule it
+   * recorded; for the rule on disk, `locked` while another program holds it,
+   * `several-files` for more than one spelling, else `on-disk`.
+   */
+  unreadable: Schema.NullOr(Schema.Literals(["recorded", "locked", "several-files", "on-disk"])),
   /** For a removal, the folder whose rule then applies; null when none above does. */
   fallsBackTo: Schema.NullOr(Schema.String),
 });

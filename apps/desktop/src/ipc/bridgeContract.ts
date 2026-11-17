@@ -1651,7 +1651,7 @@ export const AccessRuleHold = z.object({
   changes: z.array(
     z.object({ who: z.string().min(1), before: AccessRuleReach, after: AccessRuleReach }),
   ),
-  unreadable: z.enum(["on-disk", "recorded"]).nullable(),
+  unreadable: z.enum(["recorded", "locked", "several-files", "on-disk"]).nullable(),
   fallsBackTo: z.string().nullable(),
 });
 export type AccessRuleReach = z.infer<typeof AccessRuleReach>;
