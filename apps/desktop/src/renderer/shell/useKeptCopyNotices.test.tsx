@@ -55,26 +55,33 @@ function harness(initial: KeptCopy[]) {
 }
 
 describe("useKeptCopyNotices", () => {
-  it("describes copies from both removed new rules and replaced recorded rules", async () => {
+  // Restore rule's own toast names the copies it kept, so their rows are
+  // quiet results, not failures, and file no summary of colliding saves.
+  it("shows copies Restore rule kept as quiet results, path first, with no summary", async () => {
     const h = harness([
       { id: 4, path: "new/access.yaml", keptAtMs: 1 },
       { id: 5, path: "team/ACCESS.yaml", keptAtMs: 2 },
+      { id: 6, path: "notes/a.md", keptAtMs: 3 },
     ]);
-    const copies = () =>
-      h.result.current.shellErrors.filter((row) => row.action?.label === "Save copy");
-    await waitFor(() => expect(copies()).toHaveLength(2));
-    expect(copies()).toMatchObject([
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
+    expect(h.result.current.shellErrors).toMatchObject([
       {
         message:
-          "dohc kept the access rule from outside dohc that Restore rule removed or replaced at new/access.yaml.",
+          "new/access.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
         action: { label: "Save copy" },
+        tone: "success",
+        seen: true,
       },
       {
         message:
-          "dohc kept the access rule from outside dohc that Restore rule removed or replaced at team/ACCESS.yaml.",
+          "team/ACCESS.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
         action: { label: "Save copy" },
+        tone: "success",
+        seen: true,
       },
+      { message: keptCopyMessage("notes/a.md"), seen: false },
     ]);
+    expect(h.result.current.shellErrors[2]!.tone).toBeUndefined();
   });
 
   it("shows each kept copy as a row whose Save copy saves it, clears the row, and opens the copy", async () => {

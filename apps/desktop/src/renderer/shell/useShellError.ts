@@ -40,6 +40,8 @@ import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
 export interface KeptCopyNotice {
   id: number;
   message: string;
+  /** Kept by the owner's Restore rule, whose outcome already names it. */
+  accessRule: boolean;
   save: () => void;
 }
 
@@ -1297,20 +1299,24 @@ export function useShellError(
     };
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
-    const summarized = arrived.length > 1;
+    // A copy the owner's Restore rule kept is the result they chose, and the
+    // Restore's own toast names it, so its row is quiet and not a failure.
+    const collided = arrived.filter((copy) => !copy.accessRule);
+    const summarized = collided.length > 1;
     const fresh: ShellError[] = arrived.map((copy) =>
       row({
         message: copy.message,
         retry: null,
         action: { label: "Save copy", run: copy.save },
         keptCopyId: copy.id,
-        seen: summarized,
+        seen: copy.accessRule || summarized,
+        ...(copy.accessRule ? { tone: "success" as const } : {}),
       }),
     );
     if (summarized) {
       fresh.push(
         row({
-          message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+          message: `dohc kept ${collided.length} copies of files other programs changed.`,
           retry: null,
           kind: "kept-copies-summary",
           seen: false,
@@ -1331,7 +1337,8 @@ export function useShellError(
         (error) =>
           (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
           (error.kind !== "kept-copies-more" || more) &&
-          (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)),
+          (error.kind !== "kept-copies-summary" ||
+            (copies.some((copy) => !copy.accessRule) && !summarized)),
       );
       return added.length === 0 && stays.length === current.length ? current : [...stays, ...added];
     });
