@@ -183,6 +183,7 @@ import {
 import {
   collectionsServer,
   createServerHomeData,
+  signedOutServer,
   type SavedCollectionsList,
 } from "./workspaces/collectionsHome";
 import {
@@ -1758,7 +1759,10 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
     }
     if (settled) localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
     void ownerDatasetCopies
-      .credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
+      .credentialsChanged(
+        snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null,
+        snapshot.credentials?.relayUrl ? new URL(snapshot.credentials.relayUrl).origin : null,
+      )
       .catch((error) => console.error("Collection copy cleanup failed", error));
     // A credential load publishes a temporary null first. Keep saved pages until the account is known.
     if (snapshot.credentials)
@@ -6527,6 +6531,64 @@ async function withCopyWorkspace<T>(
     return attempt();
   });
 }
+const datasetCopyRuntime = () => ({
+  launch: createDesktopAppRuntimeLauncher(utilityProcess, false),
+  entryPath: join(datasetRuntimePath(), "persistent-child.mjs"),
+});
+// The last Collections list this computer read from a syncing workspace's server, for `ownerKey`.
+function savedCollectionsList(
+  workspace: { workspaceId: string; rootPath: string },
+  origin: string,
+  ownerKey: string,
+  signal: AbortSignal,
+): SavedCollectionsList {
+  const list = () =>
+    withCopyWorkspace(workspace, signal, async (copyWorkspace) =>
+      ownerDatasetCopies.savedList({ ...copyWorkspace, origin, ownerKey }),
+    );
+  return {
+    read: async () => (await list()).read(),
+    write: async (value) => (await list()).write(value),
+  };
+}
+// Signed out, a syncing workspace's Collections as the account signed in
+// here last kept them: read-only, from this computer, asking the server
+// nothing. Null while someone is signed in, or when that account is not the
+// workspace's owner, which shows what it shows signed in.
+async function signedOutHome(
+  workspace: RegistryEntry,
+  signal: AbortSignal,
+): Promise<OwnerDatasetData | null> {
+  const remote = collectionsServer(workspace);
+  if (!remote) return null;
+  await warmCredentialCache();
+  if (cachedCredentials) return null;
+  const ownerKey = datasetCopyOwnerKey({ serverUrl: remote.serverUrl, userId: remote.ownerUserId });
+  const origin = await ownerDatasetCopies.signedOutOrigin(ownerKey);
+  if (origin === null) return null;
+  const server = signedOutServer();
+  return createServerHomeData({
+    host: new URL(origin).host,
+    list: server.list,
+    saved: savedCollectionsList(workspace, origin, ownerKey, signal),
+    copy: async (datasetId) => {
+      const copy = await withCopyWorkspace(workspace, signal, (copyWorkspace, lifetime) =>
+        ownerDatasetCopies.get({
+          ...copyWorkspace,
+          datasetId,
+          origin,
+          ownerKey,
+          lifetime,
+          assertOwner: () => {
+            if (cachedCredentials) throw new Error("Your server session changed. Try again.");
+          },
+          runtime: datasetCopyRuntime(),
+        }),
+      );
+      return copy.data(server, server, signal);
+    },
+  });
+}
 // A Collection on a server as its owner uses it here: through this
 // computer's kept copy, which reads offline. If `.dohc/local` isn't ready,
 // the server holds the Collection, so it works online without the copy.
@@ -6550,10 +6612,7 @@ async function ownerCopyData(
         if (!cachedCredentials || datasetCopyOwnerKey(cachedCredentials) !== ownerKey)
           throw new Error("Sign in as this Collection's owner.");
       },
-      runtime: {
-        launch: createDesktopAppRuntimeLauncher(utilityProcess, false),
-        entryPath: join(datasetRuntimePath(), "persistent-child.mjs"),
-      },
+      runtime: datasetCopyRuntime(),
       onChanged: () => notifyCollectionCopyChanged(workspace.workspaceId, datasetId),
     }),
   ).catch((error: unknown) => {
@@ -6597,21 +6656,6 @@ async function serverHomeFor(
       relayJson: (credentials, path, init) =>
         relayShareJsonWithCredentials(credentials, path, { ...init, redirect: "error" }),
     });
-  const saved = (signal: AbortSignal) => {
-    const list = () =>
-      withCopyWorkspace(workspace, signal, async (copyWorkspace) =>
-        ownerDatasetCopies.savedList({
-          ...copyWorkspace,
-          origin,
-          ownerKey: datasetCopyOwnerKey(credentials),
-        }),
-      );
-    return {
-      read: async () => (await list()).read(),
-      write: async (value: Parameters<SavedCollectionsList["write"]>[0]) =>
-        (await list()).write(value),
-    };
-  };
   return {
     ...session,
     origin,
@@ -6627,7 +6671,7 @@ async function serverHomeFor(
           );
           return ownerCopyData(workspace, session, origin, datasetId, server, signal);
         },
-        saved: saved(signal),
+        saved: savedCollectionsList(workspace, origin, datasetCopyOwnerKey(credentials), signal),
         changed: () => notifyCollectionCopyChanged(workspace.workspaceId),
       });
     },
@@ -9480,6 +9524,8 @@ function registerIpcHandlers(): void {
       signal: AbortSignal,
       read: typeof finishedTransfer = finishedTransfer,
     ): Promise<OwnerDatasetData> => {
+      const kept = await signedOutHome(workspace, signal);
+      if (kept) return kept;
       // On a computer that doesn't keep the Collections, the server's, as every Collection action chooses.
       const authority = await collectionsAuthorityFor(workspace, signal);
       if (authority.kind === "server") {

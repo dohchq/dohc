@@ -622,7 +622,9 @@ function ScopedCollection({
           {copy?.offline && (
             <p role="status" className="m-0 text-[12px] text-muted">
               Offline copy ·{" "}
-              {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}
+              {copy.host && !copy.signedOut
+                ? `Restoring needs ${copy.host}`
+                : "Connect to restore this Collection."}
             </p>
           )}
           {owner && (

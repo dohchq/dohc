@@ -92,6 +92,44 @@ it("offline, lists and reads what this computer kept, and refuses a change at on
   });
 }, 60_000);
 
+it("signed out, lists and reads what this computer kept, read-only, and refuses a change at once", async () => {
+  const relay = await relayWithCollection();
+  const computer = await relay.computer();
+  await computer.write(id(5), { values: { [id(4)]: "First" } });
+  await computer.data.list({});
+  await computer.read();
+
+  const signedOut = await computer.signOut();
+  expect((await signedOut.data.list({})).datasets.map((dataset) => dataset.datasetId)).toEqual([
+    id(1),
+  ]);
+  expect(await signedOut.read()).toMatchObject({
+    result: [{ id: 1, name: "First" }],
+    copy: { offline: true, signedOut: true },
+  });
+  const started = performance.now();
+  await expect(signedOut.write(id(7), { id: 1, name: "Signed out" })).rejects.toEqual(
+    expect.objectContaining({
+      code: "operation_refused",
+      message:
+        "dohc didn't save this change. This Collection is read-only until you connect your server.",
+      refusal: expect.objectContaining({ code: "offline" }),
+    }),
+  );
+  expect(performance.now() - started).toBeLessThan(1000);
+  // What the copy does not hold needs the server, which a signed-out read never asks.
+  await expect(signedOut.data.history({ datasetId: id(1) })).rejects.toThrow(
+    "Sign in to your server first.",
+  );
+  expect(await signedOut.read()).toMatchObject({ result: [{ id: 1, name: "First" }] });
+}, 60_000);
+
+it("signed out on a computer that kept nothing, says to sign in, as before", async () => {
+  const relay = await relayWithCollection();
+  const signedOut = await (await relay.computer()).signOut();
+  await expect(signedOut.data.list({})).rejects.toThrow("Sign in to your server first.");
+}, 60_000);
+
 type Computer = Awaited<ReturnType<Awaited<ReturnType<typeof startTestRelay>>["computer"]>>;
 
 /** Waits until a read shows the first record named `name`, one copy update at a time. */

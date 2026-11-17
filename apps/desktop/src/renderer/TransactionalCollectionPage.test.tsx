@@ -2656,34 +2656,40 @@ describe("a Data Collection's record panel and forms", () => {
     await waitFor(() => expect(result.onError).toHaveBeenCalled());
     expect(screen.queryByText("Alice")).toBeNull();
   });
-  it("shows saved offline records with no way to change them, and refreshes the copy", async () => {
-    const onRefresh = vi.fn();
-    const { invoke } = setup({
-      copy: { offline: true, savedAtMs: 1_700_000_000_000, host: "sync.example.test" },
-      onRefresh,
-      confirmDelete: async () => true,
-    });
-    await screen.findByText("Alice");
-    expect(screen.getByRole("status").textContent).toBe(
-      `Offline copy · Read-only until sync.example.test is reachable · ${new Date(1_700_000_000_000).toLocaleString()}`,
-    );
-    expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
-    for (const field of ["Name", "Amount", "Status"]) {
-      fireEvent.click(cell(field));
-      for (const key of ["Enter", "x", "Delete"]) press(key);
-      expect(editor()).toBeNull();
-    }
-    const record = openPanel();
-    expect(within(record).queryByRole("button", { name: "Record actions" })).toBeNull();
-    expect(within(within(record).getByRole("heading")).queryByRole("button")).toBeNull();
-    for (const field of ["Amount", "Status"])
-      expect(within(property(field)).queryByRole("button")).toBeNull();
-    expect(within(record).getByText("Offline copy · Read-only")).toBeTruthy();
-    fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
-    fireEvent.click(command("Refresh"));
-    expect(onRefresh).toHaveBeenCalledOnce();
-    expect(invoke).toHaveBeenCalledOnce();
-  });
+  it.each([
+    ["with the server out of reach", {}, "Read-only until sync.example.test is reachable"],
+    ["signed out", { signedOut: true as const }, "Read-only until you connect your server"],
+  ])(
+    "shows saved offline records %s with no way to change them, and refreshes the copy",
+    async (_kind, why, line) => {
+      const onRefresh = vi.fn();
+      const { invoke } = setup({
+        copy: { offline: true, savedAtMs: 1_700_000_000_000, host: "sync.example.test", ...why },
+        onRefresh,
+        confirmDelete: async () => true,
+      });
+      await screen.findByText("Alice");
+      expect(screen.getByRole("status").textContent).toBe(
+        `Offline copy · ${line} · ${new Date(1_700_000_000_000).toLocaleString()}`,
+      );
+      expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
+      for (const field of ["Name", "Amount", "Status"]) {
+        fireEvent.click(cell(field));
+        for (const key of ["Enter", "x", "Delete"]) press(key);
+        expect(editor()).toBeNull();
+      }
+      const record = openPanel();
+      expect(within(record).queryByRole("button", { name: "Record actions" })).toBeNull();
+      expect(within(within(record).getByRole("heading")).queryByRole("button")).toBeNull();
+      for (const field of ["Amount", "Status"])
+        expect(within(property(field)).queryByRole("button")).toBeNull();
+      expect(within(record).getByText("Offline copy · Read-only")).toBeTruthy();
+      fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
+      fireEvent.click(command("Refresh"));
+      expect(onRefresh).toHaveBeenCalledOnce();
+      expect(invoke).toHaveBeenCalledOnce();
+    },
+  );
 
   it("starts a new row from the table's last row, saves it with one create on Enter, and starts the next row", async () => {
     const invoke = vi.fn(

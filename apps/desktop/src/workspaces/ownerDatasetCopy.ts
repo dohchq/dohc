@@ -53,6 +53,15 @@ const offline = (host: string) =>
     code: "offline",
     message: `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
   });
+/** A change made with no one signed in, refused the same way. */
+const signedOutChange = () =>
+  new AppBackendRuntimeError({
+    code: "offline",
+    message:
+      "dohc didn't save this change. This Collection is read-only until you connect your server.",
+  });
+/** A signed-out read of what this computer did not keep, refused as any read that needs a session. */
+const signInFirst = () => new Error("Sign in to your server first.");
 function neverSent(error: unknown): boolean {
   if (!(error instanceof TypeError)) return false;
   const cause: unknown = error.cause;
@@ -153,6 +162,8 @@ async function prefetch(
 export async function createOwnerDatasetCopy(
   options: Parameters<typeof createDatasetReplica>[0] & {
     onChanged?(): void;
+    /** Opened with no one signed in: it shows what this computer kept, asks the server nothing, and changes nothing. */
+    signedOut?: boolean;
     retryMs?: number;
     slowMs?: number;
     firstOpenMs?: number;
@@ -160,6 +171,7 @@ export async function createOwnerDatasetCopy(
 ) {
   const {
     onChanged,
+    signedOut = false,
     retryMs = RETRY_MS,
     slowMs = SLOW_MS,
     firstOpenMs = FIRST_OPEN_MS,
@@ -202,6 +214,7 @@ export async function createOwnerDatasetCopy(
   const host = new URL(options.origin).host;
   const unreachable = () =>
     new CollectionServerUnreachableError(`This Collection needs ${host}, which dohc can't reach.`);
+  const refused = () => (signedOut ? signedOutChange() : offline(host));
   const markerPath = join(options.directory, "archived.json");
   const binding = createHash("sha256")
     .update(JSON.stringify([options.scope, options.ownerKey, new URL(options.origin).origin]))
@@ -303,9 +316,14 @@ export async function createOwnerDatasetCopy(
       return dataset;
     });
   // What a read shows now, without asking the server.
-  const offlineNow = () => reachable === false || slow;
+  const offlineNow = () => signedOut || reachable === false || slow;
   const kept = () => {
-    const copy = (savedAtMs: number) => ({ offline: offlineNow(), savedAtMs, host });
+    const copy = (savedAtMs: number) => ({
+      offline: offlineNow(),
+      savedAtMs,
+      host,
+      ...(signedOut ? { signedOut: true as const } : {}),
+    });
     if (archived)
       return {
         dataset: { ...archived.dataset, archived: true },
@@ -441,7 +459,7 @@ export async function createOwnerDatasetCopy(
   // Brings the copy up to date from the server, one update at a time. It never
   // fails: `failure` and `reachable` say how it went.
   const update = (): Promise<void> => {
-    if (!latest || closing || denied) return Promise.resolve();
+    if (!latest || closing || denied || signedOut) return Promise.resolve();
     return (updating ??= updateOnce(latest)
       .catch(() => undefined)
       .finally(() => {
@@ -457,6 +475,7 @@ export async function createOwnerDatasetCopy(
       if (!fresh()) void update();
       return shown;
     }
+    if (signedOut) throw signInFirst();
     let limit: ReturnType<typeof setTimeout> | undefined;
     const answered = await Promise.race([
       update().then(() => true),
@@ -628,6 +647,7 @@ export async function createOwnerDatasetCopy(
             if (!fresh()) void update();
             return shown.dataset;
           }
+          if (signedOut) throw signInFirst();
           try {
             const dataset = await describeRemote(remote, signal, datasetId, metadata);
             authorize(signal);
@@ -655,8 +675,10 @@ export async function createOwnerDatasetCopy(
             describe(saved.checkpoint.definitionJson).operations.some(
               (operation) => operation.operationId === input.operationId && !operation.readOnly,
             )
-          )
+          ) {
+            if (signedOut) throw refused();
             return change(input, saved.cursor);
+          }
           const state = await current(signal);
           if ("archived" in state.dataset && state.dataset.archived === true)
             throw Error(
@@ -666,7 +688,7 @@ export async function createOwnerDatasetCopy(
             (operation) => operation.operationId === input.operationId,
           );
           if (!operation?.readOnly) {
-            if (state.copy.offline) throw offline(host);
+            if (state.copy.offline) throw refused();
             return change(input, replica.state()!.cursor);
           }
           const result = await replica.read(input);

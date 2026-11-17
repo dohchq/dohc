@@ -2260,9 +2260,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
           <span role="status" className="truncate text-[12px] text-muted">
             {savedPages
               ? "Offline · Saved pages only"
-              : props.copy.offline
-                ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
-                : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
+              : props.copy.signedOut
+                ? "Offline copy · Read-only until you connect your server"
+                : props.copy.offline
+                  ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+                  : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
             · {new Date(props.copy.savedAtMs).toLocaleString()}
           </span>
         ) : undefined
