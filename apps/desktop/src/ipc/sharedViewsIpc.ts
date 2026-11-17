@@ -305,8 +305,13 @@ export function registerSharedViewsIpcHandlers<
     if (rebuild === null) return;
     // Only a closed copy can lose its id: the runner needs it to go further.
     // A converged copy whose record no longer names it was installed, and
-    // only its finish failed, which leaves the hidden History aside.
-    if (rebuild.phase === "converged" && view.rebuild === undefined) {
+    // only its finish failed, which leaves the hidden History aside. The
+    // runner may have installed it while the status was read, so read the
+    // record again.
+    if (
+      rebuild.phase === "converged" &&
+      requireWorkspace(workspaceId).shareView?.rebuild === undefined
+    ) {
       await dependencies
         .finishShareViewRebuild(workspaceId, rebuild.rebuildId)
         .catch((error: unknown) => {

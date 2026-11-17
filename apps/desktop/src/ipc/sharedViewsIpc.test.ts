@@ -966,6 +966,31 @@ describe("registered received-view handlers", () => {
       expect(h.reconcile).toHaveBeenCalledOnce();
     });
 
+    // The runner installed the rebuild while the status read was out: the
+    // record no longer names it, so the refresh finishes it and reads on
+    // instead of naming it again.
+    it("finishes a rebuild installed while its status was being read", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+        rebuild: { rebuildId: "rebuild-9" },
+      });
+      h.readRebuild.mockImplementationOnce(async () => {
+        const { rebuild: _installed, ...view } = h.workspace.shareView!;
+        h.workspace.shareView = view;
+        return { rebuildId: "rebuild-9", phase: "converged" };
+      });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.finishRebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-9");
+      expect(h.workspace.shareView).not.toHaveProperty("rebuild");
+      expect(h.rebuild).not.toHaveBeenCalled();
+      expect(h.reconcile).toHaveBeenCalledOnce();
+    });
+
     // After a restart the window shows Updating access and starts nothing.
     it("resumes each closed copy's rebuild at start, including one whose id was lost", async () => {
       const rebuiltReach = { ...stored, signature: "r2", visibilitySignature: "v2" };
