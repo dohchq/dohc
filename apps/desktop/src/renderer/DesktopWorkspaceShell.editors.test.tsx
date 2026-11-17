@@ -1,3 +1,5 @@
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import * as Y from "yjs";
 // @vitest-environment jsdom
 import { installGraphFixture } from "../testing/graphPage.fixture";
 import "./DesktopWorkspaceShell.testSupport";
@@ -1146,16 +1148,21 @@ describe("ui-state merge-on-load", () => {
   });
 });
 
-  // A live session shows each change as the host applies it. Reopening it for
-  // the pull that brings the same change drops whatever the person types
-  // while it reconnects.
-  it.each([
-    [true, 1],
-    [false, 2],
-  ] as const)("reopens an open shared document after a pull only when its live session did not show it (shown live: %s)", async (shownLive, opens) => {
+// A live session shows each change as the host applies it. Reopening it for
+// the pull that brings the same change drops whatever the person types
+// while it reconnects.
+it.each([
+  [true, 1],
+  [false, 2],
+] as const)(
+  "reopens an open shared document after a pull only when its live session did not show it (shown live: %s)",
+  async (shownLive, opens) => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: [{ path: "a.md", kind: "file" as const }], folders: [] as string[] }));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "a.md", kind: "file" as const }],
+      folders: [] as string[],
+    }));
     const doc = markdownToYDoc("# Shared\n");
     const openEngineYDocSession = vi.fn(async () => ({
       available: true,
@@ -1171,14 +1178,25 @@ describe("ui-state merge-on-load", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ accepted: true as const, updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     const unchanged: RefreshSharedViewResult = {
-      ok: true, status: "unchanged", changedPaths: 0, excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null,
+      ok: true,
+      status: "unchanged",
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      refusedOps: 0,
+      refusedDetail: null,
     };
     const pull = deferred<RefreshSharedViewResult>();
     let pulls = 0;
-    bridge.refreshSharedView = vi.fn(() => ++pulls === 1 ? pull.promise : Promise.resolve(unchanged));
+    bridge.refreshSharedView = vi.fn(() =>
+      ++pulls === 1 ? pull.promise : Promise.resolve(unchanged),
+    );
     renderShell(bridge, {
       ...WORKSPACE,
       shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" },
@@ -1189,7 +1207,12 @@ describe("ui-state merge-on-load", () => {
     const registryReads = vi.spyOn(bridge, "getWorkspaceRegistry");
 
     await act(async () => {
-      pull.resolve({ ...unchanged, status: "updated", changedPaths: 1, ...(shownLive ? { shownLive: true as const } : {}) });
+      pull.resolve({
+        ...unchanged,
+        status: "updated",
+        changedPaths: 1,
+        ...(shownLive ? { shownLive: true as const } : {}),
+      });
       await pull.promise;
     });
 
@@ -1199,4 +1222,5 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(opens));
     expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy();
     expect(openEngineYDocSession).toHaveBeenCalledTimes(opens);
-  });
+  },
+);

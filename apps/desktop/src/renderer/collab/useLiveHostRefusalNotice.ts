@@ -27,7 +27,9 @@ export function useLiveHostRefusalNotice(input: {
   current.current = { key, retry: input.retry, mounted: true };
   useEffect(() => {
     current.current.mounted = true;
-    return () => { current.current.mounted = false; };
+    return () => {
+      current.current.mounted = false;
+    };
   }, []);
   const noticed = sharedOpenNoticed(input.refusal) ? input.refusal : null;
   // The page that has waited long enough for its owner's dohc. Each new answer
@@ -37,7 +39,10 @@ export function useLiveHostRefusalNotice(input: {
   useEffect(() => {
     if (!waits) return;
     const timer = setTimeout(() => setWaitedFor(key), LIVE_HOST_WAIT_REPORT_MS);
-    return () => { clearTimeout(timer); setWaitedFor(null); };
+    return () => {
+      clearTimeout(timer);
+      setWaitedFor(null);
+    };
   }, [key, waits]);
   const refused = noticed && (!waits || waitedFor === key) ? noticed : null;
   useEffect(() => {

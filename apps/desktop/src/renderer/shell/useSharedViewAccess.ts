@@ -86,19 +86,20 @@ export function useSharedViewAccess(input: {
           };
           const pullShare = async () => {
             if (!pull) return;
-            const startedAt = lastPullAt = Date.now();
+            const startedAt = (lastPullAt = Date.now());
             const pulled = await latest.current.pull(pressBurst);
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             failures = 0;
             // A pull that answers at once still waits a second before the next.
-            nextPullAt = pulled === "other" ? Date.now() + 30_000 : Math.max(Date.now(), startedAt + 1_000);
+            nextPullAt =
+              pulled === "other" ? Date.now() + 30_000 : Math.max(Date.now(), startedAt + 1_000);
             levelChanged = pulled === "level-changed";
           };
           // Access verification must not delay the opening pull.
           const completed = await Promise.allSettled([accessCheck(), pullShare()]);
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           // An access check that ran beside the pull may have read the level before it changed.
-          if (levelChanged) completed.push(...await Promise.allSettled([accessCheck(true)]));
+          if (levelChanged) completed.push(...(await Promise.allSettled([accessCheck(true)])));
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           if (result.status === "needs-reopen") {
             paused = true;

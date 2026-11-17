@@ -1212,17 +1212,25 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
    * of its own beside any editor's, and the server merges the two. It
    * refuses with the reason the editor's open gives.
    */
-  async openSharedDocument(workspaceId: string, requested: string): Promise<EngineYDocSessionProvider> {
+  async openSharedDocument(
+    workspaceId: string,
+    requested: string,
+  ): Promise<EngineYDocSessionProvider> {
     const authority = this.#acquireWorkspace(workspaceId);
     try {
       authority.assertCurrent();
       const workspace = authority.workspace;
-      if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor) throw new Error("Only a shared view's notes open here.");
+      if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor)
+        throw new Error("Only a shared view's notes open here.");
       const path = await this.#markdownDocumentPath(workspace, requested);
       const capture = await this.#sharedCaptureFor(workspace);
       authority.assertCurrent();
       if (!capture) throw new Error("dohc could not open this page for editing.");
-      return await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      return await capture.openYDocSession({
+        path,
+        contentKind: "richdoc",
+        onRemoteUpdate: () => undefined,
+      });
     } finally {
       authority.release();
     }
@@ -1244,19 +1252,30 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       const path = await this.#markdownDocumentPath(workspace, requested);
       const attachment = workspace.attachmentId;
       if (this.#owner.documentSession(attachment, path)) return;
-      await this.#documentReservations.runMutation(attachment, path, () => this.#owner.ownsDocument(attachment, path), async () => {
-        authority.assertCurrent();
-        let capture = this.#captureFor(workspace);
-        if (!capture) {
-          await this.#ensureCaptureFor(workspace);
-          capture = this.#captureFor(workspace);
-        }
-        if (!capture) throw new Error("The workspace engine is not running.");
-        const provider = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
-        await provider.close();
-      }).catch((error: unknown) => {
-        if (!(error instanceof LiveDocumentOwnedError)) throw error;
-      });
+      await this.#documentReservations
+        .runMutation(
+          attachment,
+          path,
+          () => this.#owner.ownsDocument(attachment, path),
+          async () => {
+            authority.assertCurrent();
+            let capture = this.#captureFor(workspace);
+            if (!capture) {
+              await this.#ensureCaptureFor(workspace);
+              capture = this.#captureFor(workspace);
+            }
+            if (!capture) throw new Error("The workspace engine is not running.");
+            const provider = await capture.openYDocSession({
+              path,
+              contentKind: "richdoc",
+              onRemoteUpdate: () => undefined,
+            });
+            await provider.close();
+          },
+        )
+        .catch((error: unknown) => {
+          if (!(error instanceof LiveDocumentOwnedError)) throw error;
+        });
     } finally {
       authority.release();
     }
@@ -1341,7 +1360,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       await this.#ensureCaptureFor(workspace);
       capture = this.#captureFor(workspace);
     }
-    if (!capture) throw new Error(shared ? "dohc could not open this page for editing." : "The workspace engine is not running.");
+    if (!capture)
+      throw new Error(
+        shared
+          ? "dohc could not open this page for editing."
+          : "The workspace engine is not running.",
+      );
     const provider = await capture.openYDocSession({
       ...(input.allowLossySourceSha256
         ? { allowLossySourceSha256: input.allowLossySourceSha256 }
@@ -1791,7 +1815,13 @@ async function applyDocumentEdit(
   session: { keepBlocks: boolean; assertSame(): void; show(update: Uint8Array): void },
 ): Promise<AppliedEdit> {
   const savedToHost = provider.savedToHost;
-  const settleNow = provider.settleNow ?? (savedToHost && (async () => { await savedToHost.call(provider); return undefined; }));
+  const settleNow =
+    provider.settleNow ??
+    (savedToHost &&
+      (async () => {
+        await savedToHost.call(provider);
+        return undefined;
+      }));
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,

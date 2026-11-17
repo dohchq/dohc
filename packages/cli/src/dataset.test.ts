@@ -200,7 +200,7 @@ describe("dataset CLI", () => {
       expect(await list({ kind: "unclaimed", words })).toEqual({
         exitCode: 1,
         stdout: "",
-        stderr: cliLine(words),
+        stderr: `dohc: ${words}\n`,
       });
     },
   );

@@ -1751,8 +1751,9 @@ describe("a new page in the owner's workspace", () => {
       ),
     );
     expect(invited.status, await invited.clone().text()).toBe(200);
-    const memberId = ((await json(invited)).people as Array<{ memberId: string; email: string | null }>)
-      .find((person) => person.email === `${userId}@dohc.test`)!.memberId;
+    const memberId = (
+      (await json(invited)).people as Array<{ memberId: string; email: string | null }>
+    ).find((person) => person.email === `${userId}@dohc.test`)!.memberId;
     if (role === "admin") {
       const promoted = await r.h(
         request(OWNER, `/sync/${WORKSPACE}/members/${memberId}/role`, jsonBody({ role: "admin" })),

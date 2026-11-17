@@ -21,7 +21,10 @@ describe("a membership's pinned grant", () => {
 
   it("travels to the engine with every dimension", () => {
     expect(engineGrantedSelector(whole)).toEqual(whole);
-    expect(engineGrantedSelector({ paths: ["docs"], versionId: null, access: "view" }))
-      .toEqual({ paths: ["docs"], versionId: null, access: "view" });
+    expect(engineGrantedSelector({ paths: ["docs"], versionId: null, access: "view" })).toEqual({
+      paths: ["docs"],
+      versionId: null,
+      access: "view",
+    });
   });
 });

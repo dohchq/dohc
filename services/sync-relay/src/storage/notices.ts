@@ -833,6 +833,7 @@ function withWakes(
 const PHONE_NOTICE_KINDS = {
   // Who mentioned you, and where.
   mention: "located",
+  "chat-message": "located",
   // The agent's name, the thread's place, and its reply's opening words.
   "agent-run": "located",
   // The automation's name.

@@ -296,6 +296,10 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
     const resolver = (readFence: (userId: string) => Promise<number>) =>
       createLinkAuthorityResolver({
         storage: state.storage,
+        resolveActor: async () => {
+          throw new Error("Only personal agents here.");
+        },
+        publicOrigin: SHARE_WEB_ORIGIN,
         personalAgents: { readFence },
         linkKey: key,
         publicEditRelease: { version: 1 },

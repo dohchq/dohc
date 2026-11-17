@@ -504,21 +504,17 @@ describe("a phone's alert binding", () => {
   });
 });
 
-it("keeps browser subscriptions, their account names, and the generation counter through the upgrade", async () => {
+it("keeps browser subscriptions and the generation counter through the upgrade", async () => {
   const storage = await testStorage();
   const dbPath = storagePath(storage);
   closeTestStorage(storage);
   // Put the store back as the browser-only schema left it, with one subscription.
   const db = inspectDatabase(dbPath, { foreignKeys: true });
-  const names = db
-    .prepare("SELECT sql FROM sqlite_schema WHERE name = 'sync_relay_push_installation_names'")
-    .get()!.sql as string;
-  db.exec(`DROP TABLE sync_relay_push_installation_names; DROP TABLE sync_relay_push_subscriptions;
+  db.exec(`DROP TABLE sync_relay_push_subscriptions;
     DELETE FROM sync_relay_migrations WHERE migration_id = 'push-native-devices-v1';
     UPDATE sync_relay_push_generations SET last_generation = 7;`);
   db.exec(PUSH_SCHEMA.sync_relay_push_subscriptions);
   db.exec(PUSH_SCHEMA.idx_sync_relay_push_subscriptions_account);
-  db.exec(names);
   const installationId = "installation-000000001";
   db.prepare(`INSERT INTO sync_relay_push_subscriptions (installation_id, account_user_id, session_id,
     endpoint, p256dh, auth, vapid_key_id, generation, created_at_ms, updated_at_ms, expires_at_ms)
@@ -528,9 +524,6 @@ it("keeps browser subscriptions, their account names, and the generation counter
     "a".repeat(22),
     "0".repeat(64),
   );
-  db.prepare(
-    "INSERT INTO sync_relay_push_installation_names (installation_id, account_name) VALUES (?, 'Ana')",
-  ).run(installationId);
   db.close();
 
   const reopened = reopenTestStorage(dbPath);
@@ -543,9 +536,11 @@ it("keeps browser subscriptions, their account names, and the generation counter
   expect(
     inspect(dbPath, (inspection) => [
       inspection.prepare("SELECT kind FROM sync_relay_push_subscriptions").all(),
-      inspection.prepare("SELECT account_name FROM sync_relay_push_installation_names").all(),
+      inspection
+        .prepare("SELECT name FROM sqlite_schema WHERE name = 'sync_relay_push_installation_names'")
+        .all(),
     ]),
-  ).toEqual([[{ kind: "web" }], [{ account_name: "Ana" }]]);
+  ).toEqual([[{ kind: "web" }], []]);
   expect(
     reopened.bindPushDevice({
       userId: "ana",

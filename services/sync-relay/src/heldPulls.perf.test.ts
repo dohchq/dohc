@@ -58,21 +58,35 @@ function percentile(sorted: readonly number[], fraction: number): number {
 }
 
 async function ownerAppend(h: SyncRelayHandler, ops: unknown[]): Promise<void> {
-  const response = await h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })));
+  const response = await h(
+    request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })),
+  );
   expect(response.status, await response.clone().text()).toBe(200);
 }
 
 function channel(wireId: string, slug: string) {
   return [
-    logOp("chat.channel.create", chatChannelCreate(wireId, {
-      channelId: `chan-${slug}`, name: slug, slug, kind: "channel", type: "both", purpose: "", folderPath: slug,
-    }).payload),
+    logOp(
+      "chat.channel.create",
+      chatChannelCreate(wireId, {
+        channelId: `chan-${slug}`,
+        name: slug,
+        slug,
+        kind: "channel",
+        type: "both",
+        purpose: "",
+        folderPath: slug,
+      }).payload,
+    ),
     logOp("chat.thread.create", chatThreadCreate(`t-${slug}`, wireId, { slug }).payload),
   ];
 }
 
 const message = (messageId: string, threadId: string) =>
-  logOp("chat.message.append", chatMessageAppend(messageId, threadId, `post ${messageId}`, { authorUserId: OWNER }).payload);
+  logOp(
+    "chat.message.append",
+    chatMessageAppend(messageId, threadId, `post ${messageId}`, { authorUserId: OWNER }).payload,
+  );
 
 for (const where of ["group", "general"] as const) {
   it.skipIf(process.env.DOHC_HELD_PULL_MEASURE !== "1")(
@@ -81,22 +95,38 @@ for (const where of ["group", "general"] as const) {
       resetOpSeq();
       const activity = new DiscussionActivityHub();
       const storage = await testStorage();
-      const h = testHandler(storage, { discussionActivity: activity, lookupUserDisplayName: (userId: string) => `Name ${userId}` });
-      expect((await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status).toBe(200);
-      await ownerAppend(h, [...channel(GROUP, "team"), ...channel(GENERAL_CHANNEL_WIRE_ID, "general")]);
+      const h = testHandler(storage, {
+        discussionActivity: activity,
+        lookupUserDisplayName: (userId: string) => `Name ${userId}`,
+      });
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+      await ownerAppend(h, [
+        ...channel(GROUP, "team"),
+        ...channel(GENERAL_CHANNEL_WIRE_ID, "general"),
+      ]);
 
       const members = Array.from({ length: MEMBERS }, (_, index) => `member-${index}`);
       for (const member of members) {
-        const invited = await h(request(OWNER, `/sync/${WORKSPACE}/members/invites`,
-          jsonBody({ email: `${member}@dohc.test`, workspaceName: "Community" })));
+        const invited = await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/members/invites`,
+            jsonBody({ email: `${member}@dohc.test`, workspaceName: "Community" }),
+          ),
+        );
         expect(invited.status, await invited.clone().text()).toBe(200);
       }
       const shares = new Map<string, { shareId: string; cursor: number }>();
       for (const member of members) {
         const listed = await json(await h(request(member, "/sync/shares")));
-        const shareId = (listed.received as Array<{ shareId: string; selector: { kind?: string } }>)
-          .find((row) => row.selector.kind === "workspace")!.shareId;
-        const first = await json(await h(request(member, `/sync/shares/${shareId}/log?since=0&limit=500`)));
+        const shareId = (
+          listed.received as Array<{ shareId: string; selector: { kind?: string } }>
+        ).find((row) => row.selector.kind === "workspace")!.shareId;
+        const first = await json(
+          await h(request(member, `/sync/shares/${shareId}/log?since=0&limit=500`)),
+        );
         shares.set(member, { shareId, cursor: first.nextCursor as number });
       }
 
@@ -111,9 +141,13 @@ for (const where of ["group", "general"] as const) {
       async function follow(member: string): Promise<void> {
         const state = shares.get(member)!;
         for (;;) {
-          const response = await h(request(member,
-            `/sync/shares/${state.shareId}/log?since=${state.cursor}&limit=500&hold=30000&level=comment`,
-            { signal: controller.signal }));
+          const response = await h(
+            request(
+              member,
+              `/sync/shares/${state.shareId}/log?since=${state.cursor}&limit=500&hold=30000&level=comment`,
+              { signal: controller.signal },
+            ),
+          );
           const answeredAt = performance.now();
           expect(response.status).toBe(200);
           const page = await json(response);
@@ -122,7 +156,8 @@ for (const where of ["group", "general"] as const) {
           for (const op of page.ops as Array<{ opKind: string; payload: { messageId?: string } }>) {
             if (op.opKind !== "chat.message.append" || !op.payload.messageId) continue;
             const sent = sentAt.get(op.payload.messageId);
-            if (sent !== undefined && op.payload.messageId !== lastMessage) wakes.push(answeredAt - sent);
+            if (sent !== undefined && op.payload.messageId !== lastMessage)
+              wakes.push(answeredAt - sent);
             if (op.payload.messageId === lastMessage) done = true;
           }
           if (done) return;
@@ -143,7 +178,8 @@ for (const where of ["group", "general"] as const) {
         await ownerAppend(h, [message(messageId, where === "group" ? "t-team" : "t-general")]);
       }
       // Every pull has answered, or is waiting again, before the period ends.
-      if (where === "group") await expect.poll(() => wakes.length, { timeout: 30_000 }).toBe(MEMBERS * total);
+      if (where === "group")
+        await expect.poll(() => wakes.length, { timeout: 30_000 }).toBe(MEMBERS * total);
       await expect.poll(() => activity.stats().waiters, { timeout: 30_000 }).toBe(MEMBERS);
       const wallMs = performance.now() - wallBefore;
       const cpu = process.cpuUsage(cpuBefore);
@@ -152,11 +188,14 @@ for (const where of ["group", "general"] as const) {
       controller.abort();
 
       const cpuShare = (cpu.user + cpu.system) / 1000 / wallMs;
-      const cpuText = `cpu-user-ms=${(cpu.user / 1000).toFixed(0)} cpu-system-ms=${(cpu.system / 1000).toFixed(0)} ` +
+      const cpuText =
+        `cpu-user-ms=${(cpu.user / 1000).toFixed(0)} cpu-system-ms=${(cpu.system / 1000).toFixed(0)} ` +
         `wall-ms=${wallMs.toFixed(0)} cpu-share-of-one-core=${cpuShare.toFixed(3)} cores=${cpus().length}`;
       if (where === "general") {
         expect(wakes).toHaveLength(0);
-        console.log(`HELD_PULL_UNADMITTED members=${MEMBERS} posts=${total} rate=${POSTS_PER_SECOND}/s channel=general ${cpuText}`);
+        console.log(
+          `HELD_PULL_UNADMITTED members=${MEMBERS} posts=${total} rate=${POSTS_PER_SECOND}/s channel=general ${cpuText}`,
+        );
         expect(cpuShare).toBeLessThan(LIMITS.general.cpuShareOfOneCore);
         return;
       }
@@ -164,8 +203,10 @@ for (const where of ["group", "general"] as const) {
       const sorted = [...wakes].sort((a, b) => a - b);
       const p50 = percentile(sorted, 0.5);
       const p95 = percentile(sorted, 0.95);
-      console.log(`HELD_PULL_WAKE_MS members=${MEMBERS} posts=${total} rate=${POSTS_PER_SECOND}/s channel=group ` +
-        `p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} max=${sorted[sorted.length - 1]!.toFixed(2)} samples=${sorted.length} ${cpuText}`);
+      console.log(
+        `HELD_PULL_WAKE_MS members=${MEMBERS} posts=${total} rate=${POSTS_PER_SECOND}/s channel=group ` +
+          `p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} max=${sorted[sorted.length - 1]!.toFixed(2)} samples=${sorted.length} ${cpuText}`,
+      );
       expect(p50).toBeLessThan(LIMITS.group.wakeP50Ms);
       expect(p95).toBeLessThan(LIMITS.group.wakeP95Ms);
       expect(cpuShare).toBeLessThan(LIMITS.group.cpuShareOfOneCore);

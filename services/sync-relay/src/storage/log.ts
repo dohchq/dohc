@@ -630,8 +630,14 @@ export function fetchChatMessages(
 }
 
 /** A page of the messages in every channel's threads. The caller checks which channels the reader reaches. */
-export function fetchChannelMessages(storage: StorageContext, input: ChatPageInput): FetchLogPageResult & {latestCursor: number} {
-  return fetchPlacedMessages(storage, input, { sql: "json_extract(create_json, '$.channelWireId') IS NOT NULL", params: [] });
+export function fetchChannelMessages(
+  storage: StorageContext,
+  input: ChatPageInput,
+): FetchLogPageResult & { latestCursor: number } {
+  return fetchPlacedMessages(storage, input, {
+    sql: "json_extract(create_json, '$.channelWireId') IS NOT NULL",
+    params: [],
+  });
 }
 
 /**

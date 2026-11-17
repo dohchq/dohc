@@ -243,7 +243,7 @@ export function PostCard(props: {
   return (
     <div
       // The card shows the post's own message, not its comments.
-      ref={(element) => element && message ? showMessage(message.id, element) : undefined}
+      ref={(element) => (element && message ? showMessage(message.id, element) : undefined)}
       data-testid="chats-post-card"
       data-thread-id={props.thread.id}
       data-author-kind={message?.authorKind ?? "unknown"}

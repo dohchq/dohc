@@ -2,7 +2,11 @@ import type { ShareAccess } from "../../ipc/bridgeContract";
 
 // How a membership reads wherever it is named: the role first, then what the
 // owner lets members do. Sharing's row and the Open dialog say the same.
-export function membershipWho(role: "admin" | "member" | undefined, sender: string, access: string | null | undefined): string {
+export function membershipWho(
+  role: "admin" | "member" | undefined,
+  sender: string,
+  access: string | null | undefined,
+): string {
   if (role === "admin") return `Admin · ${sender} owns this workspace`;
   return access ? `Member · ${sender} lets members ${access}` : `Member · from ${sender}`;
 }
@@ -19,11 +23,21 @@ export function levelChangedWords(access: ShareAccess, by: string | null | undef
 // An ended membership leaves a copy that only reads, and so does a joined
 // workspace while another account is signed in, whatever its level.
 export type LevelMark = { label: string; title: string };
-export function levelMark(access: ShareAccess | null | undefined, ended: boolean, sender: string, otherAccount = false): LevelMark | null {
-  if (ended) return { label: "Read-only", title: "Your membership ended. This copy stays on this computer." };
+export function levelMark(
+  access: ShareAccess | null | undefined,
+  ended: boolean,
+  sender: string,
+  otherAccount = false,
+): LevelMark | null {
+  if (ended)
+    return {
+      label: "Read-only",
+      title: "Your membership ended. This copy stays on this computer.",
+    };
   if (otherAccount) return { label: "Read-only", title: "Signed in as another account" };
   if (access === "view") return { label: "View only", title: `${sender} lets members view only` };
-  if (access === "comment") return { label: "Can comment", title: `${sender} lets members comment` };
+  if (access === "comment")
+    return { label: "Can comment", title: `${sender} lets members comment` };
   return null;
 }
 

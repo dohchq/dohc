@@ -703,11 +703,19 @@ describe("a member's share view", () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");
     await invited(h, "ben");
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status).toBe(200);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
     const listing = await json(await h(request(OWNER, `/sync/shares?workspaceId=${WORKSPACE}`)));
-    const memberships = (listing.granted as Array<Record<string, unknown>>).filter((row) => (row.selector as { kind?: string } | null)?.kind === "workspace");
-    expect(memberships.map((row) => [row.recipientUserId, row.selector, row.access]).sort()).toEqual([
-      ["ana", { kind: "workspace", role: "admin" }, "edit"], ["ben", { kind: "workspace", role: "member" }, "comment"]]);
+    const memberships = (listing.granted as Array<Record<string, unknown>>).filter(
+      (row) => (row.selector as { kind?: string } | null)?.kind === "workspace",
+    );
+    expect(
+      memberships.map((row) => [row.recipientUserId, row.selector, row.access]).sort(),
+    ).toEqual([
+      ["ana", { kind: "workspace", role: "admin" }, "edit"],
+      ["ben", { kind: "workspace", role: "member" }, "comment"],
+    ]);
   });
 
   it("says a removed member's access was removed", async () => {

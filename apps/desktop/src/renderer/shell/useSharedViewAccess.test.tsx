@@ -104,9 +104,13 @@ it("starts the next pull as soon as a held pull answers, and checks access when 
 
 it("checks access again when a pull that ran beside an access check reports a level change", async () => {
   // The first access check reads the level before the change.
-  check.mockResolvedValueOnce({ status: "current", access: "comment" }).mockResolvedValueOnce({ status: "current", access: "edit" });
+  check
+    .mockResolvedValueOnce({ status: "current", access: "comment" })
+    .mockResolvedValueOnce({ status: "current", access: "edit" });
   pull.mockResolvedValueOnce("level-changed");
-  setup(); await flush(); await flush();
+  setup();
+  await flush();
+  await flush();
   expect(check).toHaveBeenCalledTimes(2);
   expect(verified).toHaveBeenLastCalledWith({ status: "current", access: "edit" });
 });

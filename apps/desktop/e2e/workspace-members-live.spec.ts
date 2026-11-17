@@ -7,8 +7,21 @@ import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { ownerEnrollment } from "./helpers/engineDb";
-import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
-import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, revealExplorerPath, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
+import {
+  approveDesktop,
+  createVerifiedAccount,
+  openDesktopApproval,
+  startSelfHostOnboardingStack,
+  trustFixtureCa,
+} from "./helpers/selfHostOnboarding";
+import {
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  revealExplorerPath,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
+} from "./helpers/workspace";
 
 // A workspace member at Edit and the owner write in one document at the same
 // time, on a self-hosted server: real accounts, and HTTPS from a test CA,
@@ -29,12 +42,18 @@ import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, revealExpl
 //
 // workspace-members.spec.ts covers the rest of membership on a plain http relay.
 
-test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
+test.skip(
+  !process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1",
+  "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.",
+);
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: new (path: string) => {
     exec(sql: string): void;
-    prepare(sql: string): { get(...values: unknown[]): Record<string, unknown> | undefined; run(...values: unknown[]): unknown };
+    prepare(sql: string): {
+      get(...values: unknown[]): Record<string, unknown> | undefined;
+      run(...values: unknown[]): unknown;
+    };
     close(): void;
   };
 };
@@ -99,9 +118,14 @@ async function typeAfter(page: Page, anchor: string, text: string) {
 }
 
 async function hostedStatus(page: Page, workspaceId: string, path: string) {
-  const live = await page.evaluate(workspaceId =>
-    (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listOwnerLiveDocuments({ workspaceId }), workspaceId);
-  return live.documents.find(document => document.path === path)?.status ?? "not hosted";
+  const live = await page.evaluate(
+    (workspaceId) =>
+      (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listOwnerLiveDocuments({
+        workspaceId,
+      }),
+    workspaceId,
+  );
+  return live.documents.find((document) => document.path === path)?.status ?? "not hosted";
 }
 
 /**
@@ -112,20 +136,40 @@ function fillHost(relayDatabase: string, workspaceId: string): number {
   const db = new DatabaseSync(relayDatabase);
   try {
     db.exec("PRAGMA busy_timeout=10000");
-    const workspace = db.prepare("SELECT owner_user_id, replication_epoch, stream_identity FROM sync_relay_workspaces WHERE workspace_id=?").get(workspaceId)!;
-    const active = Number(db.prepare("SELECT count(*) AS n FROM sync_relay_service_host_enrollments WHERE retired=0").get()!.n);
-    const insert = db.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,
+    const workspace = db
+      .prepare(
+        "SELECT owner_user_id, replication_epoch, stream_identity FROM sync_relay_workspaces WHERE workspace_id=?",
+      )
+      .get(workspaceId)!;
+    const active = Number(
+      db
+        .prepare("SELECT count(*) AS n FROM sync_relay_service_host_enrollments WHERE retired=0")
+        .get()!.n,
+    );
+    const insert =
+      db.prepare(`INSERT INTO sync_relay_service_host_enrollments(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,
       owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,owner_demand,demand_at_ms,accounted_bytes)
       VALUES (?,?,?,?,NULL,?,?,'pause',0,0,1,1,1,1,1,64)`);
     let added = 0;
     for (let i = active; i < HOST_MAX_DOCUMENTS; i++, added++) {
-      insert.run(workspaceId, `filler-object-${i}`, `filler/${i}.md`, workspace.owner_user_id, workspace.replication_epoch, workspace.stream_identity);
+      insert.run(
+        workspaceId,
+        `filler-object-${i}`,
+        `filler/${i}.md`,
+        workspace.owner_user_id,
+        workspace.replication_epoch,
+        workspace.stream_identity,
+      );
     }
     return added;
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 }
 
-test("@members-live a member at Edit and the owner write in one document and each sees the other's text", async ({ browser }, testInfo) => {
+test("@members-live a member at Edit and the owner write in one document and each sees the other's text", async ({
+  browser,
+}, testInfo) => {
   test.setTimeout(600_000);
   const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
   const ownerTemp = await createTempWorkspace();
@@ -136,8 +180,16 @@ test("@members-live a member at Edit and the owner write in one document and eac
   const contexts: BrowserContext[] = [];
   const desktops: LaunchedDesktopApp[] = [];
   const shot = (name: string) => testInfo.outputPath(`${name}.png`);
-  const ownerAccount = { email: `owner-${randomUUID()}@example.test`, password: `Owner-proof-${randomUUID()}`, name: "Ana" };
-  const memberAccount = { email: `member-${randomUUID()}@example.test`, password: `Member-proof-${randomUUID()}`, name: "Sam" };
+  const ownerAccount = {
+    email: `owner-${randomUUID()}@example.test`,
+    password: `Owner-proof-${randomUUID()}`,
+    name: "Ana",
+  };
+  const memberAccount = {
+    email: `member-${randomUUID()}@example.test`,
+    password: `Member-proof-${randomUUID()}`,
+    name: "Sam",
+  };
   try {
     stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true, signal });
     const origin = stack.relayUrl;
@@ -152,7 +204,10 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await createVerifiedAccount(memberPage, stack.account, memberAccount);
 
     // --- The owner syncs the workspace -------------------------------------
-    await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: LATER, contents: LATER_SEED }]);
+    await writeWorkspaceFiles(ownerTemp, [
+      { path: PATH, contents: SEED },
+      { path: LATER, contents: LATER_SEED },
+    ]);
     let owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
     desktops.push(owner);
     const { workspaceId } = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
@@ -175,18 +230,29 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await expect(members).toBeVisible({ timeout: 30_000 });
     await members.getByTestId("settings-members-invite-email").fill(memberAccount.email);
     await members.getByTestId("settings-members-invite-send").click();
-    await expect(members.getByTestId("settings-members-invite-email")).toHaveValue("", { timeout: 30_000 });
-    await expect(members.getByTestId("settings-members-row").filter({ hasText: memberAccount.email })).toBeVisible();
-    const edit = members.getByTestId("settings-members-level-control").getByRole("radio", { name: "Edit" });
+    await expect(members.getByTestId("settings-members-invite-email")).toHaveValue("", {
+      timeout: 30_000,
+    });
+    await expect(
+      members.getByTestId("settings-members-row").filter({ hasText: memberAccount.email }),
+    ).toBeVisible();
+    const edit = members
+      .getByTestId("settings-members-level-control")
+      .getByRole("radio", { name: "Edit" });
     await edit.click();
-    await expect(members.getByTestId("settings-members-level-busy")).toHaveCount(0, { timeout: 30_000 });
+    await expect(members.getByTestId("settings-members-level-busy")).toHaveCount(0, {
+      timeout: 30_000,
+    });
     await expect(edit).toBeChecked();
     await owner.page.getByRole("button", { name: "Close settings", exact: true }).click();
-    const workspaceName = (await owner.page.getByTestId("status-workspace").textContent())?.trim() ?? "";
+    const workspaceName =
+      (await owner.page.getByTestId("status-workspace").textContent())?.trim() ?? "";
     // The server can host a document only once its owner has opened it in dohc on a desktop, which gives it a live-editing history.
     // The owner then closes it, so it is not open on their desktop when Sam's open starts hosting it.
     await openDocument(owner.page, PATH);
-    await expect(owner.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
+    await expect(owner.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", {
+      timeout: 60_000,
+    });
     const ownerTab = owner.page.getByTestId(editorTabTestId(PATH));
     await ownerTab.hover();
     await ownerTab.getByRole("button", { name: /^Close / }).click();
@@ -205,23 +271,35 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await approveDesktop(memberPage, memberAccount);
     await expect(mine.getByTestId("settings-row-account")).toContainText(memberAccount.email);
     await mine.getByRole("button", { name: "Close settings", exact: true }).click();
-    if (!(await mine.getByTestId("sharing-view").isVisible())) await mine.getByTestId(activityPin("sharing")).click();
+    if (!(await mine.getByTestId("sharing-view").isVisible()))
+      await mine.getByTestId(activityPin("sharing")).click();
     const received = mine.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
     await expect(received.getByTestId("sharing-row-who")).toContainText("·", { timeout: 60_000 });
     await received.locator("[data-sharing-row-focus]").hover();
     await received.getByRole("button", { name: "Share actions" }).click();
     await mine.getByRole("menuitem", { name: "Open", exact: true }).click();
     await mine.getByTestId("open-shared-view").getByTestId("open-share-start").click();
-    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName, {
+      timeout: 120_000,
+    });
     await openLive(mine);
     await expect(editor(mine)).toContainText("The owner writes here.", { timeout: 60_000 });
     // Sam's open is what hosted it. The owner types once their desktop has bound the hosted document,
     // so the owner's edits go to the server's copy, not straight into the workspace's history.
-    await expect.poll(async () => {
-      const expected = stack!.ownerLiveBinding(workspaceId, PATH);
-      const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
-      return await hostedStatus(owner.page, workspaceId, PATH) === "ready" && !!actual && isDeepStrictEqual(actual.binding, expected!.binding);
-    }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          const expected = stack!.ownerLiveBinding(workspaceId, PATH);
+          const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
+          return (
+            (await hostedStatus(owner.page, workspaceId, PATH)) === "ready" &&
+            !!actual &&
+            isDeepStrictEqual(actual.binding, expected!.binding)
+          );
+        },
+        { timeout: 120_000, intervals: [1_000] },
+      )
+      .toBe(true);
     await openLive(owner.page);
 
     // --- Each person sees the other's typing -------------------------------
@@ -232,13 +310,19 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await expect(editor(mine)).toContainText(OWNER_TEXT);
 
     for (const theme of ["Light", "Dark"] as const) {
-      for (const [who, page] of [["owner", owner.page], ["member", mine]] as const) {
+      for (const [who, page] of [
+        ["owner", owner.page],
+        ["member", mine],
+      ] as const) {
         await setTheme(page, theme);
         await expect(editor(page)).toContainText(OWNER_TEXT);
         await expect(editor(page)).toContainText(MEMBER_TEXT);
         // A window behind the other one may not paint, so it comes to the front first.
         await page.bringToFront();
-        await page.screenshot({ path: shot(`coedit-${who}-${theme.toLowerCase()}`), animations: "disabled" });
+        await page.screenshot({
+          path: shot(`coedit-${who}-${theme.toLowerCase()}`),
+          animations: "disabled",
+        });
       }
     }
 
@@ -254,13 +338,20 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await clickDocument(mine, FRESH);
     const notice = mine.getByTestId("engine-may-hold-document-notice");
     // Waiting is a state dohc is fixing, so its toast is a notice with a title that says what is happening.
-    const freshToast = mine.getByTestId("workspace-shell-notice").filter({ hasText: 'Waiting to edit "raffle.md"' });
+    const freshToast = mine
+      .getByTestId("workspace-shell-notice")
+      .filter({ hasText: 'Waiting to edit "raffle.md"' });
     // dohc opens the page by itself once the owner's dohc is online, so the page shows the cause with a ring at once, and no Try again.
-    await expect(notice).toHaveText("Editing starts once the owner's dohc is online.", { timeout: 60_000 });
+    await expect(notice).toHaveText("Editing starts once the owner's dohc is online.", {
+      timeout: 60_000,
+    });
     await expect(notice.getByTestId("engine-may-hold-document-ring")).toBeVisible();
     await expect(notice.getByRole("button", { name: "Try again" })).toHaveCount(0);
     const answered = Date.now();
-    testInfo.annotations.push({ type: "without-lineage answer ms", description: String(answered - freshOpened) });
+    testInfo.annotations.push({
+      type: "without-lineage answer ms",
+      description: String(answered - freshOpened),
+    });
     const reader = mine.getByTestId("view-markdown");
     await expect(reader).toContainText("Prizes from local shops.");
     await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
@@ -269,18 +360,30 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await setTheme(mine, theme);
       await expect(freshToast).toHaveCount(0);
       await mine.bringToFront();
-      await mine.screenshot({ path: shot(`without-lineage-waiting-member-${theme.toLowerCase()}`), animations: "disabled" });
+      await mine.screenshot({
+        path: shot(`without-lineage-waiting-member-${theme.toLowerCase()}`),
+        animations: "disabled",
+      });
     }
     // Still waiting after 15 s, the toast says why, and its row stays in Notices.
-    await expect(freshToast).toContainText("Editing starts once the owner's dohc is online. You can still read it.", { timeout: 60_000 });
-    testInfo.annotations.push({ type: "without-lineage toast after ms", description: String(Date.now() - answered) });
+    await expect(freshToast).toContainText(
+      "Editing starts once the owner's dohc is online. You can still read it.",
+      { timeout: 60_000 },
+    );
+    testInfo.annotations.push({
+      type: "without-lineage toast after ms",
+      description: String(Date.now() - answered),
+    });
     expect(Date.now() - answered).toBeGreaterThanOrEqual(14_000);
     await expect(notice.getByTestId("engine-may-hold-document-ring")).toBeVisible();
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await expect(freshToast).toBeVisible();
       await mine.bringToFront();
-      await mine.screenshot({ path: shot(`without-lineage-toast-member-${theme.toLowerCase()}`), animations: "disabled" });
+      await mine.screenshot({
+        path: shot(`without-lineage-toast-member-${theme.toLowerCase()}`),
+        animations: "disabled",
+      });
     }
     await freshToast.getByRole("button", { name: "Dismiss workspace notice" }).click();
 
@@ -289,18 +392,32 @@ test("@members-live a member at Edit and the owner write in one document and eac
     desktops[desktops.indexOf(owner)] = ownerAgain;
     owner = ownerAgain;
     await owner.page.emulateMedia({ reducedMotion: "reduce" });
-    await expect(owner.page.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+    await expect(owner.page.getByTestId("status-workspace")).toHaveText(workspaceName, {
+      timeout: 120_000,
+    });
     const ownerBack = Date.now();
     // Sam's page turns live where it is, with no click from either person.
     await expect(editor(mine)).toHaveAttribute("contenteditable", "true", { timeout: 180_000 });
-    testInfo.annotations.push({ type: "live after owner start ms", description: String(Date.now() - ownerBack) });
+    testInfo.annotations.push({
+      type: "live after owner start ms",
+      description: String(Date.now() - ownerBack),
+    });
     await expect(notice).toHaveCount(0);
     await expect(editor(mine)).toContainText("Prizes from local shops.");
-    await expect.poll(async () => {
-      const expected = stack!.ownerLiveBinding(workspaceId, FRESH);
-      const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
-      return await hostedStatus(owner.page, workspaceId, FRESH) === "ready" && !!actual && isDeepStrictEqual(actual.binding, expected!.binding);
-    }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          const expected = stack!.ownerLiveBinding(workspaceId, FRESH);
+          const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
+          return (
+            (await hostedStatus(owner.page, workspaceId, FRESH)) === "ready" &&
+            !!actual &&
+            isDeepStrictEqual(actual.binding, expected!.binding)
+          );
+        },
+        { timeout: 120_000, intervals: [1_000] },
+      )
+      .toBe(true);
     await openLive(owner.page, FRESH);
     await typeAfter(owner.page, "Prizes from local shops.", ` ${OWNER_PRIZE}`);
     await expect(editor(mine)).toContainText(OWNER_PRIZE, { timeout: 60_000 });
@@ -310,19 +427,34 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await setTheme(mine, theme);
       await expect(editor(mine)).toContainText(MEMBER_PRIZE);
       await mine.bringToFront();
-      await mine.screenshot({ path: shot(`without-lineage-live-member-${theme.toLowerCase()}`), animations: "disabled" });
+      await mine.screenshot({
+        path: shot(`without-lineage-live-member-${theme.toLowerCase()}`),
+        animations: "disabled",
+      });
     }
 
     // --- The host is full: Sam's next document opens read-only at once -----
-    expect(fillHost(join(ownerTemp.baseDir, "relay-data", "relay.sqlite"), workspaceId)).toBeGreaterThan(0);
+    expect(
+      fillHost(join(ownerTemp.baseDir, "relay-data", "relay.sqlite"), workspaceId),
+    ).toBeGreaterThan(0);
     const opened = Date.now();
     await clickDocument(mine, LATER);
-    await expect(notice).toHaveText(/^The server is editing too many pages right now\. You can still read it\.\s*Try again$/, { timeout: 60_000 });
-    testInfo.annotations.push({ type: "host-full answer ms", description: String(Date.now() - opened) });
+    await expect(notice).toHaveText(
+      /^The server is editing too many pages right now\. You can still read it\.\s*Try again$/,
+      { timeout: 60_000 },
+    );
+    testInfo.annotations.push({
+      type: "host-full answer ms",
+      description: String(Date.now() - opened),
+    });
     // A toast says the same once, and its row stays in Notices.
-    const toast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "later.md" for editing' });
+    const toast = mine
+      .getByTestId("workspace-shell-error")
+      .filter({ hasText: 'dohc could not open "later.md" for editing' });
     await expect(toast).toHaveCount(1);
-    await expect(toast).toContainText("The server is editing too many pages right now. You can still read it.");
+    await expect(toast).toContainText(
+      "The server is editing too many pages right now. You can still read it.",
+    );
     // The page shows the file read-only, not the live editor.
     await expect(reader).toContainText("Ideas for next year.");
     await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
@@ -331,7 +463,10 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await setTheme(mine, theme);
       await expect(notice).toBeVisible();
       await mine.bringToFront();
-      await mine.screenshot({ path: shot(`host-full-member-${theme.toLowerCase()}`), animations: "disabled" });
+      await mine.screenshot({
+        path: shot(`host-full-member-${theme.toLowerCase()}`),
+        animations: "disabled",
+      });
     }
     // Try again asks once more and hears the same answer, without a second toast.
     await toast.getByRole("button", { name: "Dismiss workspace error" }).click();
@@ -346,12 +481,24 @@ test("@members-live a member at Edit and the owner write in one document and eac
     bodyFailure = { error };
     throw error;
   } finally {
-    if (stack) await testInfo.attach("relay output", { contentType: "text/plain", body: stack.relayOutput() }).catch(() => undefined);
-    const cleanup = await Promise.allSettled([...contexts.map(context => context.close()), ...desktops.map(desktop => desktop.close())]);
+    if (stack)
+      await testInfo
+        .attach("relay output", { contentType: "text/plain", body: stack.relayOutput() })
+        .catch(() => undefined);
+    const cleanup = await Promise.allSettled([
+      ...contexts.map((context) => context.close()),
+      ...desktops.map((desktop) => desktop.close()),
+    ]);
     trust?.restore();
-    cleanup.push(...await Promise.allSettled([stack?.close()]));
-    cleanup.push(...await Promise.allSettled([memberTemp.cleanup(), ownerTemp.cleanup()]));
-    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failures.length && !bodyFailure) throw new AggregateError(failures.map(result => result.reason), "Members live cleanup failed.");
+    cleanup.push(...(await Promise.allSettled([stack?.close()])));
+    cleanup.push(...(await Promise.allSettled([memberTemp.cleanup(), ownerTemp.cleanup()])));
+    const failures = cleanup.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failures.length && !bodyFailure)
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        "Members live cleanup failed.",
+      );
   }
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   DEFAULT_MEMBER_LEVEL,
   MAX_WORKSPACE_MEMBERS,
@@ -174,7 +175,7 @@ export function workspaceLevelChangedBy(
   return row ? String(row.changed_by_user_id) : null;
 }
 
-export type StoredMemberState = "invited" | "active" | "left" | "removed";
+export type StoredMemberState = "invited" | "active" | "removed";
 
 export interface WorkspaceMembershipRow {
   workspaceId: string;
@@ -1042,7 +1043,7 @@ export function createWorkspaceGroup(
     const { workspaceId } = membership;
     const actor = workspaceRoleOf(storage, workspaceId, input.actorUserId);
     if (!actor) return { ok: false, reason: "not-found" };
-    if (!manages(actor.role)) return { ok: false, reason: "forbidden" };
+    if (actor.role === "member") return { ok: false, reason: "forbidden" };
     const createdAtMs = Math.trunc(input.nowMs);
     const channelWireId = `channel_${randomUUID().replaceAll("-", "")}`;
     const originId = workspaceAdminOrigin(actor.memberId);

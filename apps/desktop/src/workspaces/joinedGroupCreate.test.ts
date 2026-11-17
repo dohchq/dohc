@@ -4,8 +4,17 @@ import { createJoinedGroup } from "./joinedGroupCreate";
 import { signalChatWrite, subscribeChatWrites } from "./chatWriteSignals";
 
 const team = {
-  id: "channel_wire_team", workspaceId: "joined", name: "Team", slug: "team", kind: "channel", type: "both",
-  purpose: "", createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0,
+  id: "channel_wire_team",
+  workspaceId: "joined",
+  name: "Team",
+  slug: "team",
+  kind: "channel",
+  type: "both",
+  purpose: "",
+  createdAtMs: 1,
+  updatedAtMs: 1,
+  threadCount: 0,
+  unreadCount: 0,
 } as ChatChannelSummary;
 
 // Proves: an agent's New group finishes while no window pulls the joined
@@ -17,8 +26,15 @@ it("pulls the joined workspace itself, so the Group arrives with no window pulli
     signalChatWrite(workspaceId);
   });
   const created = createJoinedGroup(
-    { createJoinedWorkspaceGroup: async () => ({ channelWireId: team.id }), subscribeChatWrites, pullJoinedWorkspace },
-    { workspace: { workspaceId: "joined", shareView: {} }, store: { listChannels: async () => [...channels] } },
+    {
+      createJoinedWorkspaceGroup: async () => ({ channelWireId: team.id }),
+      subscribeChatWrites,
+      pullJoinedWorkspace,
+    },
+    {
+      workspace: { workspaceId: "joined", shareView: {} },
+      store: { listChannels: async () => [...channels] },
+    },
     { name: "Team" },
     () => undefined,
   );
@@ -27,7 +43,10 @@ it("pulls the joined workspace itself, so the Group arrives with no window pulli
     deadline = setTimeout(() => reject(new Error("Nothing pulled the joined workspace.")), 2_000);
   });
   try {
-    await expect(Promise.race([created, noPull])).resolves.toEqual({ channel: team, channelWireId: team.id });
+    await expect(Promise.race([created, noPull])).resolves.toEqual({
+      channel: team,
+      channelWireId: team.id,
+    });
   } finally {
     clearTimeout(deadline);
   }
@@ -40,14 +59,20 @@ it("keeps waiting when its own pull fails", async () => {
   const channels: ChatChannelSummary[] = [];
   const created = createJoinedGroup(
     {
-      createJoinedWorkspaceGroup: async () => ({ channelWireId: team.id }), subscribeChatWrites,
-      pullJoinedWorkspace: async () => { throw new Error("offline"); },
+      createJoinedWorkspaceGroup: async () => ({ channelWireId: team.id }),
+      subscribeChatWrites,
+      pullJoinedWorkspace: async () => {
+        throw new Error("offline");
+      },
     },
-    { workspace: { workspaceId: "joined-2", shareView: {} }, store: { listChannels: async () => [...channels] } },
+    {
+      workspace: { workspaceId: "joined-2", shareView: {} },
+      store: { listChannels: async () => [...channels] },
+    },
     { name: "Team" },
     () => undefined,
   );
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
   channels.push(team);
   signalChatWrite("joined-2");
   await expect(created).resolves.toEqual({ channel: team, channelWireId: team.id });

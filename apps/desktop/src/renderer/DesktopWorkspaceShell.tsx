@@ -1835,12 +1835,6 @@ export function DesktopWorkspaceShell(props: {
       sharing,
     ],
   );
-  // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
-  const appAccess = useMemo(
-    () => ({ context: aboutAccessContext, server: cloudServerUrl }),
-    [accessContext, cloudServerUrl],
-  );
-
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
   // The renderer has no identity source yet, so the user shows as "You" —
   // the same fallback main uses for local authorship.
@@ -2544,6 +2538,12 @@ export function DesktopWorkspaceShell(props: {
         : accessContext,
     [accessContext, membershipView, otherAccountEmail, shareAccess, shareViewEnded],
   );
+  // What Review app's Share links needs to say the workspace's server is signed out, as Share does.
+  const appAccess = useMemo(
+    () => ({ context: aboutAccessContext, server: cloudServerUrl }),
+    [aboutAccessContext, cloudServerUrl],
+  );
+
   otherAccountNotice.current = otherAccountApplies
     ? {
         ...otherAccountWords(workspaceName(props.workspace), cloudStatus?.email ?? null),
@@ -2654,7 +2654,10 @@ export function DesktopWorkspaceShell(props: {
     !!shareView,
     shareViewReadsCollections,
     shareViewEnded,
-    () => clearIdentity(COLLECTIONS_LIST_NOTICE),
+    () => {
+      clearIdentity(COLLECTIONS_LIST_NOTICE);
+      clearIdentity(COLLECTIONS_READ);
+    },
   );
   const folderApps = useFolderAppOffers({
     workspaceId,
@@ -8239,6 +8242,11 @@ export function DesktopWorkspaceShell(props: {
                           onManageWorkspaces={props.onManageWorkspaces}
                           manageWorkspaces={manageWorkspaces}
                           setOpenShare={setOpenShare}
+                          level={
+                            membershipView && !shareViewEnded && !shareViewDamaged && shareAccess
+                              ? youCan(shareAccess)
+                              : undefined
+                          }
                           setQuickOpenOpen={setQuickOpenOpen}
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
@@ -9451,7 +9459,6 @@ export function DesktopWorkspaceShell(props: {
                                         onOpenApp={openAppTab}
                                         siteRoot={siteRoot}
                                         onShowSource={() => showPathInExplorer(siteRoot, true)}
-                                        membership={!!shareView?.membership}
                                         sharedView={!!shareView}
                                         onShareSite={(target) =>
                                           setShareTarget({
@@ -10039,6 +10046,7 @@ export function DesktopWorkspaceShell(props: {
                               workspaceId={workspaceId}
                               workspacePath={props.workspace.rootPath}
                               workspaceName={workspaceName(props.workspace)}
+                              membership={!!shareView?.membership}
                               sharedView={!!shareView}
                               // Main's own decision, not the renderer's settings read:
                               // only main knows whether a recorder exists for this session, and

@@ -25,8 +25,13 @@ export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "sh
 // A workspace this account joined as a member or admin.
 export function JoinedWorkspaceMark() {
   return (
-    <span data-testid="workspace-joined-mark" role="img" aria-label="Joined workspace" title="Joined workspace"
-      className="flex shrink-0 items-center text-subtle">
+    <span
+      data-testid="workspace-joined-mark"
+      role="img"
+      aria-label="Joined workspace"
+      title="Joined workspace"
+      className="flex shrink-0 items-center text-subtle"
+    >
       <Users size={12} aria-hidden />
     </span>
   );
@@ -248,7 +253,12 @@ export function Titlebar(props: {
                       <span className="truncate">{workspaceName(candidate)}</span>
                       {candidate.shareView?.membership ? <JoinedWorkspaceMark /> : null}
                       {props.level && candidate.workspaceId === props.workspace?.workspaceId ? (
-                        <span data-testid="workspace-switcher-level" className="ml-auto shrink-0 text-[12px] text-subtle">{props.level}</span>
+                        <span
+                          data-testid="workspace-switcher-level"
+                          className="ml-auto shrink-0 text-[12px] text-subtle"
+                        >
+                          {props.level}
+                        </span>
                       ) : candidate.kind === "shared" ? (
                         <span className="ml-auto text-[12px] text-subtle">Shared</span>
                       ) : null}

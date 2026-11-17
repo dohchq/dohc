@@ -1068,7 +1068,7 @@ it("shows a member who joined inside the pacing window once the paced retry list
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByTestId("about-access-empty").textContent).toBe("Only you");
+    expect(screen.getByTestId("about-access-empty").textContent).toBe("No one else");
     const pending = screen.getByTestId("about-access-freshness");
     expect(pending.getAttribute("data-state")).toBe("stale");
     expect(pending.textContent).toContain("May be out of date");
@@ -1197,6 +1197,6 @@ it("says on the member's own row that the membership ended", async () => {
   const row = await screen.findByTestId("about-access-row");
   expect(row.dataset.status).toBe("revoked");
   // The avatar shows the initial.
-  expect(row.textContent).toBe("YYouended");
+  expect(row.textContent).toBe("YYouMember · Ended");
   expect(bridgeMock.workspaceMembers).not.toHaveBeenCalled();
 });

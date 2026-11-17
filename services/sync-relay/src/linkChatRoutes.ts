@@ -111,7 +111,9 @@ export function createLinkChatRoutes(options: {
     | "getShareGrant"
     | "getShareLabels"
     | "getLinkPrincipalForGrantProfile"
-    | "workspaceIsOwnedBy" | "findThreadCreateLane" | "findThreadFirstMessageId"
+    | "workspaceIsOwnedBy"
+    | "findThreadCreateLane"
+    | "findThreadFirstMessageId"
   >;
   linkKey: string | Uint8Array | undefined;
   nowMs: () => number;

@@ -202,13 +202,44 @@ it("keeps a page an agent opened after a member once the member is removed and t
 it("keeps a page an agent opens after the membership a member opened it under ends", async () => {
   const f = await fixture();
   f.revoke();
-  expect(f.storage.inviteWorkspaceMember({ workspaceId: scope.workspaceId, actorUserId: "owner-1", workspaceName: "Plans", email: "sam@example.test",
-    recipientUserId: "member-1", newMemberId: () => "member-entry", newGrantId: () => "member-grant", newShareId: () => "members-share", nowMs: 5 }))
-    .toMatchObject({ ok: true });
-  expect(f.storage.setWorkspaceMemberLevel({ workspaceId: scope.workspaceId, actorUserId: "owner-1", level: "edit", workspaceName: undefined,
-    newShareId: () => "unused-share", nowMs: 6 })).toEqual({ ok: true });
-  f.storage.ensureOwnedLiveDocument({ intent: "member-open", userId: "member-1", workspaceId: scope.workspaceId, path: binding.currentPath, nowMs: 1_000, guard() {} });
-  expect(f.storage.endWorkspaceMembership({ workspaceId: scope.workspaceId, actorUserId: "owner-1", nowMs: 1_500 })).toEqual({ ok: true });
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      workspaceName: "Plans",
+      email: "sam@example.test",
+      recipientUserId: "member-1",
+      newMemberId: () => "member-entry",
+      newGrantId: () => "member-grant",
+      newShareId: () => "members-share",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      level: "edit",
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 6,
+    }),
+  ).toEqual({ ok: true });
+  f.storage.ensureOwnedLiveDocument({
+    intent: "member-open",
+    userId: "member-1",
+    workspaceId: scope.workspaceId,
+    path: binding.currentPath,
+    nowMs: 1_000,
+    guard() {},
+  });
+  expect(
+    f.storage.endWorkspaceMembership({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      nowMs: 1_500,
+    }),
+  ).toEqual({ ok: true });
   expect(f.read()).toMatchObject({ shareId: "members-share" });
   const held = f.agent("editor").open();
   await f.holding(1, 1);
@@ -217,7 +248,13 @@ it("keeps a page an agent opens after the membership a member opened it under en
   expect(await body(await held, 200)).toEqual(ready);
   expect(f.read()).toMatchObject({ shareId: null, ownerDemand: false, demandAtMs: 2_000 });
   expect(f.storage.serviceHostEnrollmentCovered(f.read()!, 2_000)).toBe(true);
-  expect(f.storage.releaseServiceHostEnrollment({ workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 2_000 })).toBeNull();
+  expect(
+    f.storage.releaseServiceHostEnrollment({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+      nowMs: 2_000,
+    }),
+  ).toBeNull();
 });
 
 // Proves: agents alone keep at most 48 documents hosted. The owner's Resume

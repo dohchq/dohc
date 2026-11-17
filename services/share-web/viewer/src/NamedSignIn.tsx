@@ -69,19 +69,54 @@ export function NamedSignIn(props: {
 }
 
 /** The account sign-in form of the join page and a member's workspace page, on the state page's column. */
-export function SignInForm(props: {busy: boolean; error: string | null; onSignIn(credentials: {email: string; password: string}): void}) {
+export function SignInForm(props: {
+  busy: boolean;
+  error: string | null;
+  onSignIn(credentials: { email: string; password: string }): void;
+}) {
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
-    props.onSignIn({email: String(values.get("email") ?? ""), password: String(values.get("password") ?? "")});
+    props.onSignIn({
+      email: String(values.get("email") ?? ""),
+      password: String(values.get("password") ?? ""),
+    });
   };
-  return <form className="join-form" onSubmit={submit} aria-describedby={props.error ? "join-sign-in-error" : undefined}>
-    <label>Email<input name="email" type="email" autoComplete="username" required disabled={props.busy} /></label>
-    <label>Password<input name="password" type="password" autoComplete="current-password" required disabled={props.busy} /></label>
-    <button className="handoff-button primary join-primary" disabled={props.busy} aria-busy={props.busy || undefined}>
-      {props.busy ? "Signing in…" : "Sign in"}
-    </button>
-    {props.error ? <p id="join-sign-in-error" className="join-error" role="alert">{props.error}</p> : null}
-    <a className="join-forgot" href="/account/forgot-password">Forgot your password?</a>
-  </form>;
+  return (
+    <form
+      className="join-form"
+      onSubmit={submit}
+      aria-describedby={props.error ? "join-sign-in-error" : undefined}
+    >
+      <label>
+        Email
+        <input name="email" type="email" autoComplete="username" required disabled={props.busy} />
+      </label>
+      <label>
+        Password
+        <input
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          required
+          disabled={props.busy}
+        />
+      </label>
+      <button
+        className="handoff-button primary join-primary"
+        disabled={props.busy}
+        aria-busy={props.busy || undefined}
+      >
+        {props.busy ? "Signing in…" : "Sign in"}
+      </button>
+      {props.error ? (
+        <p id="join-sign-in-error" className="join-error" role="alert">
+          {props.error}
+        </p>
+      ) : null}
+      <a className="join-forgot" href="/account/forgot-password">
+        Forgot your password?
+      </a>
+    </form>
+  );
 }

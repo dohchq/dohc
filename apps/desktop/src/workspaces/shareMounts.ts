@@ -461,7 +461,9 @@ export function assertMountableSelector(
     throw new Error("This code is for a shared group. Join it from Chats instead of mounting it.");
   }
   if (selector.wholeWorkspace === true) {
-    throw new Error("This is a workspace you joined. Open it as its own workspace instead of adding it here.");
+    throw new Error(
+      "This is a workspace you joined. Open it as its own workspace instead of adding it here.",
+    );
   }
 }
 

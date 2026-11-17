@@ -354,30 +354,54 @@ it("holds readiness only while the waiting editor is visible and ignores late an
 });
 
 it.each([
-  ["a failed open that waits for the host", { state: "failed", message: "dohc could not open this file for editing." }],
-  ["an open the server refused to host", { state: "host-refused", message: "dohc could not open this page for editing." }],
+  [
+    "a failed open that waits for the host",
+    { state: "failed", message: "dohc could not open this file for editing." },
+  ],
+  [
+    "an open the server refused to host",
+    { state: "host-refused", message: "dohc could not open this page for editing." },
+  ],
 ])("settles %s instead of opening again on each workspace change", async (_name, waiting) => {
   const f = deferredBridge();
   const listeners = new Set<(event: { workspaceId?: string; paths?: string[] }) => void>();
   let answer!: (value: unknown) => void;
-  const api = { ...f.api, onWorkspaceActivity: (listener: (event: { workspaceId?: string; paths?: string[] }) => void) => {
-    listeners.add(listener); return () => listeners.delete(listener);
-  }, waitForEngineYDocAdmission: vi.fn(() => new Promise<boolean>(() => undefined)),
-  openEngineYDocSession: vi.fn(() => new Promise(resolve => { answer = resolve; })) };
+  const api = {
+    ...f.api,
+    onWorkspaceActivity: (
+      listener: (event: { workspaceId?: string; paths?: string[] }) => void,
+    ) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    waitForEngineYDocAdmission: vi.fn(() => new Promise<boolean>(() => undefined)),
+    openEngineYDocSession: vi.fn(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    ),
+  };
   vi.stubGlobal("dohcDesktop", api);
   const activity = (event: { workspaceId?: string; paths?: string[] }) =>
-    act(() => { for (const listener of listeners) listener(event); });
+    act(() => {
+      for (const listener of listeners) listener(event);
+    });
   render(<Harness path="notes/plan.md" />);
   await waitFor(() => expect(api.openEngineYDocSession).toHaveBeenCalledOnce());
   // A share pull lands while the open waits for the relay.
   activity({ workspaceId: "ws-1" });
   await act(async () => answer({ available: false, sharedWaiting: waiting }));
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
   expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true");
   activity({ workspaceId: "ws-1" });
   activity({ workspaceId: "ws-1", paths: ["notes/plan.md"] });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
 });
 
@@ -388,11 +412,32 @@ it("opens a page that waits for the owner's desktop live once the host is ready"
   const f = deferredBridge();
   const doc = new Y.Doc();
   let ready!: (value: boolean) => void;
-  const waitForEngineYDocAdmission = vi.fn(() => new Promise<boolean>(resolve => { ready = resolve; }));
-  const api = { ...f.api, waitForEngineYDocAdmission, openEngineYDocSession: vi.fn()
-    .mockResolvedValueOnce({ available: false, sharedWaiting: { state: "host-refused", message: "dohc could not open this page for editing.",
-      reason: "Editing starts once the owner's dohc is online.", awaitsHost: true } })
-    .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 }) };
+  const waitForEngineYDocAdmission = vi.fn(
+    () =>
+      new Promise<boolean>((resolve) => {
+        ready = resolve;
+      }),
+  );
+  const api = {
+    ...f.api,
+    waitForEngineYDocAdmission,
+    openEngineYDocSession: vi
+      .fn()
+      .mockResolvedValueOnce({
+        available: false,
+        sharedWaiting: {
+          state: "host-refused",
+          message: "dohc could not open this page for editing.",
+          reason: "Editing starts once the owner's dohc is online.",
+          awaitsHost: true,
+        },
+      })
+      .mockResolvedValue({
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      }),
+  };
   const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
   vi.stubGlobal("dohcDesktop", api);
   try {
@@ -402,17 +447,32 @@ it("opens a page that waits for the owner's desktop live once the host is ready"
     await act(async () => ready(true));
     await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
     expect(api.openEngineYDocSession).toHaveBeenCalledTimes(2);
-  } finally { visibility.mockRestore(); doc.destroy(); }
+  } finally {
+    visibility.mockRestore();
+    doc.destroy();
+  }
 });
 
 it("waits for Try again, not the host, after a refusal nothing will change", async () => {
   const f = deferredBridge();
   const waitForEngineYDocAdmission = vi.fn(() => new Promise<boolean>(() => undefined));
-  const api = { ...f.api, waitForEngineYDocAdmission, openEngineYDocSession: vi.fn().mockResolvedValue({ available: false,
-    sharedWaiting: { state: "host-refused", message: "dohc could not open this page for editing.", reason: "The server is editing too many pages right now." } }) };
+  const api = {
+    ...f.api,
+    waitForEngineYDocAdmission,
+    openEngineYDocSession: vi.fn().mockResolvedValue({
+      available: false,
+      sharedWaiting: {
+        state: "host-refused",
+        message: "dohc could not open this page for editing.",
+        reason: "The server is editing too many pages right now.",
+      },
+    }),
+  };
   vi.stubGlobal("dohcDesktop", api);
   render(<Harness path="notes/later.md" />);
   await waitFor(() => expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true"));
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   expect(waitForEngineYDocAdmission).not.toHaveBeenCalled();
 });

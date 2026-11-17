@@ -1,3 +1,14 @@
+import { LiveHostingRefusal } from "./serviceHostEnrollment";
+import { SERVICE_HOST_MAX_WORKSPACES } from "../liveHostingLimits";
+function refusal(run: () => unknown): string | undefined {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof LiveHostingRefusal) return error.reason;
+    throw error;
+  }
+  return undefined;
+}
 import { afterEach, expect, it } from "vitest";
 import {
   fixture as ticketFixture,
@@ -1045,7 +1056,7 @@ it("never reclaims a note the owner's restore kept live, and reclaims it once th
 
 // A workspace member's open. `member-1` joins the fixture's workspace at
 // once, and the owner sets members to `level`.
-type Fixture = Awaited<ReturnType<typeof fixture>>;
+
 const MEMBER = "member-1";
 function setMemberLevel(f: Fixture, level: "view" | "comment" | "edit") {
   expect(
@@ -1119,7 +1130,9 @@ it("hosts a document a member at Edit opens and records the open as demand", asy
     demandAtMs: 30,
   });
   expect(heard).toEqual([true]);
-  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 30)).toBe(true);
+  expect(
+    serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 30),
+  ).toBe(true);
   // A second open renews the demand and changes nothing else.
   expect(
     memberOpen(f, {
@@ -1296,14 +1309,31 @@ it("opens a 17th page once the earlier member opens go stale, and retires the st
 // Proves: ending the membership deletes its row, yet a page a member opened
 // still reads as member-opened, so it stops counting at once and retires.
 it("retires a member-opened page once the owner ends the membership", async () => {
-  const f = await fixture(); addMember(f);
-  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  const f = await fixture();
+  addMember(f);
+  expect(
+    f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20 })
+      .ok,
+  ).toBe(true);
   memberOpen(f);
-  expect(f.storage.endWorkspaceMembership({workspaceId: scope.workspaceId, actorUserId: "owner-1", nowMs: 40})).toEqual({ok: true});
+  expect(
+    f.storage.endWorkspaceMembership({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      nowMs: 40,
+    }),
+  ).toEqual({ ok: true });
   expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!, 40)).toBe(false);
-  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 40)).toBe(false);
-  expect(f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 40}))
-    .toMatchObject({enabled: false, retired: true});
+  expect(
+    serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 40),
+  ).toBe(false);
+  expect(
+    f.storage.releaseServiceHostEnrollment({
+      workspaceId: scope.workspaceId,
+      objectId: binding.objectId,
+      nowMs: 40,
+    }),
+  ).toMatchObject({ enabled: false, retired: true });
 });
 
 // Proves: a member's open that revives a retired page, or takes over a live
@@ -1311,33 +1341,59 @@ it("retires a member-opened page once the owner ends the membership", async () =
 // lapses as a new member open does.
 it("counts and lapses a member open that revives a retired page or takes over one a revoked share left", async () => {
   const f = await fixture();
-  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  expect(
+    f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20 })
+      .ok,
+  ).toBe(true);
   const path = (name: string) => `docs/${name}.md`;
-  const release = (objectId: string, nowMs: number) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs});
-  const revoke = (shareId: string) => expect(f.storage.revokeShareGrant({shareId, grantId: `${shareId}-edit`, revokedAtMs: 20}).ok).toBe(true);
+  const release = (objectId: string, nowMs: number) =>
+    f.storage.releaseServiceHostEnrollment({ workspaceId: scope.workspaceId, objectId, nowMs });
+  const revoke = (shareId: string) =>
+    expect(
+      f.storage.revokeShareGrant({ shareId, grantId: `${shareId}-edit`, revokedAtMs: 20 }).ok,
+    ).toBe(true);
   // Its path share enrolled it, and its Edit grant ended before anyone joined.
   f.seed(scope.workspaceId, "retired-object", path("retired"), "retired-share");
-  f.enroll({path: path("retired"), shareId: "retired-share"});
+  f.enroll({ path: path("retired"), shareId: "retired-share" });
   revoke("retired-share");
-  expect(release("retired-object", 25)).toMatchObject({retired: true});
+  expect(release("retired-object", 25)).toMatchObject({ retired: true });
   // Its path share's Edit grant ends once a member reaches it, so the member's grant keeps it.
   f.seed(scope.workspaceId, "held-object", path("held"), "held-share");
-  f.enroll({path: path("held"), shareId: "held-share"});
+  f.enroll({ path: path("held"), shareId: "held-share" });
   addMember(f);
   revoke("held-share");
   expect(release("held-object", 25)).toBeNull();
-  for (const name of ["retired", "held"]) expect(memberOpen(f, {path: path(name)})).toMatchObject({enabled: true, retired: false, shareId: "members-share"});
+  for (const name of ["retired", "held"])
+    expect(memberOpen(f, { path: path(name) })).toMatchObject({
+      enabled: true,
+      retired: false,
+      shareId: "members-share",
+    });
   let opened = 0;
   for (let i = 1; i <= MEMBER_OPEN_MAX_DOCUMENTS; i++) {
-    f.seed(scope.workspaceId, `member-object-${i}`, path(`member-${i}`), `member-share-${i}`, false);
-    if (refusal(() => memberOpen(f, {path: path(`member-${i}`)})) === "live_host_full") break;
+    f.seed(
+      scope.workspaceId,
+      `member-object-${i}`,
+      path(`member-${i}`),
+      `member-share-${i}`,
+      false,
+    );
+    if (refusal(() => memberOpen(f, { path: path(`member-${i}`) })) === "live_host_full") break;
     opened++;
   }
   expect(opened).toBe(MEMBER_OPEN_MAX_DOCUMENTS - 2);
   const stale = 30 + MEMBER_OPEN_DEMAND_MS;
   for (const objectId of ["retired-object", "held-object"]) {
-    expect(serviceHostDocumentEnabled(f.storage as StorageContext, {workspaceId: scope.workspaceId, objectId}, undefined, false, stale)).toBe(false);
-    expect(release(objectId, stale)).toMatchObject({enabled: false, retired: true});
+    expect(
+      serviceHostDocumentEnabled(
+        f.storage as StorageContext,
+        { workspaceId: scope.workspaceId, objectId },
+        undefined,
+        false,
+        stale,
+      ),
+    ).toBe(false);
+    expect(release(objectId, stale)).toMatchObject({ enabled: false, retired: true });
   }
 });
 

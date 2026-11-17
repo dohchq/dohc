@@ -141,13 +141,25 @@ describe("creating in a joined workspace", () => {
   const header = () => within(screen.getByTestId("explorer-files-header"));
 
   it("offers a new page at Edit and hides page and folder creation below it", () => {
-    render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: false, folders: false } })} />);
+    render(
+      <Explorer
+        {...explorerProps({ shareView: joined, creates: { pages: false, folders: false } })}
+      />,
+    );
     expect(header().queryByRole("button", { name: "New page" })).toBeNull();
     expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
     cleanup();
 
     const onNewPage = vi.fn();
-    render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: true, folders: false }, onNewPage })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          shareView: joined,
+          creates: { pages: true, folders: false },
+          onNewPage,
+        })}
+      />,
+    );
     fireEvent.click(header().getByRole("button", { name: "New page" }));
     expect(onNewPage).toHaveBeenCalledWith("");
     expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
@@ -158,7 +170,15 @@ describe("creating in a joined workspace", () => {
     window.dohcDesktop = { createWorkspaceFolder } as unknown as typeof window.dohcDesktop;
     const onNewPage = vi.fn();
     try {
-      render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: true, folders: true }, onNewPage })} />);
+      render(
+        <Explorer
+          {...explorerProps({
+            shareView: joined,
+            creates: { pages: true, folders: true },
+            onNewPage,
+          })}
+        />,
+      );
       fireEvent.click(header().getByRole("button", { name: "New folder" }));
       const name = await screen.findByRole("textbox", { name: "New folder name" });
       fireEvent.change(name, { target: { value: "Plans" } });
@@ -171,12 +191,26 @@ describe("creating in a joined workspace", () => {
   });
 
   it("shows the folder an admin named while its first page is open, and drops it when the page closes", () => {
-    const rows = () => within(screen.getByTestId("file-tree")).getAllByTestId("tree-row").map((row) => row.dataset.path);
+    const rows = () =>
+      within(screen.getByTestId("file-tree"))
+        .getAllByTestId("tree-row")
+        .map((row) => row.dataset.path);
     const page = newPageTabPath("page-1", "Plans/Week 1");
-    const props = explorerProps({ shareView: joined, creates: { pages: true, folders: true }, expandedFolders: ["Plans"] });
+    const props = explorerProps({
+      shareView: joined,
+      creates: { pages: true, folders: true },
+      expandedFolders: ["Plans"],
+    });
     const { rerender } = render(<Explorer {...props} />);
     expect(rows()).toEqual(["note.md", "other.md"]);
-    rerender(<Explorer {...props} editorGroups={[{ id: "group-1", tabs: [{ path: "note.md" }, { path: page }], activeTab: page, size: 1 }]} />);
+    rerender(
+      <Explorer
+        {...props}
+        editorGroups={[
+          { id: "group-1", tabs: [{ path: "note.md" }, { path: page }], activeTab: page, size: 1 },
+        ]}
+      />,
+    );
     expect(rows()).toEqual(["Plans", "Plans/Week 1", "note.md", "other.md"]);
     // Cancel: the page closes unwritten, and its folder goes with it.
     rerender(<Explorer {...props} />);
@@ -187,17 +221,43 @@ describe("creating in a joined workspace", () => {
 describe("changing files where this person can't", () => {
   const joined = { granterEmail: GRANTER };
   const rowOf = (path: string) =>
-    within(screen.getByTestId("file-tree")).getAllByTestId("tree-row").find((row) => row.dataset.path === path)!;
-  const homeRowOf = (key: string) => document.querySelector<HTMLElement>(`[data-home-key="${key}"]`)!;
-  const osFiles = () => ({ dropEffect: "copy", effectAllowed: "all", files: [new File(["x"], "a.txt")], types: ["Files"], setData: vi.fn() });
+    within(screen.getByTestId("file-tree"))
+      .getAllByTestId("tree-row")
+      .find((row) => row.dataset.path === path)!;
+  const homeRowOf = (key: string) =>
+    document.querySelector<HTMLElement>(`[data-home-key="${key}"]`)!;
+  const osFiles = () => ({
+    dropEffect: "copy",
+    effectAllowed: "all",
+    files: [new File(["x"], "a.txt")],
+    types: ["Files"],
+    setData: vi.fn(),
+  });
 
   it("opens no rename, delete, move or import in Files at View, Comment, or as another account", () => {
     const onImportFiles = vi.fn();
     const deleteWorkspacePath = vi.fn();
     const moveWorkspacePath = vi.fn();
-    vi.stubGlobal("dohcDesktop", { deleteWorkspacePath, moveWorkspacePath, getDroppedFilePaths: () => ["C:/a.txt"] });
+    vi.stubGlobal("dohcDesktop", {
+      deleteWorkspacePath,
+      moveWorkspacePath,
+      getDroppedFilePaths: () => ["C:/a.txt"],
+    });
     try {
-      render(<Explorer {...explorerProps({ shareView: joined, changes: false, onImportFiles, folders: ["Plans"], files: [{ path: "note.md", kind: "file" }, { path: "Plans/a.md", kind: "file" }] })} />);
+      render(
+        <Explorer
+          {...explorerProps({
+            shareView: joined,
+            changes: false,
+            onImportFiles,
+            folders: ["Plans"],
+            files: [
+              { path: "note.md", kind: "file" },
+              { path: "Plans/a.md", kind: "file" },
+            ],
+          })}
+        />,
+      );
       fireEvent.click(rowOf("note.md"));
       fireEvent.keyDown(rowOf("note.md"), { key: "F2" });
       expect(screen.queryByTestId("tree-edit-input")).toBeNull();
@@ -205,7 +265,13 @@ describe("changing files where this person can't", () => {
       expect(screen.queryByTestId("delete-confirm")).toBeNull();
 
       expect(rowOf("note.md").getAttribute("draggable")).toBe("false");
-      const move = { effectAllowed: "move", dropEffect: "move", files: [], types: [], setData: vi.fn() };
+      const move = {
+        effectAllowed: "move",
+        dropEffect: "move",
+        files: [],
+        types: [],
+        setData: vi.fn(),
+      };
       fireEvent.dragStart(rowOf("note.md"), { dataTransfer: move });
       // A drop target that takes nothing leaves the drag over it unprevented.
       expect(fireEvent.dragOver(rowOf("Plans"), { dataTransfer: move })).toBe(true);

@@ -934,7 +934,7 @@ function ensureInsideTransaction(
     input.intent === "member-open" ||
     input.intent === "owner-open";
   const full = () =>
-    opening || input.intent === "owner-open"
+    opening
       ? new LiveHostingRefusal("live_host_full")
       : relayError("quota_exceeded", CAPACITY_FULL);
   const held = input.intent === "owner-resume" ? input.held : undefined;

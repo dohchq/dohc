@@ -14,7 +14,10 @@ export interface JoinedGroupInput {
  */
 export async function createJoinedGroup<View>(
   dependencies: {
-    createJoinedWorkspaceGroup(view: View, input: JoinedGroupInput): Promise<{ channelWireId: string }>;
+    createJoinedWorkspaceGroup(
+      view: View,
+      input: JoinedGroupInput,
+    ): Promise<{ channelWireId: string }>;
     subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
     // One pull of the joined workspace from main, as the window's refresh runs it.
     pullJoinedWorkspace(workspaceId: string): Promise<unknown>;
@@ -27,11 +30,14 @@ export async function createJoinedGroup<View>(
   assertCurrent: () => void,
 ): Promise<{ channel: ChatChannelSummary; channelWireId: string }> {
   const { workspaceId } = target.workspace;
-  const { channelWireId } = await dependencies.createJoinedWorkspaceGroup(target.workspace.shareView as View, {
-    name: input.name,
-    ...(input.type ? { type: input.type } : {}),
-    ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-  });
+  const { channelWireId } = await dependencies.createJoinedWorkspaceGroup(
+    target.workspace.shareView as View,
+    {
+      name: input.name,
+      ...(input.type ? { type: input.type } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+    },
+  );
   assertCurrent();
   // A pull that fails leaves the wait below, which says the Group has not arrived.
   void dependencies.pullJoinedWorkspace(workspaceId).catch(() => undefined);
@@ -41,11 +47,20 @@ export async function createJoinedGroup<View>(
     const unsubscribe = dependencies.subscribeChatWrites(workspaceId, () => wake());
     try {
       for (;;) {
-        const woke = new Promise<void>((resolve) => { wake = resolve; });
-        const found = (await target.store.listChannels({ workspaceId })).find((channel) => channel.id === channelWireId);
+        const woke = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        const found = (await target.store.listChannels({ workspaceId })).find(
+          (channel) => channel.id === channelWireId,
+        );
         if (found) return found;
         signal.throwIfAborted();
-        await Promise.race([woke, new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))]);
+        await Promise.race([
+          woke,
+          new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          ),
+        ]);
       }
     } finally {
       unsubscribe();
@@ -55,6 +70,9 @@ export async function createJoinedGroup<View>(
     return { channel: await arrived(), channelWireId };
   } catch (error) {
     assertCurrent();
-    throw new Error(`dohc created ${input.name}, and it has not reached this computer yet. It shows in Chats when it does.`, { cause: error });
+    throw new Error(
+      `dohc created ${input.name}, and it has not reached this computer yet. It shows in Chats when it does.`,
+      { cause: error },
+    );
   }
 }

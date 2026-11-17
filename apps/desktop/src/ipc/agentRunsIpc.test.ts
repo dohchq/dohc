@@ -780,9 +780,14 @@ describe("agent run IPC registrations", () => {
   // threads have no runs and nothing queued, and opening one must not fail.
   it("answers no runs and an idle dispatch for a shared view without capture", async () => {
     const h = await harness(true);
-    await expect(h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload)).resolves.toEqual({ runs: {} });
+    await expect(h.invoke(CHANNELS.chatRunRecordsForThread, threadPayload)).resolves.toEqual({
+      runs: {},
+    });
     await expect(h.invoke(CHANNELS.chatDispatchStateForThread, threadPayload)).resolves.toEqual({
-      liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false,
+      liveRunId: null,
+      liveTriggerMessageId: null,
+      pendingCount: 0,
+      paused: false,
     });
     expect(h.requireCapture).not.toHaveBeenCalled();
     expect(h.records).not.toHaveBeenCalled();

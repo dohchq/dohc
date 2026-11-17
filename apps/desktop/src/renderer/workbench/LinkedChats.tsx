@@ -663,7 +663,9 @@ export function LinkedChatsPanel(props: {
                 </div>
               ) : null}
               {readOnlyReason !== undefined ? (
-                <AboutNote testId="linked-chat-readonly-note" icon={Lock}>{readOnlyReason}</AboutNote>
+                <AboutNote testId="linked-chat-readonly-note" icon={Lock}>
+                  {readOnlyReason}
+                </AboutNote>
               ) : untracked ? (
                 <AboutNote testId="linked-chats-untracked">
                   dohc does not track this file, so it cannot have comments.

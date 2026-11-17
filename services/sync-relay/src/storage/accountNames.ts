@@ -23,7 +23,8 @@ export function initializeAccountNames(db: SqliteDb): void {
   const assert = () => {
     for (const [name, sql] of Object.entries(schema)) {
       const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name);
-      if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql)) throw Error("account name schema is missing or damaged");
+      if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql))
+        throw Error("account name schema is missing or damaged");
     }
   };
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
@@ -31,33 +32,52 @@ export function initializeAccountNames(db: SqliteDb): void {
     return;
   }
   for (const name of Object.keys(schema)) {
-    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name)) throw Error("unmarked account name schema already exists");
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
+      throw Error("unmarked account name schema already exists");
   }
   for (const sql of Object.values(schema)) db.exec(sql);
   assert();
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }
 
 /** Keeps the account's current name, inside the caller's transaction. Writes only when it changed. */
-export function saveAccountName(storage: StorageContext, userId: string, name: string | null, nowMs: number): void {
+export function saveAccountName(
+  storage: StorageContext,
+  userId: string,
+  name: string | null,
+  nowMs: number,
+): void {
   const normalized = normalizeShareDiscussionDisplayName(name);
   if (!normalized.ok) return;
-  const current = storage.db.prepare("SELECT display_name FROM sync_relay_account_names WHERE user_id = ?").get(userId);
+  const current = storage.db
+    .prepare("SELECT display_name FROM sync_relay_account_names WHERE user_id = ?")
+    .get(userId);
   if (current?.display_name === normalized.value) return;
-  storage.db.prepare(`INSERT INTO sync_relay_account_names (user_id, display_name, handle, updated_at_ms)
+  storage.db
+    .prepare(`INSERT INTO sync_relay_account_names (user_id, display_name, handle, updated_at_ms)
     VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name,
     handle = excluded.handle, updated_at_ms = excluded.updated_at_ms`)
     .run(userId, normalized.value, normalizeHandle(handleForName(normalized.value)), nowMs);
 }
 
 /** Keeps the account's current name in its own transaction. */
-export function recordAccountName(storage: StorageContext, userId: string, name: string | null, nowMs = Date.now()): void {
+export function recordAccountName(
+  storage: StorageContext,
+  userId: string,
+  name: string | null,
+  nowMs = Date.now(),
+): void {
   const normalized = normalizeShareDiscussionDisplayName(name);
   if (!normalized.ok || accountName(storage, userId) === normalized.value) return;
   storage.tx(() => saveAccountName(storage, userId, normalized.value, nowMs));
 }
 
 export function accountName(storage: StorageContext, userId: string): string | null {
-  const row = storage.db.prepare("SELECT display_name FROM sync_relay_account_names WHERE user_id = ?").get(userId);
+  const row = storage.db
+    .prepare("SELECT display_name FROM sync_relay_account_names WHERE user_id = ?")
+    .get(userId);
   return row ? String(row.display_name) : null;
 }

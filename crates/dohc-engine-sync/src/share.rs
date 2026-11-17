@@ -490,14 +490,14 @@ fn enforce_share_view_chat_boundary(
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or(SyncError::ShareBoundaryViolation)?;
-            if granted.scope == ShareScope::Workspace {
-                if let Some(channel_id) = thread_channel(tx, &op.workspace_id, thread_id)? {
-                    return if channel_is_group(tx, &op.workspace_id, &channel_id)? {
-                        Ok(())
-                    } else {
-                        Err(SyncError::ShareBoundaryViolation)
-                    };
-                }
+            if granted.scope == ShareScope::Workspace
+                && let Some(channel_id) = thread_channel(tx, &op.workspace_id, thread_id)?
+            {
+                return if channel_is_group(tx, &op.workspace_id, &channel_id)? {
+                    Ok(())
+                } else {
+                    Err(SyncError::ShareBoundaryViolation)
+                };
             }
             let path = thread_linked_path(tx, &op.workspace_id, thread_id)?
                 .ok_or(SyncError::ShareBoundaryViolation)?;

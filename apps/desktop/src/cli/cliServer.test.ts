@@ -2706,8 +2706,11 @@ describe("CLI socket server", () => {
       for (const access of ["view", "edit"] as const) {
         joinAs(access);
         context = { ...context, makeWorkReference };
-        await expect(invoke("link", { ...args(), target: { kind: "path", path: "tracked.md" } }))
-          .rejects.toThrow("Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.");
+        await expect(
+          invoke("link", { ...args(), target: { kind: "path", path: "tracked.md" } }),
+        ).rejects.toThrow(
+          "Agents can't make links in a joined workspace yet. Name the file or Group in the message instead.",
+        );
       }
       expect(makeWorkReference).not.toHaveBeenCalled();
     });
@@ -4091,7 +4094,11 @@ describe("CLI socket server", () => {
       [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
     ] as const) {
       const denied = await comment(path, "T", "B");
-      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `${reason.startsWith("dohc ") ? reason : `dohc: ${reason}`}\n` });
+      expect(denied).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr: `${reason.startsWith("dohc ") ? reason : `dohc: ${reason}`}\n`,
+      });
     }
     const beforeReadOnly = calls.writes;
     registryWorkspace = { ...registryWorkspace, readOnly: true };

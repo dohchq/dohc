@@ -319,7 +319,8 @@ export function createDeviceLiveDelivery(options: {
         console.error("Owner outbox change delivery failed.", serverLogLine(error));
     },
   });
-  if (changes) stopObserving = observeRelayWrites(storage, documents => changes.notifyWrite(documents));
+  if (changes)
+    stopObserving = observeRelayWrites(storage, (documents) => changes.notifyWrite(documents));
   return {
     receive(bytes: Buffer, binary: boolean): void {
       try {

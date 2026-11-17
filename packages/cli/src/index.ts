@@ -888,7 +888,11 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     }
   } catch (error) {
     if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
-    return { exitCode: 1, stdout: "", stderr: cliErrorLine(options.argv[0] === "members" ? membersWordsForCli(error) : error) };
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: cliErrorLine(options.argv[0] === "members" ? membersWordsForCli(error) : error),
+    };
   }
 }
 

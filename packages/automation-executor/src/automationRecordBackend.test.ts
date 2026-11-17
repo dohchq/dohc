@@ -1407,7 +1407,7 @@ it.each(["host"])("does not save a stale source refusal after the %s await", asy
               recipientUserId: "person",
               recipientEmail: "person@example.com",
               files: { paths: ["Source/automations.yaml"], access: "edit", versionId: null },
-              channel: null,
+              chat: null,
             },
           ],
         };

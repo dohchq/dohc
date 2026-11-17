@@ -1,5 +1,5 @@
-import {fetchShareWeb} from "./apiVersion";
-import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
+import { fetchShareWeb } from "./apiVersion";
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import {
   Component,
   lazy,
@@ -18,7 +18,6 @@ import { DohcMark, Icon, fileIcon } from "./icons";
 import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 import {
   accumulatorFromCurrentFiles,
-  filesFromAccumulator,
   foldLogOps,
   isExcalidraw,
   isMarkdown,
@@ -87,8 +86,13 @@ export class VersionMismatchError extends Error {}
 
 export async function versionMismatch(response: Response): Promise<VersionMismatchError | null> {
   if (response.status !== 409) return null;
-  const body = await response.clone().json().catch(() => null) as { api?: unknown; code?: unknown; error?: unknown } | null;
-  return body?.api === "share-web" && (body.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { api?: unknown; code?: unknown; error?: unknown } | null;
+  return body?.api === "share-web" &&
+    (body.code === "api_version_too_old" || body?.code === "api_version_too_new") &&
+    typeof body.error === "string"
     ? new VersionMismatchError(body.error)
     : null;
 }
@@ -99,15 +103,9 @@ export class EpochFloorChangedError extends Error {
   }
 }
 
-export type TextPreview =
-  | { status: "ready"; text: string }
-  | { status: "download" };
+export type TextPreview = { status: "ready"; text: string } | { status: "download" };
 
-export async function api(
-  session: string,
-  path: string,
-  signal?: AbortSignal,
-): Promise<Response> {
+export async function api(session: string, path: string, signal?: AbortSignal): Promise<Response> {
   return fetchShareWeb(path, {
     credentials: "same-origin",
     headers: { [SESSION_HEADER]: session },
@@ -176,8 +174,16 @@ export async function withBoundedRetry(
 // UTF-16; a high share of other C0 controls marks binary data too. Tab, line
 // breaks, form feed, and escape (terminal colors) are ordinary text.
 export function isStrayControlByte(byte: number): boolean {
-  return (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0b &&
-    byte !== 0x0c && byte !== 0x0d && byte !== 0x1b) || byte === 0x7f;
+  return (
+    (byte < 0x20 &&
+      byte !== 0x09 &&
+      byte !== 0x0a &&
+      byte !== 0x0b &&
+      byte !== 0x0c &&
+      byte !== 0x0d &&
+      byte !== 0x1b) ||
+    byte === 0x7f
+  );
 }
 export const MAX_STRAY_CONTROL_SHARE = 0.01;
 
@@ -252,7 +258,8 @@ export async function loadLog(
       }`,
       signal,
     );
-    if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+    if (!response.ok)
+      throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
@@ -284,10 +291,7 @@ export async function loadLog(
       }
       previousRelaySeq = op.relaySeq;
     }
-    if (
-      expectedEpochLogFloor !== undefined &&
-      page.epochLogFloor !== expectedEpochLogFloor
-    ) {
+    if (expectedEpochLogFloor !== undefined && page.epochLogFloor !== expectedEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
     if (foldEpochLogFloor === undefined) {
@@ -295,7 +299,8 @@ export async function loadLog(
     } else if (page.epochLogFloor !== foldEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
-    if ((page.ops as RelayOp[]).some(op => op.opKind === "files.reset")) throw new EpochFloorChangedError();
+    if ((page.ops as RelayOp[]).some((op) => op.opKind === "files.reset"))
+      throw new EpochFloorChangedError();
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
       return {
@@ -315,8 +320,9 @@ export function relayOp(value: unknown, currentOnly = false): value is RelayOp {
   if (currentOnly) {
     if (!Number.isSafeInteger(record.relaySeq) || Number(record.relaySeq) < 0) return false;
     if (record.opKind === "files.reset") return true;
-    const payload = record.payload as {objectId?: unknown; file?: unknown} | null;
-    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string") return false;
+    const payload = record.payload as { objectId?: unknown; file?: unknown } | null;
+    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string")
+      return false;
     if (payload.file === null) return true;
     const files = accumulatorFromCurrentFiles([payload.file]);
     return files !== null && [...files.values()][0]?.objectId === payload.objectId;
@@ -348,13 +354,16 @@ export function viewMeta(value: unknown): ViewMeta | null {
     (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||
     typeof record.lastSettledKnown !== "boolean" ||
     (record.lastSettledAtMs !== null &&
-      (typeof record.lastSettledAtMs !== "number" ||
-        !Number.isSafeInteger(record.lastSettledAtMs)))
+      (typeof record.lastSettledAtMs !== "number" || !Number.isSafeInteger(record.lastSettledAtMs)))
   ) {
     return null;
   }
   const channel = record.channel as Record<string, unknown> | null | undefined;
-  if (channel !== undefined && (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")) return null;
+  if (
+    channel !== undefined &&
+    (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")
+  )
+    return null;
   return {
     ...(channel ? { channel: { channelWireId: channel.channelWireId as string } } : {}),
     access,
@@ -366,7 +375,9 @@ export function viewMeta(value: unknown): ViewMeta | null {
     },
     lastSettledAtMs: record.lastSettledAtMs as number | null,
     lastSettledKnown: record.lastSettledKnown,
-    ...(typeof record.levelChangedBy === "string" && record.levelChangedBy.trim() ? { levelChangedBy: record.levelChangedBy.trim() } : {}),
+    ...(typeof record.levelChangedBy === "string" && record.levelChangedBy.trim()
+      ? { levelChangedBy: record.levelChangedBy.trim() }
+      : {}),
   };
 }
 
@@ -375,8 +386,9 @@ export async function loadCurrentProjection(
   signal?: AbortSignal,
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
-  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
-  const body = await response.json() as Record<string, unknown>;
+  if (!response.ok)
+    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+  const body = (await response.json()) as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
   if (
@@ -431,7 +443,8 @@ export async function loadCurrentState(
 
 export async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
   const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
-  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+  if (!response.ok)
+    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const meta = viewMeta(await response.json());
   if (!meta) throw new Error("refused");
   return meta;
@@ -488,21 +501,28 @@ export function fileTree(files: SharedFile[]): FolderNode {
     folders: [...folder.children.values()]
       .sort((left, right) => left.name.localeCompare(right.name))
       .map(complete),
-    files: [...folder.files]
-      .sort((left, right) => left.path.localeCompare(right.path)),
+    files: [...folder.files].sort((left, right) => left.path.localeCompare(right.path)),
   });
   return complete(root);
 }
 
-type TreeRow = {path: string; level: number; parent: string | null} & ({folder: FolderNode} | {file: SharedFile});
+type TreeRow = { path: string; level: number; parent: string | null } & (
+  | { folder: FolderNode }
+  | { file: SharedFile }
+);
 
-function treeRows(node: FolderNode, closed: ReadonlySet<string>, level = 1, parent: string | null = null): TreeRow[] {
+function treeRows(
+  node: FolderNode,
+  closed: ReadonlySet<string>,
+  level = 1,
+  parent: string | null = null,
+): TreeRow[] {
   return [
     ...node.folders.flatMap((folder): TreeRow[] => [
-      {path: folder.path, level, parent, folder},
+      { path: folder.path, level, parent, folder },
       ...(closed.has(folder.path) ? [] : treeRows(folder, closed, level + 1, folder.path)),
     ]),
-    ...node.files.map((file): TreeRow => ({path: file.path, level, parent, file})),
+    ...node.files.map((file): TreeRow => ({ path: file.path, level, parent, file })),
   ];
 }
 
@@ -521,21 +541,34 @@ export function FileTree(props: {
   const [focused, setFocused] = useState<string | null>(null);
   const items = useRef(new Map<string, HTMLButtonElement>());
   const rows = useMemo(() => treeRows(props.tree, closed), [props.tree, closed]);
-  const tabbable = rows.find((row) => row.path === focused)?.path
-    ?? rows.find((row) => row.path === props.selected)?.path ?? rows[0]?.path;
-  const fold = (path: string, open: boolean) => setClosed((value) => {
-    const next = new Set(value);
-    if (open) next.delete(path); else next.add(path);
-    return next;
-  });
+  const tabbable =
+    rows.find((row) => row.path === focused)?.path ??
+    rows.find((row) => row.path === props.selected)?.path ??
+    rows[0]?.path;
+  const fold = (path: string, open: boolean) =>
+    setClosed((value) => {
+      const next = new Set(value);
+      if (open) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   const keyDown = (event: KeyboardEvent, row: TreeRow) => {
-    const at = rows.indexOf(row), open = "folder" in row && !closed.has(row.path);
+    const at = rows.indexOf(row),
+      open = "folder" in row && !closed.has(row.path);
     let target: TreeRow | undefined;
     switch (event.key) {
-      case "ArrowDown": target = rows[at + 1]; break;
-      case "ArrowUp": target = rows[at - 1]; break;
-      case "Home": target = rows[0]; break;
-      case "End": target = rows.at(-1); break;
+      case "ArrowDown":
+        target = rows[at + 1];
+        break;
+      case "ArrowUp":
+        target = rows[at - 1];
+        break;
+      case "Home":
+        target = rows[0];
+        break;
+      case "End":
+        target = rows.at(-1);
+        break;
       case "ArrowRight":
         if ("folder" in row && !open) fold(row.path, true);
         else if (open && rows[at + 1]?.parent === row.path) target = rows[at + 1];
@@ -546,18 +579,24 @@ export function FileTree(props: {
         break;
       // Handled here, so the button does not also click.
       case "Enter":
-        if ("file" in row) props.onSelect(row.file); else fold(row.path, !open);
+        if ("file" in row) props.onSelect(row.file);
+        else fold(row.path, !open);
         break;
-      default: return;
+      default:
+        return;
     }
     event.preventDefault();
     if (target) items.current.get(target.path)?.focus();
   };
   const item = (row: TreeRow) => {
-    const open = "folder" in row && !closed.has(row.path), selected = props.selected === row.path;
+    const open = "folder" in row && !closed.has(row.path),
+      selected = props.selected === row.path;
     return (
       <button
-        ref={(node) => {if (node) items.current.set(row.path, node); else items.current.delete(row.path);}}
+        ref={(node) => {
+          if (node) items.current.set(row.path, node);
+          else items.current.delete(row.path);
+        }}
         role="treeitem"
         aria-level={row.level}
         aria-expanded={"folder" in row ? open : undefined}
@@ -568,30 +607,44 @@ export function FileTree(props: {
         type="button"
         onFocus={() => setFocused(row.path)}
         onKeyDown={(event) => keyDown(event, row)}
-        onClick={() => "file" in row ? props.onSelect(row.file) : fold(row.path, !open)}
+        onClick={() => ("file" in row ? props.onSelect(row.file) : fold(row.path, !open))}
       >
-        {"folder" in row ? <>
-          <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
-          <Icon name="folder" />
-          <span>{row.folder.name}</span>
-        </> : <>
-          <Icon name={fileIcon(row.file.path)} />
-          <span>{row.file.path.split("/").at(-1)}</span>
-        </>}
+        {"folder" in row ? (
+          <>
+            <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
+            <Icon name="folder" />
+            <span>{row.folder.name}</span>
+          </>
+        ) : (
+          <>
+            <Icon name={fileIcon(row.file.path)} />
+            <span>{row.file.path.split("/").at(-1)}</span>
+          </>
+        )}
       </button>
     );
   };
   const byPath = new Map(rows.map((row) => [row.path, row]));
-  const children = (node: FolderNode): ReactNode => <>
-    {node.folders.map((folder) => (
-      <li key={folder.path} role="none">
-        {item(byPath.get(folder.path)!)}
-        {closed.has(folder.path) ? null : <ul role="group">{children(folder)}</ul>}
-      </li>
-    ))}
-    {node.files.map((file) => <li key={file.path} role="none">{item(byPath.get(file.path)!)}</li>)}
-  </>;
-  return <ul className="tree" role="tree" aria-label={props.label}>{children(props.tree)}</ul>;
+  const children = (node: FolderNode): ReactNode => (
+    <>
+      {node.folders.map((folder) => (
+        <li key={folder.path} role="none">
+          {item(byPath.get(folder.path)!)}
+          {closed.has(folder.path) ? null : <ul role="group">{children(folder)}</ul>}
+        </li>
+      ))}
+      {node.files.map((file) => (
+        <li key={file.path} role="none">
+          {item(byPath.get(file.path)!)}
+        </li>
+      ))}
+    </>
+  );
+  return (
+    <ul className="tree" role="tree" aria-label={props.label}>
+      {children(props.tree)}
+    </ul>
+  );
 }
 
 export function FileView(props: {
@@ -603,13 +656,10 @@ export function FileView(props: {
 }) {
   const [previewText, setPreviewText] = useState<string | null>(null);
   const [previewIsDownload, setPreviewIsDownload] = useState(false);
-  const [fileStatus, setFileStatus] = useState<
-    "ready" | "refreshing" | "unavailable"
-  >("ready");
+  const [fileStatus, setFileStatus] = useState<"ready" | "refreshing" | "unavailable">("ready");
   const [readAttempt, setReadAttempt] = useState(0);
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
-  const rendersExcalidraw =
-    props.file.contentKind === "text" && isExcalidraw(props.file.path);
+  const rendersExcalidraw = props.file.contentKind === "text" && isExcalidraw(props.file.path);
   // Any other text file shows its source as plain text, never as markup.
   const rendersSourceText =
     props.file.contentKind === "text" &&
@@ -626,7 +676,10 @@ export function FileView(props: {
     setPreviewText(null);
     setPreviewIsDownload(false);
     setFileStatus("ready");
-    if (!rendersTextPreview) return () => { current = false; };
+    if (!rendersTextPreview)
+      return () => {
+        current = false;
+      };
     const abortController = new AbortController();
     void apiWithThrottleRetry(
       props.session,
@@ -650,10 +703,7 @@ export function FileView(props: {
           return;
         }
         setFileStatus("refreshing");
-        const changed = await props.onStaleBlob(
-          props.file.path,
-          props.file.blobSha256,
-        );
+        const changed = await props.onStaleBlob(props.file.path, props.file.blobSha256);
         if (current && !abortController.signal.aborted && !changed) {
           setFileStatus("unavailable");
         }
@@ -696,12 +746,8 @@ export function FileView(props: {
     return (
       <MarkdownContent
         markdown={previewText}
-        resolveImage={(href) =>
-          resolveSharedImage(href, props.file.path, fileMap, props.session)
-        }
-        resolveLink={(href) =>
-          resolveSharedFile(href, props.file.path, fileMap)?.path ?? null
-        }
+        resolveImage={(href) => resolveSharedImage(href, props.file.path, fileMap, props.session)}
+        resolveLink={(href) => resolveSharedFile(href, props.file.path, fileMap)?.path ?? null}
         onNavigate={props.onSelect}
         collapseProperties
       />
@@ -739,10 +785,7 @@ export function FileView(props: {
   if (isRasterImage(props.file.path)) {
     const source = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
     return (
-      <RasterImage
-        source={source}
-        alt={props.file.path.split("/").at(-1) ?? "Shared image"}
-      />
+      <RasterImage source={source} alt={props.file.path.split("/").at(-1) ?? "Shared image"} />
     );
   }
   return <DownloadCard file={props.file} session={props.session} />;
@@ -813,7 +856,9 @@ export function DownloadCard(props: { file: SharedFile; session: string }) {
   return (
     // No glyphs here: a file that opens as a download shows no SVG at all, so a shared SVG is plainly never drawn.
     <div className="download-card">
-      <p>{isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}</p>
+      <p>
+        {isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}
+      </p>
       <a
         className="handoff-button secondary"
         href={visibleDownloadPath}
@@ -826,22 +871,29 @@ export function DownloadCard(props: { file: SharedFile; session: string }) {
         Download file
       </a>
       {downloadFailed ? (
-        <p className="download-error muted">
-          The download didn't finish. Try again.
-        </p>
+        <p className="download-error muted">The download didn't finish. Try again.</p>
       ) : null}
     </div>
   );
 }
 
 /** A page that stands alone: the mark, what happened, and the next step when there is one. */
-export function StatePage(props: { icon: "unlink" | "alert" | "refresh"; failed?: boolean; title: string; children?: ReactNode }) {
+export function StatePage(props: {
+  icon: "unlink" | "alert" | "refresh";
+  failed?: boolean;
+  title: string;
+  children?: ReactNode;
+}) {
   return (
     <div className="state-page">
-      <span className="bar-mark"><DohcMark /></span>
+      <span className="bar-mark">
+        <DohcMark />
+      </span>
       <main className="state">
         <div className="state-message" role={props.failed ? "alert" : undefined}>
-          <span className={props.failed ? "tile bad" : "tile"}><Icon name={props.icon} size={20} /></span>
+          <span className={props.failed ? "tile bad" : "tile"}>
+            <Icon name={props.icon} size={20} />
+          </span>
           <h1>{props.title}</h1>
           {props.children}
         </div>
@@ -854,24 +906,46 @@ export function StatePage(props: { icon: "unlink" | "alert" | "refresh"; failed?
 export function Opening() {
   return (
     <div className="state-page">
-      <span className="bar-mark"><DohcMark /></span>
+      <span className="bar-mark">
+        <DohcMark />
+      </span>
       <main className="state opening" aria-busy="true">
         <p className="sr-only">Opening shared files</p>
-        <div className="skeleton" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></div>
+        <div className="skeleton" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
       </main>
     </div>
   );
 }
 
 export const EMPTY_PICTURE = (
-  <svg aria-hidden="true" width="72" height="88" viewBox="0 0 72 88" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-    <rect x="1" y="1" width="70" height="86" rx="6" strokeDasharray="5 6" /><path d="M16 22h26M16 36h40M16 48h40M16 60h28" />
+  <svg
+    aria-hidden="true"
+    width="72"
+    height="88"
+    viewBox="0 0 72 88"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+  >
+    <rect x="1" y="1" width="70" height="86" rx="6" strokeDasharray="5 6" />
+    <path d="M16 22h26M16 36h40M16 48h40M16 60h28" />
   </svg>
 );
 
 // Narrow windows show the file list and the panels over the page, not beside it.
 export function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia?.("(max-width: 720px)").matches ?? false);
+  const [narrow, setNarrow] = useState(
+    () => window.matchMedia?.("(max-width: 720px)").matches ?? false,
+  );
   useEffect(() => {
     const query = window.matchMedia?.("(max-width: 720px)");
     if (!query) return;

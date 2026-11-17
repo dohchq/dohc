@@ -67,8 +67,18 @@ it.each([
   expect(deps.relayJson).not.toHaveBeenCalled();
 });
 it("refuses a joined workspace's Collections while another account is signed in, before transport", async () => {
-  const deps = input(), joined = { ...marker, grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true } };
-  expect(() => createNamedDatasetData({ ...deps, shareView: joined, credentials: { ...deps.credentials, userId: "other" } })).toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+  const deps = input(),
+    joined = {
+      ...marker,
+      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+    };
+  expect(() =>
+    createNamedDatasetData({
+      ...deps,
+      shareView: joined,
+      credentials: { ...deps.credentials, userId: "other" },
+    }),
+  ).toThrow(JOINED_BY_ANOTHER_ACCOUNT);
   expect(deps.relayJson).not.toHaveBeenCalled();
   await createNamedDatasetData({ ...deps, shareView: joined }).list({});
   expect(deps.relayJson).toHaveBeenCalledOnce();

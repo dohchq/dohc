@@ -1328,21 +1328,50 @@ describe("createCaptureLiveStores", () => {
   it("lists a joined workspace's unsent pages across the member's whole reach", async () => {
     const paths = ["ideas/new.md", "plans/2027/first.md", ".env/notes.md"];
     const asked: string[][] = [];
-    const client = clientFor(async request => {
-      if (request.method === VERSIONED_METHOD.textList) return { id: request.id, result: {
-        files: paths.map(path => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64),
-          byteLength: 5, binarySha256: null, updatedAtMs: 2, hasYdocMarker: false, latestMomentId: "moment-local",
-          metadataOrigin: "local-file", metadataSummary: null, metadataCorrelationId: null })), nextAfterPath: null,
-      } };
+    const client = clientFor(async (request) => {
+      if (request.method === VERSIONED_METHOD.textList)
+        return {
+          id: request.id,
+          result: {
+            files: paths.map((path) => ({
+              path,
+              objectId: path,
+              contentKind: "text",
+              sha256: "a".repeat(64),
+              byteLength: 5,
+              binarySha256: null,
+              updatedAtMs: 2,
+              hasYdocMarker: false,
+              latestMomentId: "moment-local",
+              metadataOrigin: "local-file",
+              metadataSummary: null,
+              metadataCorrelationId: null,
+            })),
+            nextAfterPath: null,
+          },
+        };
       const params = request.params as { paths: string[] };
       asked.push(params.paths);
-      return { id: request.id, result: Object.fromEntries(params.paths.map(path => [path, { state: "pending" }])) };
+      return {
+        id: request.id,
+        result: Object.fromEntries(params.paths.map((path) => [path, { state: "pending" }])),
+      };
     });
-    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace", shareMount: true }, sessionsFor(client));
-    await expect(store.listUnconfirmedSharePaths({ workspaceId: WORKSPACE_ID, shareId: "share-a",
-      grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true } }))
-      .resolves.toEqual({ paths: ["ideas/new.md", "plans/2027/first.md"], unchecked: false, checked: 2 });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace", shareMount: true },
+      sessionsFor(client),
+    );
+    await expect(
+      store.listUnconfirmedSharePaths({
+        workspaceId: WORKSPACE_ID,
+        shareId: "share-a",
+        grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+      }),
+    ).resolves.toEqual({
+      paths: ["ideas/new.md", "plans/2027/first.md"],
+      unchecked: false,
+      checked: 2,
+    });
     expect(asked).toEqual([["ideas/new.md", "plans/2027/first.md"]]);
   });
-
 });

@@ -1975,6 +1975,12 @@ it("logs drains that waited over 100 ms for their document once a minute, with f
 
 const stopLookup = { operationId: "restore", workspaceId: "workspace", ownerUserId: "owner" };
 
+const withoutLineage = () =>
+  new EngineRequestError(1, {
+    code: "CONFLICT",
+    message: "live-document-without-lineage",
+    retry: "no",
+  } as never);
 const unready = () =>
   new EngineRequestError(1, {
     code: "CONFLICT",
@@ -8722,7 +8728,11 @@ const openIdleOwnerConnection = async (o: Enrolled) => {
         .readNextLiveApplied(request(), opened.position, 10_000, signal)
         .catch(() => {});
     };
-    const unsubscribe = native.changes.subscribe(read, o.document);
+    const unsubscribe = native.changes.subscribe(read, {
+      kind: "object",
+      workspaceId: o.document.workspaceId,
+      objectId: o.document.objectId,
+    });
     read();
     return () => {
       unsubscribe();

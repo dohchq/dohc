@@ -236,7 +236,8 @@ export function createNamedDesktopLive(options: {
               path: path.normalized,
             });
             if (!objectId) return refuse();
-            let authorized = false, counted = false;
+            let authorized = false,
+              counted = false;
             const grants = namedGrant
               ? [namedGrant]
               : storage.listActiveShareGrantsForRecipient(shareId, actor.userId);

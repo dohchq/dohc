@@ -55,7 +55,11 @@ export function ShellTitlebar(props: {
       version={props.version}
       workspaceStatus={
         <>
-          <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} otherAccount={props.otherAccount} />
+          <WorkspaceSyncStatus
+            syncStatus={syncStatus}
+            failedSaves={failedSaves}
+            otherAccount={props.otherAccount}
+          />
           {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
         </>
       }

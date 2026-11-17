@@ -356,11 +356,35 @@ it("answers only the pinned recipient's own share for a matching mount account",
 });
 it("says the recipient's own row ended once the share or membership ended, for the app and the CLI alike", async () => {
   const h = harness();
-  const inventory = parseReceivedInventory({ received: [{ shareId: "received", grantId: "own", granterUserId: "owner", granterEmail: null,
-    selector: { kind: "workspace", role: "member" }, access: "edit", generation: 1, createdAtMs: 1, genericChatWritable: false }], removed: [] })!;
+  const inventory = parseReceivedInventory({
+    received: [
+      {
+        shareId: "received",
+        grantId: "own",
+        granterUserId: "owner",
+        granterEmail: null,
+        selector: { kind: "workspace", role: "member" },
+        access: "edit",
+        generation: 1,
+        createdAtMs: 1,
+        genericChatWritable: false,
+      },
+    ],
+    removed: [],
+  })!;
   h.received.mockReturnValue({ inventory, checkedAtMs: 42, freshness: "fresh" });
-  h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "https://relay.test", recipientEmail: "RECIPIENT@test.dev", ended: true });
-  expect(await h.owner.object("w", { ref: path })).toMatchObject({ freshness: "stale", rows: [{ grantId: "own", status: "revoked" }] });
+  h.resolve.mockResolvedValue({
+    ref: path,
+    visibility: "visible",
+    shareId: "received",
+    relayUrl: "https://relay.test",
+    recipientEmail: "RECIPIENT@test.dev",
+    ended: true,
+  });
+  expect(await h.owner.object("w", { ref: path })).toMatchObject({
+    freshness: "stale",
+    rows: [{ grantId: "own", status: "revoked" }],
+  });
 });
 it("uses one scope capture and rejects a credential generation change during resolution", async () => {
   const h = harness(),

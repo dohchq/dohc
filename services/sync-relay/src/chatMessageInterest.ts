@@ -169,7 +169,10 @@ export function pushMessageAccess(
     return {
       place:
         found?.place ??
-        pushPlainText(storage.getShareLabels(authority.share.shareId, "member").subjectName, "a chat"),
+        pushPlainText(
+          storage.getShareLabels(authority.share.shareId, "member").subjectName,
+          "a chat",
+        ),
       channel: found?.channel ?? Boolean(channel),
       dm,
       shareId: authority.share.shareId,

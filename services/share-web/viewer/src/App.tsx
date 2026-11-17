@@ -812,7 +812,12 @@ export function App() {
     <div className={editing ? "viewer link-page editing" : "viewer link-page"}>
       {several && !editing ? (
         <nav id="shared-files" aria-label="Shared files" hidden={!filesShown}>
-          <FileTree tree={tree} label="Shared files" selected={selected?.path ?? ""} onSelect={(file) => selectFile(file.path)} />
+          <FileTree
+            tree={tree}
+            label="Shared files"
+            selected={selected?.path ?? ""}
+            onSelect={(file) => selectFile(file.path)}
+          />
         </nav>
       ) : null}
       {filesShown && narrow ? (

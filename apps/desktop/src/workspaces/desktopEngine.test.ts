@@ -1,3 +1,16 @@
+async function ownerPasses(
+  f: { engine: { retryOwnerDelivery(workspaceId: string): void } },
+  count: number,
+) {
+  for (let pass = 0; pass < count; pass++) {
+    const before = ownerDeliveryMock.pass.mock.calls.length;
+    f.engine.retryOwnerDelivery("owner");
+    await vi.waitFor(() =>
+      expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before),
+    );
+  }
+}
+
 import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES } from "@dohc/live-session-contract/live-frame";
 import { resolve } from "node:path";
 import { mkdirSync } from "node:fs";
@@ -399,12 +412,17 @@ async function quarantinedOwner(
         documents: async (_signal, fresh) => {
           const answer = {
             ok: true,
-            documents: documents.map(({ path, objectId, head }) => ({
-              path,
-              status: "ready",
-              document: { binding: bindingOf(path, objectId), relayDatabaseNamespace: "namespace" },
-              ...(head ? { head: head() } : {}),
-            })).concat((server.rows?.() as never[]) ?? []),
+            documents: documents
+              .map(({ path, objectId, head }) => ({
+                path,
+                status: "ready",
+                document: {
+                  binding: bindingOf(path, objectId),
+                  relayDatabaseNamespace: "namespace",
+                },
+                ...(head ? { head: head() } : {}),
+              }))
+              .concat((server.rows?.() as never[]) ?? []),
             ...(server.kept ? { keptEdits: server.kept() } : {}),
             ...(server.keptCursor === undefined ? {} : { keptEditsCursor: server.keptCursor }),
           };
@@ -2442,61 +2460,96 @@ describe("server owner peer lifecycle", () => {
   });
 });
 
-  // Proves: a document the server cannot host until its live history starts
-  // gets a start with no window, then none until its wait ends, and each wait
-  // doubles. While a start can still help, the owner sees no "can't start"
-  // reason; once a start fails, the reason returns.
-  it("starts a document's live history by itself, one per pass, and backs off a document whose start fails", async () => {
-    const without = (path: string) => ({path, status: "unavailable", reason: "live-document-without-lineage"});
-    let rows = [without("notes/fresh.md"), without("notes/other.md")];
-    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {rows: () => rows});
-    const started = vi.fn(async (_workspaceId: string, path: string) => {if (path === "notes/other.md") throw new Error("The engine is not running.");});
-    f.dependencies.startOwnerLiveHistory = started;
-    const now = Date.now.bind(Date);
-    let ahead = 0;
-    const clock = vi.spyOn(Date, "now").mockImplementation(() => now() + ahead);
-    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    ownerDeliveryMock.pass.mockResolvedValue("empty");
-    try {
-      expect(await f.engine.start()).toBe(true);
-      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
-      expect(started.mock.calls).toEqual([["owner", "notes/fresh.md"]]);
-      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
-      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("preparing");
-      await ownerPasses(f, 1);
-      expect(started.mock.calls).toEqual([["owner", "notes/fresh.md"], ["owner", "notes/other.md"]]);
-      // The failed start shows the reason, and neither document starts again on the passes that follow at once.
-      await ownerPasses(f, 3);
-      expect(started).toHaveBeenCalledTimes(2);
-      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage");
-      // Past the first wait, each starts once more, then waits twice as long.
-      ahead = 31_000;
-      await ownerPasses(f, 3);
-      expect(started.mock.calls.slice(2).map(call => call[1]).sort()).toEqual(["notes/fresh.md", "notes/other.md"]);
-      ahead = 62_000;
-      await ownerPasses(f, 3);
-      expect(started).toHaveBeenCalledTimes(4);
-      ahead = 93_000;
-      await ownerPasses(f, 3);
-      expect(started).toHaveBeenCalledTimes(6);
-      // Once the server hosts them, the pass forgets them; a document listed again starts at once.
-      rows = [];
-      await ownerPasses(f, 1);
-      expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
-      rows = [without("notes/other.md")];
-      await ownerPasses(f, 1);
-      expect(started.mock.calls.at(-1)).toEqual(["owner", "notes/other.md"]);
-    } finally {credentials.abort(); clock.mockRestore(); errors.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+// Proves: a document the server cannot host until its live history starts
+// gets a start with no window, then none until its wait ends, and each wait
+// doubles. While a start can still help, the owner sees no "can't start"
+// reason; once a start fails, the reason returns.
+it("starts a document's live history by itself, one per pass, and backs off a document whose start fails", async () => {
+  const without = (path: string) => ({
+    path,
+    status: "unavailable",
+    reason: "live-document-without-lineage",
   });
+  let rows = [without("notes/fresh.md"), without("notes/other.md")];
+  const { f, credentials } = await quarantinedOwner(
+    [{ path: "notes/plan.md", objectId: "object" }],
+    { rows: () => rows },
+  );
+  const started = vi.fn(async (_workspaceId: string, path: string) => {
+    if (path === "notes/other.md") throw new Error("The engine is not running.");
+  });
+  f.dependencies.startOwnerLiveHistory = started;
+  const now = Date.now.bind(Date);
+  let ahead = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now() + ahead);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  ownerDeliveryMock.pass.mockResolvedValue("empty");
+  try {
+    expect(await f.engine.start()).toBe(true);
+    await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+    expect(started.mock.calls).toEqual([["owner", "notes/fresh.md"]]);
+    expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+    expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("preparing");
+    await ownerPasses(f, 1);
+    expect(started.mock.calls).toEqual([
+      ["owner", "notes/fresh.md"],
+      ["owner", "notes/other.md"],
+    ]);
+    // The failed start shows the reason, and neither document starts again on the passes that follow at once.
+    await ownerPasses(f, 3);
+    expect(started).toHaveBeenCalledTimes(2);
+    expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage");
+    // Past the first wait, each starts once more, then waits twice as long.
+    ahead = 31_000;
+    await ownerPasses(f, 3);
+    expect(
+      started.mock.calls
+        .slice(2)
+        .map((call) => call[1])
+        .sort(),
+    ).toEqual(["notes/fresh.md", "notes/other.md"]);
+    ahead = 62_000;
+    await ownerPasses(f, 3);
+    expect(started).toHaveBeenCalledTimes(4);
+    ahead = 93_000;
+    await ownerPasses(f, 3);
+    expect(started).toHaveBeenCalledTimes(6);
+    // Once the server hosts them, the pass forgets them; a document listed again starts at once.
+    rows = [];
+    await ownerPasses(f, 1);
+    expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
+    rows = [without("notes/other.md")];
+    await ownerPasses(f, 1);
+    expect(started.mock.calls.at(-1)).toEqual(["owner", "notes/other.md"]);
+  } finally {
+    credentials.abort();
+    clock.mockRestore();
+    errors.mockRestore();
+    await f.close();
+    ownerDeliveryMock.pass.mockReset();
+  }
+});
 
-  // Proves: with nothing on this computer to start a document's live history,
-  // the owner is told it can't start, as before.
-  it("names a document the server cannot start when this computer cannot start it either", async () => {
-    const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}],
-      {rows: () => [{path: "notes/fresh.md", status: "unavailable", reason: "live-document-without-lineage"}]});
-    ownerDeliveryMock.pass.mockResolvedValue("empty");
-    try {
-      expect(await f.engine.start()).toBe(true);
-      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
-    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
-  });
+// Proves: with nothing on this computer to start a document's live history,
+// the owner is told it can't start, as before.
+it("names a document the server cannot start when this computer cannot start it either", async () => {
+  const { f, credentials } = await quarantinedOwner(
+    [{ path: "notes/plan.md", objectId: "object" }],
+    {
+      rows: () => [
+        { path: "notes/fresh.md", status: "unavailable", reason: "live-document-without-lineage" },
+      ],
+    },
+  );
+  ownerDeliveryMock.pass.mockResolvedValue("empty");
+  try {
+    expect(await f.engine.start()).toBe(true);
+    await vi.waitFor(() =>
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"),
+    );
+  } finally {
+    credentials.abort();
+    await f.close();
+    ownerDeliveryMock.pass.mockReset();
+  }
+});

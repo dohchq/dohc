@@ -75,7 +75,11 @@ export interface NamedFrameRoomHost extends NamedFrameHostSession {
 }
 import { RelayError } from "./errors.js";
 import { createLogLineCap } from "./logLineCap.js";
-export { createNamedFrameChanges, type NamedFrameChangeScope, type NamedFrameChanges } from "./liveHostChanges.js";
+export {
+  createNamedFrameChanges,
+  type NamedFrameChangeScope,
+  type NamedFrameChanges,
+} from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
   readonly client: Pick<

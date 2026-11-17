@@ -11,7 +11,13 @@ import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-ref
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, dohcNavigation } from "./App";
-import { fileTree, loadCurrentState, loadLog, MAX_LOG_PAGES, TEXT_PREVIEW_BYTE_CAP } from "./viewFiles";
+import {
+  fileTree,
+  loadCurrentState,
+  loadLog,
+  MAX_LOG_PAGES,
+  TEXT_PREVIEW_BYTE_CAP,
+} from "./viewFiles";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 import { RETRY_MAX_MS } from "./retry";
 

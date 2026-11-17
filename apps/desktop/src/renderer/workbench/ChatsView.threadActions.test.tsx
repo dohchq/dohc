@@ -3,7 +3,15 @@ import "../../testing/legendListMock";
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { NOW, thread, message, openingPreview, bridgeMock, renderView } from "./ChatsView.testHarness";
+import {
+  NOW,
+  thread,
+  message,
+  openingPreview,
+  bridgeMock,
+  renderView,
+} from "./ChatsView.testHarness";
+import { tellWindowFocused } from "../../testing/windowFocus";
 import { messageOnScreen } from "./chatsOnScreen";
 
 describe("ChatsView decisions", () => {
@@ -384,10 +392,18 @@ describe("ChatsView runs that didn't reply", () => {
   // A mention or reply Notice reads when its own message shows. In the feed
   // a post shows its own message; its comments show once it is open.
   it("counts a post's message as on screen in the feed, and a comment only in the open post", async () => {
-    const comment = message({ id: "message-2", parentMessageId: "message-1", body: "Yes, Friday works.", createdAtMs: NOW + 1 });
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 2, openingMessage: openingPreview() })] });
+    const comment = message({
+      id: "message-2",
+      parentMessageId: "message-1",
+      body: "Yes, Friday works.",
+      createdAtMs: NOW + 1,
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2, openingMessage: openingPreview() })],
+    });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), comment] });
     renderView();
+    tellWindowFocused(true);
     const user = userEvent.setup();
     await user.click(await screen.findByTestId("chats-channel"));
     await screen.findByTestId("chats-post-card");

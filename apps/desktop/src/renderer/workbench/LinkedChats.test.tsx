@@ -560,6 +560,32 @@ describe("LinkedChatsPanel share level", () => {
     );
   }
 
+  it("names the reason it gives, and offers no comment control or composer", async () => {
+    const view = render(
+      panel({ shared: true, readOnly: "Only people who can comment post here." }),
+    );
+
+    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "Only people who can comment post here.",
+    );
+
+    view.rerender(
+      panel({
+        shared: true,
+        readOnly: "Only people who can comment post here.",
+        initialThread: searchThread,
+      }),
+    );
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "Only people who can comment post here.",
+    );
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+
   it("offers no comment when the share refuses writes, and never asks main to create one", async () => {
     render(panel({ shared: true, readOnly: READ_ONLY }));
 
@@ -840,25 +866,7 @@ describe("commentTitle", () => {
   });
 });
 
-  it("names the reason it gives, and offers no comment control or composer", async () => {
-    const view = render(panel({ shared: true, readOnly: "Only people who can comment post here." }));
-
-    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
-    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
-    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "Only people who can comment post here.",
-    );
-
-    view.rerender(panel({ shared: true, readOnly: "Only people who can comment post here.", initialThread: searchThread }));
-    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
-    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
-    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "Only people who can comment post here.",
-    );
-    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
-  });
-
-  // A shared view always states the answer, so an absent prop can only mean
-  // a workspace this machine owns. The shell is what guarantees that, and it
-  // is why this prop carries the decision rather than the level: a damaged
-  // grant has no level to read, and reading one would answer "writable".
+// A shared view always states the answer, so an absent prop can only mean
+// a workspace this machine owns. The shell is what guarantees that, and it
+// is why this prop carries the decision rather than the level: a damaged
+// grant has no level to read, and reading one would answer "writable".

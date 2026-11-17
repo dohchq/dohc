@@ -178,7 +178,9 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
     }
     const base = defaultWorkspaceRoot(effectiveHome());
     const segment = input.name === undefined ? null : folderSegment(input.name);
-    const root = (segment === null ? null : await freeFolder(base, segment)) ?? `${base}/shared/${input.shareId}`;
+    const root =
+      (segment === null ? null : await freeFolder(base, segment)) ??
+      `${base}/shared/${input.shareId}`;
     approveRoot(root);
     return DefaultShareRootResult.parse(root);
   });
@@ -353,7 +355,9 @@ export function registerOpenWorkspaceIpcHandler<
 // is left. Separators and characters Windows refuses become spaces.
 export function folderSegment(name: string): string | null {
   const segment = [...name.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ").replace(/\s+/gu, " ")]
-    .slice(0, 80).join("").replace(/^[.\s]+|[.\s]+$/gu, "");
+    .slice(0, 80)
+    .join("")
+    .replace(/^[.\s]+|[.\s]+$/gu, "");
   if (segment.length === 0 || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/iu.test(segment)) return null;
   return segment;
 }
@@ -363,7 +367,9 @@ export async function freeFolder(base: string, segment: string): Promise<string 
   for (let attempt = 1; attempt < 100; attempt += 1) {
     const root = `${base}/${attempt === 1 ? segment : `${segment} ${attempt}`}`;
     if (dirname(resolve(root)) !== resolve(base)) return null;
-    const entries = await readdir(root).catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : null);
+    const entries = await readdir(root).catch((error: NodeJS.ErrnoException) =>
+      error.code === "ENOENT" ? [] : null,
+    );
     if (entries !== null && entries.length === 0) return root;
   }
   return null;

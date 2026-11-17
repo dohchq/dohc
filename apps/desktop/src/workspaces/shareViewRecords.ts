@@ -146,9 +146,14 @@ export function recordedShareSelector(value: unknown): ShareViewSelector | null 
     wholeWorkspace?: unknown;
   };
   if (candidate.wholeWorkspace !== undefined) {
-    if (candidate.wholeWorkspace !== true || !Array.isArray(candidate.paths) ||
-      candidate.paths.length !== 0 || candidate.versionId !== null ||
-      !isShareAccessValue(candidate.access)) return null;
+    if (
+      candidate.wholeWorkspace !== true ||
+      !Array.isArray(candidate.paths) ||
+      candidate.paths.length !== 0 ||
+      candidate.versionId !== null ||
+      !isShareAccessValue(candidate.access)
+    )
+      return null;
     return { paths: [], versionId: null, access: candidate.access, wholeWorkspace: true };
   }
   if (!Array.isArray(candidate.paths)) return null;

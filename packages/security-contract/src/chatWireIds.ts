@@ -25,7 +25,15 @@ export function agentIdForChannelWireId(wireId: string): string | null {
  * message, or an agent chat. `kind` is the channel's kind in the owner's log.
  * The relay's workspace reach and the automation reach check both ask this.
  */
-export function isWorkspaceGroup(wireId: string | null, kind: string | null | undefined): wireId is string {
-  return typeof wireId === "string" && wireId.length > 0 && wireId !== GENERAL_CHANNEL_WIRE_ID &&
-    !wireId.startsWith(AGENT_CHANNEL_WIRE_ID) && kind === "channel";
+export function isWorkspaceGroup(
+  wireId: string | null,
+  kind: string | null | undefined,
+): wireId is string {
+  return (
+    typeof wireId === "string" &&
+    wireId.length > 0 &&
+    wireId !== GENERAL_CHANNEL_WIRE_ID &&
+    !wireId.startsWith(AGENT_CHANNEL_WIRE_ID) &&
+    kind === "channel"
+  );
 }

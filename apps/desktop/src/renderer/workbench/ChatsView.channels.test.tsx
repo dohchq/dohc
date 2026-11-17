@@ -52,8 +52,14 @@ describe("ChatsView channels", () => {
     });
 
     it("shows no Agents section and makes no direct-message or saved-message calls", async () => {
-      bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "Launch team" })], fileThreads: [] });
-      renderView(vi.fn(), vi.fn(), { joinedWorkspace: { createsGroups: false }, userSettings: DEFAULT_USER_SETTINGS });
+      bridgeMock.listChatChannels.mockResolvedValue({
+        channels: [channel({ name: "Launch team" })],
+        fileThreads: [],
+      });
+      renderView(vi.fn(), vi.fn(), {
+        joinedWorkspace: { createsGroups: false },
+        userSettings: DEFAULT_USER_SETTINGS,
+      });
       await screen.findByTestId("chats-channel");
       expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
       expect(screen.queryByText("Add an agent")).toBeNull();
@@ -232,8 +238,17 @@ describe("ChatsView channels", () => {
   });
 
   it("counts no unread messages in a Group the person can no longer reach once the membership ended", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "Launch team", unreadCount: 3 })], fileThreads: [] });
-    renderView(vi.fn(), vi.fn(), { joinedWorkspace: { postingClosed: "Your membership ended.", createsGroups: false, ended: true } });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ name: "Launch team", unreadCount: 3 })],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      joinedWorkspace: {
+        postingClosed: "Your membership ended.",
+        createsGroups: false,
+        ended: true,
+      },
+    });
     const row = await screen.findByTestId("chats-channel");
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
     expect(row.textContent).not.toContain("3");

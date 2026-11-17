@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dohc_engine_domain::chats::CHAT_THREAD_HEADER_MESSAGE_ID;
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, ChatActorKind, ChatChannelKind, ChatReactionState,
-    ChatThreadLane, DeleteTextFile, FollowState, FollowTargetKind, LinkedChatStore,
-    MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES,
-    SECRET_TAG_BYTES, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
-    attachment_id_for, channel_slug_for_name,
+    ChatThreadLane, DeleteTextFile, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
+    LinkedChatStore, MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES, RenameTextFile, ResolveDecision,
+    SECRET_IV_BYTES, SECRET_TAG_BYTES, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_files::MaterializeOptions;
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};

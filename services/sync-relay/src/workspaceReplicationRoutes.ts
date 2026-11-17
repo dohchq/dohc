@@ -174,7 +174,8 @@ export function createWorkspaceReplicationRoutes(
       });
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
       // A message's Notices name its author by the relay's record of their account.
-      if (accountNames && ops.some(op => op.opKind === "chat.message.append")) await accountDisplayName(accountNames, actor.userId);
+      if (accountNames && ops.some((op) => op.opKind === "chat.message.append"))
+        await accountDisplayName(accountNames, actor.userId);
       const workReferences = input.workReferences === undefined ? [] : input.workReferences;
       if (
         !Array.isArray(workReferences) ||

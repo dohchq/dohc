@@ -464,27 +464,42 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     }
 
     // --- The server stops and starts again: an outage ends nothing ---------
-    const registry = JSON.parse(await readFile(join(memberTemp.homeDir, "dohc-workspaces.json"), "utf8")) as
-      { workspaces: { workspaceId?: string; id?: string; shareView?: unknown }[] };
+    const registry = JSON.parse(
+      await readFile(join(memberTemp.homeDir, "dohc-workspaces.json"), "utf8"),
+    ) as { workspaces: { workspaceId?: string; id?: string; shareView?: unknown }[] };
     const joined = registry.workspaces.find((entry) => entry.shareView);
     const joinedId = joined?.workspaceId ?? joined?.id;
     expect(joinedId).toBeTruthy();
-    const refreshMembership = () => mine.evaluate(async (workspaceId) => {
-      const desktop = (window as unknown as { dohcDesktop: { refreshSharedView(input: { workspaceId: string; trigger: "manual" }):
-        Promise<{ ok?: boolean; status?: string }> } }).dohcDesktop;
-      try {
-        const outcome = await desktop.refreshSharedView({ workspaceId, trigger: "manual" });
-        return outcome.ok === false ? "failed" : outcome.status ?? "failed";
-      } catch {
-        return "failed";
-      }
-    }, joinedId!);
+    const refreshMembership = () =>
+      mine.evaluate(async (workspaceId) => {
+        const desktop = (
+          window as unknown as {
+            dohcDesktop: {
+              refreshSharedView(input: {
+                workspaceId: string;
+                trigger: "manual";
+              }): Promise<{ ok?: boolean; status?: string }>;
+            };
+          }
+        ).dohcDesktop;
+        try {
+          const outcome = await desktop.refreshSharedView({ workspaceId, trigger: "manual" });
+          return outcome.ok === false ? "failed" : (outcome.status ?? "failed");
+        } catch {
+          return "failed";
+        }
+      }, joinedId!);
     const relayPort = relay.port;
     await relay.stop();
     relay = null;
     await expect.poll(refreshMembership, { timeout: 30_000 }).toBe("failed");
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"), port: relayPort });
-    await expect.poll(refreshMembership, { timeout: 60_000, intervals: [1_000] }).toMatch(/^(updated|unchanged)$/);
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      port: relayPort,
+    });
+    await expect
+      .poll(refreshMembership, { timeout: 60_000, intervals: [1_000] })
+      .toMatch(/^(updated|unchanged)$/);
     await expect(mine.getByTestId("shared-view-banner")).toHaveCount(0);
     await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName);
 
@@ -754,7 +769,9 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     );
     expect(general).toBeInstanceOf(DohcCliFailure);
     // A joined workspace has no General, as in the member's Chats.
-    expect((general as DohcCliFailure).stderr).toContain("No Group matches general. Run dohc chat groups to list them.");
+    expect((general as DohcCliFailure).stderr).toContain(
+      "No Group matches general. Run dohc chat groups to list them.",
+    );
     // The agent reads the plan's History, as Sam's History panel lists it.
     expect(
       (await runDohcCli(samCli, ["--json", "history", "list", "notes/plan.md"])).stdout,

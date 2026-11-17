@@ -424,23 +424,47 @@ it("sends a member's unsent pages without a click once they can edit again", asy
 
 it("sends nothing while another account is signed in, then sends once the joined account is back", async () => {
   const notices: DirectWriteNotice[] = [];
-  const hook = renderHook(({ otherAccount }: { otherAccount: boolean }) => useShareDirectWrites({
-    workspaceId: "share-view", sharedView: true, membership: true, workspaceName: "Lisbon trip", enabled: true, otherAccount, ready: true,
-    ownerName: "ana", refreshShareView: async () => "current", checkShareAccess: async () => "current",
-    sendShareChanges: vi.fn(async () => undefined), showNotice: (notice) => notices.push(notice),
-  }), { initialProps: { otherAccount: true } });
-  await act(async () => { await Promise.resolve(); });
+  const hook = renderHook(
+    ({ otherAccount }: { otherAccount: boolean }) =>
+      useShareDirectWrites({
+        workspaceId: "share-view",
+        sharedView: true,
+        membership: true,
+        workspaceName: "Lisbon trip",
+        enabled: true,
+        otherAccount,
+        ready: true,
+        ownerName: "ana",
+        refreshShareView: async () => "current",
+        checkShareAccess: async () => "current",
+        sendShareChanges: vi.fn(async () => undefined),
+        showNotice: (notice) => notices.push(notice),
+      }),
+    { initialProps: { otherAccount: true } },
+  );
+  await act(async () => {
+    await Promise.resolve();
+  });
   expect(pushShareDirectWrites).not.toHaveBeenCalled();
   hook.rerender({ otherAccount: false });
-  await vi.waitFor(() => expect(pushShareDirectWrites).toHaveBeenCalledExactlyOnceWith({ workspaceId: "share-view" }));
+  await vi.waitFor(() =>
+    expect(pushShareDirectWrites).toHaveBeenCalledExactlyOnceWith({ workspaceId: "share-view" }),
+  );
   expect(notices).toEqual([]);
 });
 
 it("words a push the bridge rejects in a person's words, never the engine's", async () => {
-  pushShareDirectWrites.mockRejectedValueOnce(Object.assign(new Error("workspace operation failed"), { name: "DaemonRefusalError", wireCode: "INTERNAL" }));
+  pushShareDirectWrites.mockRejectedValueOnce(
+    Object.assign(new Error("workspace operation failed"), {
+      name: "DaemonRefusalError",
+      wireCode: "INTERNAL",
+    }),
+  );
   const { notices } = await setup();
   await vi.waitFor(() => expect(notices).toHaveLength(1));
-  expect(notices[0]!.message).toBe("dohc could not send your Collection changes to ana@example.com.");
+  expect(notices[0]!.message).toBe(
+    "dohc could not send your Collection changes to ana@example.com.",
+  );
 });
 
 it("counts several refused writes and gives the first reason", async () => {

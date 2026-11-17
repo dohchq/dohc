@@ -85,10 +85,16 @@ describe("received-share record drafts", () => {
     const f = fixture();
     f.host.resolved.grantedSelector = { ...membership, access: "edit" };
     f.host.checkAuthority.mockResolvedValue({ ...membership, access: "edit" });
-    expect(await createReceivedShareRecord(input, f.host)).toEqual({ path: "trip/Tasks/One.md", recordId: id, delivery: "pending" });
+    expect(await createReceivedShareRecord(input, f.host)).toEqual({
+      path: "trip/Tasks/One.md",
+      recordId: id,
+      delivery: "pending",
+    });
     const below = fixture();
     below.host.resolved.grantedSelector = { ...membership, access: "comment" };
-    await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow("This Collection does not have Edit access.");
+    await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
     expect(below.host.files.change).not.toHaveBeenCalled();
   });
 

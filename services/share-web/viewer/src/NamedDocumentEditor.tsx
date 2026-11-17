@@ -11,7 +11,6 @@ import {
 import { quoteRemovedText } from "@dohc/ydoc-projection/removed-text";
 import { Icon } from "./icons";
 import { PropertiesAsWritten, useFrontmatterAsWritten } from "./PropertiesAsWritten";
-import { Icon } from "./icons";
 import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<
@@ -70,8 +69,7 @@ function statusText(state: NamedLiveBrowserState, link: boolean, band: boolean):
   if (state.reason === "access-removed") return "The owner removed your access.";
   if (state.reason === "link-full")
     return "This link cannot take more people. Ask the owner for a new link.";
-  if (state.reason === "authority-unavailable")
-    return "dohc could not open the file for editing.";
+  if (state.reason === "authority-unavailable") return "dohc could not open the file for editing.";
   if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";

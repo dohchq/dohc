@@ -103,7 +103,10 @@ const FileGrant = z.object({
 // An admin's grant is Edit. The relay names the role the person holds now.
 const WorkspaceGrant = z.object({
   ...BASE,
-  selector: z.object({ kind: z.literal("workspace"), role: z.enum(["admin", "member"]).optional() }),
+  selector: z.object({
+    kind: z.literal("workspace"),
+    role: z.enum(["admin", "member"]).optional(),
+  }),
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);

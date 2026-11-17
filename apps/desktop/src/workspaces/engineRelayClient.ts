@@ -34,7 +34,7 @@ import {
   type SubmitShareProposalResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
+
 import { engineGrantedSelector, type GrantedSelector } from "./shareViewRecords";
 import {
   DaemonRefusalError,

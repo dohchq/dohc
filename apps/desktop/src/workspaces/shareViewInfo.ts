@@ -195,7 +195,10 @@ export async function fetchShareViewInfo(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   const selector = parseSelector(body.selector, body.access, input.shareId);
-  if (selector?.wholeWorkspace && (typeof body.workspaceId !== "string" || body.workspaceId.length === 0)) {
+  if (
+    selector?.wholeWorkspace &&
+    (typeof body.workspaceId !== "string" || body.workspaceId.length === 0)
+  ) {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return {
@@ -206,7 +209,9 @@ export async function fetchShareViewInfo(input: {
     sharerName: normalizeShareLabel(body.sharerName, 320),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
-    ...(selector?.wholeWorkspace ? { role: readWorkspaceRole(body.selector)!, membersWorkspaceId: body.workspaceId as string } : {}),
+    ...(selector?.wholeWorkspace
+      ? { role: readWorkspaceRole(body.selector)!, membersWorkspaceId: body.workspaceId as string }
+      : {}),
     selector,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };

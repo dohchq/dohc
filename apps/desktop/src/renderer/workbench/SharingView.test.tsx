@@ -833,28 +833,39 @@ describe("grouping and waiting changes", () => {
 });
 
 it("marks both lists as possibly out of date while a paced check waits, then reads them again", async () => {
-    vi.useFakeTimers();
-    try {
-      let rows: AccessShareRow[] = [];
-      bridgeMock.requestAccessRefresh.mockImplementation(async (input) => {
-        if (!input.wait) return { status: "paced" };
-        await new Promise((resolve) => setTimeout(resolve, 60_000));
-        rows = [granted()];
-        return { status: "joined" };
-      });
-      bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) => lane === "granted" ? answer("granted", { rows }) : answer("received"));
-      render(<View />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-      for (const lane of ["granted", "received"]) {
-        const mark = screen.getByTestId(`sharing-${lane}-freshness`);
-        expect(mark.getAttribute("data-state")).toBe("stale");
-        expect(mark.textContent).toContain("May be out of date");
-      }
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-      for (const lane of ["granted", "received"]) expect(screen.getByTestId(`sharing-${lane}-freshness`).getAttribute("data-state")).toBe("fresh");
-      expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(1);
-      expect(bridgeMock.requestAccessRefresh.mock.calls.filter(([input]) => input.wait)).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
+  vi.useFakeTimers();
+  try {
+    let rows: AccessShareRow[] = [];
+    bridgeMock.requestAccessRefresh.mockImplementation(async (input) => {
+      if (!input.wait) return { status: "paced" };
+      await new Promise((resolve) => setTimeout(resolve, 60_000));
+      rows = [granted()];
+      return { status: "joined" };
+    });
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) =>
+      lane === "granted" ? answer("granted", { rows }) : answer("received"),
+    );
+    render(<View />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    for (const lane of ["granted", "received"]) {
+      const mark = screen.getByTestId(`sharing-${lane}-freshness`);
+      expect(mark.getAttribute("data-state")).toBe("stale");
+      expect(mark.textContent).toContain("May be out of date");
     }
-  });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    for (const lane of ["granted", "received"])
+      expect(screen.getByTestId(`sharing-${lane}-freshness`).getAttribute("data-state")).toBe(
+        "fresh",
+      );
+    expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(1);
+    expect(bridgeMock.requestAccessRefresh.mock.calls.filter(([input]) => input.wait)).toHaveLength(
+      1,
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});

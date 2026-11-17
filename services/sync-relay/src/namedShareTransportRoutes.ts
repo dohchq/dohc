@@ -215,8 +215,19 @@ export function createNamedShareTransportRoutes(
       // while no read waited still ends the next hold. The stored grant
       // decides; a value that names no level is ignored.
       const knew = url.searchParams.get("level");
-      if (hold > 0 && isShareAccessValue(knew) && knew !== (fileSideOf(authorized.effectiveSelector)?.access ?? "view")) {
-        return jsonResponse({ ok: true, ops: [], nextCursor: since, hasMore: false, ownOriginId, levelChanged: true });
+      if (
+        hold > 0 &&
+        isShareAccessValue(knew) &&
+        knew !== (fileSideOf(authorized.effectiveSelector)?.access ?? "view")
+      ) {
+        return jsonResponse({
+          ok: true,
+          ops: [],
+          nextCursor: since,
+          hasMore: false,
+          ownOriginId,
+          levelChanged: true,
+        });
       }
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
         const deadline = Date.now() + hold;

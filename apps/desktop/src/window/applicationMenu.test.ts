@@ -496,13 +496,20 @@ describe("application menu template", () => {
 
   it("disables each File create its workspace does not offer, with its shortcut still shown", () => {
     const template = buildMenuTemplate({
-      isDev: false, platform: "win32", sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn(),
+      isDev: false,
+      platform: "win32",
+      sendCommand: vi.fn(),
+      stepZoom: vi.fn(),
+      showAbout: vi.fn(),
       createOffers: { write: true, folder: false, collection: false },
     });
     const file = items(template, "File");
     const enabled = (label: string) => file.find((entry) => entry.label === label)?.enabled;
-    expect(["New page", "New folder", "New collection", "Import files", "Export workspace as zip"].map(enabled))
-      .toEqual([true, false, false, true, true]);
+    expect(
+      ["New page", "New folder", "New collection", "Import files", "Export workspace as zip"].map(
+        enabled,
+      ),
+    ).toEqual([true, false, false, true, true]);
     expect(file.find((entry) => entry.label === "New page")?.accelerator).toBeDefined();
   });
 

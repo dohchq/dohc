@@ -1,3 +1,12 @@
+import { RelayUnreachableError } from "@dohc/workspace-contracts/relay";
+function expectStatefulRequestsScoped(requests: Request[]): void {
+  for (const request of requests) {
+    if (request.method === "workspace.open") continue;
+    expect(request.workspace, `${request.method} must retain its daemon workspace handle`).toBe(
+      "ws-mock",
+    );
+  }
+}
 import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -550,6 +559,28 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("sends a joined workspace's Group posts with its pinned selector", async () => {
+    const { daemon, sessions, client } = await harness();
+    await expect(
+      client.pushShareViewChat({
+        shareId: "share-membership",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      }),
+    ).resolves.toEqual({ pushed: 3 });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.view.pushChat")
+        .map((request) => request.params),
+    ).toEqual([
+      {
+        workspaceId: "workspace-a",
+        shareId: "share-membership",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      },
+    ]);
+    await sessions.closeAll();
+  });
+
   // The pull commits each intermediate page's cursor as it goes. So an early
   // page's refusals must be recorded before that commit: if a later page
   // fails, the retry starts past the refused op and the only remaining record
@@ -580,28 +611,6 @@ describe("EngineRelayClient", () => {
       };
     });
     const { sessions, client } = await harness(daemon);
-    it("sends a joined workspace's Group posts with its pinned selector", async () => {
-      const { daemon, sessions, client } = await harness();
-      await expect(
-        client.pushShareViewChat({
-          shareId: "share-membership",
-          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
-        }),
-      ).resolves.toEqual({ pushed: 3 });
-      expect(
-        daemon.requests
-          .filter((request) => request.method === "share.view.pushChat")
-          .map((request) => request.params),
-      ).toEqual([
-        {
-          workspaceId: "workspace-a",
-          shareId: "share-membership",
-          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
-        },
-      ]);
-      await sessions.closeAll();
-    });
-
     const recorded: string[] = [];
 
     await expect(

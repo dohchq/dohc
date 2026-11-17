@@ -319,9 +319,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // with no workspace open keeps every item, as before it had one.
   function targetCreateOffers(): CreateOffers {
     const target = targetWindow(dependencies.focusedWindow() ?? undefined);
-    const workspaceId = target && !target.webContents.isDestroyed()
-      ? dependencies.rendererWorkspaceSessions.current(target.webContents)?.workspaceId
-      : undefined;
+    const workspaceId =
+      target && !target.webContents.isDestroyed()
+        ? dependencies.rendererWorkspaceSessions.current(target.webContents)?.workspaceId
+        : undefined;
     return workspaceId ? dependencies.createOffersFor(workspaceId) : EVERY_CREATE_OFFER;
   }
 
@@ -331,7 +332,13 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     if (!app.isReady()) return;
     const offers = targetCreateOffers();
     const applied = applicationMenuCreateOffers;
-    if (applied && applied.write === offers.write && applied.folder === offers.folder && applied.collection === offers.collection) return;
+    if (
+      applied &&
+      applied.write === offers.write &&
+      applied.folder === offers.folder &&
+      applied.collection === offers.collection
+    )
+      return;
     refreshApplicationMenu();
   }
 

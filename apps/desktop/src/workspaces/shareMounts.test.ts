@@ -1,3 +1,4 @@
+import { assertMountableSelector } from "./shareMounts";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import { RefreshShareMountsResult, ShareMountStatusRow } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./shareViewRecords";
@@ -806,7 +807,6 @@ describe("refreshShareMount", () => {
       }),
     ).toThrow("Open it as its own workspace");
   });
-
 });
 
 describe("owner-mediated mount removal", () => {

@@ -131,7 +131,7 @@ it("reads again when a paced check ends, so a share made in the last minute is f
     listSharingAccess.mockImplementation(async ({ lane }) =>
       lane === "granted" ? page(rows, null) : page([], null, "received-account"),
     );
-    const { result } = renderHook(() => useSharingSearch("ws-1", false, "file-3"));
+    const { result } = renderHook(() => useSharingSearch("ws-1", false, "file-3"), { wrapper });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
