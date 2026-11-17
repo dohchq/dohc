@@ -350,6 +350,225 @@ pub fn is_rule_of(path: &str, folder: &str) -> bool {
     is_access_rule_path(path) && access_rule_folder(path) == folder
 }
 
+/// What a member can reach at one point: hidden, their workspace member
+/// level, which the engine does not know, or a rule's level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Hidden,
+    Workspace,
+    Level(Level),
+}
+
+impl Reach {
+    /// Whether this gives nobody more than `bound`. A workspace member level
+    /// is at least View and at most Edit.
+    fn within(self, bound: Self) -> bool {
+        match (self, bound) {
+            (Self::Hidden, _) | (Self::Workspace, Self::Workspace) => true,
+            (Self::Workspace, Self::Level(level)) => level == Level::Edit,
+            (Self::Level(level), Self::Workspace) => level == Level::View,
+            (Self::Level(level), Self::Level(bound)) => level <= bound,
+            (_, Self::Hidden) => false,
+        }
+    }
+}
+
+/// Rule files by path; `None` is one that can't be read.
+type RuleFiles<'a> = BTreeMap<&'a str, Option<AccessRule>>;
+
+/// Each ruled folder's rule. Two files in one folder are one unreadable rule.
+fn folder_rules<'a>(files: &'a RuleFiles<'_>) -> BTreeMap<&'a str, Option<&'a AccessRule>> {
+    let mut folders: BTreeMap<&str, Option<&AccessRule>> = BTreeMap::new();
+    for (path, rule) in files {
+        folders
+            .entry(access_rule_folder(path))
+            .and_modify(|twice| *twice = None)
+            .or_insert(rule.as_ref());
+    }
+    folders
+}
+
+/// What a member reaches in `folder`, as the relay's `folderLevel` reads it:
+/// rules apply from the root down, each replaces the level above, and one
+/// that leaves the member out hides everything below. `email` is a person a
+/// rule names, or `None` for a member none names.
+fn reach_in(
+    rules: &BTreeMap<&str, Option<&AccessRule>>,
+    folder: &str,
+    email: Option<&str>,
+) -> Reach {
+    let mut reach = Reach::Workspace;
+    let chain = std::iter::once("").chain(
+        folder
+            .match_indices('/')
+            .map(|(slash, _)| &folder[..slash])
+            .chain((!folder.is_empty()).then_some(folder)),
+    );
+    for ancestor in chain {
+        let Some(rule) = rules.get(ancestor) else {
+            continue;
+        };
+        let level = rule.and_then(|rule| match email {
+            Some(email) => level_for_email(rule, email),
+            None => rule.members,
+        });
+        match level {
+            Some(level) => reach = Reach::Level(level),
+            None => return Reach::Hidden,
+        }
+    }
+    reach
+}
+
+/// A rule file a change of many paths writes, with its bytes, or deletes.
+#[derive(Clone, Copy, Debug)]
+pub enum RuleFileStep<'a> {
+    Write(&'a str, &'a [u8]),
+    Delete(&'a str),
+}
+
+fn parsed(bytes: &[u8]) -> Option<AccessRule> {
+    std::str::from_utf8(bytes).ok().and_then(parse_access_rule)
+}
+
+fn apply<'a>(files: &mut RuleFiles<'a>, step: RuleFileStep<'a>) {
+    match step {
+        RuleFileStep::Write(path, bytes) => {
+            files.insert(path, parsed(bytes));
+        }
+        RuleFileStep::Delete(path) => {
+            files.remove(path);
+        }
+    }
+}
+
+/// Searching every order is exponential; past this many steps, only the
+/// order given is tried.
+const MAX_SEARCHED_RULE_STEPS: usize = 16;
+
+/// An order for writing, then deleting, many rule files one at a time, in
+/// which no step gives any member more anywhere than both the rules before
+/// and the rules after give them. Each phase is a list of indexes into its
+/// steps, and tries the order given first. `None` when no such order exists.
+///
+/// `before` is every rule file before the change. Files merge between the
+/// two phases, so the state after the writes must stay within bounds too.
+pub fn safe_rule_file_order<'a>(
+    before: &'a BTreeMap<String, Vec<u8>>,
+    writes: &[RuleFileStep<'a>],
+    deletes: &[RuleFileStep<'a>],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let start: RuleFiles<'a> = before
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), parsed(bytes)))
+        .collect();
+    let mut end = start.clone();
+    for step in writes.iter().chain(deletes) {
+        apply(&mut end, *step);
+    }
+    let emails: BTreeSet<&str> = start
+        .values()
+        .chain(end.values())
+        .flatten()
+        .flat_map(|rule| rule.people.keys().map(String::as_str))
+        .collect();
+    let people: Vec<Option<&str>> = std::iter::once(None)
+        .chain(emails.into_iter().map(Some))
+        .collect();
+    let points: BTreeSet<&str> = std::iter::once("")
+        .chain(
+            start
+                .keys()
+                .chain(end.keys())
+                .map(|path| access_rule_folder(path)),
+        )
+        .collect();
+    let (start_rules, end_rules) = (folder_rules(&start), folder_rules(&end));
+    let bounds: Vec<(&str, Option<&str>, Reach, Reach)> = points
+        .iter()
+        .flat_map(|point| people.iter().map(move |email| (*point, *email)))
+        .map(|(point, email)| {
+            (
+                point,
+                email,
+                reach_in(&start_rules, point, email),
+                reach_in(&end_rules, point, email),
+            )
+        })
+        .collect();
+    let safe = |files: &RuleFiles<'_>| {
+        let rules = folder_rules(files);
+        bounds.iter().all(|(point, email, before, after)| {
+            let reach = reach_in(&rules, point, *email);
+            reach.within(*before) || reach.within(*after)
+        })
+    };
+    let mut middle = start.clone();
+    let write_order = phase_order(&mut middle, writes, &safe)?;
+    let delete_order = phase_order(&mut middle, deletes, &safe)?;
+    Some((write_order, delete_order))
+}
+
+/// Finds an order of `steps` from `files` in which every state is `safe`,
+/// and leaves `files` as the state after all of them.
+fn phase_order<'a>(
+    files: &mut RuleFiles<'a>,
+    steps: &[RuleFileStep<'a>],
+    safe: &impl Fn(&RuleFiles<'_>) -> bool,
+) -> Option<Vec<usize>> {
+    if steps.len() > MAX_SEARCHED_RULE_STEPS {
+        for step in steps {
+            apply(files, *step);
+            if !safe(files) {
+                return None;
+            }
+        }
+        return Some((0..steps.len()).collect());
+    }
+    let mut order = Vec::with_capacity(steps.len());
+    let mut failed = BTreeSet::new();
+    if !search(files, 0, steps, safe, &mut failed, &mut order) {
+        return None;
+    }
+    for &index in &order {
+        apply(files, steps[index]);
+    }
+    Some(order)
+}
+
+fn search<'a>(
+    files: &RuleFiles<'a>,
+    done: u32,
+    steps: &[RuleFileStep<'a>],
+    safe: &impl Fn(&RuleFiles<'_>) -> bool,
+    failed: &mut BTreeSet<u32>,
+    order: &mut Vec<usize>,
+) -> bool {
+    if order.len() == steps.len() {
+        return true;
+    }
+    if failed.contains(&done) {
+        return false;
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if done & (1 << index) != 0 {
+            continue;
+        }
+        let mut next = files.clone();
+        apply(&mut next, *step);
+        if !safe(&next) {
+            continue;
+        }
+        order.push(index);
+        if search(&next, done | (1 << index), steps, safe, failed, order) {
+            return true;
+        }
+        order.pop();
+    }
+    failed.insert(done);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +792,154 @@ mod tests {
         assert!(!is_access_rule_related_path("a/access.yml"));
         assert_eq!(access_rule_folder("a/b/access.yaml"), "a/b");
         assert_eq!(access_rule_folder("access.yaml"), "");
+    }
+
+    fn rule_files(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+        files
+            .iter()
+            .map(|(path, text)| {
+                assert!(parse_access_rule(text).is_some(), "{path} reads");
+                ((*path).to_owned(), text.as_bytes().to_vec())
+            })
+            .collect()
+    }
+
+    /// Each member's reach after every write, the first included, stays
+    /// within what the rules before or after give them.
+    fn each_write_stays_within(
+        before: &BTreeMap<String, Vec<u8>>,
+        writes: &[(&str, &str)],
+        people: &[Option<&str>],
+    ) -> bool {
+        let start: RuleFiles<'_> = before
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), parsed(bytes)))
+            .collect();
+        let mut states = vec![start];
+        for (path, text) in writes {
+            let mut next = states.last().expect("a state").clone();
+            apply(&mut next, RuleFileStep::Write(path, text.as_bytes()));
+            states.push(next);
+        }
+        let all_rules: Vec<_> = states.iter().map(folder_rules).collect();
+        let (first, last) = (&all_rules[0], &all_rules[all_rules.len() - 1]);
+        let points: BTreeSet<&str> = all_rules
+            .iter()
+            .flat_map(|rules| rules.keys().copied())
+            .chain([""])
+            .collect();
+        all_rules.iter().all(|rules| {
+            points.iter().all(|point| {
+                people.iter().all(|email| {
+                    let reach = reach_in(rules, point, *email);
+                    reach.within(reach_in(first, point, *email))
+                        || reach.within(reach_in(last, point, *email))
+                })
+            })
+        })
+    }
+
+    fn plan(before: &BTreeMap<String, Vec<u8>>, writes: &[(&str, &str)]) -> Option<Vec<usize>> {
+        let steps: Vec<_> = writes
+            .iter()
+            .map(|(path, text)| RuleFileStep::Write(path, text.as_bytes()))
+            .collect();
+        safe_rule_file_order(before, &steps, &[]).map(|(writes, deletes)| {
+            assert!(deletes.is_empty());
+            writes
+        })
+    }
+
+    #[test]
+    fn a_merge_writes_an_inner_rule_before_an_outer_widening() {
+        // The outer folder widens while a rule is created inside it: outer
+        // first would give team/private Edit, where it had View before and
+        // after.
+        let before = rule_files(&[("team/access.yaml", "members: view\n")]);
+        let writes = [
+            ("team/access.yaml", "members: edit\n"),
+            ("team/private/access.yaml", "members: view\n"),
+        ];
+        assert!(!each_write_stays_within(&before, &writes, &[None]));
+        let order = plan(&before, &writes).expect("a safe order");
+        assert_eq!(order, [1, 0]);
+        let ordered: Vec<_> = order.iter().map(|&index| writes[index]).collect();
+        assert!(each_write_stays_within(&before, &ordered, &[None]));
+    }
+
+    #[test]
+    fn a_merge_hides_an_inner_folder_before_showing_the_outer_one() {
+        // The outer folder goes from hidden to shown while the inner one turns
+        // to hidden: outer first would show team/private at Edit.
+        let before = rule_files(&[
+            ("team/access.yaml", "people:\n"),
+            ("team/private/access.yaml", "members: edit\n"),
+        ]);
+        let writes = [
+            ("team/access.yaml", "members: view\n"),
+            ("team/private/access.yaml", "people:\n"),
+        ];
+        assert!(!each_write_stays_within(&before, &writes, &[None]));
+        let order = plan(&before, &writes).expect("a safe order");
+        assert_eq!(order, [1, 0]);
+        let ordered: Vec<_> = order.iter().map(|&index| writes[index]).collect();
+        assert!(each_write_stays_within(&before, &ordered, &[None]));
+    }
+
+    #[test]
+    fn a_merge_hides_an_outer_folder_before_widening_an_inner_one() {
+        // The mirror: the inner rule widens while the outer one turns to
+        // hidden. The outer write goes first, as it already did.
+        let before = rule_files(&[
+            ("team/access.yaml", "members: view\n"),
+            ("team/private/access.yaml", "members: view\n"),
+        ]);
+        let writes = [
+            ("team/access.yaml", "people:\n"),
+            ("team/private/access.yaml", "members: edit\n"),
+        ];
+        let reversed = [writes[1], writes[0]];
+        assert!(!each_write_stays_within(&before, &reversed, &[None]));
+        assert_eq!(plan(&before, &writes), Some(vec![0, 1]));
+        assert!(each_write_stays_within(&before, &writes, &[None]));
+    }
+
+    #[test]
+    fn a_merge_with_no_safe_order_of_rule_writes_is_refused() {
+        // Team first gives the person Edit in team/sub, where they end with
+        // View; team/sub first gives members Edit there, where they end hidden.
+        let before = rule_files(&[]);
+        let writes = [
+            ("team/access.yaml", "people:\n  p@example.com: edit\n"),
+            (
+                "team/sub/access.yaml",
+                "members: edit\npeople:\n  p@example.com: view\n",
+            ),
+        ];
+        let people = [None, Some("p@example.com")];
+        assert!(!each_write_stays_within(&before, &writes, &people));
+        assert!(!each_write_stays_within(
+            &before,
+            &[writes[1], writes[0]],
+            &people
+        ));
+        assert_eq!(plan(&before, &writes), None);
+    }
+
+    #[test]
+    fn a_merge_deletes_rules_after_its_writes_within_the_same_bounds() {
+        // The outer rule narrows to View and the inner one that hid
+        // team/private goes: the write first, then the delete, which leaves
+        // team/private at View.
+        let before = rule_files(&[
+            ("team/access.yaml", "members: edit\n"),
+            ("team/private/access.yaml", "people:\n"),
+        ]);
+        let write = [RuleFileStep::Write("team/access.yaml", b"members: view\n")];
+        let delete = [RuleFileStep::Delete("team/private/access.yaml")];
+        assert_eq!(
+            safe_rule_file_order(&before, &write, &delete),
+            Some((vec![0], vec![0]))
+        );
     }
 }
