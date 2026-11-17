@@ -3339,3 +3339,43 @@ fn an_undo_after_the_store_moved_records_nothing() {
         .unwrap();
     assert_eq!(plans, 0, "a pending Undo plan was recorded");
 }
+
+#[test]
+fn hiding_two_new_edit_spellings_cannot_publish_a_widening_prefix() {
+    let f = Fixture::new();
+    f.put("access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(!f.hold_views()[0].can_accept);
+    let before = f.journal();
+    let result = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "widened",
+        30,
+        Arc::new(CrashAfterOneMoment(
+            f.db.clone(),
+            moments(&f.db),
+            Default::default(),
+        )),
+    );
+    assert_rule_prefixes_at_most_view(&f);
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(f.journal(), before);
+    f.decide("team", AccessRuleDecision::Restore).unwrap();
+    assert_eq!(f.journal(), before);
+    assert!(!f.root().join("team/access.yaml").exists());
+    assert!(!f.root().join("team/\u{FF41}ccess.yaml").exists());
+}

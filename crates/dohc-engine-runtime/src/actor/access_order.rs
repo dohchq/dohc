@@ -1079,9 +1079,8 @@ fn with_touches(mut disk: OnDisk, touches: &[Touch<'_>]) -> OnDisk {
 }
 
 /// The rule files to commit so the store matches `disk`: new files, then
-/// changed ones, each in path order, then deletes. No step holds fewer rule
-/// files than both ends do, and a folder that ends with several files hides
-/// from its first step, before a changed file can stand alone.
+/// changed ones, each in path order, then deletes. The caller must check
+/// this order before committing it.
 fn rule_changes(committed: Option<&Committed>, disk: &OnDisk) -> Vec<(String, Option<Vec<u8>>)> {
     let committed_sha = |path: &str| {
         committed
@@ -1286,6 +1285,69 @@ fn every_step_narrows(
     })
 }
 
+/// Try at most the six orders of a three-file change. Larger changes keep
+/// their proposed order and are refused if that order is unsafe.
+fn safe_rule_order(
+    before: ReachBefore<'_>,
+    committed: Option<&Committed>,
+    changes: Vec<RuleChange>,
+    include_final: bool,
+) -> Option<Vec<RuleChange>> {
+    let safe = |changes: &[RuleChange]| {
+        let end = if include_final {
+            changes.len()
+        } else {
+            changes.len().saturating_sub(1)
+        };
+        every_step_narrows(before, committed, &changes[..end])
+    };
+    if safe(&changes) {
+        return Some(changes);
+    }
+    let orders: &[&[usize]] = match changes.len() {
+        2 => &[&[1, 0]],
+        3 => &[&[0, 2, 1], &[1, 0, 2], &[1, 2, 0], &[2, 0, 1], &[2, 1, 0]],
+        _ => &[],
+    };
+    orders.iter().find_map(|indices| {
+        let reordered: Vec<_> = indices.iter().map(|&i| changes[i].clone()).collect();
+        safe(&reordered).then_some(reordered)
+    })
+}
+
+/// Accept authorizes the final reach, but no intermediate rule may exceed
+/// it. Hide may retain the previous reach while its files are recorded.
+fn decision_rule_changes(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    folder: &str,
+    committed: Option<&Committed>,
+    disk: &OnDisk,
+) -> Result<Option<Vec<RuleChange>>, RuntimeError> {
+    let above = nearest_committed_above(conn, workspace, version, folder)?;
+    let inherited = match &above {
+        Some(above) => ReachBefore::Inherited(above.rule()),
+        None => ReachBefore::WorkspaceLevel,
+    };
+    let target = (disk.len() == 1)
+        .then(|| disk.values().next())
+        .flatten()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(parse_access_rule);
+    let ceiling = match disk.len() {
+        0 => inherited,
+        1 => ReachBefore::Own(target.as_ref()),
+        _ => committed.map_or(inherited, |own| ReachBefore::Own(own.rule())),
+    };
+    Ok(safe_rule_order(
+        ceiling,
+        committed,
+        rule_changes(committed, disk),
+        false,
+    ))
+}
+
 fn judge_folder(
     conn: &Connection,
     order: &Scope<'_>,
@@ -1388,11 +1450,11 @@ fn judge_folder(
         (None, Some(above)) => ReachBefore::Inherited(above.rule()),
         (None, None) => ReachBefore::WorkspaceLevel,
     };
-    if !every_step_narrows(before, committed.as_ref(), &changes) {
+    let Some(changes) = safe_rule_order(before, committed.as_ref(), changes, true) else {
         return Ok(Plan::Verdict(Verdict::Held {
             reason: access_rule_holds::WIDENED,
         }));
-    }
+    };
     Ok(if covered && changes.len() == 1 {
         Plan::Verdict(Verdict::Clear(Clearance::RuleFirst))
     } else {
@@ -1833,6 +1895,8 @@ pub struct AccessRuleLevelChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessRuleHoldView {
     pub hold: AccessRuleHold,
+    /// Whether Accept can publish the change without a wider prefix.
+    pub can_accept: bool,
     /// The rule dohc recorded at the folder, when it is one text file.
     pub recorded: Option<String>,
     /// The rule file on disk, when there is exactly one.
@@ -1932,6 +1996,13 @@ fn hold_view(
         _ => None,
     };
     let mut view = AccessRuleHoldView {
+        can_accept: match &disk {
+            Ok(disk) => {
+                decision_rule_changes(conn, workspace, version, folder, here.as_ref(), disk)?
+                    .is_some()
+            }
+            Err(_) => false,
+        },
         recorded,
         rule_path,
         changes: Vec::new(),
@@ -2035,7 +2106,11 @@ fn decide_on_store(
     let mut decided = AccessRuleDecided::default();
     match decision {
         AccessRuleDecision::Accept => {
-            let changes = rule_changes(committed.as_ref(), &disk);
+            let changes = store.read_with(|conn| decision_rule_changes(
+                conn, order.workspace_id, order.version_id, folder, committed.as_ref(), &disk,
+            ))?.ok_or(DomainError::InvalidInput {
+                reason: "the access rule cannot be recorded without temporarily widening access",
+            })?;
             commit_rule_changes(store, order, folder, changes)?;
         }
         AccessRuleDecision::Restore => {

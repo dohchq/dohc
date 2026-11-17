@@ -25,6 +25,7 @@ const WIDENED: AccessRuleHold = {
     { who: "members", before: "view", after: "edit" },
     { who: "sam@example.com", before: "none", after: "edit" },
   ],
+  canAccept: true,
   unreadable: null,
   fallsBackTo: null,
 };
@@ -37,6 +38,7 @@ const REMOVED: AccessRuleHold = {
   recordedRule: "members: view\n",
   rulePath: null,
   changes: [{ who: "members", before: "view", after: "edit" }],
+  canAccept: true,
   unreadable: null,
   fallsBackTo: "team",
 };
@@ -241,6 +243,24 @@ describe("useAccessRuleHoldNotices", () => {
         action: { label: "Open History" },
       }),
     );
+  });
+
+  it("keeps Restore and withholds choices the engine cannot publish safely", async () => {
+    for (const hold of [
+      {
+        ...WIDENED,
+        canAccept: false,
+        observedSha256: null,
+        changes: [],
+        unreadable: "several-files" as const,
+      },
+      { ...REMOVED, canAccept: false },
+    ]) {
+      cleanup();
+      const h = harness([hold]);
+      await waitFor(() => expect(h.row(hold.folder)).toBeDefined());
+      expect(h.row(hold.folder)!.action).toMatchObject({ label: "Restore rule", additional: [] });
+    }
   });
 
   it("reads as working while a decision runs, then says what took effect with Open History", async () => {

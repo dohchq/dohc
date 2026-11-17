@@ -36,6 +36,7 @@ const shownContent = (hold: AccessRuleHold, level: MemberLevel) =>
   JSON.stringify([
     hold.recordedRule,
     hold.rulePath,
+    hold.canAccept,
     hold.changes,
     hold.unreadable,
     hold.fallsBackTo,

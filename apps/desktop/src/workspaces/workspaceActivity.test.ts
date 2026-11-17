@@ -189,6 +189,7 @@ describe("workspaceActivity capture hooks", () => {
       recordedRule: null,
       rulePath: null,
       changes: [],
+      canAccept: true,
       unreadable: null,
       fallsBackTo: null,
     };

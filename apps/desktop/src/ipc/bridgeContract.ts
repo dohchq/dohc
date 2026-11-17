@@ -1651,6 +1651,7 @@ export const AccessRuleHold = z.object({
   changes: z.array(
     z.object({ who: z.string().min(1), before: AccessRuleReach, after: AccessRuleReach }),
   ),
+  canAccept: z.boolean(),
   unreadable: z.enum(["recorded", "locked", "several-files", "on-disk"]).nullable(),
   fallsBackTo: z.string().nullable(),
 });

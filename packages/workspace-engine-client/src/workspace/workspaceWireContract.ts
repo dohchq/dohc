@@ -1134,6 +1134,8 @@ const AccessRuleReachSchema = Schema.Union([
 
 /** A folder whose access rule changed outside dohc and waits for its owner. */
 const AccessRuleHoldSchema = mutableStruct({
+  /** Whether recording this change has a safe publication order. */
+  canAccept: Schema.Boolean,
   versionId: Schema.NonEmptyString,
   /** The folder's path; empty for the workspace's own rule. */
   folder: Schema.String,

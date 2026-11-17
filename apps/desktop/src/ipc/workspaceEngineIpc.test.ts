@@ -870,6 +870,7 @@ describe("workspace engine IPC registrations", () => {
       recordedRule: "members: view\n",
       rulePath: "team/access.yaml",
       changes: [{ who: "members", before: "view" as const, after: "edit" as const }],
+      canAccept: true,
       unreadable: null,
       fallsBackTo: null,
     };

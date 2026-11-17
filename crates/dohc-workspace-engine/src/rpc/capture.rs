@@ -58,7 +58,7 @@ fn access_rule_holds_json(views: &[dohc_engine_runtime::AccessRuleHoldView]) -> 
                 json!({
                     "versionId": hold.version_id, "folder": hold.folder, "reason": hold.reason,
                     "observedSha256": hold.observed_sha256, "recordedAtMs": hold.recorded_at_ms,
-                    "recordedRule": view.recorded, "rulePath": view.rule_path,
+                    "recordedRule": view.recorded, "rulePath": view.rule_path, "canAccept": view.can_accept,
                     "changes": view.changes.iter().map(|change| json!({
                         "who": change.who, "before": change.before, "after": change.after,
                     })).collect::<Vec<_>>(),

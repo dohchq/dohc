@@ -106,6 +106,7 @@ const REMOVED_TEAM = {
   recordedRule: "members: view\n",
   rulePath: null,
   changes: [{ who: "members", before: "view" as const, after: "workspace" as const }],
+  canAccept: true,
   unreadable: null,
   fallsBackTo: null,
 };
