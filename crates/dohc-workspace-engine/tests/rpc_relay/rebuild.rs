@@ -1860,6 +1860,61 @@ async fn a_displaced_file_that_cant_be_synced_stops_the_rebuild_until_it_can() {
     finish(&copy).await;
 }
 
+/// A try that stopped after it moved a saved version into recovery may not
+/// have synced it. The next try syncs it before the manifest marks it saved,
+/// so a version it can't sync stops the rebuild and the old store stays.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_version_already_in_recovery_that_cant_be_synced_stops_the_rebuild_until_it_can() {
+    use std::os::unix::fs::PermissionsExt;
+    let copy = edited_copy("rpc-rebuild-saved-sync").await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("rename-0");
+    rebuild_on(&service, &copy).await.expect_err("crashed");
+    drop(service);
+    let root = copy.scratch.path().to_path_buf();
+    std::fs::remove_file(root.join("open/a.md")).expect("remove");
+    let plan = manifest(&copy).expect("manifest")["plan"].clone();
+    let item = |plan: &Value| {
+        plan["recovery"]
+            .as_array()
+            .expect("recovery")
+            .iter()
+            .find(|item| item["source"] == "saved")
+            .cloned()
+            .expect("saved item")
+    };
+    let placed = root
+        .join(plan["recoveryFolder"].as_str().expect("recovery folder"))
+        .join(item(&plan)["destination"].as_str().expect("destination"));
+    // The move happened and the sync didn't.
+    std::fs::create_dir_all(placed.parent().expect("folder")).expect("folder");
+    std::fs::write(&placed, "my edit").expect("placed");
+    std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o000)).expect("lock");
+    if std::fs::File::open(&placed).is_ok() {
+        // Root opens it anyway, so this run can't make the sync fail.
+        return;
+    }
+
+    let stopped = rebuild_on(&Arc::new(EngineService::new()), &copy)
+        .await
+        .expect_err("stopped");
+    assert_eq!(stopped.message, "share-view-rebuild-recovery-unavailable");
+    let saved = item(&manifest(&copy).expect("manifest")["plan"]);
+    assert_ne!(saved["done"], true, "not marked saved: {saved}");
+    assert!(
+        root.join(".dohc/local/rebuild-aside").exists(),
+        "the old store stays"
+    );
+
+    std::fs::set_permissions(&placed, std::fs::Permissions::from_mode(0o644)).expect("unlock");
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    assert_eq!(std::fs::read(&placed).expect("saved"), b"my edit");
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
 /// Stop the rebuild at `point` as a crash would, then run it again on a new
 /// service, as after a restart. It must finish as if nothing had stopped it.
 async fn crash_then_resume(workspace_id: &str, point: &str, phase: &str) -> ClosedCopy {
