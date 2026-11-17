@@ -47,6 +47,13 @@ export interface PageLive {
   end(): void;
 }
 
+interface Stream {
+  readonly toPage: (body: Body<ToPage>) => void;
+  readonly check: (message: FromPage) => "next" | "stale" | "broken";
+  readonly window: ReturnType<typeof frameWindow>;
+  readonly limits: NamedLiveBrowserLimits;
+}
+
 const FIRST_RETRY_MS = 500;
 const LONGEST_RETRY_MS = 8_000;
 
@@ -86,12 +93,9 @@ export function createPageLive(options: {
   } | null = null;
   // The last connection's messages both ways. They outlive its socket, so the page's reports after a loss arrive, until
   // the next open retires them.
-  let stream: {
-    readonly toPage: (body: Body<ToPage>) => void;
-    readonly check: (message: FromPage) => "next" | "stale" | "broken";
-    readonly window: ReturnType<typeof frameWindow>;
-    readonly limits: NamedLiveBrowserLimits;
-  } | null = null;
+  let stream: Stream | null = null;
+  // The connection before Try again. Its late reports can't show Saved, but their unsent text still asks before leaving.
+  let retired: Stream | null = null;
 
   const set = (next: Partial<PageLiveState>) => {
     state = { ...state, ...next };
@@ -128,6 +132,7 @@ export function createPageLive(options: {
     const held = { controller: new AbortController() };
     open = held;
     // The last connection's reports say nothing of this one.
+    retired = stream ?? retired;
     stream = null;
     set({ phase: "opening", reason: null, facts: null });
     const current = () => open === held;
@@ -199,11 +204,15 @@ export function createPageLive(options: {
 
   function receive(raw: unknown) {
     const message = readFromPage(raw);
+    if (!message || state.phase === "ended") return;
     const held = stream;
-    if (!message || !held || state.phase === "ended") return;
-    const order = held.check(message);
-    if (order === "stale") return;
-    if (order === "broken") return lose("bridge-order");
+    const order = held?.check(message) ?? "stale";
+    if (order === "stale") {
+      if (retired?.check(message) === "next" && message.type === "state" && message.facts.unsent)
+        set({ unsent: true });
+      return;
+    }
+    if (order === "broken" || !held) return lose("bridge-order");
     const socket = open?.socket;
     switch (message.type) {
       case "frame": {
@@ -252,7 +261,7 @@ export function createPageLive(options: {
     receive,
     end() {
       close();
-      stream = null;
+      stream = retired = null;
       if (state.phase !== "ended") set({ phase: "ended" });
     },
   };
@@ -294,25 +303,21 @@ export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && 
 export const holdsPage = (state: PageLiveState) =>
   state.phase !== "ended" && (state.phase !== "refused" || state.shown || state.unsent);
 
-/** One sign-in's and workspace's live pages, which the account ends with its apps (appTeardown). */
+/** One sign-in's and workspace's page screens, which the account ends with its apps (appTeardown). */
 export interface PageScope {
   readonly signIn: object;
   readonly workspaceId: string;
 }
 export function createLivePages() {
-  const open = new Map<PageLive, PageScope>();
+  const open = new Map<{ end(): void }, PageScope>();
   return {
-    /** Holds `live` until it ends. */
-    add(scope: PageScope, live: PageLive) {
-      open.set(live, scope);
-      const stop = live.subscribe(() => {
-        if (live.state().phase !== "ended") return;
-        open.delete(live);
-        stop();
-      });
+    /** Holds a page screen, with or without a session yet, until the returned removal. */
+    add(scope: PageScope, page: { end(): void }) {
+      open.set(page, scope);
+      return () => void open.delete(page);
     },
     end(match: (scope: PageScope) => boolean = () => true) {
-      for (const [live, scope] of [...open]) if (match(scope)) live.end();
+      for (const [page, scope] of [...open]) if (match(scope)) page.end();
     },
   };
 }

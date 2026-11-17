@@ -105,6 +105,11 @@ function PageScreen({ path }: { path: string }) {
   );
   const { mount, painted, live, stopped } = useSyncExternalStore(host.subscribe, host.state);
   useEffect(() => () => host.gone(), [host]);
+  // The account's teardown reaches the page from the start, before any session opens.
+  const workspaceId = data?.workspaceId;
+  useEffect(() => {
+    if (workspaceId !== undefined) return livePages.add({ signIn, workspaceId }, host);
+  }, [livePages, signIn, workspaceId, host]);
   useEffect(() => {
     let current = true;
     editorHtmlUri().then(
@@ -120,8 +125,8 @@ function PageScreen({ path }: { path: string }) {
     };
   }, [attempt]);
 
-  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A session that the
-  // sign-in or workspace ended (appTeardown) leaves the page read-only.
+  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
+  // or workspace ended (appTeardown) stays read-only.
   const editsLive = phoneWrites && state.value?.kind === "page" && data !== null && !stopped;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
@@ -153,7 +158,7 @@ function PageScreen({ path }: { path: string }) {
         ? "opening"
         : "readOnlyPhone";
   const [explaining, setExplaining] = useState(false);
-  const handleMessage = (raw: string) => {
+  const handleMessage = (raw: string, from: number) => {
     let data: unknown;
     try {
       data = JSON.parse(raw);
@@ -162,7 +167,7 @@ function PageScreen({ path }: { path: string }) {
     }
     if (typeof data !== "object" || data === null || !("kind" in data)) return;
     if (data.kind === "live") live?.receive(data);
-    if (data.kind === "painted") host.painted();
+    if (data.kind === "painted") host.painted(from);
     // The page's fonts didn't load, so it didn't draw: Try again mounts a fresh page.
     if (data.kind === "fontsFailed") setLostPage("failed");
     // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
@@ -253,17 +258,9 @@ function PageScreen({ path }: { path: string }) {
   }, [webShown]);
   useEffect(() => {
     if (!editsLive || !webShown || !data) return;
-    const scope = { signIn, workspaceId: data.workspaceId };
-    host.open((post) => {
-      const made = createPageLive({
-        client: signIn.client,
-        workspaceId: data.workspaceId,
-        path,
-        post,
-      });
-      livePages.add(scope, made);
-      return made;
-    });
+    host.open((post) =>
+      createPageLive({ client: signIn.client, workspaceId: data.workspaceId, path, post }),
+    );
   }, [editsLive, webShown, painted, live, data, signIn, path]);
 
   // What stopped editing, under the header, with Try again when another open may work.
@@ -358,7 +355,7 @@ function PageScreen({ path }: { path: string }) {
                 allowingReadAccessToURL={editorFolderUri}
                 allowFileAccess
                 injectedJavaScriptBeforeContentLoaded={injected}
-                onMessage={(event) => handleMessage(event.nativeEvent.data)}
+                onMessage={(event) => handleMessage(event.nativeEvent.data, mount)}
                 onError={() => setLostPage("failed")}
                 onContentProcessDidTerminate={() => setLostPage("failed")}
                 keyboardDisplayRequiresUserAction={false}

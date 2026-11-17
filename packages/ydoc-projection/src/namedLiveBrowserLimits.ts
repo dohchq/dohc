@@ -18,17 +18,23 @@ const record = (value: unknown): value is Record<string, unknown> =>
 const exact = (value: unknown, keys: string): value is Record<string, unknown> =>
   record(value) && Object.keys(value).sort().join(",") === keys;
 
+const shaped = (value: unknown) =>
+  exact(
+    value,
+    "connectTimeoutMs,drainPollMs,maxHttpResponseBytes,maxSocketBufferedBytes,provider,sendTimeoutMs",
+  ) && exact(value.provider, "frames,maxDeliveryAttempts,maxPendingUpdateBytes,maxPendingUpdates");
+
 export function parseNamedLiveBrowserLimits(value: unknown): NamedLiveBrowserLimits {
-  if (
-    !exact(
-      value,
-      "connectTimeoutMs,drainPollMs,maxHttpResponseBytes,maxSocketBufferedBytes,provider,sendTimeoutMs",
-    ) ||
-    !exact(value.provider, "frames,maxDeliveryAttempts,maxPendingUpdateBytes,maxPendingUpdates")
-  )
-    throw new TypeError("Invalid browser transport limits.");
-  // A JSON copy, as Hermes has no structuredClone; the limits are JSON numbers.
-  const limits = JSON.parse(JSON.stringify(value)) as NamedLiveBrowserLimits;
+  // A JSON copy, as Hermes has no structuredClone. The input and the copy must both have the shape, so a toJSON can't
+  // add a key the check never saw. The checks below read only the copy.
+  let copy: unknown;
+  try {
+    copy = shaped(value) ? JSON.parse(JSON.stringify(value)) : undefined;
+  } catch {
+    copy = undefined;
+  }
+  if (!shaped(copy)) throw new TypeError("Invalid browser transport limits.");
+  const limits = copy as unknown as NamedLiveBrowserLimits;
   for (const number of [
     limits.maxHttpResponseBytes,
     limits.maxSocketBufferedBytes,

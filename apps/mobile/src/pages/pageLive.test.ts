@@ -303,6 +303,20 @@ describe("the save mark", () => {
     t.fromPage(2)({ type: "state", facts: facts("live") });
     expect(liveMark(t.live.state())).toBe("saved");
   });
+
+  it("still asks before leaving when an edit's report arrives after Try again, and the new open is refused", async () => {
+    const t = await connected(ready(), answer({ status: "refused", reason: "paused" }));
+    const page = t.fromPage(1);
+    page({ type: "state", facts: facts("live") });
+    expect(holdsUnsent(t.live.state())).toBe(false);
+    // The page typed; its report is still on its way when the socket drops and Try again starts.
+    t.latest().onclose?.();
+    t.live.retry();
+    page({ type: "state", facts: facts("disconnected", 1) });
+    await vi.waitFor(() => expect(t.live.state().phase).toBe("refused"));
+    expect(holdsUnsent(t.live.state())).toBe(true);
+    expect(liveMark(t.live.state())).toBe("readOnlySetAside");
+  });
 });
 
 describe("drops", () => {

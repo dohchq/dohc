@@ -23,20 +23,20 @@ function setup(scope: PageScope, pages: LivePages, ...answers: Answer[]) {
         message: JSON.parse(script.slice("window.__dohcLive?.(".length, -"); true;".length)),
       }),
   });
+  pages.add(scope, host);
   const open = () =>
-    host.open((post) => {
-      const live = createPageLive({
+    host.open((post) =>
+      createPageLive({
         client: t.client,
         workspaceId: "ws-1",
         path: "notes/plan.md",
         post,
         sleep: async () => undefined,
-      });
-      pages.add(scope, live);
-      return live;
-    });
+      }),
+    );
+  const painted = () => host.painted(host.state().mount);
   const opens = () => t.server.paths().filter((path) => path === OPEN).length;
-  return { ...t, host, injected, open, opens };
+  return { ...t, host, injected, open, painted, opens };
 }
 
 describe("a page's web view and its session", () => {
@@ -44,7 +44,7 @@ describe("a page's web view and its session", () => {
     const t = setup({ signIn: {}, workspaceId: "ws-1" }, createLivePages(), ready());
     t.open();
     expect(t.host.state().live).toBeNull();
-    t.host.painted();
+    t.painted();
     t.open();
     await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
     t.latest().open();
@@ -63,7 +63,7 @@ describe("a page's web view and its session", () => {
     t.host.remount();
     t.open();
     expect(t.host.state().live).toBeNull();
-    t.host.painted();
+    t.painted();
     t.open();
     await vi.waitFor(() => expect(t.sockets).toHaveLength(2));
     t.latest().open();
@@ -75,6 +75,15 @@ describe("a page's web view and its session", () => {
     pageSide(live)(1)({ type: "state", facts: facts("live") });
     expect(liveMark(live.state())).toBe("saved");
     expect(t.opens()).toBe(2);
+  });
+
+  it("ignores a late painted report from a web view it replaced", () => {
+    const t = setup({ signIn: {}, workspaceId: "ws-1" }, createLivePages(), ready());
+    t.host.remount();
+    t.host.painted(0);
+    t.open();
+    expect(t.host.state()).toMatchObject({ mount: 1, painted: false, live: null });
+    expect(t.opens()).toBe(0);
   });
 });
 
@@ -100,7 +109,7 @@ describe("teardown", () => {
       const signedIn = account.state();
       if (signedIn.status !== "signed-in") throw Error("not signed in");
       const t = setup({ signIn: signedIn.signIn, workspaceId: "ws-1" }, pages, ready());
-      t.host.painted();
+      t.painted();
       t.open();
       await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
       t.latest().open();
@@ -128,10 +137,31 @@ describe("teardown", () => {
       if (trigger.includes("sign-out"))
         expect(atDelete, trigger).toMatchObject({ mount: 1, live: null });
       // The new web view draws, and no session opens in it.
-      t.host.painted();
+      t.painted();
       t.open();
       expect(t.host.state().live, trigger).toBeNull();
       expect(t.opens(), trigger).toBe(1);
+    }
+  });
+
+  it("reaches a page before its first paint and while its web view recovers, so neither opens afterwards", async () => {
+    for (const when of ["before the first paint", "while recovering"]) {
+      const pages = createLivePages();
+      const teardown = appTeardown(createAppRunner(), pages);
+      const t = setup({ signIn: {}, workspaceId: "ws-1" }, pages, ready());
+      if (when === "while recovering") {
+        t.painted();
+        t.open();
+        await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+        t.host.gone();
+      }
+      // Show on phone off reaches the page with no session open.
+      teardown.hide("ws-1");
+      expect(t.host.state(), when).toMatchObject({ live: null, stopped: true });
+      t.painted();
+      t.open();
+      expect(t.host.state().live, when).toBeNull();
+      expect(t.opens(), when).toBe(when === "while recovering" ? 1 : 0);
     }
   });
 });
