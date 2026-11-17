@@ -529,10 +529,14 @@ export function readError(error: unknown): ReadError {
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
-  // Trying again gives the same answer until Main's rules change or the
-  // conflict is resolved. The first line is the words; the rest, with the
-  // rules dohc could not order, is for Details.
-  if (name === "MergeWidensAccessError" || name === "MergeRuleConflictError") {
+  // Trying again at once gives the same answer, so the words say what to do
+  // first. The first line is the words; the rest, with the rules dohc could
+  // not order, is for Details.
+  if (
+    name === "MergeWidensAccessError" ||
+    name === "MergeRuleConflictError" ||
+    name === "MergeRulesKeptChangingError"
+  ) {
     return { words: message.split("\n")[0]!, mapped: false, cause: text, canRetry: false };
   }
   if (

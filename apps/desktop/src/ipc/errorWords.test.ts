@@ -38,6 +38,7 @@ import {
   liveFolderTitle,
   LivePageOwnedError,
   MergeRuleConflictError,
+  MergeRulesKeptChangingError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   RestorePolicyRefusalError,
@@ -695,27 +696,47 @@ describe("error words", () => {
     ).toBe(false);
   });
 
+  const oneFolderAtATime =
+    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.";
   it.each([
-    ["widens", /In any order/],
-    ["too-many", /too many related access rules/],
-    ["folded-names", /differ only in case/],
+    ["widens", oneFolderAtATime, /both before and after the merge/],
+    ["too-many", oneFolderAtATime, /too many related access rules/],
+    [
+      "folded-names",
+      "Nothing was merged. Use one spelling for each folder with access rules in Main and this version, then merge again.",
+      /names dohc counts as the same, such as Team and team\. .*only when the merge renames such a folder/,
+    ],
   ] as const)(
     "says a merge whose %s rules dohc could not order merged nothing, with the rules in Details",
-    (reason, cause) => {
+    (reason, next, cause) => {
       const refused = new MergeWidensAccessError(reason, [
         "team/access.yaml",
         "team/sub/access.yaml",
       ]);
       const words = readError(acrossIpc(refused, "desktop:merge-workspace-version"));
-      expect(words).toMatchObject({
-        words:
-          "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
-        canRetry: false,
-      });
+      expect(words).toMatchObject({ words: next, canRetry: false });
       expect(words.cause).toMatch(cause);
       expect(words.cause).toContain("\nteam/access.yaml\nteam/sub/access.yaml");
     },
   );
+
+  it("says Main or the version changed during a merge, not only Main", () => {
+    const stopped = new MergeWidensAccessError("widens", ["team/access.yaml"], "during");
+    expect(readError(acrossIpc(stopped, "desktop:merge-workspace-version"))).toMatchObject({
+      words: "Main or this version changed during the merge, so dohc stopped it. Merge again.",
+      canRetry: false,
+    });
+  });
+
+  it("says what happened when Main or the version kept changing under a merge's rule order", () => {
+    const stopped = acrossIpc(new MergeRulesKeptChangingError(), "desktop:merge-workspace-version");
+    expect(readError(stopped)).toMatchObject({
+      words:
+        "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
+      canRetry: false,
+    });
+    expect(isMergeStoppedPartway(stopped)).toBe(false);
+  });
 
   it("says a merge stopped at a rule's conflict, and to resolve it first", () => {
     const stopped = new MergeRuleConflictError("team/access.yaml", [

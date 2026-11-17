@@ -37,6 +37,7 @@ import {
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
   MergeRuleConflictError,
+  MergeRulesKeptChangingError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   YDocOpenRacedError,
@@ -470,8 +471,9 @@ describe("merge rule order from the engine", () => {
     orders: Order[];
     // Team's rule merge conflicts, and its conflict stays open.
     conflict?: boolean;
-    // A rule whose first merge the engine refuses because Main changed.
+    // A rule whose first merges the engine refuses because Main changed.
     staleAt?: string;
+    staleTimes?: number;
     runs?: number;
   }) {
     const root = await createTestScratch("dohc-merge-rule-order-");
@@ -479,6 +481,7 @@ describe("merge rule order from the engine", () => {
     const send = loopback.sendRequest.bind(loopback);
     const orders = [...options.orders];
     let staleAt = options.staleAt;
+    let staleTimes = options.staleTimes ?? 1;
     const asked: unknown[] = [];
     const merged: { path: string; ruleOrder?: string[] }[] = [];
     vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
@@ -491,7 +494,7 @@ describe("merge rule order from the engine", () => {
       if (request.method === VERSIONED_METHOD.versionsMerge) {
         const { path, ruleOrder } = request.params as { path: string; ruleOrder?: string[] };
         if (path === staleAt) {
-          staleAt = undefined;
+          if (--staleTimes === 0) staleAt = undefined;
           throw Object.assign(new Error("rule-merge-order-changed"), {
             wireError: { code: "CONFLICT", message: "rule-merge-order-changed", retry: "no" },
           });
@@ -653,6 +656,24 @@ describe("merge rule order from the engine", () => {
       { path: TEAM, ruleOrder: [TEAM] },
       { path: "team/private/a.md" },
     ]);
+  });
+
+  it("stops, writing nothing, when Main changed under every order it planned", async () => {
+    const order = { writes: [PRIVATE, OTHER, TEAM], deletes: [] };
+    const { failure, asked, merged, onDisk } = await mergeWithRuleOrder({
+      staleAt: PRIVATE,
+      staleTimes: 3,
+      orders: [order, order, order],
+    });
+    expect(failure).toBeInstanceOf(MergeRulesKeptChangingError);
+    expect(readError(failure)).toMatchObject({
+      words:
+        "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
+      canRetry: false,
+    });
+    expect(asked).toHaveLength(3);
+    expect(merged).toEqual([]);
+    expect(onDisk).toBe(VIEW_RULE);
   });
 });
 

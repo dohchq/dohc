@@ -1384,10 +1384,21 @@ export class MergeStoppedPartwayError extends Error {
 
 const RULE_REFUSAL_CAUSE: Record<AccessRuleMergeRefusal, string> = {
   widens:
-    "In any order, these access rule changes would briefly give someone more access than Main gives them before or after the merge.",
+    "In any order, these access rule changes would briefly give someone more access than Main gives them both before and after the merge.",
   "too-many": "This version changes too many related access rules for dohc to check together.",
   "folded-names":
-    "These access rules are in folders whose names differ only in case, which dohc cannot order safely.",
+    "These access rules are in folders whose names dohc counts as the same, such as Team and team. dohc can order their changes only when the merge renames such a folder, keeps its access rules the same, and changes no other access rule above or inside it.",
+};
+
+// What to do before the merge: change the rules in Main a little at a time,
+// or, for folders whose names count as the same, use one spelling.
+const RULE_REFUSAL_NEXT: Record<AccessRuleMergeRefusal, string> = {
+  widens:
+    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
+  "too-many":
+    "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
+  "folded-names":
+    "Nothing was merged. Use one spelling for each folder with access rules in Main and this version, then merge again.",
 };
 
 // The engine could not order a merge's rule changes so that none gives
@@ -1401,8 +1412,8 @@ export class MergeWidensAccessError extends Error {
   ) {
     const words =
       stage === "before"
-        ? "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again."
-        : "Main's access rules changed during the merge, so dohc stopped it. Merge again.";
+        ? RULE_REFUSAL_NEXT[reason]
+        : "Main or this version changed during the merge, so dohc stopped it. Merge again.";
     super([words, RULE_REFUSAL_CAUSE[reason], ...rules].join("\n"));
     this.name = "MergeWidensAccessError";
   }
@@ -1427,8 +1438,18 @@ export class MergeRuleConflictError extends Error {
 }
 
 // How many times one rule's merge plans its order again when the engine
-// finds Main changed under it, before the merge gives up.
+// finds Main or the version changed under it, before the merge gives up.
 const RULE_ORDER_TRIES = 3;
+
+// Main or the version changed under every order planned for a rule's merge.
+export class MergeRulesKeptChangingError extends Error {
+  constructor() {
+    super(
+      "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
+    );
+    this.name = "MergeRulesKeptChangingError";
+  }
+}
 
 // History's current rules refused a restore. An unreadable rules file's
 // message leads with the files dohc could not read, so the error map names
@@ -7847,7 +7868,8 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             const changed =
               error instanceof DaemonRefusalError && error.message === "rule-merge-order-changed";
-            if (!changed || ++tries >= RULE_ORDER_TRIES) throw error;
+            if (!changed) throw error;
+            if (++tries >= RULE_ORDER_TRIES) throw new MergeRulesKeptChangingError();
             await replan(index);
             index -= 1;
             continue;
