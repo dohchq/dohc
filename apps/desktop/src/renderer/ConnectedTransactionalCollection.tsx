@@ -183,6 +183,9 @@ function ScopedCollection({
   const request = useRef(0);
   // Rises each time a quiet read shows its answer.
   const quietShown = useRef(0);
+  // A session is starting while the page shows a signed-out copy: the page
+  // reads nothing until it is ready.
+  const sessionChanging = useRef(false);
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
   useEffect(() => {
@@ -193,6 +196,7 @@ function ScopedCollection({
   }, []);
   // Says whether this read showed the Collection, failed, or gave way to a newer read.
   const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
+    if (sessionChanging.current) return "failed";
     const sequence = ++request.current,
       shown = quietShown.current;
     setLoading(true);
@@ -361,8 +365,6 @@ function ScopedCollection({
   // Reads the Collection again without the loading line, and says nothing when
   // the read fails. A read the page started meanwhile wins.
   const quietRecords = useRef(false);
-  // A session is starting while the page shows a signed-out copy: quiet reads show nothing.
-  const sessionChanging = useRef(false);
   const quiet = useWorkspaceQuery(useWorkspaceSession(), {
     key: `${datasetPath}\0${owner ? "owner" : "reader"}`,
     manual: true,
@@ -379,7 +381,6 @@ function ScopedCollection({
   });
   useEffect(() => {
     const answer = quiet.value;
-    if (sessionChanging.current) return;
     if (!answer || answer.sequence !== request.current || answer.result.kind !== "description")
       return;
     quietShown.current++;
@@ -401,6 +402,7 @@ function ScopedCollection({
     quietAgain = useRef(false);
   const readQuietly = useCallback(
     function read(records: boolean) {
+      if (sessionChanging.current) return;
       if (records) quietRecords.current = true;
       if (quietBusy.current) {
         quietAgain.current = true;
