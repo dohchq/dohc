@@ -207,6 +207,38 @@ export async function closeLivePages(
 }
 
 /**
+ * Close every reader and writer of a copy for its rebuild and keep its
+ * engine sessions closed. On a failure the sessions open again; the copy
+ * stays closed in the engine until its rebuild finishes.
+ */
+export async function holdShareViewCopy(
+  workspaceId: string,
+  parts: {
+    sessions: {
+      holdForRebuild(workspaceId: string): Promise<void>;
+      releaseRebuildHold(workspaceId: string): void;
+    };
+    closeActivity(): Promise<void>;
+    closeLivePages(): Promise<void>;
+  },
+): Promise<void> {
+  const holding = parts.sessions.holdForRebuild(workspaceId);
+  try {
+    // The activity's last file reads go through the copy's session, which
+    // the hold and the engine both refuse. What they would have recorded
+    // stays on disk, where the rebuild's plan reads it.
+    await parts.closeActivity().catch((error: unknown) => {
+      if (!isClosedCopyRefusal(error)) throw error;
+    });
+    await holding;
+    await parts.closeLivePages();
+  } catch (error) {
+    parts.sessions.releaseRebuildHold(workspaceId);
+    throw error;
+  }
+}
+
+/**
  * Whether a background read failed only because the engine closed the copy
  * for its access, or main holds its sessions for the rebuild. Such a read
  * waits for the rebuild and logs nothing.

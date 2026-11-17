@@ -37,7 +37,7 @@ interface JoinedEntry {
   rootPath: string;
   shareView?: {
     grantedSelector?: { wholeWorkspace?: boolean };
-    rebuild?: unknown;
+    rebuild?: { stopped?: unknown };
     reach?: { visibilitySignature?: string };
   };
 }
@@ -203,12 +203,29 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
       .not.toBe(before);
     expect((await memberLog(relay, shareId)).body).not.toContain("team/budget.md");
 
-    // Sam's desktop pulls, closes the copy, rebuilds it and reopens it.
+    // Sam's desktop pulls and closes the copy.
     await expect
       .poll(
         async () => {
-          await refresh(mine, joinedId);
           const entry = await joinedEntry(memberTemp.homeDir);
+          if (
+            entry?.shareView?.rebuild !== undefined ||
+            entry?.shareView?.reach?.visibilitySignature !== before
+          )
+            return true;
+          await refresh(mine, joinedId);
+          return false;
+        },
+        { timeout: 120_000, intervals: [2_000] },
+      )
+      .toBe(true);
+    // The first try rebuilds the copy and reopens it, with no Try again.
+    const stops: unknown[] = [];
+    await expect
+      .poll(
+        async () => {
+          const entry = await joinedEntry(memberTemp.homeDir);
+          if (entry?.shareView?.rebuild?.stopped) stops.push(entry.shareView.rebuild.stopped);
           const gone = !(await exists(join(joined!.rootPath, "team/budget.md")));
           return (
             gone &&
@@ -216,9 +233,10 @@ test("@two-client a rule that hides a folder rebuilds a member's copy without it
             entry?.shareView?.reach?.visibilitySignature !== before
           );
         },
-        { timeout: 120_000, intervals: [2_000] },
+        { timeout: 120_000, intervals: [500] },
       )
       .toBe(true);
+    expect(stops).toEqual([]);
     expect(await readFile(join(joined!.rootPath, "notes/plan.md"), "utf8")).toBe("# Plan\n");
     await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName);
     expect(await refresh(mine, joinedId)).not.toMatch(/^(failed|threw)/);

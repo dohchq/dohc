@@ -1,15 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import {
   EngineRequestError,
   EngineWorkspaceRebuildingError,
+  EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import type { Request, Response } from "@dohc/workspace-engine-client";
 import { RelayUnreachableError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import type { EngineYDocSessionReleaseOutcome } from "./engineYDocSessionOwner";
 import {
   classifyShareViewRebuildError,
   closeLivePages,
   createShareViewRebuilds,
+  holdShareViewCopy,
   isClosedCopyRefusal,
   LivePageUnkeptError,
   shareViewRebuildStop,
@@ -358,6 +364,78 @@ describe("rebuilding a joined copy", () => {
     pages = [{ kind: "released" }];
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(rebuiltCalls).toBe(1);
+  });
+});
+
+// Main's hold, against the real session gate. The engine closed the copy
+// before main holds it, so it refuses every request but close.
+describe("holding a copy for its rebuild", () => {
+  async function heldCopy(closeActivity: (run: () => Promise<unknown>) => Promise<void>) {
+    const workspace = {
+      workspaceId: "w",
+      rootPath: await mkdtemp(join(tmpdir(), "dohc-hold-")),
+      attachmentId: Symbol("window"),
+    };
+    let closedForAccess = false;
+    const client = {
+      close() {},
+      sendRequest: async (request: Request): Promise<Response> => {
+        if (closedForAccess && request.method !== "workspace.close") {
+          throw new EngineRequestError(
+            request.id,
+            {
+              code: "FORBIDDEN",
+              message: "share-view-updating-access",
+              retry: "no",
+            } as ConstructorParameters<typeof EngineRequestError>[1],
+            request.method,
+          );
+        }
+        return {
+          id: request.id,
+          result: request.method === "workspace.open" ? { workspace: "handle" } : { closed: true },
+        };
+      },
+    };
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { sleep: async () => undefined },
+    );
+    await sessions.run(workspace, async () => undefined);
+    closedForAccess = true;
+    const hold = () =>
+      holdShareViewCopy("w", {
+        sessions,
+        closeLivePages: async () => undefined,
+        // The activity's last file reads go through the copy's session.
+        closeActivity: () => closeActivity(() => sessions.run(workspace, async () => undefined)),
+      });
+    return { workspace, sessions, hold };
+  }
+
+  // A file the watcher saw last stays on disk, where the rebuild's plan reads it.
+  it("holds the copy though the activity's last reads are refused", async () => {
+    const { workspace, sessions, hold } = await heldCopy(async (read) => {
+      await read();
+    });
+    await expect(hold()).resolves.toBeUndefined();
+    await expect(sessions.run(workspace, async () => undefined)).rejects.toBeInstanceOf(
+      EngineWorkspaceRebuildingError,
+    );
+    await sessions.closeAll();
+  });
+
+  it("stops on another failure of the close, and opens the sessions again", async () => {
+    const full = new Error("ENOSPC: the disk is full");
+    const { workspace, sessions, hold } = await heldCopy(async () => {
+      throw full;
+    });
+    await expect(hold()).rejects.toBe(full);
+    // Open again: the engine's own refusal answers, not the hold.
+    await expect(sessions.run(workspace, async () => undefined)).rejects.toThrow(
+      "share-view-updating-access",
+    );
+    await sessions.closeAll();
   });
 });
 

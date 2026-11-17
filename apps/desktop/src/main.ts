@@ -233,6 +233,7 @@ import {
   classifyShareViewRebuildError,
   closeLivePages,
   createShareViewRebuilds,
+  holdShareViewCopy,
   logUnlessClosedCopy,
   parseShareViewRebuildAnswer,
   shareViewRebuildStop,
@@ -10743,27 +10744,25 @@ function registerIpcHandlers(): void {
   };
   const shareViewRebuilds = createShareViewRebuilds<ListedReach>({
     hold: async (workspaceId) => {
-      const sessions = requireEngineSessions();
       const reopen = activity.listOpenWorkspaceIds().includes(workspaceId);
-      const holding = sessions.holdForRebuild(workspaceId);
-      try {
-        await closeDispatchRunActivity(requireWorkspace(workspaceId), { notifyRenderer: false });
-        await holding;
+      await holdShareViewCopy(workspaceId, {
+        sessions: requireEngineSessions(),
+        closeActivity: () =>
+          closeDispatchRunActivity(requireWorkspace(workspaceId), { notifyRenderer: false }),
         // Each joined live page keeps its unsent edits as a draft before it
         // closes, and the rebuild saves those drafts. A copy with no window
         // attached has no pages open.
-        let attachment: symbol | undefined;
-        try {
-          attachment = workspaceAuthorities.currentBinding(workspaceId).attachmentId;
-        } catch {
-          /* Not attached. */
-        }
-        if (attachment)
-          await closeLivePages(() => engineYDocSessionIpc.retireAuthority(attachment));
-      } catch (error) {
-        sessions.releaseRebuildHold(workspaceId);
-        throw error;
-      }
+        closeLivePages: async () => {
+          let attachment: symbol | undefined;
+          try {
+            attachment = workspaceAuthorities.currentBinding(workspaceId).attachmentId;
+          } catch {
+            /* Not attached. */
+          }
+          if (attachment)
+            await closeLivePages(() => engineYDocSessionIpc.retireAuthority(attachment));
+        },
+      });
       return { reopen };
     },
     release: async (workspaceId, reopen) => {
