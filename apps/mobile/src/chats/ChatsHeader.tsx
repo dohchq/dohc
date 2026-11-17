@@ -7,7 +7,7 @@ import { useSignIn } from "../account/AccountProvider";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme } from "../theme";
 import { waitingToSend } from "../demo";
-import type { PhoneWorkspace } from "./sample";
+import type { PhoneWorkspace } from "./types";
 import { useWorkspaceMenu } from "./workspaceMenu";
 
 // The sample's "you", in a sample build only (src/sampleBuild.ts).
