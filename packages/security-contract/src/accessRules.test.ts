@@ -47,11 +47,12 @@ const member = (
 ): ReachViewer => ({ role: "member", level, verifiedEmail });
 
 // The engine reads the same cases: its merge order planner where no folder
-// names fold together, and its tests' copy of folderLevel everywhere.
+// names fold together, and its tests' copy of folderLevel everywhere. The
+// relay's rule index reads the ruleFiles cases, which start from rule files.
 describe("shared reach vectors", () => {
   it.each(vectors.reach)("reaches $name", ({ rules: entries, folder, email, level }) => {
     const set = rules(entries as Record<string, string | null>);
-    for (const memberLevel of ["view", "edit"] as const) {
+    for (const memberLevel of ["view", "comment", "edit"] as const) {
       expect(folderLevel(set, member(memberLevel, email), folder)).toBe(
         level === "member" ? memberLevel : level,
       );

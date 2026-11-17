@@ -67,6 +67,13 @@
     {"name":"two twins that both grant show the folder","rules":{"team":"members: view\n","Team":"members: view\n"},"folder":"Team","email":null,"level":"view"},
     {"name":"an unruled twin folder is hidden by its twin","rules":{"team":"people:\n"},"folder":"TEAM/sub","email":null,"level":null},
     {"name":"an unreadable twin hides","rules":{"team":null,"Team":"members: view\n"},"folder":"Team","email":null,"level":null},
-    {"name":"a twin that leaves a person out hides from them","rules":{"team":"people:\n  p@example.com: view\n","Team":"members: edit\n"},"folder":"Team","email":"q@example.com","level":null}
+    {"name":"a twin that leaves a person out hides from them","rules":{"team":"people:\n  p@example.com: view\n","Team":"members: edit\n"},"folder":"Team","email":"q@example.com","level":null},
+    {"name":"a twin in another Unicode form hides","rules":{"caf\u00e9":"people:\n","cafe\u0301":"members: view\n"},"folder":"cafe\u0301","email":null,"level":null},
+    {"name":"a twin in another Unicode form never widens","rules":{"caf\u00e9":"members: edit\n","cafe\u0301":"members: view\n"},"folder":"cafe\u0301","email":null,"level":"view"}
+  ],
+  "ruleFiles": [
+    {"name":"two rule files in one folder are one unreadable rule","files":{"team/access.yaml":"members: edit\n","team/Access.yaml":"members: edit\n"},"folder":"team","email":null,"level":null},
+    {"name":"a rule file named in another case is its folder's rule","files":{"team/ACCESS.yaml":"members: view\n"},"folder":"team/sub","email":null,"level":"view"},
+    {"name":"a rule file in a twin folder is that twin's rule","files":{"caf\u00e9/access.yaml":"people:\n","cafe\u0301/access.yaml":"members: view\n"},"folder":"cafe\u0301","email":null,"level":null}
   ]
 }

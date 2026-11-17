@@ -4420,3 +4420,115 @@ fn a_rule_merge_refuses_an_order_main_changed_under() {
     );
     merge_judged(&f, "feature", again, &["team/private"]);
 }
+
+fn version_rename(f: &Fixture, version: &str, from: &str, to: &str, moment: &str) {
+    f.runtime
+        .block_on(f.actor.versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: version.to_owned(),
+                from_path: from.to_owned(),
+                to_path: to.to_owned(),
+                moment_id: moment.to_owned(),
+                request_id: None,
+                metadata_origin: "cli".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+            },
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .unwrap_or_else(|error| panic!("{version} {from}: {error}"));
+}
+
+/// Opus's case from review: a Version renames Team to team, as renaming a
+/// folder on a disk that ignores case does. Main always holds the old
+/// spelling, so refusing every folded name refused this merge every time.
+/// The new spellings are written deepest first, then the old ones deleted
+/// outermost first, and no state between reaches more on either spelling.
+#[test]
+fn a_merge_that_only_respells_a_ruled_folder_merges() {
+    let f = Fixture::new();
+    f.versioned_write(write("Team/access.yaml", EDIT, "m-team"))
+        .unwrap();
+    f.versioned_write(write("Team/sub/access.yaml", VIEW, "m-sub"))
+        .unwrap();
+    f.versioned_write(write("Team/sub/x.md", "x", "m-x"))
+        .unwrap();
+    create_version(&f, "feature");
+    version_rename(
+        &f,
+        "feature",
+        "Team/access.yaml",
+        "team/access.yaml",
+        "v-team",
+    );
+    version_rename(
+        &f,
+        "feature",
+        "Team/sub/access.yaml",
+        "team/sub/access.yaml",
+        "v-sub",
+    );
+    version_rename(&f, "feature", "Team/sub/x.md", "team/sub/x.md", "v-x");
+    let order = rule_order(
+        &f,
+        "feature",
+        &["team/access.yaml", "team/sub/access.yaml"],
+        &["Team/access.yaml", "Team/sub/access.yaml"],
+    );
+    assert_eq!(
+        order,
+        RuleMergeOrder::Ordered {
+            writes: owned(&["team/sub/access.yaml", "team/access.yaml"]),
+            deletes: owned(&["Team/access.yaml", "Team/sub/access.yaml"]),
+        }
+    );
+    merge_judged(
+        &f,
+        "feature",
+        order,
+        &["Team", "team", "Team/sub", "team/sub"],
+    );
+    assert_eq!(
+        main_rules(&f),
+        BTreeMap::from([
+            ("team/access.yaml".to_owned(), EDIT.to_owned()),
+            ("team/sub/access.yaml".to_owned(), VIEW.to_owned()),
+        ])
+    );
+}
+
+/// Opus's case from review: the engine works out the rule changes still to
+/// come itself, so an order that leaves one out writes nothing.
+#[test]
+fn a_rule_merge_refuses_an_order_that_leaves_out_a_rule_change() {
+    let f = Fixture::new();
+    f.versioned_write(write("access.yaml", VIEW, "m-root"))
+        .unwrap();
+    f.versioned_write(write("team/private/notes.md", "notes", "m-notes"))
+        .unwrap();
+    create_version(&f, "feature");
+    version_write(&f, "feature", "team/access.yaml", EDIT, "v-team");
+    version_write(&f, "feature", "team/private/access.yaml", VIEW, "v-private");
+    let journal = f.journal();
+    for partial in [&["team/access.yaml"][..], &["team/private/access.yaml"][..]] {
+        let refused = merge_rule(&f, "feature", &owned(partial), 50);
+        assert!(
+            matches!(refused, Err(RuntimeError::RuleMergeOrderChanged)),
+            "{partial:?}: {refused:?}"
+        );
+        assert_eq!(f.journal(), journal);
+    }
+    let order = rule_order(
+        &f,
+        "feature",
+        &["team/access.yaml", "team/private/access.yaml"],
+        &[],
+    );
+    merge_judged(&f, "feature", order, &["team/private"]);
+}
