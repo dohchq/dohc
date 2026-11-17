@@ -175,20 +175,54 @@ describe("useAccessRuleHoldNotices", () => {
     });
   });
 
-  // Neither choice can read a rule another program holds, so there is no
-  // change to allow; Restore rule says why it failed.
-  it("says when the rule on disk cannot be read, and offers no change to allow", async () => {
+  // Neither choice can read a rule another program holds, or one dohc could
+  // not read, so there is no change to allow; Restore rule says why it
+  // failed. The row leads with what the owner does, in the engine's words.
+  it("says why the rule on disk cannot be read, what to do first, and offers no change to allow", async () => {
+    const until = "Until you choose, dohc doesn't record or share changes in team.";
+    for (const [unreadable, lead] of [
+      [
+        "locked",
+        "Close the access rule for team in the program that has it open, so dohc can read it.",
+      ],
+      ["on-disk", "Check that you can open the access rule for team. dohc could not read it."],
+    ] as const) {
+      cleanup();
+      const h = harness([{ ...WIDENED, changes: [], unreadable }]);
+      await waitFor(() => expect(h.row("team")).toBeDefined());
+      expect(h.row("team")!.message).toBe(`${lead} ${until}`);
+      expect(h.row("team")!.rows).toBeUndefined();
+      expect(h.row("team")!.action).toMatchObject({ label: "Restore rule", additional: [] });
+    }
+  });
+
+  // Two readable spellings record as one rule members can't read, so
+  // keeping them hides the folder, and the row says that is the choice.
+  it("offers to hide the folder when the rule on disk is several files", async () => {
     const h = harness([
-      { ...WIDENED, changes: [], unreadable: "on-disk" },
-      { ...REMOVED, changes: [], unreadable: "on-disk" },
+      { ...WIDENED, observedSha256: null, changes: [], unreadable: "several-files" },
     ]);
-    await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
+    await waitFor(() => expect(h.row("team")).toBeDefined());
     expect(h.row("team")!.message).toBe(
-      "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. If another program has it open, close it there.",
+      "Keep one access rule file in team and delete the others, or hide team from members. Until you choose, dohc doesn't record or share changes in team.",
     );
-    expect(h.row("team")!.rows).toBeUndefined();
-    expect(h.row("team")!.action).toMatchObject({ label: "Restore rule", additional: [] });
-    expect(h.row("team/sub")!.action).toMatchObject({ label: "Restore rule", additional: [] });
+    expect(h.row("team")!.action).toMatchObject({
+      label: "Restore rule",
+      additional: [{ label: "Hide from members" }],
+    });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
+    await waitFor(() =>
+      expect(h.bridge.decideAccessRule).toHaveBeenCalledWith(
+        expect.objectContaining({ decision: "accept", expectedSha256: null }),
+      ),
+    );
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(done()).toMatchObject({
+        message: "Hid team from members.",
+        action: { label: "Open History" },
+      }),
+    );
   });
 
   it("reads as working while a decision runs, then says what took effect with Open History", async () => {

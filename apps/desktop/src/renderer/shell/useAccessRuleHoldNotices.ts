@@ -105,6 +105,29 @@ const ruleOf = (folder: string) =>
 const ruleOfLower = (folder: string) =>
   folder ? `the access rule for ${folder}` : "the workspace's access rule";
 
+// While dohc can't show the widened rule on disk, the row leads with what the
+// owner does about it, so the row's three lines show it without Show more.
+// Neither choice can read a locked or unreadable file, so they offer no
+// change to allow. Several readable spellings record as one rule members
+// can't read, which hides the folder.
+const ON_DISK: Record<
+  "locked" | "on-disk" | "several-files",
+  (folder: string) => { lead: string; accept: { label: string; busy: string } | null }
+> = {
+  locked: (folder) => ({
+    lead: `Close ${ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
+    accept: null,
+  }),
+  "on-disk": (folder) => ({
+    lead: `Check that you can open ${ruleOfLower(folder)}. dohc could not read it.`,
+    accept: null,
+  }),
+  "several-files": (folder) => ({
+    lead: `Keep one access rule file in ${placeOf(folder)} and delete the others, or hide ${placeOf(folder)} from members.`,
+    accept: { label: "Hide from members", busy: "Hiding…" },
+  }),
+};
+
 export function accessRuleHoldWords(
   hold: AccessRuleHold,
   level: MemberLevel,
@@ -124,13 +147,12 @@ export function accessRuleHoldWords(
     return `${whoOf(change.who)}: ${before === after ? `${before}, no change` : `${before} → ${after}`}`;
   });
   const openMembers = level === null && usesMemberLevel(hold);
-  const onDisk = hold.unreadable === "on-disk";
-  const unreadable =
+  const recordedUnread =
     hold.unreadable === "recorded"
       ? " dohc can't read the rule it recorded, so it can't list who gains access."
-      : onDisk
-        ? " dohc can't read the access rule now on disk. If another program has it open, close it there."
-        : "";
+      : "";
+  // The engine reads a removed rule's disk not at all, so only a widening
+  // can say why it can't show the rule on disk.
   if (hold.reason === "removed") {
     const without =
       hold.fallsBackTo !== null
@@ -138,18 +160,23 @@ export function accessRuleHoldWords(
         : `members get the level ${IN_SETTINGS}.${level === null ? " dohc can't read that level now." : ""}`;
     return {
       title: `${ruleOf(hold.folder)} was removed outside dohc`,
-      message: `${until} Without it, ${without}${unreadable}`,
+      message: `${until} Without it, ${without}${recordedUnread}`,
       rows,
       openMembers,
-      accept: onDisk ? null : { label: "Remove rule", busy: "Removing…" },
+      accept: { label: "Remove rule", busy: "Removing…" },
     };
   }
+  const title = `Access to ${place} was widened outside dohc`;
+  if (hold.unreadable !== null && hold.unreadable !== "recorded") {
+    const onDisk = ON_DISK[hold.unreadable](hold.folder);
+    return { title, message: `${onDisk.lead} ${until}`, rows, openMembers, accept: onDisk.accept };
+  }
   return {
-    title: `Access to ${place} was widened outside dohc`,
-    message: `${until} Restoring keeps the rule from outside dohc as a copy.${unreadable}`,
+    title,
+    message: `${until} Restoring keeps the rule from outside dohc as a copy.${recordedUnread}`,
     rows,
     openMembers,
-    accept: onDisk ? null : { label: "Allow new access", busy: "Allowing…" },
+    accept: { label: "Allow new access", busy: "Allowing…" },
   };
 }
 
@@ -194,6 +221,7 @@ export function accessRuleDecidedWords(
   }
   if (hold.reason === "removed")
     return `Removed ${ruleOfLower(hold.folder)}. ${changedReach(hold, level)}`;
+  if (hold.unreadable === "several-files") return `Hid ${placeOf(hold.folder)} from members.`;
   return changedReach(hold, level);
 }
 
