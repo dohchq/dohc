@@ -64,6 +64,14 @@ const REFUSAL_LINGER_MS = 2_000;
 const READ_FIRST_BYTES = 64 * 1024;
 
 /**
+ * How long a connection may wait between requests. A gateway in front keeps its connections to a server
+ * and sends later requests on them. If the server closes one first, the gateway can already have sent a
+ * request on it. That request is lost and the gateway answers 502. Caddy keeps an unused connection for two
+ * minutes and Node closes one after five seconds, so a server waits longer than its gateway does.
+ */
+const IDLE_CONNECTION_MS = 150_000;
+
+/**
  * A node:http server over a fetch-style handler. The handler starts as soon
  * as the headers arrive, and a body is read only as the handler reads it, so
  * a handler that refuses its caller first never receives the upload. A body
@@ -79,7 +87,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   const callerBytesInFlight = new Map<string, number>();
   // Headers stay bounded to 60s; the adapter or a streaming handler bounds the body.
   const server = createServer(
-    { requestTimeout: 0, headersTimeout: 60_000 },
+    { requestTimeout: 0, headersTimeout: 60_000, keepAliveTimeout: IDLE_CONNECTION_MS },
     (incoming, outgoing) => {
       let url: URL;
       try {
