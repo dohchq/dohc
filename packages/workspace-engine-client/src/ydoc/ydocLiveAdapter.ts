@@ -1026,6 +1026,8 @@ export class YdocAdapterSession {
       }
     }
     if ("ownerDraft" in result && this.ownerDraft) {
+      // A resync reading now may answer with the queue as it was before this edit.
+      if (this.resyncPending !== null) this.resyncAgain = true;
       this.ownerDraft = {
         ...this.ownerDraft,
         outboxId: result.ownerDraft.outboxId,

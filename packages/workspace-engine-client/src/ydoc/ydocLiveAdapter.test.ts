@@ -587,7 +587,7 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   await reopened.close();
 });
 
-it("records the owner's typing while a resync is pending, without failing the session", async () => {
+it("records the owner's typing while a resync is pending, and reads the queue again after it", async () => {
   const engine = new YdocLoopbackEngine();
   const path = "notes/owner.md";
   engine.seedFile({
@@ -611,7 +611,8 @@ it("records the owner's typing while a resync is pending, without failing the se
   seedAdapter.dispose();
   const claim = "a".repeat(64);
   let release!: () => void,
-    resyncs = 0;
+    resyncs = 0,
+    pendingBytes = 0;
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
@@ -627,7 +628,7 @@ it("records the owner's typing while a resync is pending, without failing the se
     },
     relayDatabaseNamespace: "relay",
     revision: 1,
-    acceptedCursor: 0,
+    acceptedCursor: 1,
     nativeHeadSequence: 1,
     nativeUnsettled: false,
     outboxId: "outbox",
@@ -640,6 +641,7 @@ it("records the owner's typing while a resync is pending, without failing the se
     async sendRequest(request) {
       if (request.method === YDOC_METHOD.recordUpdate) {
         const response = await recordUnderClaim(engine, request, claim);
+        pendingBytes = 10;
         return {
           ...response,
           result: {
@@ -650,12 +652,14 @@ it("records the owner's typing while a resync is pending, without failing the se
               sequence: 1,
               deliveryId: "delivery",
               updateDigest: "b".repeat(64),
-              pendingBytes: 10,
+              pendingBytes,
               state: "active",
             },
           },
         };
       }
+      // A resync reads the owner's queue before the read is held.
+      const read = { ...draft, pendingBytes };
       if (request.method === YDOC_METHOD.resync) {
         resyncs++;
         await held;
@@ -668,7 +672,7 @@ it("records the owner's typing while a resync is pending, without failing the se
         result: {
           ...(response.result as Record<string, JsonValue>),
           lineageClaimId: claim,
-          ownerDraft: draft,
+          ownerDraft: read,
         },
       };
     },
@@ -701,6 +705,9 @@ it("records the owner's typing while a resync is pending, without failing the se
   );
   release();
   await drain();
+  // The held read saw an empty queue. Its answer must not say the typed edit was saved.
+  await expect(provider.settleNow()).rejects.toMatchObject({ draft: { pendingBytes: 10 } });
+  expect(resyncs).toBe(2);
   await provider.applyLocalUpdate(
     richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "typed after reading"),
   );
