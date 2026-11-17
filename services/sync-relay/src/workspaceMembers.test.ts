@@ -740,6 +740,13 @@ describe("what a member reaches", () => {
     await expectChanged("revealing a folder", true, true);
     await ownerWrite(h, "empty/access.yaml", "");
     await expectChanged("hiding a folder with no other files", true, true);
+    // A rule on a hidden folder's case twin changes no reach: the twin hides it.
+    await ownerWrite(h, "EMPTY/access.yaml", "members: edit\n");
+    const twin = await signatures();
+    expect(twin.visibilitySignature, "a hidden folder's twin with a rule").toBe(
+      last.visibilitySignature,
+    );
+    last = twin;
     // A move changes no reach: the listed levels already place the moved file,
     // and a move across the edge is marked in the pull.
     await ownerRename(h, "team/a.md", "view/a.md");

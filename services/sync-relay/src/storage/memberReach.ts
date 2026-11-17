@@ -157,16 +157,22 @@ export function memberReach(
       ),
     ]);
   // A hidden folder hides all under it, so reach can only stop at a ruled
-  // folder. Reach is the same for every spelling of a folded name, so the
-  // exact rule folders cover their case twins.
+  // folder. Reach is the same for every spelling of a folded name, so each
+  // edge is named once by its folded name: a rule on a twin moves no edge.
   const reaches = (folder: string) => atFolder(folder) !== null;
   const visibilitySignature = () =>
     digest([
       role,
       reaches(""),
-      ruled().filter(
-        (folder) => folder !== "" && reaches(folder) !== reaches(accessRuleFolder(folder)),
-      ),
+      [
+        ...new Set(
+          ruled()
+            .filter(
+              (folder) => folder !== "" && reaches(folder) !== reaches(accessRuleFolder(folder)),
+            )
+            .map(pathCollisionKey),
+        ),
+      ].sort(),
     ]);
   const keyed = (key: string | Uint8Array, tag: string, value: string) =>
     createHmac("sha256", key)
