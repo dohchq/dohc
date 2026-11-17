@@ -898,6 +898,39 @@ describe("registered received-view handlers", () => {
       );
     });
 
+    // The levels moved, and the visibility moved before the pull that follows
+    // them: the engine closes the copy on that second pull.
+    it("marks the view as updating access when the pull after new levels closes the copy", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
+      h.fetchReach.mockResolvedValue({
+        ...stored,
+        signature: "r2",
+        folders: [{ path: "Notes", level: "edit" as const }],
+      });
+      h.reconcile.mockImplementationOnce(async () =>
+        stoppedPull({ signature: "r2", visibilitySignature: "v1" }),
+      );
+      h.reconcile.mockImplementationOnce(async () => {
+        const stopped = stoppedPull({ signature: "r3", visibilitySignature: "v2" });
+        return { ...stopped, outcome: { ...stopped.outcome, rebuildId: "rebuild-1" } };
+      });
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.reconcile).toHaveBeenCalledTimes(2);
+      expect(h.workspace.shareView).toMatchObject({ rebuild: { rebuildId: "rebuild-1" } });
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-1");
+      // Nothing caches the closed copy as unchanged: the next refresh asks again.
+      await expect(
+        h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+          workspaceId: "existing",
+          trigger: "background",
+        }),
+      ).rejects.toThrow("dohc could not refresh this workspace while its access is being updated.");
+    });
+
     // The engine closed the copy before the pull answered. The view records
     // the rebuild and the window shows "Updating access"; nothing reads the
     // copy again, and its levels wait for the rebuild.

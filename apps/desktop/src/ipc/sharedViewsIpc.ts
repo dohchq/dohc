@@ -1019,21 +1019,32 @@ export function registerSharedViewsIpcHandlers<
             ) {
               await enrollInstalled();
             }
-            outcome = await reconcile();
-            if (!("ok" in outcome && !outcome.ok) && outcome.rebuildId !== undefined) {
-              await closeForRebuild(workspace.workspaceId, outcome.rebuildId);
+            // A pull the engine closed the copy on records the rebuild and starts it.
+            const closedForRebuild = async (pulled: typeof outcome) => {
+              if (("ok" in pulled && !pulled.ok) || pulled.rebuildId === undefined) return false;
+              await closeForRebuild(workspace.workspaceId, pulled.rebuildId);
               startRebuild(workspace.workspaceId);
-            } else if (!("ok" in outcome && !outcome.ok) && outcome.reachChanged && reachRelay) {
+              return true;
+            };
+            outcome = await reconcile();
+            if (
+              !(await closedForRebuild(outcome)) &&
+              !("ok" in outcome && !outcome.ok) &&
+              outcome.reachChanged &&
+              reachRelay
+            ) {
               const followed = await followShareViewReach(
                 workspace.workspaceId,
                 workspace.rootPath,
                 reachRelay,
                 () => operation.assertCurrent(),
               );
-              // Pull again under the installed levels. A second change waits for the next refresh.
+              // Pull again under the installed levels. A second change waits for
+              // the next refresh, unless the engine closes the copy for it.
               if (followed === "installed") {
                 await enrollInstalled();
                 outcome = await reconcile();
+                await closedForRebuild(outcome);
               } else if (followed === "visibility-changed") settledReach = outcome.reachChanged;
             }
             if (settledReach === undefined) {
