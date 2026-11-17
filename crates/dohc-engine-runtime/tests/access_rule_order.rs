@@ -3549,3 +3549,25 @@ fn a_held_widening_with_several_files_still_waits_after_later_capture() {
         }
     }
 }
+
+#[test]
+fn capture_cannot_expose_a_hidden_rule_while_removing_an_empty_folder() {
+    let f = ruled_team();
+    f.put("access.yaml", VIEW);
+    f.settle();
+    f.capture_ok(&["access.yaml"]);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.decide_on("team", AccessRuleDecision::Accept, None, "widened")
+        .unwrap();
+    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml", "team/a.md"] {
+        std::fs::remove_file(f.root().join(path)).unwrap();
+    }
+    f.settle();
+    f.retire("team/a.md").unwrap();
+    let _ = f.retire("team/access.yaml");
+    assert_rule_prefixes_at_most_view(&f);
+    assert_eq!(recorded_reach(&f, "members"), None);
+}

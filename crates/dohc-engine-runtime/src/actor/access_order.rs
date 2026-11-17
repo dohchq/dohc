@@ -1410,9 +1410,7 @@ fn judge_folder(
         Ok(disk) => with_touches(disk, rule_touches),
         Err(_) => return Ok(Plan::Verdict(Verdict::Waits)),
     };
-    if disk.len() > 1
-        && access_rule_holds::hold_in(conn, workspace, version, folder)?.is_some()
-    {
+    if disk.len() > 1 && access_rule_holds::hold_in(conn, workspace, version, folder)?.is_some() {
         return Ok(Plan::Verdict(Verdict::Held {
             reason: access_rule_holds::WIDENED,
         }));
@@ -1440,12 +1438,31 @@ fn judge_folder(
                 reason: access_rule_holds::REMOVED,
             }));
         }
-        return Ok(match (rule_touches.is_empty(), recorded) {
-            (true, _) => Plan::Verdict(Verdict::Clear(Clearance::DeletesOnly)),
+        if rule_touches.is_empty() {
+            return Ok(Plan::Verdict(Verdict::Clear(Clearance::DeletesOnly)));
+        }
+        let changes = match decision_rule_changes(
+            conn,
+            workspace,
+            version,
+            folder,
+            committed.as_ref(),
+            &disk,
+        )? {
+            Some(changes) => changes,
+            None => {
+                return Ok(Plan::Verdict(Verdict::Held {
+                    reason: access_rule_holds::REMOVED,
+                }));
+            }
+        };
+        return Ok(match recorded {
             // The rule's delete waits for the deletes of its files.
-            (false, true) => Plan::Verdict(Verdict::Waits),
-            (false, false) if covered => Plan::Verdict(Verdict::Clear(Clearance::RuleLast)),
-            (false, false) => Plan::CommitRule(changes),
+            true => Plan::Verdict(Verdict::Waits),
+            false if covered && changes.len() == 1 => {
+                Plan::Verdict(Verdict::Clear(Clearance::RuleLast))
+            }
+            false => Plan::CommitRule(changes),
         });
     }
     let above = match &committed {
