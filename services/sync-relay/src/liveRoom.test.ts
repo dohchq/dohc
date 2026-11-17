@@ -1182,6 +1182,13 @@ it("checks the part of an edit it keeps, not the edit as sent", async () => {
   const apart = new Uint8Array([3, ...bogus, ...between, ...ok, 0]);
   expect(Y.decodeUpdate(apart).structs.map((struct) => struct.id.client)).toEqual([7, 8, 7]);
   expect(await a.submit(apart)).toEqual({ result: "refused", reason: "invalid-update" });
+  // Editors listed lowest first: merging the room's edits for a save would drop editor 8's.
+  expect(await a.submit(new Uint8Array([2, ...ok, ...between, 0]))).toEqual({
+    result: "refused",
+    reason: "invalid-update",
+  });
+  // Listed highest first, as Yjs writes them, the same two are taken.
+  await take(new Uint8Array([2, ...between, ...ok, 0]));
   // Editor 5 adds a paragraph and removes it, and Yjs collects its words (5,1 to 5,3).
   await take(
     edit(
@@ -1209,7 +1216,11 @@ it("checks the part of an edit it keeps, not the edit as sent", async () => {
   const value = [119, 1, 118];
   const resent = new Uint8Array([1, 1, 9, 2, 0x88, 5, 1, 6, ...Array(6).fill(value).flat(), 0]);
   expect(await a.submit(resent)).toEqual({ result: "refused", reason: "invalid-update" });
-  expect(unsaved(f)).toHaveLength(2);
+  const rows = unsaved(f).map((row) => row.updateBytes);
+  expect(rows).toHaveLength(3);
+  // A save of them all keeps every editor's changes.
+  const saved = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(Y.mergeUpdates(rows)));
+  expect([7, 8, 5, 9].map((client) => saved.get(client))).toEqual([1, 1, 4, 5]);
 });
 
 it("saves every taken edit before a step that closes the note, taking none until the step ends, then ends the room", async () => {
