@@ -149,7 +149,9 @@ export function accessRuleHoldWords(
         : `members get the level ${IN_SETTINGS}.${level === null ? " dohc can't read that level now." : ""}`;
     return {
       title: `${ruleOf(hold.folder)} was removed outside dohc`,
-      message: `${until} Without it, ${without}`,
+      message: hold.canAccept
+        ? `${until} Without it, ${without}`
+        : `Without it, ${without} dohc can't remove both files at once without briefly giving members more access. To remove the rule, restore, delete one file, choose here, then delete the other.`,
       rows,
       openMembers,
       accept: hold.canAccept ? { label: "Remove rule", busy: "Removing…" } : null,
@@ -163,8 +165,9 @@ export function accessRuleHoldWords(
       title: hold.folder
         ? `More than one access rule file in ${hold.folder}`
         : "This workspace has more than one access rule file",
-      message:
-        hold.recordedRule === null
+      message: !hold.canAccept
+        ? "dohc can't record these files without briefly giving members more access. Restore, then put the rule in one file."
+        : hold.recordedRule === null
           ? `${until} Restoring removes these access rule files and keeps them as copies.`
           : `${until} Restoring puts back the rule dohc recorded and keeps the files from outside dohc as copies.`,
       rows,

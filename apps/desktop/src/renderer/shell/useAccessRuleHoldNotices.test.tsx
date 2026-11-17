@@ -263,7 +263,11 @@ describe("useAccessRuleHoldNotices", () => {
       expect(h.row(hold.folder)!.action).toMatchObject({ label: "Restore rule", additional: [] });
       if (hold.unreadable === "several-files") {
         expect(h.row(hold.folder)!.message).toContain(
-          "Restoring removes these access rule files and keeps them as copies.",
+          "dohc can't record these files without briefly giving members more access. Restore, then put the rule in one file.",
+        );
+      } else {
+        expect(h.row(hold.folder)!.message).toContain(
+          "dohc can't remove both files at once without briefly giving members more access. To remove the rule, restore, delete one file, choose here, then delete the other.",
         );
       }
     }
@@ -280,8 +284,11 @@ describe("useAccessRuleHoldNotices", () => {
       },
     ]);
     await waitFor(() => expect(h.row("team/sub")).toBeDefined());
-    expect(h.row("team/sub")!.message).toBe(
-      "Until you choose, dohc doesn't record or share changes in team/sub. Without it, team/sub follows the access rule for team.",
+    expect(h.row("team/sub")!.message).toContain(
+      "Without it, team/sub follows the access rule for team.",
+    );
+    expect(h.row("team/sub")!.message).toContain(
+      "To remove the rule, restore, delete one file, choose here, then delete the other.",
     );
     expect(h.row("team/sub")!.rows).toEqual(["Members: No access \u2192 View"]);
   });

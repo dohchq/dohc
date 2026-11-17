@@ -3593,3 +3593,59 @@ fn putting_back_the_recorded_pair_ends_its_hold() {
     assert!(f.holds().is_empty());
     assert_eq!(f.journal(), before);
 }
+
+#[test]
+fn removing_a_hidden_pair_can_continue_one_file_at_a_time() {
+    let f = Fixture::new();
+    f.put("access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.decide("team", AccessRuleDecision::Accept).unwrap();
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.settle();
+    f.capture_ok(&["team/\u{FF41}ccess.yaml"]);
+    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+        std::fs::remove_file(f.root().join(path)).unwrap();
+    }
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(!f.hold_views()[0].can_accept);
+    f.decide("team", AccessRuleDecision::Restore).unwrap();
+    assert!(f.holds().is_empty());
+    assert!(f.root().join("team/access.yaml").exists());
+    assert!(f.root().join("team/\u{FF41}ccess.yaml").exists());
+    std::fs::remove_file(f.root().join("team/\u{FF41}ccess.yaml")).unwrap();
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(f.hold_views()[0].can_accept);
+    f.decide("team", AccessRuleDecision::Accept).unwrap();
+    assert_eq!(recorded_reach(&f, "members"), Some(Level::Edit));
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(f.hold_views()[0].can_accept);
+    f.decide("team", AccessRuleDecision::Accept).unwrap();
+    assert!(f.holds().is_empty());
+    assert!(!f.root().join("team/access.yaml").exists());
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+        assert!(
+            dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", path)
+                .unwrap()
+                .snapshot
+                .is_none()
+        );
+    }
+    assert_eq!(
+        dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", "access.yaml")
+            .unwrap()
+            .snapshot
+            .unwrap()
+            .text,
+        VIEW
+    );
+}
