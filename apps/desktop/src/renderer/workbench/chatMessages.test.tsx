@@ -772,7 +772,14 @@ describe("formatChatTime", () => {
 describe("continuesRun", () => {
   const relayPerson = { group: "", hue: null, self: false };
   const record = (id: string, authorUserId: string, createdAtMs: number): ChatMessageRecord => ({
-    id, threadId: "dm", presentation: relayPerson, authorKind: "human", authorDisplayName: authorUserId, authorUserId, body: id, createdAtMs,
+    id,
+    threadId: "dm",
+    presentation: relayPerson,
+    authorKind: "human",
+    authorDisplayName: authorUserId,
+    authorUserId,
+    body: id,
+    createdAtMs,
   });
 
   it("joins one account's messages, never two accounts' that share a presentation group", () => {

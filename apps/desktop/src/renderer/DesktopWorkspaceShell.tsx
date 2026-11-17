@@ -8951,7 +8951,7 @@ export function DesktopWorkspaceShell(props: {
                                                               onOpenInTab={openChatsNavInTab}
                                                               onCloseTab={() => {
                                                                 if (tab)
-                                                                  void closeTabsAfterFlush([
+                                                                  closeTabsAfterFlush([
                                                                     {
                                                                       groupId: editorGroup.id,
                                                                       tab,
@@ -9963,7 +9963,7 @@ export function DesktopWorkspaceShell(props: {
                             <LazyDesktopSettings
                               onMessageMember={(memberId) => {
                                 closeSettings();
-                                openChatsNavInTab({ level: "direct-new", memberIds: [memberId] });
+                                openChatsNavInTab({ level: "direct-new", memberId });
                               }}
                               workspaceIsReady={workspaceIsReady}
                               workspaceOpenFailed={!!workspaceOpenFailure}

@@ -1,4 +1,8 @@
-import { NOTICE_BODY_MAX_CHARS, NOTICE_SENDER_LABEL_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
+import {
+  NOTICE_BODY_MAX_CHARS,
+  NOTICE_SENDER_LABEL_MAX_CHARS,
+  NOTICE_TITLE_MAX_CHARS,
+} from "@dohc/workspace-contracts/relay";
 import type { DirectConversation } from "@dohc/security-contract/direct-messages";
 import type { NoticeRow } from "../ipc/bridgeContract";
 
@@ -14,25 +18,30 @@ const cut = (text: string, max: number) => {
 };
 
 /** One row per conversation with an unread message from the other person: its newest one. */
-export function directNoticeRows(viewerId: string, conversations: readonly DirectConversation[]): NoticeRow[] {
+export function directNoticeRows(
+  viewerId: string,
+  conversations: readonly DirectConversation[],
+): NoticeRow[] {
   return conversations.flatMap(({ conversationId, person, last, unread }) => {
     if (unread === 0 || last.authorId === viewerId || person.blocked) return [];
     const name = cut(person.name ?? last.authorName ?? "Someone", NOTICE_SENDER_LABEL_MAX_CHARS);
-    return [{
-      store: "direct",
-      noticeId: `direct:${conversationId}:${last.seq}`,
-      kind: DIRECT_NOTICE_KIND,
-      workspaceId: null,
-      recipientShareId: null,
-      senderKind: "person",
-      senderLabel: name,
-      title: cut(`${name} messaged you`, NOTICE_TITLE_MAX_CHARS),
-      body: cut(last.body.replace(/\s+/gu, " ").trim(), NOTICE_BODY_MAX_CHARS),
-      target: { thread: conversationId },
-      createdAtMs: last.createdAtMs,
-      readAtMs: null,
-      postedHere: false,
-    } satisfies NoticeRow];
+    return [
+      {
+        store: "direct",
+        noticeId: `direct:${conversationId}:${last.seq}`,
+        kind: DIRECT_NOTICE_KIND,
+        workspaceId: null,
+        recipientShareId: null,
+        senderKind: "person",
+        senderLabel: name,
+        title: cut(`${name} messaged you`, NOTICE_TITLE_MAX_CHARS),
+        body: cut(last.body.replace(/\s+/gu, " ").trim(), NOTICE_BODY_MAX_CHARS),
+        target: { thread: conversationId },
+        createdAtMs: last.createdAtMs,
+        readAtMs: null,
+        postedHere: false,
+      } satisfies NoticeRow,
+    ];
   });
 }
 

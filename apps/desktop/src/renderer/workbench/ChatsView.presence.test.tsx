@@ -14,9 +14,7 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
-type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
-  workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
-};
+type TestChatsViewProps = Parameters<typeof ProductionChatsView>[0];
 
 function ChatsView(props: TestChatsViewProps) {
   return (

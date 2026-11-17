@@ -6,7 +6,11 @@ type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 function fakeApi() {
   const sessionListeners = new Set<(event: SessionEvent) => void>();
   const api = {
-    directConversations: vi.fn(async () => ({ available: true as const, viewerId: "ana", conversations: [] })),
+    directConversations: vi.fn(async () => ({
+      available: true as const,
+      viewerId: "ana",
+      conversations: [],
+    })),
     directMarkRead: vi.fn(async () => undefined),
     directBlock: vi.fn(async () => undefined),
     onDirectChanged: vi.fn(() => () => {}),

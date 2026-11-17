@@ -3,17 +3,32 @@ import type { DirectConversation, DirectMessage } from "@dohc/security-contract/
 import { ipcWireError, readError } from "../ipc/errorWords";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
 
-interface Account { relayUrl?: string; userId: string; token?: string }
+interface Account {
+  relayUrl?: string;
+  userId: string;
+  token?: string;
+}
 
 const message = (seq: number, body = `m${seq}`, authorId = "bob"): DirectMessage => ({
-  seq, messageId: `id-${seq}`, authorId, authorName: "Bob", body, createdAtMs: seq * 1000,
+  seq,
+  messageId: `id-${seq}`,
+  authorId,
+  authorName: "Bob",
+  body,
+  createdAtMs: seq * 1000,
 });
 const conversation = (last: DirectMessage, unread = 1): DirectConversation => ({
-  conversationId: "c1", person: { personId: "bob", name: "Bob", blocked: false }, last, unread,
+  conversationId: "c1",
+  person: { personId: "bob", name: "Bob", blocked: false },
+  last,
+  unread,
 });
 
 function harness(options: { account?: Account | null; retryMs?: number } = {}) {
-  let account: Account | null = options.account === undefined ? { relayUrl: "https://relay.test", userId: "ann" } : options.account;
+  let account: Account | null =
+    options.account === undefined
+      ? { relayUrl: "https://relay.test", userId: "ann" }
+      : options.account;
   let offline = false;
   const routes = new Map<string, () => Response | Promise<Response>>();
   const requests: string[] = [];
@@ -32,25 +47,43 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
       if (!route) return Response.json({ error: "not found" }, { status: 404 });
       return route();
     },
-    changed: () => { changes += 1; },
-    listedChanged: () => { listedChanges += 1; },
+    changed: () => {
+      changes += 1;
+    },
+    listedChanged: () => {
+      listedChanges += 1;
+    },
     retryMs: options.retryMs ?? 1,
   });
   return {
-    service, routes, requests, tokens,
+    service,
+    routes,
+    requests,
+    tokens,
     changes: () => changes,
     listedChanges: () => listedChanges,
-    goOffline: () => { offline = true; },
-    goOnline: () => { offline = false; },
-    signInAs: (next: Account | null) => { account = next; },
+    goOffline: () => {
+      offline = true;
+    },
+    goOnline: () => {
+      offline = false;
+    },
+    signInAs: (next: Account | null) => {
+      account = next;
+    },
   };
 }
 
 describe("direct messages for the signed-in account", () => {
   it("fails plainly while the server is unreachable, with nothing kept on this computer", async () => {
     const h = harness();
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 3, conversations: [conversation(message(2))] }));
-    expect(await h.service.list()).toMatchObject({ viewerId: "ann", conversations: [{ conversationId: "c1" }] });
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 3, conversations: [conversation(message(2))] }),
+    );
+    expect(await h.service.list()).toMatchObject({
+      viewerId: "ann",
+      conversations: [{ conversationId: "c1" }],
+    });
     h.goOffline();
     await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
     await expect(h.service.history("ann", "c1")).rejects.toMatchObject({ failure: "unreachable" });
@@ -71,7 +104,9 @@ describe("direct messages for the signed-in account", () => {
     for (const call of calls) await expect(call).rejects.toMatchObject({ failure: "refused" });
     expect(h.requests).toEqual([]);
     // The account that is signed in still acts.
-    expect(await h.service.send("cat", { conversationId: "c1", messageId: "m2", body: "hi" })).toEqual({ conversationId: "c1", seq: 1 });
+    expect(
+      await h.service.send("cat", { conversationId: "c1", messageId: "m2", body: "hi" }),
+    ).toEqual({ conversationId: "c1", seq: 1 });
   });
 
   it("refuses as signed out without calling the server", async () => {
@@ -83,28 +118,52 @@ describe("direct messages for the signed-in account", () => {
 
   it("says plainly when the other person blocked the sender", async () => {
     const h = harness();
-    h.routes.set("/sync/direct/send", () => Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }));
-    await expect(h.service.send("ann", { conversationId: "c1", messageId: "m1", body: "hi" }))
-      .rejects.toMatchObject({ failure: "refused", code: "direct_blocked", message: "You can't message this person." });
+    h.routes.set("/sync/direct/send", () =>
+      Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }),
+    );
+    await expect(
+      h.service.send("ann", { conversationId: "c1", messageId: "m1", body: "hi" }),
+    ).rejects.toMatchObject({
+      failure: "refused",
+      code: "direct_blocked",
+      message: "You can't message this person.",
+    });
   });
 
   it("offers Try again only where trying again can help", async () => {
     // What the renderer reads: main's wire error, as Electron passes it on.
     const afterIpc = async (call: Promise<unknown>) => {
-      const error = await call.then(() => null, (cause: unknown) => cause);
-      return readError(new Error(`Error invoking remote method 'desktop:direct-send': ${String(ipcWireError(error))}`));
+      const error = await call.then(
+        () => null,
+        (cause: unknown) => cause,
+      );
+      return readError(
+        new Error(
+          `Error invoking remote method 'desktop:direct-send': ${String(ipcWireError(error))}`,
+        ),
+      );
     };
-    const send = (h: ReturnType<typeof harness>, as = "ann") => h.service.send(as, { conversationId: "c1", messageId: "m1", body: "hi" });
+    const send = (h: ReturnType<typeof harness>, as = "ann") =>
+      h.service.send(as, { conversationId: "c1", messageId: "m1", body: "hi" });
     const h = harness();
-    h.routes.set("/sync/direct/send", () => Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }));
-    expect(await afterIpc(send(h))).toMatchObject({ words: "You can't message this person.", canRetry: false });
+    h.routes.set("/sync/direct/send", () =>
+      Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }),
+    );
+    expect(await afterIpc(send(h))).toMatchObject({
+      words: "You can't message this person.",
+      canRetry: false,
+    });
     expect(await afterIpc(send(h, "cat"))).toMatchObject({ canRetry: false });
     h.routes.set("/sync/direct/send", () => Response.json({ error: "busy" }, { status: 429 }));
     expect((await afterIpc(send(h))).canRetry).toBeUndefined();
     h.goOffline();
-    expect(await afterIpc(send(h))).toMatchObject({ words: "dohc could not reach your server. Check your connection." });
+    expect(await afterIpc(send(h))).toMatchObject({
+      words: "dohc could not reach your server. Check your connection.",
+    });
     expect((await afterIpc(send(h))).canRetry).toBeUndefined();
-    expect(await afterIpc(harness({ account: { userId: "ann" } }).service.list())).toMatchObject({ canRetry: false });
+    expect(await afterIpc(harness({ account: { userId: "ann" } }).service.list())).toMatchObject({
+      canRetry: false,
+    });
   });
 
   it("reads the list once per move for the windows and Notices, and again after this computer writes", async () => {
@@ -112,7 +171,10 @@ describe("direct messages for the signed-in account", () => {
     let lists = 0;
     let unread = 1;
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 4 }));
-    h.routes.set("/sync/direct/conversations", () => { lists += 1; return Response.json({ revision: 4, conversations: [conversation(message(2), unread)] }); });
+    h.routes.set("/sync/direct/conversations", () => {
+      lists += 1;
+      return Response.json({ revision: 4, conversations: [conversation(message(2), unread)] });
+    });
     h.routes.set("/sync/direct/conversations/c1/read", () => Response.json({ ok: true }));
     const stop = h.service.listen();
     await expect.poll(() => h.changes()).toBe(1);
@@ -136,8 +198,13 @@ describe("direct messages for the signed-in account", () => {
     const h = harness();
     const answers: Array<(response: Response) => void> = [];
     let activity = 0;
-    h.routes.set("/sync/direct/activity", () => activity++ === 0 ? Response.json({ revision: 1 }) : new Promise<Response>(() => {}));
-    h.routes.set("/sync/direct/conversations", () => new Promise<Response>((resolve) => answers.push(resolve)));
+    h.routes.set("/sync/direct/activity", () =>
+      activity++ === 0 ? Response.json({ revision: 1 }) : new Promise<Response>(() => {}),
+    );
+    h.routes.set(
+      "/sync/direct/conversations",
+      () => new Promise<Response>((resolve) => answers.push(resolve)),
+    );
     const stop = h.service.listen();
     // The follow loop's read at revision 1 is on its way; a window's read overtakes it after a read mark.
     await vi.waitFor(() => expect(answers).toHaveLength(1));
@@ -169,7 +236,9 @@ describe("direct messages for the signed-in account", () => {
       if (polls === 3) revision = 2;
       return Response.json({ revision });
     });
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision, conversations: [] }));
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision, conversations: [] }),
+    );
     const stop = h.service.listen();
     // The first answer, then the move to revision 2.
     await expect.poll(() => h.changes()).toBe(2);
@@ -183,8 +252,13 @@ describe("direct messages for the signed-in account", () => {
   it("does not spin when the server answers at once with nothing new", async () => {
     const h = harness({ retryMs: 50 });
     let polls = 0;
-    h.routes.set("/sync/direct/activity", () => { polls += 1; return Response.json({ revision: 7 }); });
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 7, conversations: [] }));
+    h.routes.set("/sync/direct/activity", () => {
+      polls += 1;
+      return Response.json({ revision: 7 });
+    });
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 7, conversations: [] }),
+    );
     const stop = h.service.listen();
     await new Promise((resolve) => setTimeout(resolve, 120));
     stop();
@@ -196,7 +270,9 @@ describe("direct messages for the signed-in account", () => {
   it("tells listeners on each failure while the server is away, and once when it answers again", async () => {
     const h = harness();
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 7 }));
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 7, conversations: [] }));
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 7, conversations: [] }),
+    );
     const stop = h.service.listen();
     await expect.poll(() => h.changes()).toBe(1);
     h.goOffline();
@@ -218,7 +294,9 @@ describe("direct messages for the signed-in account", () => {
   it("follows with the newest token when the same account signs in again", async () => {
     const h = harness({ account: { relayUrl: "https://relay.test", userId: "ann", token: "old" } });
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 1, conversations: [] }));
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 1, conversations: [] }),
+    );
     const stop = h.service.listen();
     await expect.poll(() => h.tokens.length).toBeGreaterThan(0);
     h.signInAs({ relayUrl: "https://relay.test", userId: "ann", token: "new" });
@@ -231,7 +309,9 @@ describe("direct messages for the signed-in account", () => {
   it("forgets the last account's list once another signs in", async () => {
     const h = harness();
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
-    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 1, conversations: [conversation(message(1))] }));
+    h.routes.set("/sync/direct/conversations", () =>
+      Response.json({ revision: 1, conversations: [conversation(message(1))] }),
+    );
     const stop = h.service.listen();
     await expect.poll(() => h.service.listed("ann")).not.toBeNull();
     h.signInAs({ relayUrl: "https://relay.test", userId: "cat" });

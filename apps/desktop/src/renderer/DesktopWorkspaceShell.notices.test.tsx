@@ -4,9 +4,6 @@ import {
   WORKSPACE,
   OTHER_WORKSPACE,
   SYNC_STATUS,
-  SHARE_VIEW,
-  READY_UPDATE_STATE,
-  STORED_STATE,
   storedStateWithTabs,
   makeBridge,
   renderShell,
@@ -17,7 +14,6 @@ import { editorTabTestId } from "../testPins";
 import type {
   OwnerLiveDocumentsResult,
   ShareHandoffStatus,
-  ChatChannelRecord,
   JoinedChannelAnswer,
   WorkspaceUiState,
   DohcDesktopBridge,
@@ -45,12 +41,6 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
-import { useEngineDoc } from "./collab/useEngineDoc";
-import { useReopenKey } from "./documentVersionKey";
-import { inputCount } from "./ui/inputCount";
-import { COPY_FAILURE } from "./ui/CopyButton";
-import { INVITATION_WAIT_MS } from "./workbench/invitationOutcome";
-
 
 import type { Workspace } from "./DesktopWorkspaceShell";
 

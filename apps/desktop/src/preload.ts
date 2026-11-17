@@ -198,7 +198,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(accessOperations, invoke),
   ...operationBridge(memberOperations, invoke),
   ...operationBridge(directMessageOperations, invoke),
-  onDirectChanged: (listener) => onEvent(CHANNELS.directChanged, DirectChangedEvent, () => listener()),
+  onDirectChanged: (listener) =>
+    onEvent(CHANNELS.directChanged, DirectChangedEvent, () => listener()),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
   releaseChannel: releaseChannelFromArgv(process.argv),

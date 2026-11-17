@@ -1333,11 +1333,7 @@ describe("Home and a file's chat share one reaction store", () => {
       .mockImplementationOnce(() => refused.promise);
     render(
       <ReactionStoreProvider workspaceId="workspace-a">
-        <ProductionChatsView
-          workspaceId="workspace-a"
-          onOpenFileChat={vi.fn()}
-          onError={onError}
-        />
+        <ProductionChatsView workspaceId="workspace-a" onOpenFileChat={vi.fn()} onError={onError} />
         <div data-testid="file-chat">
           <LinkedChatsPanel
             workspaceId="workspace-a"

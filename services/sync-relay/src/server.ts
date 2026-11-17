@@ -1644,7 +1644,9 @@ export function createSyncRelayHandler({
           workspaceId,
         );
       };
-      if (isDirectMessageRoute(route)) { return await respondToDirectMessages(request, route, await bearerActor("")); }
+      if (isDirectMessageRoute(route)) {
+        return await respondToDirectMessages(request, route, await bearerActor(""));
+      }
       if (
         route.route === "chat-runners" ||
         route.route === "chat-wakes" ||

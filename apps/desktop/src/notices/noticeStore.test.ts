@@ -16,7 +16,11 @@ import {
 import type { SyncRelayHandler } from "@dohc/sync-relay";
 import type { SyncRelayStorage } from "@dohc/sync-relay/storage";
 import { type NoticeReach } from "@dohc/workspace-contracts/relay";
-import { ListNoticesResult, RetryAutomationNoticeResult, type NoticeRef } from "../ipc/bridgeContract";
+import {
+  ListNoticesResult,
+  RetryAutomationNoticeResult,
+  type NoticeRef,
+} from "../ipc/bridgeContract";
 import { SHARE_CHAT_REFUSED } from "./settlementRefusal";
 import {
   AUTOMATION_SWITCHED_OFF_BODY,

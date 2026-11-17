@@ -2239,8 +2239,12 @@ export interface LiveTicketStoragePolicy {
 
 type WorkspaceMembersModule = typeof import("./workspaceMembers");
 type DirectMessagesModule = typeof import("./directMessages");
-type DirectMessagesMethod<K extends keyof DirectMessagesModule> =
-  DirectMessagesModule[K] extends (storage: never, ...args: infer A) => infer R ? (...args: A) => R : never;
+type DirectMessagesMethod<K extends keyof DirectMessagesModule> = DirectMessagesModule[K] extends (
+  storage: never,
+  ...args: infer A
+) => infer R
+  ? (...args: A) => R
+  : never;
 type WorkspaceMembersMethod<K extends keyof WorkspaceMembersModule> =
   WorkspaceMembersModule[K] extends (storage: never, ...args: infer A) => infer R
     ? (...args: A) => R

@@ -68,8 +68,6 @@ import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   Archive,
-  AtSign,
-  ArchiveRestore,
   ChevronDown,
   ChevronRight,
   Hash,
@@ -113,7 +111,7 @@ import {
 } from "./chatMessages";
 import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
-import { channelFileCandidates, DM_FILE_CANDIDATES } from "./chatFileMentionScope";
+import { channelFileCandidates } from "./chatFileMentionScope";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -1618,6 +1616,9 @@ export function ChatsView(props: {
       void loadPersonalFeed();
       return;
     }
+    // An open Group's composer offers files by the rule in the channel list,
+    // which a change to the Group's shares moves.
+    if (nav.level === "thread" || nav.level === "channel") void refreshChannelBadges();
     if (nav.level === "thread") {
       const threadId = nav.thread.id;
       const token = liveToken.current;

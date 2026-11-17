@@ -1,11 +1,11 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
-import { bridgeMock, channel, ChatsView, dm, renderView } from "./ChatsView.testHarness";
+import { bridgeMock, channel, ChatsView, thread, renderView } from "./ChatsView.testHarness";
 import { resetChosenColorsForTests, setPersonalAgents } from "./chosenColors";
 
 function archived(settings: DesktopUserSettings, ...channelIds: string[]): DesktopUserSettings {
@@ -99,26 +99,23 @@ describe("ChatsView archive and row menus", () => {
           finish = resolve;
         }),
     );
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [dm({ unreadCount: 1 })],
-      pending: [],
-      declined: [],
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ unreadCount: 1 })],
+      fileThreads: [],
     });
-    const onDmRead = vi.fn();
+    bridgeMock.listChannelThreads
+      .mockResolvedValueOnce({ threads: [thread({ unreadCount: 1 })] })
+      .mockResolvedValue({ threads: [] });
+    const onThreadRead = vi.fn();
     const props = {
-      workspaces: [
-        { workspaceId: "workspace-a", label: "Work" },
-        { workspaceId: "workspace-b", label: "Personal" },
-      ],
       onOpenFileChat: vi.fn(),
       onError: vi.fn(),
       userSettings: DEFAULT_USER_SETTINGS,
-      onDmRead,
+      onThreadRead,
     };
     const view = render(<ChatsView workspaceId="workspace-a" {...props} />);
 
-    fireEvent.contextMenu(await screen.findByTestId("chats-dm-item"), { clientX: 40, clientY: 60 });
+    fireEvent.contextMenu(await screen.findByTestId("chats-channel"), { clientX: 40, clientY: 60 });
     await user.click(screen.getByTestId("chat-row-menu-mark-read"));
     await waitFor(() => expect(bridgeMock.markChatThreadRead).toHaveBeenCalledOnce());
     view.rerender(<ChatsView workspaceId="workspace-b" {...props} />);
@@ -134,7 +131,7 @@ describe("ChatsView archive and row menus", () => {
     const before = workspaceACalls();
 
     await act(async () => finish());
-    expect(onDmRead).not.toHaveBeenCalled();
+    expect(onThreadRead).not.toHaveBeenCalled();
     expect(workspaceACalls()).toBe(before);
   });
 

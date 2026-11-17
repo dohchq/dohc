@@ -1,6 +1,10 @@
 import { useSyncExternalStore } from "react";
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
-import type { DirectConversation, DirectMessage, DirectPerson } from "@dohc/security-contract/direct-messages";
+import type {
+  DirectConversation,
+  DirectMessage,
+  DirectPerson,
+} from "@dohc/security-contract/direct-messages";
 import type { ChatMessageRecord, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -14,10 +18,22 @@ export type DirectListState =
   | { status: "loading" }
   | { status: "signed-out" }
   // `failure`: the latest read failed; the list is the one read before it.
-  | { status: "ready"; viewerId: string; conversations: readonly DirectConversation[]; failure: string | null }
+  | {
+      status: "ready";
+      viewerId: string;
+      conversations: readonly DirectConversation[];
+      failure: string | null;
+    }
   | { status: "failed"; message: string };
 
-type Api = Pick<DohcDesktopBridge, "directConversations" | "directMarkRead" | "directBlock" | "onDirectChanged" | "onCloudSessionChanged">;
+type Api = Pick<
+  DohcDesktopBridge,
+  | "directConversations"
+  | "directMarkRead"
+  | "directBlock"
+  | "onDirectChanged"
+  | "onCloudSessionChanged"
+>;
 
 const LIST_FAILED = "dohc could not read your direct messages.";
 
@@ -45,9 +61,17 @@ export function createDirectStore(api: Api) {
     state = next;
     for (const listener of [...listeners]) listener();
   };
-  const patch = (conversationId: string, change: (conversation: DirectConversation) => DirectConversation) => {
+  const patch = (
+    conversationId: string,
+    change: (conversation: DirectConversation) => DirectConversation,
+  ) => {
     if (state.status !== "ready") return;
-    set({ ...state, conversations: state.conversations.map((entry) => entry.conversationId === conversationId ? change(entry) : entry) });
+    set({
+      ...state,
+      conversations: state.conversations.map((entry) =>
+        entry.conversationId === conversationId ? change(entry) : entry,
+      ),
+    });
   };
 
   async function refresh(): Promise<void> {
@@ -68,14 +92,20 @@ export function createDirectStore(api: Api) {
             // A mark read still on its way keeps the row read.
             const conversations = result.conversations.map((conversation) => {
               const sent = readSent.get(conversation.conversationId);
-              return sent !== undefined && sent >= conversation.last.seq ? { ...conversation, unread: 0 } : conversation;
+              return sent !== undefined && sent >= conversation.last.seq
+                ? { ...conversation, unread: 0 }
+                : conversation;
             });
             set({ status: "ready", viewerId: result.viewerId, conversations, failure: null });
           }
         } catch (cause) {
           if (mine !== session) continue;
           const message = ipcErrorMessage(cause, LIST_FAILED);
-          set(state.status === "ready" ? { ...state, failure: message } : { status: "failed", message });
+          set(
+            state.status === "ready"
+              ? { ...state, failure: message }
+              : { status: "failed", message },
+          );
         }
       } while (again);
     } finally {
@@ -134,7 +164,10 @@ export function createDirectStore(api: Api) {
       if ((readSent.get(conversationId) ?? -1) >= seq) return;
       readSent.set(conversationId, seq);
       patch(conversationId, (conversation) =>
-        conversation.unread === 0 || conversation.last.seq > seq ? conversation : { ...conversation, unread: 0 });
+        conversation.unread === 0 || conversation.last.seq > seq
+          ? conversation
+          : { ...conversation, unread: 0 },
+      );
       const mine = session;
       // A read mark never waits on a list: one made before the list read is dropped with nothing lost.
       if (state.status !== "ready") return;
@@ -149,7 +182,10 @@ export function createDirectStore(api: Api) {
       const mine = session;
       await api.directBlock({ viewerId, conversationId, blocked });
       if (mine !== session) return;
-      patch(conversationId, (conversation) => ({ ...conversation, person: { ...conversation.person, blocked } }));
+      patch(conversationId, (conversation) => ({
+        ...conversation,
+        person: { ...conversation.person, blocked },
+      }));
       void refresh();
     },
     draft: (key: string) => drafts.get(key) ?? "",
@@ -213,14 +249,17 @@ export function directPersonName(person: Pick<DirectPerson, "name">): string {
   return person.name ?? "Someone";
 }
 
-
 /** A person's color, the same on every computer. */
 export function directPresentation(personId: string, viewerId: string | null) {
   return personId === viewerId ? ownPresentation : relayPresentation(actorHueSlot(personId));
 }
 
 /** A direct message as the chat list draws it. */
-export function directMessageRecord(conversationId: string, message: DirectMessage, viewerId: string | null): ChatMessageRecord {
+export function directMessageRecord(
+  conversationId: string,
+  message: DirectMessage,
+  viewerId: string | null,
+): ChatMessageRecord {
   const self = message.authorId === viewerId;
   return {
     id: message.messageId,
@@ -239,10 +278,15 @@ export function directMessageRecord(conversationId: string, message: DirectMessa
  * newest page that starts past the next seq would leave a gap: it replaces
  * what is shown instead.
  */
-export function mergeDirectPage(shown: readonly DirectMessage[], page: { messages: readonly DirectMessage[] }, newest: boolean): DirectMessage[] {
+export function mergeDirectPage(
+  shown: readonly DirectMessage[],
+  page: { messages: readonly DirectMessage[] },
+  newest: boolean,
+): DirectMessage[] {
   if (page.messages.length === 0) return [...shown];
   const lastShown = shown.at(-1)?.seq ?? 0;
-  if (newest && shown.length > 0 && page.messages[0]!.seq > lastShown + 1) return [...page.messages];
+  if (newest && shown.length > 0 && page.messages[0]!.seq > lastShown + 1)
+    return [...page.messages];
   const bySeq = new Map(shown.map((message) => [message.seq, message]));
   for (const message of page.messages) bySeq.set(message.seq, message);
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);

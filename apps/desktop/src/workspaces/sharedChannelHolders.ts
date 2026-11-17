@@ -41,8 +41,7 @@ export function liveSharedChannelHoldersByWireId(
   for (const workspace of workspaces) {
     for (const channel of workspace.sharedChannels ?? []) {
       if (channel.ended === true) continue;
-      const wireHolders =
-        holders.get(channel.channelWireId) ?? new Set<string>();
+      const wireHolders = holders.get(channel.channelWireId) ?? new Set<string>();
       wireHolders.add(workspace.workspaceId);
       holders.set(channel.channelWireId, wireHolders);
     }
@@ -60,8 +59,7 @@ function otherLiveSharedChannelHolderFromMap(input: {
   return (
     input.workspaces.find(
       (workspace) =>
-        workspace.workspaceId !== input.workspaceId &&
-        holderIds.has(workspace.workspaceId),
+        workspace.workspaceId !== input.workspaceId && holderIds.has(workspace.workspaceId),
     ) ?? null
   );
 }
@@ -74,9 +72,7 @@ export function otherLiveSharedChannelHolder(input: {
   return otherLiveSharedChannelHolderFromMap({
     workspaces: input.workspaces,
     workspaceId: input.workspaceId,
-    holderIds: liveSharedChannelHoldersByShareId(input.workspaces).get(
-      input.shareId,
-    ),
+    holderIds: liveSharedChannelHoldersByShareId(input.workspaces).get(input.shareId),
   });
 }
 
@@ -88,9 +84,7 @@ export function otherLiveSharedChannelHolderByWireId(input: {
   return otherLiveSharedChannelHolderFromMap({
     workspaces: input.workspaces,
     workspaceId: input.workspaceId,
-    holderIds: liveSharedChannelHoldersByWireId(input.workspaces).get(
-      input.channelWireId,
-    ),
+    holderIds: liveSharedChannelHoldersByWireId(input.workspaces).get(input.channelWireId),
   });
 }
 
@@ -105,14 +99,9 @@ export async function reserveAndPullSharedChannel(input: {
   // Stores `update` applied to the channels as they stand when written.
   updateSharedChannels: (
     workspaceId: string,
-    update: (
-      channels: readonly JoinedSharedChannel[],
-    ) => readonly JoinedSharedChannel[],
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
   ) => Promise<void>;
-  fetchInfo: (input: {
-    relay: SyncRelayConnection;
-    shareId: string;
-  }) => Promise<SharedChannelInfo>;
+  fetchInfo: (input: { relay: SyncRelayConnection; shareId: string }) => Promise<SharedChannelInfo>;
   pull: (input: {
     workspaceId: string;
     rootPath: string;
@@ -120,10 +109,7 @@ export async function reserveAndPullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
   }) => Promise<{ applied: number }>;
-  serialize: (
-    workspaceId: string,
-    run: () => Promise<void>,
-  ) => Promise<void>;
+  serialize: (workspaceId: string, run: () => Promise<void>) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
   // Runs in the same step that stores the row, so a check here sees every
   // workspace as the row lands. It may run twice; throwing stores nothing.

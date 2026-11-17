@@ -1342,22 +1342,36 @@ describe("direct tab names", () => {
     });
     state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, alice);
     expect(state.directNames).toEqual({ "c-sam": { account: ann, name: "Sam Rivera" } });
-    expect(parseUiState(serializeUiState(state)).directNames).toEqual({ "c-sam": { account: ann, name: "Sam Rivera" } });
+    expect(parseUiState(serializeUiState(state)).directNames).toEqual({
+      "c-sam": { account: ann, name: "Sam Rivera" },
+    });
   });
 
   it("parse drops foreign entries, names without a tab, and entries past the cap", () => {
     const serialized = serializeUiState(withTabs(alice));
-    expect(parseUiState({
-      ...serialized,
-      directNames: {
-        "c-alice": { account: ann, name: "Alice Moreno" },
-        "c-lee": { account: ann, name: "Lee Park" },
-      },
-    }).directNames).toEqual({ "c-alice": { account: ann, name: "Alice Moreno" } });
-    for (const entry of [{ account: ann }, { account: "", name: "A" }, { account: ann, name: "x".repeat(201) }, "Alice"]) {
-      expect(parseUiState({ ...serialized, directNames: { "c-alice": entry } }).directNames).toEqual({});
+    expect(
+      parseUiState({
+        ...serialized,
+        directNames: {
+          "c-alice": { account: ann, name: "Alice Moreno" },
+          "c-lee": { account: ann, name: "Lee Park" },
+        },
+      }).directNames,
+    ).toEqual({ "c-alice": { account: ann, name: "Alice Moreno" } });
+    for (const entry of [
+      { account: ann },
+      { account: "", name: "A" },
+      { account: ann, name: "x".repeat(201) },
+      "Alice",
+    ]) {
+      expect(
+        parseUiState({ ...serialized, directNames: { "c-alice": entry } }).directNames,
+      ).toEqual({});
     }
-    expect(parseUiState({ ...serialized, directNames: { "c alice": { account: ann, name: "A" } } }).directNames).toEqual({});
+    expect(
+      parseUiState({ ...serialized, directNames: { "c alice": { account: ann, name: "A" } } })
+        .directNames,
+    ).toEqual({});
     const paths: string[] = [];
     const flood: Record<string, unknown> = {};
     for (let i = 0; i < MAX_DIRECT_NAMES + 20; i++) {

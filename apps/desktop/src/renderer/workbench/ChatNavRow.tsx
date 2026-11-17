@@ -39,24 +39,38 @@ export function NavRow(props: {
       aria-haspopup={onMenu ? "menu" : undefined}
       title={props.title}
       onClick={props.onClick}
-      onKeyDown={onMenu ? (event) => {
-        if (!isContextMenuKey(event)) return;
-        event.preventDefault();
-        if (!keyedMenu.current) {
-          keyedMenu.current = true;
-          window.addEventListener("pointerdown", () => { keyedMenu.current = false; }, { capture: true, once: true });
-        }
-        const box = event.currentTarget.getBoundingClientRect();
-        onMenu({ x: box.left, y: box.bottom }, true);
-      } : undefined}
-      onContextMenu={onMenu ? (event) => {
-        event.preventDefault();
-        if (keyedMenu.current) {
-          keyedMenu.current = false;
-          return;
-        }
-        onMenu({ x: event.clientX, y: event.clientY }, false);
-      } : undefined}
+      onKeyDown={
+        onMenu
+          ? (event) => {
+              if (!isContextMenuKey(event)) return;
+              event.preventDefault();
+              if (!keyedMenu.current) {
+                keyedMenu.current = true;
+                window.addEventListener(
+                  "pointerdown",
+                  () => {
+                    keyedMenu.current = false;
+                  },
+                  { capture: true, once: true },
+                );
+              }
+              const box = event.currentTarget.getBoundingClientRect();
+              onMenu({ x: box.left, y: box.bottom }, true);
+            }
+          : undefined
+      }
+      onContextMenu={
+        onMenu
+          ? (event) => {
+              event.preventDefault();
+              if (keyedMenu.current) {
+                keyedMenu.current = false;
+                return;
+              }
+              onMenu({ x: event.clientX, y: event.clientY }, false);
+            }
+          : undefined
+      }
       {...props.data}
       className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
         props.active ? "bg-selected font-medium" : props.menuOpen ? "bg-hover" : "hover:bg-hover"
@@ -107,4 +121,3 @@ export function SectionActionButton(props: {
     </button>
   );
 }
-

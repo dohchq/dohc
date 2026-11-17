@@ -1138,6 +1138,7 @@ it("lists everyone in a joined workspace by name and role, from the Members page
     memberId,
     role,
     state: "active" as const,
+    paletteSlot: 0,
     name,
     email: null,
     invitedAtMs: null,

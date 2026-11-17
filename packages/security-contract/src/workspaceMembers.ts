@@ -132,7 +132,8 @@ export function isInviteLinkAction(value: unknown): value is InviteLinkAction {
 
 const isNullableString = (value: unknown): value is string | null =>
   value === null || typeof value === "string";
-export const isPaletteSlot = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value < ACTOR_HUES.length;
+export const isPaletteSlot = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value < ACTOR_HUES.length;
 
 export function parseWorkspaceJoinPreview(value: unknown): WorkspaceJoinPreview | null {
   if (!isRecord(value)) return null;

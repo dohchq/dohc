@@ -29,7 +29,11 @@ export function isDirectPersonId(value: unknown): value is string {
 
 /** Words to send: not only spaces, and at most DIRECT_MESSAGE_BODY_MAX_BYTES. */
 export function isDirectMessageBody(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== "" && new TextEncoder().encode(value).length <= DIRECT_MESSAGE_BODY_MAX_BYTES;
+  return (
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    new TextEncoder().encode(value).length <= DIRECT_MESSAGE_BODY_MAX_BYTES
+  );
 }
 
 /** A person picked from a workspace's member list. `memberId` is `"owner"` for the owner. */
@@ -107,18 +111,42 @@ export const DIRECT_ROUTES = {
   activity: "/sync/direct/activity",
 } as const;
 
-const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
-const isName = (value: unknown): value is string | null => value === null || (typeof value === "string" && value.length > 0 && value.length <= 200);
+const isCount = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0;
+const isName = (value: unknown): value is string | null =>
+  value === null || (typeof value === "string" && value.length > 0 && value.length <= 200);
 
 export function parseDirectPerson(value: unknown): DirectPerson | null {
-  if (!isRecord(value) || !isDirectPersonId(value.personId) || !isName(value.name) || typeof value.blocked !== "boolean") return null;
+  if (
+    !isRecord(value) ||
+    !isDirectPersonId(value.personId) ||
+    !isName(value.name) ||
+    typeof value.blocked !== "boolean"
+  )
+    return null;
   return { personId: value.personId, name: value.name, blocked: value.blocked };
 }
 
 export function parseDirectMessage(value: unknown): DirectMessage | null {
-  if (!isRecord(value) || !isCount(value.seq) || value.seq < 1 || !isDirectId(value.messageId) || !isDirectPersonId(value.authorId)
-    || !isName(value.authorName) || typeof value.body !== "string" || !isCount(value.createdAtMs)) return null;
-  return { seq: value.seq, messageId: value.messageId, authorId: value.authorId, authorName: value.authorName, body: value.body, createdAtMs: value.createdAtMs };
+  if (
+    !isRecord(value) ||
+    !isCount(value.seq) ||
+    value.seq < 1 ||
+    !isDirectId(value.messageId) ||
+    !isDirectPersonId(value.authorId) ||
+    !isName(value.authorName) ||
+    typeof value.body !== "string" ||
+    !isCount(value.createdAtMs)
+  )
+    return null;
+  return {
+    seq: value.seq,
+    messageId: value.messageId,
+    authorId: value.authorId,
+    authorName: value.authorName,
+    body: value.body,
+    createdAtMs: value.createdAtMs,
+  };
 }
 
 function parseAll<T>(value: unknown, parse: (entry: unknown) => T | null): T[] | null {
@@ -147,18 +175,21 @@ export function parseDirectConversationList(value: unknown): DirectConversationL
 }
 
 export function parseDirectMessagePage(value: unknown): DirectMessagePage | null {
-  if (!isRecord(value) || !isDirectId(value.conversationId) || typeof value.more !== "boolean") return null;
+  if (!isRecord(value) || !isDirectId(value.conversationId) || typeof value.more !== "boolean")
+    return null;
   const messages = parseAll(value.messages, parseDirectMessage);
   return messages ? { conversationId: value.conversationId, messages, more: value.more } : null;
 }
 
 export function parseDirectResolution(value: unknown): DirectResolution | null {
-  if (!isRecord(value) || !(value.conversationId === null || isDirectId(value.conversationId))) return null;
+  if (!isRecord(value) || !(value.conversationId === null || isDirectId(value.conversationId)))
+    return null;
   const person = parseDirectPerson(value.person);
   return person ? { conversationId: value.conversationId, person } : null;
 }
 
 export function parseDirectSendResult(value: unknown): DirectSendResult | null {
-  if (!isRecord(value) || !isDirectId(value.conversationId) || !isCount(value.seq) || value.seq < 1) return null;
+  if (!isRecord(value) || !isDirectId(value.conversationId) || !isCount(value.seq) || value.seq < 1)
+    return null;
   return { conversationId: value.conversationId, seq: value.seq };
 }

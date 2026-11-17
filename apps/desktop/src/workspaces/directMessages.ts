@@ -39,7 +39,8 @@ export class DirectMessageError extends Error {
   ) {
     super(message);
     this.name = "DirectMessageError";
-    this.wireCode = failure === "signed-out" ? DIRECT_SIGNED_OUT : retry ? DIRECT_RETRY : DIRECT_FINAL;
+    this.wireCode =
+      failure === "signed-out" ? DIRECT_SIGNED_OUT : retry ? DIRECT_RETRY : DIRECT_FINAL;
   }
 }
 
@@ -65,20 +66,50 @@ interface Dependencies<Credentials extends DirectAccount> {
 const UNREACHABLE = "dohc could not reach your server. Check your connection.";
 const SIGNED_OUT = "Sign in to your server to send direct messages.";
 // A window read the account, then the account changed before its call arrived.
-const OTHER_ACCOUNT = "You signed in as someone else. Open Chats again to see their direct messages.";
+const OTHER_ACCOUNT =
+  "You signed in as someone else. Open Chats again to see their direct messages.";
 
 const accountKey = (account: DirectAccount) => `${account.relayUrl}\n${account.userId}`;
-const conversationPath = (route: string, conversationId: string) => route.replace(":conversationId", encodeURIComponent(conversationId));
+const conversationPath = (route: string, conversationId: string) =>
+  route.replace(":conversationId", encodeURIComponent(conversationId));
 
 function refusal(status: number, code: string | null, message: string | null): DirectMessageError {
-  if (code === "direct_blocked") return new DirectMessageError("refused", "You can't message this person.", status, code);
-  if (code === "direct_limit_reached") return new DirectMessageError("refused", "Your account has stored as many direct messages as your server keeps. Ask whoever runs it for more room.", status, code);
-  if (status === 404) return new DirectMessageError("refused", "dohc could not find this conversation or person. They may have left the workspace.", status, code);
-  if (status === 429) return new DirectMessageError("refused", "You have sent a lot of messages. Wait a minute, then try again.", status, code, true);
-  return new DirectMessageError("refused", message ?? `Your server refused the request (${status}).`, status, code, true);
+  if (code === "direct_blocked")
+    return new DirectMessageError("refused", "You can't message this person.", status, code);
+  if (code === "direct_limit_reached")
+    return new DirectMessageError(
+      "refused",
+      "Your account has stored as many direct messages as your server keeps. Ask whoever runs it for more room.",
+      status,
+      code,
+    );
+  if (status === 404)
+    return new DirectMessageError(
+      "refused",
+      "dohc could not find this conversation or person. They may have left the workspace.",
+      status,
+      code,
+    );
+  if (status === 429)
+    return new DirectMessageError(
+      "refused",
+      "You have sent a lot of messages. Wait a minute, then try again.",
+      status,
+      code,
+      true,
+    );
+  return new DirectMessageError(
+    "refused",
+    message ?? `Your server refused the request (${status}).`,
+    status,
+    code,
+    true,
+  );
 }
 
-export function createDirectMessages<Credentials extends DirectAccount>(dependencies: Dependencies<Credentials>) {
+export function createDirectMessages<Credentials extends DirectAccount>(
+  dependencies: Dependencies<Credentials>,
+) {
   let following: { key: string; stop: AbortController } | null = null;
   let listeners = 0;
   // The list for one account, from the read numbered `read`. `fresh` while nothing has changed it since the follow loop read it.
@@ -89,7 +120,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
   const setListed = (next: typeof listed) => {
     const before = listed;
     listed = next;
-    if (before?.key !== next?.key || before?.conversations !== next?.conversations) dependencies.listedChanged();
+    if (before?.key !== next?.key || before?.conversations !== next?.conversations)
+      dependencies.listedChanged();
   };
 
   const signedIn = async (): Promise<Credentials> => {
@@ -104,7 +136,11 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     return credentials;
   };
 
-  async function call(credentials: Credentials, path: string, init: RequestInit = {}): Promise<unknown> {
+  async function call(
+    credentials: Credentials,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<unknown> {
     let response: Response;
     try {
       response = await dependencies.relayResponse(credentials, path, init);
@@ -112,15 +148,24 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
       if ((error as { name?: string } | null)?.name === "AbortError") throw error;
       throw new DirectMessageError("unreachable", UNREACHABLE);
     }
-    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
-    if (!response.ok) throw refusal(response.status, typeof body?.code === "string" ? body.code : null, typeof body?.error === "string" ? body.error : null);
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!response.ok)
+      throw refusal(
+        response.status,
+        typeof body?.code === "string" ? body.code : null,
+        typeof body?.error === "string" ? body.error : null,
+      );
     return body;
   }
 
   /** A write changes the list, so the next read goes to the server. */
   async function post(credentials: Credentials, path: string, body: unknown): Promise<unknown> {
     try {
-      return await call(credentials, path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      return await call(credentials, path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
     } finally {
       if (listed?.key === accountKey(credentials)) listed = { ...listed, fresh: false };
     }
@@ -128,19 +173,39 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
 
   async function readList(credentials: Credentials, fresh: boolean): Promise<DirectListed> {
     const read = ++reads;
-    const answer = parseDirectConversationList(await call(credentials, DIRECT_ROUTES.conversations));
-    if (!answer) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read.", null, null, true);
-    const next = { key: accountKey(credentials), viewerId: credentials.userId, conversations: answer.conversations, read, fresh };
+    const answer = parseDirectConversationList(
+      await call(credentials, DIRECT_ROUTES.conversations),
+    );
+    if (!answer)
+      throw new DirectMessageError(
+        "refused",
+        "Your server sent conversations dohc could not read.",
+        null,
+        null,
+        true,
+      );
+    const next = {
+      key: accountKey(credentials),
+      viewerId: credentials.userId,
+      conversations: answer.conversations,
+      read,
+      fresh,
+    };
     // A read that lands after the account changed does not replace the new account's list.
     const current = await dependencies.credentials().catch(() => null);
-    if (!current || accountKey(current) !== next.key) return { viewerId: next.viewerId, conversations: next.conversations };
+    if (!current || accountKey(current) !== next.key)
+      return { viewerId: next.viewerId, conversations: next.conversations };
     // Reads overlap, so answers can arrive out of order. An older one would bring back a Notice already read.
-    if (listed?.key === next.key && listed.read > next.read) return { viewerId: listed.viewerId, conversations: listed.conversations };
+    if (listed?.key === next.key && listed.read > next.read)
+      return { viewerId: listed.viewerId, conversations: listed.conversations };
     setListed(next);
     return { viewerId: next.viewerId, conversations: next.conversations };
   }
 
-  const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
+  const pause = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms).unref?.();
+    });
 
   async function follow(key: string, stop: AbortSignal): Promise<void> {
     let since = -1;
@@ -153,9 +218,14 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         return;
       }
       try {
-        const answer = await call(credentials, `${DIRECT_ROUTES.activity}?since=${Math.max(since, 0)}&waitMs=${since < 0 ? 0 : DIRECT_ACTIVITY_MAX_WAIT_MS}`, { signal: stop });
+        const answer = await call(
+          credentials,
+          `${DIRECT_ROUTES.activity}?since=${Math.max(since, 0)}&waitMs=${since < 0 ? 0 : DIRECT_ACTIVITY_MAX_WAIT_MS}`,
+          { signal: stop },
+        );
         const revision = (answer as { revision?: unknown } | null)?.revision;
-        if (!Number.isSafeInteger(revision)) throw new DirectMessageError("refused", "unreadable activity", null, null, true);
+        if (!Number.isSafeInteger(revision))
+          throw new DirectMessageError("refused", "unreadable activity", null, null, true);
         const unchanged = since >= 0 && revision === since;
         // The first answer counts as a change: a window may be showing a failed read from while the server was away.
         if (!unchanged) {
@@ -226,29 +296,67 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     async list(): Promise<DirectListed> {
       const credentials = await signedIn();
       void ensureFollowing();
-      if (listed?.fresh && listed.key === accountKey(credentials)) return { viewerId: listed.viewerId, conversations: listed.conversations };
+      if (listed?.fresh && listed.key === accountKey(credentials))
+        return { viewerId: listed.viewerId, conversations: listed.conversations };
       return readList(credentials, false);
     },
 
     /** The newest page, or the page before `before`. */
-    async history(viewerId: string, conversationId: string, before?: number): Promise<DirectMessagePage> {
+    async history(
+      viewerId: string,
+      conversationId: string,
+      before?: number,
+    ): Promise<DirectMessagePage> {
       const credentials = await as(viewerId);
       const query = before === undefined ? "" : `?before=${before}`;
-      const page = parseDirectMessagePage(await call(credentials, `${conversationPath(DIRECT_ROUTES.messages, conversationId)}${query}`));
-      if (!page || page.conversationId !== conversationId) throw new DirectMessageError("refused", "Your server sent messages dohc could not read.", null, null, true);
+      const page = parseDirectMessagePage(
+        await call(
+          credentials,
+          `${conversationPath(DIRECT_ROUTES.messages, conversationId)}${query}`,
+        ),
+      );
+      if (!page || page.conversationId !== conversationId)
+        throw new DirectMessageError(
+          "refused",
+          "Your server sent messages dohc could not read.",
+          null,
+          null,
+          true,
+        );
       return page;
     },
 
     async resolve(viewerId: string, person: DirectMemberPick): Promise<DirectResolution> {
-      const resolved = parseDirectResolution(await post(await as(viewerId), DIRECT_ROUTES.resolve, { person }));
-      if (!resolved) throw new DirectMessageError("refused", "Your server sent a person dohc could not read.", null, null, true);
+      const resolved = parseDirectResolution(
+        await post(await as(viewerId), DIRECT_ROUTES.resolve, { person }),
+      );
+      if (!resolved)
+        throw new DirectMessageError(
+          "refused",
+          "Your server sent a person dohc could not read.",
+          null,
+          null,
+          true,
+        );
       return resolved;
     },
 
     /** Sends one message. The caller keeps `messageId` for Try again, so a retry never sends twice. */
-    async send(viewerId: string, input: { messageId: string; body: string } & ({ conversationId: string } | { person: DirectMemberPick })): Promise<DirectSendResult> {
-      const result = parseDirectSendResult(await post(await as(viewerId), DIRECT_ROUTES.send, input));
-      if (!result) throw new DirectMessageError("refused", "Your server answered in a way dohc could not read. Check the conversation before sending again.");
+    async send(
+      viewerId: string,
+      input: { messageId: string; body: string } & (
+        | { conversationId: string }
+        | { person: DirectMemberPick }
+      ),
+    ): Promise<DirectSendResult> {
+      const result = parseDirectSendResult(
+        await post(await as(viewerId), DIRECT_ROUTES.send, input),
+      );
+      if (!result)
+        throw new DirectMessageError(
+          "refused",
+          "Your server answered in a way dohc could not read. Check the conversation before sending again.",
+        );
       return result;
     },
 
@@ -257,7 +365,9 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     },
 
     async block(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
-      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.block, conversationId), { blocked });
+      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.block, conversationId), {
+        blocked,
+      });
     },
   };
 }

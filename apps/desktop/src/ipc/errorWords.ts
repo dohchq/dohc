@@ -481,7 +481,12 @@ export function readError(error: unknown): ReadError {
   }
   if (code === WORKSPACE_NOT_SYNCED) return { words: message, mapped: false, cause: null };
   if (name === "DirectMessageError") {
-    return { words: message || null, mapped: false, cause: text, ...(code === DIRECT_FINAL || code === DIRECT_SIGNED_OUT ? { canRetry: false as const } : {}) };
+    return {
+      words: message || null,
+      mapped: false,
+      cause: text,
+      ...(code === DIRECT_FINAL || code === DIRECT_SIGNED_OUT ? { canRetry: false as const } : {}),
+    };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };

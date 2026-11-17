@@ -12,7 +12,6 @@ import {
   message,
   openingPreview,
   bridgeMock,
-  emitWorkspaceActivity,
   renderView,
 } from "./ChatsView.testHarness";
 

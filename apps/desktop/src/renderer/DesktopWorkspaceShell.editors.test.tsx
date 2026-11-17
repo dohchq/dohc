@@ -1,7 +1,6 @@
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import * as Y from "yjs";
 // @vitest-environment jsdom
-import { installGraphFixture } from "../testing/graphPage.fixture";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { act, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
@@ -24,7 +23,6 @@ import {
   STORED_STATE,
   storedStateWithTabs,
   storedTabs,
-  DM_GRAPH_NODE,
   makeBridge,
   renderShell,
   enterMarkdownSource,
@@ -919,100 +917,6 @@ describe("ui-state merge-on-load", () => {
       expect(bridge.cloudStatus.mock.calls.length).toBeGreaterThan(statusQueries),
     );
   });
-
-  // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
-  // engine bridge only stubs the navigator's overview surface.
-  function chatsPageBridge(uiState: WorkspaceUiState) {
-    const bridge = makeBridge(Promise.resolve(uiState));
-    bridge.listChatChannels = vi.fn(async () => ({
-      channels: [
-        {
-          id: "channel-team",
-          name: "team",
-          slug: "team",
-          kind: "channel" as const,
-          createdAtMs: 1,
-          updatedAtMs: 1,
-          threadCount: 1,
-          unreadCount: 0,
-        },
-      ],
-      fileThreads: [],
-    }));
-    installGraphFixture(bridge, {
-      nodes: [DM_GRAPH_NODE],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 1,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    });
-    return Object.assign(bridge, {
-      listPersonalChatFeed: vi.fn(async () => ({
-        items: [
-          {
-            message: {
-              presentation: { group: "fixture", hue: null, self: false },
-              id: "message-feed",
-              threadId: "thread-team",
-              authorKind: "human" as const,
-              authorDisplayName: "You",
-              body: "Feed update worth revisiting",
-              createdAtMs: 1,
-            },
-            thread: {
-              id: "thread-team",
-              title: "Feed thread",
-              createdAtMs: 1,
-              updatedAtMs: 1,
-              channelId: "channel-team",
-              messageCount: 1,
-              lastReadSequence: 1,
-              unreadCount: 0,
-            },
-            channel: {
-              id: "channel-team",
-              name: "team",
-              slug: "team",
-              kind: "channel" as const,
-            },
-            reactions: [],
-            matchedBy: ["channel" as const],
-          },
-        ],
-      })),
-      listChatMessages: vi.fn(async () => ({
-        messages: [
-          {
-            presentation: { group: "fixture", hue: null, self: false },
-            id: "message-feed",
-            threadId: "thread-team",
-            authorKind: "human" as const,
-            authorDisplayName: "You",
-            body: "Feed update worth revisiting",
-            createdAtMs: 1,
-          },
-        ],
-      })),
-      listChatReactions: vi.fn(async () => ({ reactions: [], viewerAuthorId: "you" })),
-      listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
-      listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
-      chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
-      chatDispatchStateForThread: vi.fn(async () => ({
-        liveRunId: null,
-        liveTriggerMessageId: null,
-        pendingCount: 0,
-        paused: false,
-      })),
-      markChatThreadRead: vi.fn(async () => ({ lastReadSequence: 1, revision: 1 })),
-    });
-  }
-
-  const CHATS_PAGE_STATE: WorkspaceUiState = {
-    ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-    aboutVisible: false,
-  };
-
 
   it("stored state applies when the user touched nothing before the load", async () => {
     const stored = deferred<WorkspaceUiState | null>();

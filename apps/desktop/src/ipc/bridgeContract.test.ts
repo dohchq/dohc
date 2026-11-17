@@ -2369,7 +2369,9 @@ describe("workspace UI state IPC contract", () => {
       { "c alice": { account: "a", name: "Alice" } },
       { "c-alice": { account: "a", name: "" } },
       { "c-alice": { account: "a", name: "Alice", body: "Hi" } },
-      Object.fromEntries(Array.from({ length: 101 }, (_, i) => [`c-${i}`, { account: "a", name: "A" }])),
+      Object.fromEntries(
+        Array.from({ length: 101 }, (_, i) => [`c-${i}`, { account: "a", name: "A" }]),
+      ),
     ]) {
       expect(WorkspaceUiState.safeParse({ ...validState, directNames: bad }).success).toBe(false);
     }
