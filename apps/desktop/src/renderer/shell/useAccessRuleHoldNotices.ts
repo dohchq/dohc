@@ -103,8 +103,6 @@ const ruleOf = (folder: string) =>
   folder ? `The access rule for ${folder}` : "The workspace's access rule";
 const ruleOfLower = (folder: string) =>
   folder ? `the access rule for ${folder}` : "the workspace's access rule";
-const rulePossessive = (folder: string) =>
-  folder ? `${folder}'s access rule` : "the workspace's access rule";
 
 export function accessRuleHoldWords(
   hold: AccessRuleHold,
@@ -363,7 +361,7 @@ export function useAccessRuleHoldNotices(
     latest.current.reportShellFailure({
       identity: waits,
       tone: "warning",
-      title: `Choose for ${rulePossessive(outer)} first`,
+      title: `Decide on ${ruleOfLower(outer)} first`,
       message: `dohc didn't apply your choice for ${placeOf(hold.folder)}. ${ruleOf(outer)} also changed outside dohc.`,
       retry: null,
       action: {

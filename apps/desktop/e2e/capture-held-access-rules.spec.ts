@@ -266,7 +266,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     // A choice on team waits for the workspace's own rule. Notices stays
     // open on it, and its row says so with nothing to retry.
     await widenedRow.getByRole("button", { name: "Allow new access" }).click();
-    const waits = rows.filter({ hasText: "Choose for the workspace's access rule first" });
+    const waits = rows.filter({ hasText: "Decide on the workspace's access rule first" });
     await expect(waits).toHaveCount(1, { timeout: 30_000 });
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect(waits).toContainText(

@@ -280,7 +280,7 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() =>
       expect(waits()).toMatchObject({
         tone: "warning",
-        title: "Choose for team's access rule first",
+        title: "Decide on the access rule for team first",
         message:
           "dohc didn't apply your choice for team/sub. The access rule for team also changed outside dohc.",
         retry: null,
@@ -311,7 +311,7 @@ describe("useAccessRuleHoldNotices", () => {
       h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team:waits");
     await waitFor(() =>
       expect(waits()).toMatchObject({
-        title: "Choose for the workspace's access rule first",
+        title: "Decide on the workspace's access rule first",
         message:
           "dohc didn't apply your choice for team. The workspace's access rule also changed outside dohc.",
       }),
