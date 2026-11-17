@@ -1359,7 +1359,8 @@ fn judge_folder(
     if !settled(order.root, folder, &disk) {
         return Ok(Plan::Verdict(Verdict::Waits));
     }
-    // The writer's own moments commit the change when they cover all of it.
+    // Only a single covered change may use the writer's own moment. Several
+    // changes must commit in the order judged here, before its batch runs.
     let covered = changes
         .iter()
         .all(|(path, _)| rule_touches.iter().any(|touch| touch.path == path));
@@ -1392,7 +1393,7 @@ fn judge_folder(
             reason: access_rule_holds::WIDENED,
         }));
     }
-    Ok(if covered {
+    Ok(if covered && changes.len() == 1 {
         Plan::Verdict(Verdict::Clear(Clearance::RuleFirst))
     } else {
         Plan::CommitRule(changes)

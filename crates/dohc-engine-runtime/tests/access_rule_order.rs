@@ -441,6 +441,102 @@ fn a_batch_journals_its_rule_first_in_either_order() {
     }
 }
 
+#[test]
+fn a_two_rule_batch_commits_only_the_order_it_judged() {
+    for reverse in [false, true] {
+        for refuse_second in [false, true] {
+            let f = ruled_team();
+            let mut seed = write("outside.md", "seed", "m-seed");
+            seed.request_id = Some("reject-second".to_owned());
+            f.versioned_write(seed).unwrap();
+            f.put(
+                "team/access.yaml",
+                "members: edit\npeople:\n  sam@example.com: edit\n",
+            );
+            f.put("team/\u{FF41}ccess.yaml", EDIT);
+            f.put("team/a.md", "later");
+            f.settle();
+            let mut paths = ["team/access.yaml", "team/\u{FF41}ccess.yaml", "team/a.md"];
+            if reverse {
+                paths.swap(0, 1);
+            }
+            let mut inputs: Vec<_> = paths
+                .iter()
+                .map(|path| ingest(path, &std::fs::read_to_string(f.root().join(path)).unwrap()))
+                .collect();
+            if refuse_second {
+                inputs[1].request_id = Some("reject-second".to_owned());
+            }
+            let results = f
+                .actor
+                .capture_ingest_batch_blocking(
+                    inputs,
+                    Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                        f.root(),
+                    )),
+                    dohc_engine_collab::LeaseRegistry::new(),
+                    Arc::new(NoFaults),
+                    f.root().to_path_buf(),
+                    Arc::new(ExistingRootGuard),
+                )
+                .unwrap();
+            assert_eq!(results[1].is_err(), refuse_second, "{results:?}");
+            assert_rule_prefixes_at_most_view(&f);
+        }
+    }
+}
+
+/// Replay the actual outbound rule prefixes, including inherited reach.
+fn assert_rule_prefixes_at_most_view(f: &Fixture) {
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let mut query = conn.prepare("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' ORDER BY origin_seq").unwrap();
+    let rows = query.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    let mut files = std::collections::BTreeMap::<String, String>::new();
+    let mut inherited = VIEW.to_owned();
+    for row in rows {
+        let payload: serde_json::Value = serde_json::from_str(&row.unwrap()).unwrap();
+        let path = payload["path"].as_str().unwrap();
+        if !["access.yaml", "team/access.yaml", "team/\u{FF41}ccess.yaml"].contains(&path) {
+            continue;
+        }
+        if payload["operation"] == "delete" {
+            files.remove(path);
+        } else {
+            let text: String = conn
+                .query_row(
+                    "SELECT text FROM blobs WHERE sha256=?1",
+                    [payload["payloadAfterBlobSha256"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if path == "access.yaml" {
+                inherited = text;
+            } else {
+                files.insert(path.to_owned(), text);
+            }
+        }
+        let text = match files.len() {
+            0 => Some(&inherited),
+            1 => files.values().next(),
+            _ => None,
+        };
+        let rule = text.and_then(|text| parse_access_rule(text));
+        for who in ["members", "sam@example.com"] {
+            let reach = rule.as_ref().and_then(|rule| {
+                if who == "members" {
+                    rule.members
+                } else {
+                    level_for_email(rule, who)
+                }
+            });
+            assert!(
+                reach.is_none_or(|level| level <= Level::View),
+                "{who} after {path}: {reach:?}"
+            );
+        }
+    }
+}
+
 /// The relay reads `team/ACCESS.yaml` as team's rule, so the engine does too.
 #[test]
 fn a_rule_spelled_with_other_capitals_journals_before_its_files() {
@@ -897,36 +993,37 @@ fn a_widened_hold_lists_who_reaches_the_folder_differently() {
     assert_eq!(f.journal(), expected);
 }
 
+struct CrashAfterOneMoment(PathBuf, i64, std::sync::atomic::AtomicBool);
+impl FaultInjector for CrashAfterOneMoment {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        if point != FaultPoint::StorageBeforePersist
+            || self.2.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return FaultAction::Continue;
+        }
+        if moments(&self.0) > self.1 {
+            self.2.store(true, std::sync::atomic::Ordering::SeqCst);
+            return FaultAction::Crash;
+        }
+        FaultAction::Continue
+    }
+}
+fn moments(db: &Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .expect("open db")
+        .query_row(
+            "SELECT count(*) FROM replication_log WHERE op_kind='moment.append'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count moments")
+}
+
 /// Recording a widened rule beside a second spelling hides the folder, and
 /// every step of it does: stopped after its first moment, the journal gives
 /// nobody more than the rule recorded before.
 #[test]
 fn hiding_a_folder_spelled_twice_widens_nothing_at_any_step() {
-    struct CrashAfterOneMoment(PathBuf, i64, std::sync::atomic::AtomicBool);
-    impl FaultInjector for CrashAfterOneMoment {
-        fn poll(&self, point: FaultPoint) -> FaultAction {
-            if point != FaultPoint::StorageBeforePersist
-                || self.2.load(std::sync::atomic::Ordering::SeqCst)
-            {
-                return FaultAction::Continue;
-            }
-            if moments(&self.0) > self.1 {
-                self.2.store(true, std::sync::atomic::Ordering::SeqCst);
-                return FaultAction::Crash;
-            }
-            FaultAction::Continue
-        }
-    }
-    fn moments(db: &Path) -> i64 {
-        rusqlite::Connection::open(db)
-            .expect("open db")
-            .query_row(
-                "SELECT count(*) FROM replication_log WHERE op_kind='moment.append'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count moments")
-    }
     let f = ruled_team();
     let other = "team/\u{FF41}ccess.yaml";
     f.put(
