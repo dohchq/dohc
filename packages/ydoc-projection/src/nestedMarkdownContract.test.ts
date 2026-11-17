@@ -39,7 +39,6 @@ const corpus = JSON.parse(
     rereadCanonical?: string;
     sourceCanonical?: string;
     witnessSeed?: boolean;
-    foldRefuse?: boolean;
     refuse?: boolean;
     projected?: boolean;
     rustBase64?: string;

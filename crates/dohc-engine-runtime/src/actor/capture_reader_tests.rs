@@ -271,7 +271,9 @@ async fn outside_reader_fold_refuses_file_staleness() {
 #[tokio::test]
 async fn outside_reader_fold_unavailable_and_cap_preserve_strict_hold() {
     let (scratch, mut store, key) = fixture(false);
-    let source = "Changed\n\n- parent\n  - child\n";
+    // A renderer shows the HTML, which the document holds as text, so only
+    // the outside reader could take this file.
+    let source = "Changed\n\n<div>html</div>\n";
     let preparation = store
         .read_with(|conn| reader_resolver::prepare_fold(conn, &key, "note.md", source))
         .unwrap()
@@ -580,10 +582,12 @@ async fn outside_reader_fold_requires_engine_serialization_to_match_the_file() {
         let doc = store
             .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
             .unwrap();
-        assert!(
-            doc.canonical_content()["body"]
-                .to_string()
-                .contains("**bold**")
+        let read = Ydoc::wire();
+        read.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
+            .unwrap();
+        assert_eq!(
+            doc.canonical_content()["body"],
+            read.canonical_content()["body"]
         );
         assert_eq!(
             std::fs::read_to_string(scratch.path().join("note.md")).unwrap(),

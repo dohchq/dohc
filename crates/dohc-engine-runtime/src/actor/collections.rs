@@ -580,7 +580,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn a_never_replicated_empty_seed_retires_and_adopts_a_nested_list_exactly() {
+    fn a_never_replicated_empty_seed_retires_and_adopts_the_file_exactly() {
         for settled_empty in [false, true] {
             assert_never_replicated_completion_adopts(settled_empty);
         }
@@ -623,7 +623,9 @@ mod collection_adoption_update_tests {
                 })
                 .unwrap();
         }
-        let completed = "---\nTitle: Completed\n---\n- parent\n  - child\n";
+        // A renderer shows the HTML, which the document holds as text, so the
+        // file cannot fold into the seed.
+        let completed = "---\nTitle: Completed\n---\n<div>html</div>\n";
         std::fs::write(scratch.path().join(path), completed).unwrap();
         store
             .write_with(&dohc_engine_storage::NoFaults, |tx| {
@@ -691,7 +693,7 @@ mod collection_adoption_update_tests {
                     reconcile_collections_in_tx(tx, "workspace", "main")
                 })
                 .unwrap();
-            let completed = "---\nTitle: Completed\n---\n- parent\n  - child\n";
+            let completed = "---\nTitle: Completed\n---\n<div>html</div>\n";
             std::fs::write(scratch.path().join(path), completed).unwrap();
             let result = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
                 capture_ingest_fixture_in_tx(tx, &key, path, completed)
@@ -778,7 +780,7 @@ mod collection_adoption_update_tests {
                 })
                 .unwrap();
             let result = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-                capture_ingest_fixture_in_tx(tx, &key, path, "- parent\n  - child\n")
+                capture_ingest_fixture_in_tx(tx, &key, path, "<div>html</div>\n")
             });
             assert!(
                 matches!(
@@ -829,7 +831,7 @@ mod collection_adoption_update_tests {
                 "main",
                 &key.object_id,
                 path,
-                "- parent\n  - child\n",
+                "<div>html</div>\n",
                 6,
             )
         });
@@ -1141,7 +1143,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn relation_cleanup_skips_a_never_opened_indented_code_referrer() {
+    fn relation_cleanup_skips_a_never_opened_referrer_it_cannot_keep() {
         let (scratch, mut store, mut cache) = fixture();
         capture(
             &mut store,
@@ -1149,7 +1151,8 @@ mod collection_adoption_update_tests {
             "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
             3,
         );
-        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nInstall:\n\n    npm i foo";
+        // A renderer shows the HTML, which the document holds as text.
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nInstall:\n\n<div>npm i foo</div>";
         capture(&mut store, "tasks/a.md", text, 4);
         std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
         let snapshot = VersionedTextStore::new(&mut store)
@@ -1189,132 +1192,82 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn nested1b_relation_cleanup_skips_non_allowlisted_seed() {
-        let (scratch, mut store, mut cache) = fixture();
-        capture(
-            &mut store,
-            "tasks/collection.yaml",
-            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
-            3,
-        );
-        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n- a\n  ---";
-        capture(&mut store, "tasks/a.md", text, 4);
-        std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
-        let snapshot = VersionedTextStore::new(&mut store)
-            .read_text("workspace", "main", "tasks/a.md")
-            .unwrap()
-            .unwrap();
-        let result = cleanup_collection_relation_on_store(
-            &mut store,
-            &mut cache,
-            &CollectionRelationCleanupCandidate {
-                source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                source_file_path: "tasks/a.md".into(),
-                source_object_id: snapshot.object_id.clone(),
-                field_name: "related".into(),
-                target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-                many: false,
-            },
-            "workspace",
-            "main",
-            scratch.path(),
-            &LeaseRegistry::new(),
-            &(),
-            5,
-            &dohc_engine_storage::NoFaults,
-            &CancellationToken::new(),
-            None,
-        )
-        .unwrap();
-        assert!(matches!(
-            result,
-            CollectionRelationCleanupExecution::Skipped
-        ));
-        assert_eq!(
-            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
-            text
-        );
-        let after = VersionedTextStore::new(&mut store)
-            .read_text("workspace", "main", "tasks/a.md")
-            .unwrap()
-            .unwrap();
-        assert_eq!(after.latest_moment_id, snapshot.latest_moment_id);
-        assert_eq!(after.text, text);
-        let key = DocKey::new("workspace", "main", &snapshot.object_id).unwrap();
-        assert!(
-            dohc_engine_collab::load_persisted(&store, &key)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn nested1b_relation_cleanup_keeps_exact_allowed_body() {
-        let (scratch, mut store, mut cache) = fixture();
-        capture(
-            &mut store,
-            "tasks/collection.yaml",
-            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
-            3,
-        );
-        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n* parent\n\n    * child\n";
-        capture(&mut store, "tasks/a.md", text, 4);
-        std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
-        let snapshot = VersionedTextStore::new(&mut store)
-            .read_text("workspace", "main", "tasks/a.md")
-            .unwrap()
-            .unwrap();
-        let result = cleanup_collection_relation_on_store(
-            &mut store,
-            &mut cache,
-            &CollectionRelationCleanupCandidate {
-                source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                source_file_path: "tasks/a.md".into(),
-                source_object_id: snapshot.object_id.clone(),
-                field_name: "related".into(),
-                target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-                many: false,
-            },
-            "workspace",
-            "main",
-            scratch.path(),
-            &LeaseRegistry::new(),
-            &(),
-            5,
-            &dohc_engine_storage::NoFaults,
-            &CancellationToken::new(),
-            None,
-        )
-        .unwrap();
-        assert!(matches!(
-            result,
-            CollectionRelationCleanupExecution::Applied(_)
-        ));
-        let expected = text.replace("related: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n", "");
-        assert_eq!(
-            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
-            expected
-        );
-        assert_eq!(
-            VersionedTextStore::new(&mut store)
+    fn relation_cleanup_keeps_a_body_as_written() {
+        for body in [
+            "* parent\n\n    * child\n",
+            "- a\n  ---",
+            "Install:\n\n    npm i foo",
+        ] {
+            let (scratch, mut store, mut cache) = fixture();
+            capture(
+                &mut store,
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+                3,
+            );
+            let text = format!(
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n{body}"
+            );
+            let text = text.as_str();
+            capture(&mut store, "tasks/a.md", text, 4);
+            std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
+            let snapshot = VersionedTextStore::new(&mut store)
                 .read_text("workspace", "main", "tasks/a.md")
                 .unwrap()
-                .unwrap()
-                .text,
-            expected
-        );
-        let key = DocKey::new("workspace", "main", &snapshot.object_id).unwrap();
-        drop(store);
-        let store =
-            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 6).unwrap();
-        let loaded = dohc_engine_collab::load_persisted(&store, &key)
-            .unwrap()
+                .unwrap();
+            let result = cleanup_collection_relation_on_store(
+                &mut store,
+                &mut cache,
+                &CollectionRelationCleanupCandidate {
+                    source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    source_file_path: "tasks/a.md".into(),
+                    source_object_id: snapshot.object_id.clone(),
+                    field_name: "related".into(),
+                    target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    many: false,
+                },
+                "workspace",
+                "main",
+                scratch.path(),
+                &LeaseRegistry::new(),
+                &(),
+                5,
+                &dohc_engine_storage::NoFaults,
+                &CancellationToken::new(),
+                None,
+            )
             .unwrap();
-        let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
-        assert_eq!(
-            loaded.doc.preserved_markdown_source(&canonical).as_deref(),
-            Some(expected.as_str())
-        );
+            assert!(matches!(
+                result,
+                CollectionRelationCleanupExecution::Applied(_)
+            ));
+            let expected = text.replace("related: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n", "");
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
+                expected
+            );
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_text("workspace", "main", "tasks/a.md")
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                expected
+            );
+            let key = DocKey::new("workspace", "main", &snapshot.object_id).unwrap();
+            drop(store);
+            let store =
+                EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 6)
+                    .unwrap();
+            let loaded = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
+            assert_eq!(
+                loaded.doc.preserved_markdown_source(&canonical).as_deref(),
+                Some(expected.as_str())
+            );
+        }
     }
 
     #[test]

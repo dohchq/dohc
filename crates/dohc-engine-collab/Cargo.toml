@@ -31,6 +31,8 @@ held-proof-memory = []
 
 [dependencies]
 memchr = "2.8.3"
+# The Markdown reader's CommonMark and GFM parsing (`ydoc/read_markdown.rs`).
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 dohc-engine-reader = { path = "../dohc-engine-reader" }
 tokio = { version = "1", features = ["sync", "time"] }
 # The durable store: single writer, migration ledger with the ydoc tables,

@@ -7277,53 +7277,25 @@ mod tests {
     }
 
     #[test]
-    fn nested1b_claimed_successor_keeps_divergent_agent_body_and_conflict_open() {
-        let agent = "- agent\n  ---";
+    fn a_nested_incoming_body_resolves_the_conflict_as_written() {
+        let incoming = "- incoming\n  ---";
         let (_scratch, mut store, key) =
-            content_conflict_store(agent, "- incoming\n  ---", None, ContentKind::Richdoc);
+            content_conflict_store("- agent\n  ---", incoming, None, ContentKind::Richdoc);
         let before = dohc_engine_collab::read_marker(&store, &key)
             .unwrap()
             .unwrap();
-        let state = dohc_engine_collab::load_persisted(&store, &key)
-            .unwrap()
-            .unwrap()
-            .doc
-            .encode_full_state();
-        let result = try_resolve_content_conflict(
-            &mut store,
-            "document-conflict",
-            "document-object",
-            21,
-            None,
-        );
-        assert!(
-            matches!(
-                result,
-                Err(dohc_engine_domain::DomainError::InvalidInput {
-                    reason: "ydoc-resolution-not-representable"
-                })
-            ),
-            "{result:?}"
-        );
+        resolve_content_conflict(&mut store, "document-conflict", "document-object", 21);
         let after = dohc_engine_collab::read_marker(&store, &key)
             .unwrap()
             .unwrap();
-        assert_eq!(after.lineage_claim_id, before.lineage_claim_id);
-        assert_eq!(
-            dohc_engine_collab::load_persisted(&store, &key)
-                .unwrap()
-                .unwrap()
-                .doc
-                .encode_full_state(),
-            state
-        );
+        assert_ne!(after.lineage_claim_id, before.lineage_claim_id);
         assert_eq!(
             VersionedTextStore::new(&mut store)
                 .read_text("ws", "main", "doc.md")
                 .unwrap()
                 .unwrap()
                 .text,
-            agent
+            incoming
         );
         let status: String = store
             .read_with(|conn| {
@@ -7334,7 +7306,7 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(status, "open");
+        assert_eq!(status, "resolved");
     }
 
     /// Binds `object-a`'s lineage to this computer as its live owner, with no

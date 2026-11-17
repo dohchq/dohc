@@ -3293,12 +3293,12 @@ fn assert_desktop_frontmatter_fold(index: usize, refuses: [bool; 2]) {
     }
 }
 
+// The reader reads the desktop's body from both forms, so neither is held.
 #[test]
-fn nested1b_desktop_frontmatter_link() {
-    // Only the engine's own form folds; the file without it is held.
-    assert_desktop_frontmatter_fold(0, [true, false]);
+fn a_desktop_seed_folds_a_frontmatter_edit_above_a_link() {
+    assert_desktop_frontmatter_fold(0, [false, false]);
 }
 #[test]
-fn nested1b_desktop_frontmatter_setext_holds() {
-    assert_desktop_frontmatter_fold(6, [true, true]);
+fn a_desktop_seed_folds_a_frontmatter_edit_above_an_item_heading() {
+    assert_desktop_frontmatter_fold(6, [false, false]);
 }

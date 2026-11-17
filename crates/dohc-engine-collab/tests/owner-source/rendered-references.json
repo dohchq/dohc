@@ -5,9 +5,9 @@
  { "text": "a &LT;b&GT; c", "references": ["LT", "GT"] },
  { "text": "a&nbsp;b&zwj;c&lrm;d", "references": ["nbsp", "zwj", "lrm"] },
  { "text": "&ZeroWidthSpace; and &#X41;", "references": ["ZeroWidthSpace", "#X41"] },
- { "text": "`&#x202E;` in code", "references": ["#x202E"] },
+ { "text": "`&#x202E;` in code", "references": [] },
  { "text": "a &copy; b &amp; c &lt; d &quot; e", "references": [] },
- { "text": "&#35; and &#160; and &#035;", "references": [] },
+ { "text": "&#35; and &#160; and &#035;", "references": ["#035"] },
  { "text": "\\&#x202E; and &amp;#x202E;", "references": [] },
  { "text": "&unknown; and &; and & alone", "references": [] }
 ]

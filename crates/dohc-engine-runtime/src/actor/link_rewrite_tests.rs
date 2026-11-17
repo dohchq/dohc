@@ -533,7 +533,7 @@ async fn middle_source_state(f: &Fixture) -> (Vec<u8>, i64, i64, i64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unrepresentable_closed_source_does_not_stop_the_link_pass() {
     let f = Fixture::new(3, 3).await;
-    let body = "- parent [[old]]\n  - child\n";
+    let body = "[[old]]\n\n<div>html</div>\n";
     seed_middle_lineage(&f, body).await;
     let before = middle_source_state(&f).await;
     let result = f.pass("unrepresentable", Arc::new(NoFaults)).await.unwrap();

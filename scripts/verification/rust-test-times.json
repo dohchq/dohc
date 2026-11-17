@@ -66,7 +66,6 @@
     "dohc-engine-collab owner_outbox::enrollment::tests::bad_cut_capture_race_and_capacity_failure_leave_original_work_unchanged": 4.431,
     "dohc-engine-collab owner_outbox::enrollment::tests::refused_restore_generation_leaves_the_old_generation_and_its_unsent_work": 3.302,
     "dohc-engine-collab ydoc::frontmatter_yaml::tests::single_quoted_scalar_preserves_escaping_and_exact_byte_limit": 2.305,
-    "dohc-engine-collab ydoc::nested1b_allowlist_tests::nested1b_positive_grammar_and_strict_admission_remains_off": 9.214,
     "dohc-engine-collab::integration cross_engine::every_fixture_converges_before_and_after_compaction": 3.547,
     "dohc-engine-collab::integration ydoc_full_state_size::the_bound_covers_the_largest_document_the_engine_accepts": 3.74,
     "dohc-engine-domain store::capture_write::tests::capture_batch_preserves_producer_and_global_high_water_parity": 3.355,

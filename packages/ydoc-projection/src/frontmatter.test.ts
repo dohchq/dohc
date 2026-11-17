@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import vectors from "../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/frontmatter-edits.json";
 import {
+  frontmatterBlockFor,
   leadingFrontmatter,
   writeMarkdownFrontmatter,
   loadMarkdownFrontmatter,
@@ -817,6 +818,21 @@ describe("frontmatterAsWritten", () => {
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
     } finally {
       doc.destroy();
+    }
+  });
+});
+
+describe("frontmatterBlockFor", () => {
+  it("leaves the blank lines a body starts with out of the kept text, as the engine does", () => {
+    const values = { id: "x" };
+    for (const lineEnding of ["\n", "\r\n"] as const) {
+      const source = `---${lineEnding}id: x${lineEnding}---${lineEnding.repeat(4)}`;
+      expect(frontmatterBlockFor(values, source, "\n\na\n", lineEnding)).toBe(
+        `---${lineEnding}id: x${lineEnding}---${lineEnding.repeat(2)}`,
+      );
+      expect(frontmatterBlockFor(values, source, "a\n", lineEnding)).toBe(source);
+      const closed = `---${lineEnding}id: x${lineEnding}---${lineEnding}`;
+      expect(frontmatterBlockFor(values, closed, "\n\na\n", lineEnding)).toBe(closed);
     }
   });
 });

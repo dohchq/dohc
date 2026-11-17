@@ -1,10 +1,12 @@
 use dohc_engine_collab::{
-    fresh_successor_base, hex_sha256, CollabError, ContentKind, DocKey, SuccessorIdentity,
+    fresh_successor_base, hex_sha256, ContentKind, DocKey, SuccessorIdentity,
     SuccessorIdentityInput,
 };
 
+/// Raw HTML inside a list item reads as text the editor keeps, and the
+/// successor writes the chosen bytes back as they were.
 #[test]
-fn outside_html_blocks_cannot_seed_a_richdoc_successor() {
+fn outside_html_blocks_seed_a_richdoc_successor_as_written() {
     for source in [
         "- parent\n\n  </custom >\n  - child",
         "- parent\n\n  </custom\t>\n  - child",
@@ -24,9 +26,6 @@ fn outside_html_blocks_cannot_seed_a_richdoc_successor() {
             result_sha256: &hex_sha256(source.as_bytes()),
         });
         let result = fresh_successor_base(&identity, source);
-        assert!(
-            matches!(result, Err(CollabError::MarkdownNotRepresentable)),
-            "{source:?}: {result:?}"
-        );
+        assert!(result.is_ok(), "{source:?}: {result:?}");
     }
 }

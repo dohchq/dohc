@@ -20,9 +20,11 @@ impl Fixture {
                 let seed = if elements {
                     doc.richdoc_wikilinks_for_test(&head.text)?
                 } else {
-                    doc.rewrite_content_to_markdown_preserving_source(
+                    // The wikilinks as text, as a reader that did not read
+                    // them left the document.
+                    doc.rewrite_content_to_markdown(
                         ContentKind::Richdoc,
-                        &head.text,
+                        &head.text.replace("[[", "\\[\\["),
                     )?
                 };
                 dohc_engine_collab::ensure_marker(
@@ -330,6 +332,8 @@ async fn literal_wikilinks_without_editor_elements_stay_unchecked() {
     let (lease, doc) = f.open_document_with_elements("source-0000", false).await;
     let before = doc.encode_state_vector();
     let result = f.pass("literal-open", Arc::new(NoFaults)).await.unwrap();
+    // The file holds links the open document holds as text, so the pass can
+    // rewrite neither and says so.
     assert_eq!(result["documents"], 0);
     assert_eq!(result["unchecked"], json!(["source-0000.md"]));
     assert_eq!(f.text("source-0000.md").await, BODY);

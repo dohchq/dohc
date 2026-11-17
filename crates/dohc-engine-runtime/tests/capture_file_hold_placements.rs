@@ -355,8 +355,7 @@ async fn capture_file_hold_parks_pending_settlement_without_compensation() {
 }
 
 /// Seed a desktop-read note without its final newline: a nested list item
-/// with a link. The engine's reading cannot reproduce the desktop's here, so
-/// an outside frontmatter edit to it is held.
+/// with a link.
 fn seed_desktop_link_row(scratch: &ScratchDir) -> (DocKey, String) {
     use base64::Engine;
     let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
@@ -443,6 +442,11 @@ async fn open_error(actor: &ActorHandle) -> Option<&'static str> {
         .map(|error| error.code())
 }
 
+/// An outside edit the reader refuses: quotes nested past its limit.
+fn too_deep() -> String {
+    format!("{} too deep\n", "> ".repeat(121))
+}
+
 fn file(scratch: &ScratchDir) -> String {
     std::fs::read_to_string(scratch.path().join(FILE)).unwrap()
 }
@@ -452,7 +456,7 @@ async fn a_held_outside_edit_survives_a_dohc_edit_and_restart() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let (key, initial) = seed_desktop_link_row(&scratch);
-    let outside = initial.replace("todo", "done");
+    let outside = too_deep();
     let store = EngineStore::open(&db, 4).unwrap();
     let loaded = dohc_engine_collab::load_persisted(&store, &key)
         .unwrap()
@@ -526,7 +530,7 @@ async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let (_key, initial) = seed_desktop_link_row(&scratch);
-    let outside = initial.replace("todo", "done");
+    let outside = too_deep();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
     let held = Err("capture-file-held");
@@ -540,18 +544,13 @@ async fn a_held_outside_edit_is_released_by_the_file_dohc_would_write() {
     let first = &holds[0];
     assert_eq!((first.attempt_count, first.retry_requested), (2, false));
     assert_eq!(file(&scratch), outside);
-    // A final newline on the edited file doesn't help: its body no longer
-    // matches the body the desktop seeded, which had no final newline.
-    let ended = format!("{outside}\n");
-    assert_eq!(capture_outside(&actor, &scratch, &ended, 7).await, held);
-    // The earlier bytes lack the final newline too, so they are held as well.
-    assert_eq!(capture_outside(&actor, &scratch, &initial, 8).await, held);
-    let before = format!("{initial}\n");
-    assert_eq!(capture_outside(&actor, &scratch, &before, 9).await, Ok(()));
+    assert_eq!(capture_outside(&actor, &scratch, &initial, 7).await, Ok(()));
     let holds = actor.capture_file_holds(WS.into()).await.unwrap();
     assert!(holds.is_empty(), "{holds:?}");
     assert_eq!(open_error(&actor).await, None);
-    assert_eq!(capture_outside(&actor, &scratch, &ended, 10).await, Ok(()));
-    assert_eq!(file(&scratch), ended);
+    // The desktop's note takes an outside edit once the hold is released.
+    let edited = initial.replace("todo", "done");
+    assert_eq!(capture_outside(&actor, &scratch, &edited, 8).await, Ok(()));
+    assert_eq!(file(&scratch), edited);
     supervisor.close(&db).unwrap();
 }
