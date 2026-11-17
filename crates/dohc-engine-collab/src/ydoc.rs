@@ -2849,9 +2849,17 @@ macro_rules! count_fold_work {
     };
 }
 
+/// Why [`write_blocks`] wrote nothing.
+#[derive(Debug, PartialEq)]
+enum Unwritten {
+    /// More nodes than the writer writes, so a save could not write them.
+    PastNodeLimit,
+    Refused,
+}
+
 /// `blocks` as the writer writes them, as a whole note's body (`note`) or
 /// inside one, which the reader's check reads again.
-fn write_blocks(blocks: &[read_markdown::Element], note: bool) -> Option<String> {
+fn write_blocks(blocks: &[read_markdown::Element], note: bool) -> Result<String, Unwritten> {
     let doc = yrs::Doc::new();
     let fragment = doc.get_or_insert_xml_fragment(ROOT_BODY);
     {
@@ -2868,11 +2876,15 @@ fn write_blocks(blocks: &[read_markdown::Element], note: bool) -> Option<String>
         .children(&txn)
         .map(|child| markdown_node(&txn, child, 0, &mut remaining, &mut bytes))
         .collect::<ProjectionResult<Vec<_>>>()
-        .ok()?;
+        .map_err(|_| match remaining {
+            0 => Unwritten::PastNodeLimit,
+            _ => Unwritten::Refused,
+        })?;
     if note {
-        markdown_document(&children).ok()
+        markdown_document(&children).map_err(|_| Unwritten::Refused)
     } else {
-        render_nodes(&children, "doc", &BTreeMap::new(), "\n\n", false).ok()
+        render_nodes(&children, "doc", &BTreeMap::new(), "\n\n", false)
+            .map_err(|_| Unwritten::Refused)
     }
 }
 

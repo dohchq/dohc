@@ -146,11 +146,16 @@ pub(super) const MAX_PARAGRAPH: usize = 8 * 1024;
 /// reading them back. A part of the note that would lose a word or read back
 /// differently keeps its source, which the writer writes back exactly; if
 /// that is not enough, so do the neighbours it fails with. If the note with
-/// those parts kept still fails the check, the whole note keeps its source.
+/// those parts kept still fails the check, or has more nodes than the writer
+/// writes, the whole note keeps its source.
 pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
     let parts = read_parts(body, 0, 0, &HashMap::new())?;
-    if reads_whole(&parts, body) {
-        return Ok(parts.blocks);
+    match reads_whole(&parts, body) {
+        Some(true) => return Ok(parts.blocks),
+        // No seal of a part that fails alone brings the note back under the
+        // limit, and trying takes seconds.
+        None => return Ok(vec![raw_block(body)]),
+        Some(false) => {}
     }
     // A part that keeps its source is written byte for byte, but the writer
     // trims the white space that ends the note. Read as the writer leaves
@@ -158,7 +163,7 @@ pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
     let trimmed = super::trim_js_end(body);
     let parts = if trimmed.len() < body.len() {
         let parts = read_parts(trimmed, 0, 0, &HashMap::new())?;
-        if reads_whole(&parts, trimmed) {
+        if reads_whole(&parts, trimmed) == Some(true) {
             return Ok(parts.blocks);
         }
         parts
@@ -168,10 +173,10 @@ pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
     let body = trimmed;
     for with_neighbours in [false, true] {
         let blocks = sealed(&parts, body, with_neighbours);
-        let kept = super::write_blocks(&blocks, true).is_some_and(|written| {
+        let kept = super::write_blocks(&blocks, true).is_ok_and(|written| {
             keeps_words(&written, body)
                 && read_parts(&written, 0, 0, &HashMap::new()).is_ok_and(|again| {
-                    let again = if reads_whole(&again, &written) {
+                    let again = if reads_whole(&again, &written) == Some(true) {
                         again.blocks
                     } else {
                         sealed(&again, &written, with_neighbours)
@@ -191,9 +196,17 @@ fn raw_block(source: &str) -> Element {
     element("rawBlock", vec![("source", Any::from(source))], Vec::new())
 }
 
-/// Whether the whole note reads back, with no part held back by its size.
-fn reads_whole(parts: &Parts, body: &str) -> bool {
-    parts.held.is_empty() && reads_back(&parts.blocks, body, &HashMap::new(), true)
+/// Whether the whole note reads back, with no part held back by its size,
+/// or `None` when it has more nodes than the writer writes.
+fn reads_whole(parts: &Parts, body: &str) -> Option<bool> {
+    if !parts.held.is_empty() {
+        return Some(false);
+    }
+    match super::write_blocks(&parts.blocks, true) {
+        Ok(written) => Some(read_back(&parts.blocks, &written, body, &HashMap::new())),
+        Err(super::Unwritten::PastNodeLimit) => None,
+        Err(super::Unwritten::Refused) => Some(false),
+    }
 }
 
 /// The note's blocks with each part that fails the check alone keeping its
@@ -261,13 +274,11 @@ fn sealed(parts: &Parts, body: &str, with_neighbours: bool) -> Vec<Element> {
     out
 }
 
-/// Whether the writer writes `blocks` to text that keeps each word of
+/// Whether `written`, the writer's text for `blocks`, keeps each word of
 /// `source` and reads back to the same blocks.
-fn reads_back(blocks: &[Element], source: &str, definitions: &Definitions, note: bool) -> bool {
-    super::write_blocks(blocks, note).is_some_and(|written| {
-        keeps_words(&written, source)
-            && read_blocks(&written, 0, 0, definitions).is_ok_and(|again| alike(blocks, &again))
-    })
+fn read_back(blocks: &[Element], written: &str, source: &str, definitions: &Definitions) -> bool {
+    keeps_words(written, source)
+        && read_blocks(written, 0, 0, definitions).is_ok_and(|again| alike(blocks, &again))
 }
 
 /// Whether two readings build the same document. Empty paragraphs at the
@@ -340,7 +351,10 @@ fn shown(children: &[Child]) -> Vec<Shown<'_>> {
                 out.push(Shown::Element(element));
                 continue;
             }
-            Child::Text(runs) => runs.iter().map(|(text, marks)| (text.as_str(), marks)).collect(),
+            Child::Text(runs) => runs
+                .iter()
+                .map(|(text, marks)| (text.as_str(), marks))
+                .collect(),
         };
         if !matches!(out.last(), Some(Shown::Text(_))) {
             out.push(Shown::Text(Vec::new()));
@@ -350,7 +364,9 @@ fn shown(children: &[Child]) -> Vec<Shown<'_>> {
         };
         for (text, marks) in runs.into_iter().filter(|(text, _)| !text.is_empty()) {
             match last.last_mut() {
-                Some((before, before_marks)) if before_marks.writes_as(marks) => before.push_str(text),
+                Some((before, before_marks)) if before_marks.writes_as(marks) => {
+                    before.push_str(text)
+                }
                 _ => last.push((text.to_owned(), marks)),
             }
         }
