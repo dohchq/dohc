@@ -1603,10 +1603,10 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
                 &mut engine,
                 "ws",
                 "share",
-                &grant(ShareAccess::Comment),
+                &listed(ShareAccess::Comment),
                 &NoFaults
             )
-            .expect("Comment sends its Group posts")
+            .expect("Comment in one folder opens the lane for a View member")
             .pushed,
         4
     );
@@ -1616,10 +1616,10 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
                 &mut engine,
                 "ws",
                 "share",
-                &listed(ShareAccess::Comment),
+                &grant(ShareAccess::Comment),
                 &NoFaults
             )
-            .expect("Comment in one folder opens the lane for a View member")
+            .expect("Comment sends its Group posts")
             .pushed,
         0,
         "the posts went already"
