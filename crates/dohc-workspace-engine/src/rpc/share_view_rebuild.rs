@@ -1339,7 +1339,7 @@ fn plan(
         ));
     }
     // Last, so a version the first wave drops leaves no gap in the numbers
-    // before it.
+    // before these saves. They may leave a gap among themselves.
     saves.extend(in_case);
     let undone: Vec<UndoneChange> = old
         .unsent
