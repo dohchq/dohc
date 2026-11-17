@@ -3257,8 +3257,8 @@ export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
 export const EMAIL_STRING = z.email().max(320);
 
-// Ephemeral presence (MU-C1 / MU-C5). The renderer's presence transport is
-// IPC-PROXIED so the relay bearer token never reaches the renderer: main holds
+// Ephemeral presence. The renderer's presence transport is
+// IPC-proxied so the relay bearer token never reaches the renderer: main holds
 // cachedCredentials.token and makes the actual relay presence request. These
 // payloads carry only the scope, an opaque display state, and the long-poll
 // bookkeeping. The scope is authorized in MAIN (the caller's own workspace, or
@@ -9348,7 +9348,7 @@ export interface DohcDesktopBridge
   chatRunRecordsForThread(
     payload: ChatRunRecordsForThreadPayload,
   ): Promise<ChatRunRecordsForThreadResult>;
-  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
+  // Ephemeral presence: IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;
   // presenceCancel aborts an in-flight poll on unmount / workspace switch.
   presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;

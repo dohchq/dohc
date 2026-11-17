@@ -469,9 +469,6 @@ describe("registered shared-channel handlers", () => {
     ).rejects.toThrow("Left the group. Its folder is still in shared-with-me/");
   });
 
-  // The listing is applied to this machine's records before the joined lane
-  // is answered, so a row the owner restored answers as live in the same
-  // read. Its removed lane rides with the relay answer.
   it("applies the listing to the registry before answering the joined lane, and carries the removed lane", async () => {
     const h = await harness();
     h.workspace.sharedChannels = [joined("shown"), { ...joined("gone"), ended: true }];

@@ -641,10 +641,6 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
   });
 });
 
-// FIX 3 — presence must not act before its SCOPE is resolved for the current
-// workspace. Scope for a joined channel derives from channelShares (loaded
-// async); until that load lands, and after a workspace switch, presence stays
-// dormant so it never publishes under a guessed or previous-workspace scope.
 describe("ChatsView presence scope gating (loaded share state)", () => {
   const ownedChannel: ChatChannelRecord = {
     id: "channel-owned",

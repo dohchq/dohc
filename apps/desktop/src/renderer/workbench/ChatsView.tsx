@@ -562,8 +562,8 @@ export function ChatsView(props: {
     setCreatingGroup(false);
   }, []);
   const [addingAgent, setAddingAgent] = useState(false);
-  // MU-C4 shared channels. null = the sharing surface is unavailable (signed
-  // out / listing failed) and every sharing affordance stays hidden — the
+  // Shared channels. null means the sharing surface is unavailable (signed
+  // out or listing failed) and every sharing affordance stays hidden, so the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
   // Why the last committed share read did not produce rows, or null when it
@@ -1490,7 +1490,7 @@ export function ChatsView(props: {
     [reactions, workspaceId],
   );
 
-  // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
+  // Derived lookups: a channel matches a grant by its wire id. A key
   // that is present with a null value means "asked, and this workspace holds
   // no grant" — an absent key means nobody asked, which is unknown.
   const joinedByWire = useMemo(() => {

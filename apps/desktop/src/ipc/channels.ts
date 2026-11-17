@@ -289,7 +289,7 @@ export const CHANNELS = {
   readEngineMoment: "desktop:read-engine-moment",
   restoreEngineMomentFile: "desktop:restore-engine-moment-file",
   chatRunRecordsForThread: "desktop:chat-run-records-for-thread",
-  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token never
+  // Ephemeral presence: IPC-proxied so the relay bearer token never
   // reaches the renderer — main holds the token and makes the relay presence
   // request. publish (or leave), long-poll, and cancel an in-flight poll.
   presencePublish: "desktop:presence-publish",

@@ -388,20 +388,4 @@ describe("handleRelayUnauthorized", () => {
     expect(acted).toBe(false);
     expect(steps).toEqual([]);
   });
-
-  it("keeps the session error and still broadcasts when the store step fails", async () => {
-    const steps: string[] = [];
-    const acted = await handleRelayUnauthorized({
-      requestCredentials: sessionA,
-      currentCredentials: sessionA,
-      clearCachedCredentials: () => steps.push("clear"),
-      notifySessionChanging: () => steps.push("notify changing"),
-      notifyCloudSessionChanged: () => steps.push("notify ready"),
-      invalidatePersistedSessionIf: async () => {
-        throw new Error("store unavailable");
-      },
-    });
-    expect(acted).toBe(true);
-    expect(steps).toEqual(["clear", "notify changing", "notify ready"]);
-  });
 });

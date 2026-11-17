@@ -281,6 +281,7 @@ import {
   createWorkspaceMembersActions,
   membersPlace,
 } from "./ipc/workspaceMembersActions";
+import { refuseChatFileLinks } from "./workspaces/chatFileLinkScope";
 import { createDirectMessages, DirectMessageError } from "./workspaces/directMessages";
 import { directNoticeRead, directNoticeRows } from "./notices/directNotices";
 import { directMessageOperations } from "./ipc/directMessageOperations";
@@ -9087,14 +9088,18 @@ function registerIpcHandlers(): void {
       directMessages.history(viewerId, conversationId, before),
     directResolve: async ({ viewerId, memberId }, { operation }) =>
       directMessages.resolve(viewerId, await directPick(operation.workspace, memberId)),
-    directStart: async ({ viewerId, memberId, messageId, body }, { operation }) =>
-      directMessages.send(viewerId, {
+    directStart: async ({ viewerId, memberId, messageId, body }, { operation }) => {
+      refuseChatFileLinks({ kind: "none" }, [body]);
+      return directMessages.send(viewerId, {
         messageId,
         body,
         person: await directPick(operation.workspace, memberId),
-      }),
-    directSend: ({ viewerId, conversationId, messageId, body }) =>
-      directMessages.send(viewerId, { conversationId, messageId, body }),
+      });
+    },
+    directSend: ({ viewerId, conversationId, messageId, body }) => {
+      refuseChatFileLinks({ kind: "none" }, [body]);
+      return directMessages.send(viewerId, { conversationId, messageId, body });
+    },
     directMarkRead: ({ viewerId, conversationId, seq }) =>
       directMessages.read(viewerId, conversationId, seq),
     directBlock: ({ viewerId, conversationId, blocked }) =>

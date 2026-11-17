@@ -707,8 +707,6 @@ describe("registered cloud handlers", () => {
       workspaceSyncConnected: false,
       sessionKey: chatShareSessionKey({ ...credentials, userId: "other" }),
     });
-    // An unconfirmed account records nothing, so once it matches again sync
-    // reads on and connected, with no pause saved.
     h.cache.set(credentials);
     await expect(
       h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
