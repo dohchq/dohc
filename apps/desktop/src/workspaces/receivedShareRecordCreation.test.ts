@@ -98,6 +98,14 @@ describe("received-share record drafts", () => {
       "This Collection does not have Edit access.",
     );
     expect(below.host.files.change).not.toHaveBeenCalled();
+    // The relay lowered the member to View after the copy stored Edit.
+    const lowered = fixture();
+    lowered.host.resolved.grantedSelector = { ...membership, access: "edit" };
+    lowered.host.checkAuthority.mockResolvedValue({ ...membership, access: "view" });
+    await expect(createReceivedShareRecord(input, lowered.host)).rejects.toThrow(
+      "This Collection does not have Edit access.",
+    );
+    expect(lowered.host.files.change).not.toHaveBeenCalled();
   });
 
   // The same levels the CLI and MCP read (desktopCliServer.test.ts).

@@ -8,6 +8,7 @@ import type {
   ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 import { recordedShareSelector } from "./shareViewRecords";
+import { grantLevels } from "./shareViewReach";
 import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
@@ -41,7 +42,9 @@ export async function createReceivedShareRecord(
 ): Promise<ReceivedRecordDraft | CreationPartial> {
   const { resolved } = host;
   // A joined workspace's grant names the whole workspace and no paths. A new
-  // record lands in the Collection's folder, so it takes the level there.
+  // record lands in the Collection's folder, so it takes the level there, by
+  // the stored marker and by the grant being checked: the relay's live grant
+  // can lower the member level the marker still holds.
   const writes = shareViewWriteScopeOf(
     {
       shareId: resolved.shareId,
@@ -54,7 +57,9 @@ export async function createReceivedShareRecord(
   const covers = (grant: ShareViewSelector | null) =>
     grant?.versionId === null &&
     (grant.wholeWorkspace === true
-      ? writes !== null && shareViewWriteLevel(writes, { folder: host.collectionPath }) === "edit"
+      ? writes !== null &&
+        shareViewWriteLevel(writes, { folder: host.collectionPath }) === "edit" &&
+        grantLevels(grant, resolved.reach).in(host.collectionPath) === "edit"
       : grant.access === "edit" &&
         grant.paths.some(
           (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),
