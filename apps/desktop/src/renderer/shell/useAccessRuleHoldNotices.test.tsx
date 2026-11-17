@@ -180,18 +180,28 @@ describe("useAccessRuleHoldNotices", () => {
   // failed. The row leads with what the owner does, in the engine's words.
   it("says why the rule on disk cannot be read, what to do first, and offers no change to allow", async () => {
     const until = "Until you choose, dohc doesn't record or share changes in team.";
-    for (const [unreadable, lead] of [
+    // A locked rule names its file as spelled on disk, and its row reveals
+    // the folder rather than opening a file dohc can't read.
+    for (const [unreadable, rulePath, lead, target] of [
       [
         "locked",
-        "Close the access rule for team in the program that has it open, so dohc can read it.",
+        "team/ACCESS.yaml",
+        "Close team/ACCESS.yaml in the program that has it open, so dohc can read it.",
+        { to: "folder", path: "team" },
       ],
-      ["on-disk", "Check that you can open the access rule for team. dohc could not read it."],
+      [
+        "on-disk",
+        "team/access.yaml",
+        "Check that you can open the access rule for team. dohc could not read it.",
+        { to: "file", path: "team/access.yaml" },
+      ],
     ] as const) {
       cleanup();
-      const h = harness([{ ...WIDENED, changes: [], unreadable }]);
+      const h = harness([{ ...WIDENED, rulePath, changes: [], unreadable }]);
       await waitFor(() => expect(h.row("team")).toBeDefined());
       expect(h.row("team")!.message).toBe(`${lead} ${until}`);
       expect(h.row("team")!.rows).toBeUndefined();
+      expect(h.row("team")!.target).toEqual(target);
       expect(h.row("team")!.action).toMatchObject({ label: "Restore rule", additional: [] });
     }
   });

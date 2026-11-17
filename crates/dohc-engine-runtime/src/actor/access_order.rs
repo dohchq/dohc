@@ -996,10 +996,10 @@ fn committed_rule(
 }
 
 /// Why dohc could not read a folder's rule from disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Unread {
-    /// Another program holds a rule file open without letting dohc read it.
-    Locked,
+    /// Another program holds this rule file open without letting dohc read it.
+    Locked(String),
     Other,
 }
 
@@ -1008,7 +1008,7 @@ impl Unread {
     /// file says so, as a write to any held file does; anything else waits.
     fn refusal(self) -> RuntimeError {
         match self {
-            Unread::Locked => {
+            Unread::Locked(_) => {
                 RuntimeError::Materialize(dohc_engine_files::MaterializeError::FileLocked)
             }
             Unread::Other => waits(),
@@ -1052,7 +1052,9 @@ fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, Unread> {
             }
             // A folder or an oversized file is nothing capture records.
             Ok(PublicationTarget::Absent | PublicationTarget::Untracked) => {}
-            Err(dohc_engine_files::MaterializeError::FileLocked) => return Err(Unread::Locked),
+            Err(dohc_engine_files::MaterializeError::FileLocked) => {
+                return Err(Unread::Locked(path));
+            }
             Err(_) => return Err(Unread::Other),
         }
     }
@@ -1921,11 +1923,13 @@ fn hold_view(
             _ => None,
         });
     let disk = read_disk_rule(root, folder);
-    let rule_path = disk
-        .as_ref()
-        .ok()
-        .filter(|disk| disk.len() == 1)
-        .and_then(|disk| disk.keys().next().cloned());
+    // The one rule file, or the one another program holds, so the notice
+    // can name it.
+    let rule_path = match &disk {
+        Ok(disk) if disk.len() == 1 => disk.keys().next().cloned(),
+        Err(Unread::Locked(path)) => Some(path.clone()),
+        _ => None,
+    };
     let mut view = AccessRuleHoldView {
         recorded,
         rule_path,
@@ -1969,7 +1973,7 @@ fn hold_view(
 /// The rule on disk a widened hold's notice compares, or why it can't.
 fn rule_now(disk: &Result<OnDisk, Unread>) -> Result<AccessRule, &'static str> {
     match disk {
-        Err(Unread::Locked) => Err("locked"),
+        Err(Unread::Locked(_)) => Err("locked"),
         Err(Unread::Other) => Err("on-disk"),
         Ok(disk) if disk.len() > 1 => Err("several-files"),
         Ok(disk) => disk
@@ -2923,7 +2927,10 @@ mod tests {
     fn a_notice_says_why_it_cannot_show_the_rule_on_disk() {
         let one = |text: &[u8]| OnDisk::from([("T/access.yaml".to_owned(), text.to_vec())]);
         assert!(rule_now(&Ok(one(b"members: edit\n"))).is_ok());
-        assert_eq!(rule_now(&Err(Unread::Locked)).err(), Some("locked"));
+        assert_eq!(
+            rule_now(&Err(Unread::Locked("T/access.yaml".to_owned()))).err(),
+            Some("locked")
+        );
         assert_eq!(rule_now(&Err(Unread::Other)).err(), Some("on-disk"));
         assert_eq!(rule_now(&Ok(one(&[0xff]))).err(), Some("on-disk"));
         let both = OnDisk::from([

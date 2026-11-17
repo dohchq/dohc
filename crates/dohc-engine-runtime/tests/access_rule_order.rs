@@ -605,6 +605,8 @@ fn a_decision_on_a_rule_another_program_holds_says_it_is_held() {
     // The notice says why it can't show the rule.
     let views = f.hold_views();
     assert_eq!(views[0].unreadable, Some("locked"), "{views:?}");
+    // It names the file to close.
+    assert_eq!(views[0].rule_path.as_deref(), Some("team/access.yaml"));
     for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
         let decided = f.decide("team", decision);
         assert!(

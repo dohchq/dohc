@@ -110,12 +110,17 @@ const ruleOfLower = (folder: string) =>
 // Neither choice can read a locked or unreadable file, so they offer no
 // change to allow. Several readable spellings record as one rule members
 // can't read, which hides the folder.
+// A locked rule names its file, as it is spelled on disk, so the owner can
+// find it in the program that has it open.
 const ON_DISK: Record<
   "locked" | "on-disk" | "several-files",
-  (folder: string) => { lead: string; accept: { label: string; busy: string } | null }
+  (
+    folder: string,
+    path: string | null,
+  ) => { lead: string; accept: { label: string; busy: string } | null }
 > = {
-  locked: (folder) => ({
-    lead: `Close ${ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
+  locked: (folder, path) => ({
+    lead: `Close ${path ?? ruleOfLower(folder)} in the program that has it open, so dohc can read it.`,
     accept: null,
   }),
   "on-disk": (folder) => ({
@@ -168,7 +173,7 @@ export function accessRuleHoldWords(
   }
   const title = `Access to ${place} was widened outside dohc`;
   if (hold.unreadable !== null && hold.unreadable !== "recorded") {
-    const onDisk = ON_DISK[hold.unreadable](hold.folder);
+    const onDisk = ON_DISK[hold.unreadable](hold.folder, hold.rulePath);
     return { title, message: `${onDisk.lead} ${until}`, rows, openMembers, accept: onDisk.accept };
   }
   return {
@@ -225,9 +230,12 @@ export function accessRuleDecidedWords(
   return changedReach(hold, level);
 }
 
-/** Where a press on the row goes: a widening opens its rule; a removal reveals its folder. */
+/**
+ * Where a press on the row goes: a widening opens its rule; a removal, or a
+ * rule another program holds, reveals its folder.
+ */
 function targetOf(hold: AccessRuleHold): NoticeTarget {
-  return hold.reason === "widened" && hold.rulePath
+  return hold.reason === "widened" && hold.rulePath && hold.unreadable !== "locked"
     ? { to: "file", path: hold.rulePath }
     : { to: "folder", path: hold.folder };
 }
