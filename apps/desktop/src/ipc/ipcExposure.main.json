@@ -317,6 +317,7 @@
     "desktop:retry-secret-key",
     "desktop:retry-server-account-disconnect",
     "desktop:retry-share-handoff",
+    "desktop:retry-share-view-rebuild",
     "desktop:retry-stopped-run",
     "desktop:retry-workspace-path-open",
     "desktop:retune-relay-share-link",

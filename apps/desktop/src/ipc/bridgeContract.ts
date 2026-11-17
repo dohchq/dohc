@@ -6637,6 +6637,21 @@ export const sharedViewAccessOperations = {
     result: RefreshSharedViewResult,
     guard: "trusted-sender",
   },
+  // Try again on Updating access. After a restart that panel shows with no
+  // workspace open in its window, so no session names it. This starts only
+  // the rebuild the copy's record names.
+  retryShareViewRebuild: {
+    capabilityId: "share.view.refresh",
+    scope: "workspace",
+    handlerCheck: {
+      check: "sharedViewsIpc.retryShareViewRebuild",
+      reason:
+        "A closed copy has no session. The handler starts only the rebuild its record names, for a membership that has not ended.",
+    },
+    channel: "desktop:retry-share-view-rebuild",
+    payload: z.object({ workspaceId: WORKSPACE_ID }),
+    guard: "trusted-sender",
+  },
   dismissShareCaptureNotice: {
     capabilityId: "share.capture.notice.dismiss",
     scope: "workspace",

@@ -479,7 +479,7 @@ const LISTED_CAPABILITIES = {
     { ipc: ["updateShareDirectWriteDelivery"] },
   ),
   "share.view.refresh": capability("Pull changes into a received share.", {
-    ipc: ["refreshSharedView"],
+    ipc: ["refreshSharedView", "retryShareViewRebuild"],
   }),
   "share.capture.notice.dismiss": capability("Dismiss a received share's capture Notice.", {
     ipc: ["dismissShareCaptureNotice"],

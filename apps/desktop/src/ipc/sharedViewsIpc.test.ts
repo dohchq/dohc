@@ -602,6 +602,7 @@ describe("registered received-view handlers", () => {
     expect([...h.handlers.keys()]).toEqual([
       sharedViewAccessOperations.openSharedView.channel,
       sharedViewAccessOperations.refreshSharedView.channel,
+      sharedViewAccessOperations.retryShareViewRebuild.channel,
       sharedViewAccessOperations.dismissShareCaptureNotice.channel,
       sharedViewAccessOperations.dismissAccessSavedNotice.channel,
       sharedViewAccessOperations.checkSharedViewAccess.channel,
@@ -1067,6 +1068,38 @@ describe("registered received-view handlers", () => {
       expect(open.rebuild).not.toHaveBeenCalled();
       expect(path.rebuild).not.toHaveBeenCalled();
       expect(path.readRebuild).not.toHaveBeenCalled();
+    });
+
+    // After a restart the panel shows with no workspace open in its window,
+    // so its Try again has no session to refresh through.
+    it("starts a stopped rebuild again from Try again after a restart", async () => {
+      const h = await harness();
+      Object.assign(h.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+        rebuild: {
+          rebuildId: "rebuild-1",
+          stopped: { reason: "failed", detail: "dohc could not update access: the disk is full." },
+        },
+      });
+      h.withoutRendererSession();
+      await h.invoke(sharedViewAccessOperations.retryShareViewRebuild.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith("existing", "rebuild-1");
+      // Only a trusted window, and only a membership that hasn't ended.
+      await expect(
+        h.invoke(
+          sharedViewAccessOperations.retryShareViewRebuild.channel,
+          { workspaceId: "existing" },
+          false,
+        ),
+      ).rejects.toThrow("untrusted");
+      h.workspace.shareView!.ended = true;
+      await h.invoke(sharedViewAccessOperations.retryShareViewRebuild.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.rebuild).toHaveBeenCalledOnce();
     });
 
     it("tells the window why an update of access stopped", async () => {

@@ -21,14 +21,13 @@ import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight, LockKeyhole } from "lucide-react";
 import { SecondaryButton } from "./ui/controls";
 import { readError, refusalCode } from "../ipc/errorWords";
-import { UPDATING_ACCESS_MESSAGE } from "../ipc/bridgeContract";
 import {
   REGISTRY_READ_FAILURE_TITLE,
   registryReadFailureNext,
 } from "../workspaces/registryReadFailure";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
-import { ShellErrorReporter } from "./shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
@@ -88,6 +87,7 @@ function RegistryErrorTitlebar() {
 // not mounted; this says why and offers another workspace.
 function UpdatingAccess(props: { workspace: Workspace }) {
   const reportFailure = useContext(ShellErrorReporter);
+  const clearNotice = useContext(ShellNoticeClear);
   const manageWorkspaces = (): void => {
     void bridge()
       .openWorkspaceManager()
@@ -103,16 +103,11 @@ function UpdatingAccess(props: { workspace: Workspace }) {
   const stopped = props.workspace.shareView?.updatingAccessStopped;
   const ended = stopped?.reason === "ended";
   const identity = `update-access:${workspaceId}`;
+  // How the update ends arrives as this view's state.
   const tryAgain = useCallback((): void => {
     void bridge()
-      .refreshSharedView({ workspaceId, trigger: "manual" })
+      .retryShareViewRebuild({ workspaceId })
       .catch((error: unknown) => {
-        // The refresh starts the update and answers that access is updating;
-        // how the update ends arrives as this view's state.
-        if (
-          String(error instanceof Error ? error.message : error).includes(UPDATING_ACCESS_MESSAGE)
-        )
-          return;
         reportFailure?.({
           message: readError(error).words ?? "dohc could not update access.",
           cause: error,
@@ -122,12 +117,14 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       });
   }, [workspaceId, reportFailure, identity]);
   // A stopped update is one thing that failed. Waiting for the server shows
-  // here only, as an ended membership does.
+  // here only, as an ended membership does. A new try or an ended
+  // membership takes the failure back.
   const failedDetail = stopped?.reason === "failed" ? stopped.detail : null;
   useEffect(() => {
     if (failedDetail !== null)
       reportFailure?.({ message: failedDetail, retry: tryAgain, identity });
-  }, [failedDetail, reportFailure, tryAgain, identity]);
+    else clearNotice?.(identity);
+  }, [failedDetail, reportFailure, clearNotice, tryAgain, identity]);
   return (
     <div
       data-testid="workspace-updating-access"

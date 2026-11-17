@@ -1166,6 +1166,14 @@ export function registerSharedViewsIpcHandlers<
           };
         }
       },
+      // The copy is closed, so no session names this window: the handler
+      // starts only the rebuild the membership's record names.
+      retryShareViewRebuild: async (input) => {
+        const view = requireWorkspace(input.workspaceId).shareView;
+        if (!view || view.ended || !shareViewIdentityIsIntact(view)) return;
+        await recoverRebuild(input.workspaceId);
+        startRebuild(input.workspaceId);
+      },
       dismissShareCaptureNotice: async (input, { operation }) => {
         operation.assertCurrent();
         const view = operation.workspace.shareView;

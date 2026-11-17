@@ -182,12 +182,10 @@ describe("workspace summary changes", () => {
   // again asks main to start it again.
   it("says why an update of access stopped and starts it again", async () => {
     const h = setup();
-    const refreshSharedView = vi.fn(async () => {
-      throw new Error("dohc could not refresh this workspace while its access is being updated.");
-    });
+    const retryShareViewRebuild = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
       ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
-      refreshSharedView,
+      retryShareViewRebuild,
       getUpdateState: () => new Promise(() => {}),
       onUpdateState: () => () => {},
     });
@@ -221,24 +219,74 @@ describe("workspace summary changes", () => {
     expect(within(toast!).getByRole("button", { name: "Try again" })).toBeTruthy();
     fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
     await waitFor(() =>
-      expect(refreshSharedView).toHaveBeenCalledExactlyOnceWith({
-        workspaceId: "a",
-        trigger: "manual",
-      }),
+      expect(retryShareViewRebuild).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" }),
     );
-    // The refresh answers that access is updating, which is no failure of its own.
-    expect(toastsWith("being updated")).toHaveLength(0);
+  });
+
+  // A new try clears the stop, and an ended membership offers no Try again:
+  // the stop's toast and Notices row go with it.
+  it.each([
+    ["a new try runs", { updatingAccess: true as const }],
+    [
+      "the membership ended",
+      {
+        ended: true,
+        updatingAccess: true as const,
+        updatingAccessStopped: {
+          reason: "ended" as const,
+          detail: "Your membership ended. What arrived stays in this folder.",
+        },
+      },
+    ],
+  ])("takes back a stopped update's notice once %s", async (_case, next) => {
+    const h = setup();
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail = "dohc could not update access: the disk is full.";
+    const noticesWith = (text: string) =>
+      screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$|^workspace-error-notice$/u)
+        .filter((notice) => notice.textContent?.includes(text));
+    const view = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+    };
+    h.replace([
+      {
+        ...workspace("a"),
+        shareView: {
+          ...view,
+          updatingAccess: true as const,
+          updatingAccessStopped: { reason: "failed" as const, detail },
+        },
+      },
+    ]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    await waitFor(() => expect(noticesWith(detail).length).toBeGreaterThan(0));
+    h.replace([{ ...workspace("a"), shareView: { ...view, ...next } }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(screen.getByTestId("workspace-updating-access")).toBeTruthy();
+    await waitFor(() => expect(noticesWith(detail)).toHaveLength(0));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
   // Try again's own refresh can fail before it starts the update again.
   it("reports what stopped Try again", async () => {
     const h = setup();
-    const refreshSharedView = vi.fn(async () => {
+    const retryShareViewRebuild = vi.fn(async () => {
       throw new Error("dohc could not reach the server.");
     });
     vi.stubGlobal("dohcDesktop", {
       ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
-      refreshSharedView,
+      retryShareViewRebuild,
       getUpdateState: () => new Promise(() => {}),
       onUpdateState: () => () => {},
     });

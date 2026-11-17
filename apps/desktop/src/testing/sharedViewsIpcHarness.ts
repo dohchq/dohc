@@ -103,6 +103,8 @@ export async function createSharedViewsIpcHarness(
   );
   let rendererCurrent = true;
   let rendererClosed = false;
+  // After a restart, Updating access shows with no workspace open in its window.
+  let rendererSession = true;
   const session = {
     workspaceId: "existing",
     attachmentId,
@@ -122,7 +124,7 @@ export async function createSharedViewsIpcHarness(
     object,
     typeof session
   >({
-    currentSession: () => session,
+    currentSession: () => (rendererSession ? session : undefined),
     withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
   const cache = new CredentialSessionCache<CloudCredentials>();
@@ -271,7 +273,7 @@ export async function createSharedViewsIpcHarness(
     warmCredentialCache: warm,
     currentCredentials: () => cache.snapshot().credentials,
     engineDaemonStartup: startup,
-    currentRendererSession: () => session,
+    currentRendererSession: () => (rendererSession ? session : undefined),
     probeShareViewLog: probeLog,
     currentCredentialGeneration: () => cache.snapshot().generation,
     onSenderClosed: (_sender, close) => {
@@ -367,6 +369,9 @@ export async function createSharedViewsIpcHarness(
     },
     retireRenderer: () => {
       rendererCurrent = false;
+    },
+    withoutRendererSession: () => {
+      rendererSession = false;
     },
   };
 }
