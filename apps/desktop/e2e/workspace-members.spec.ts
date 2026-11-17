@@ -178,6 +178,7 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     // Turning the link off stops new joins.
     await members.getByRole("switch", { name: "Invite link" }).click();
     await expect(url).toHaveCount(0);
+    await expect(members.getByRole("switch", { name: "Invite link" })).toBeEnabled();
     const late = await relayJson(relay.baseUrl, "test:e2e-members-late", "/sync/members/join", {
       method: "POST",
       body: JSON.stringify({ token }),
@@ -238,8 +239,8 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
 
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await relay?.stop();
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
-    await relay?.stop();
   }
 });
