@@ -5144,15 +5144,19 @@ async function createShareViewRecord(
           return null;
         const generation = credentialCacheGeneration;
         try {
-          const info = await fetchShareViewInfo({
-            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-            shareId: resolved.shareId!,
-          });
+          const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+          const info = await fetchShareViewInfo({ relay, shareId: resolved.shareId! });
           operation.assertCurrent();
           if (generation !== credentialCacheGeneration)
             throw new Error("The shared file session changed.");
           if (!info.selector) throw new Error("This Collection does not have Edit access.");
-          return info.selector;
+          if (info.selector.wholeWorkspace !== true) return { selector: info.selector };
+          // The stored reach can predate the grant: the relay's reach now decides.
+          const reach = await fetchShareViewReach({ relay, shareId: resolved.shareId! });
+          operation.assertCurrent();
+          if (generation !== credentialCacheGeneration)
+            throw new Error("The shared file session changed.");
+          return { selector: info.selector, reach };
         } catch (error) {
           operation.assertCurrent();
           if (generation !== credentialCacheGeneration)
