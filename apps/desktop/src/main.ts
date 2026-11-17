@@ -10820,6 +10820,7 @@ function registerIpcHandlers(): void {
       const view = findWorkspace(workspaceId)?.shareView;
       if (!view?.rebuild) return;
       const stopped = shareViewRebuildStop(notice);
+      if (!stopped && !view.rebuild.stopped) return;
       void setWorkspaceShareView(workspaceId, {
         ...view,
         rebuild: { rebuildId: view.rebuild.rebuildId, ...(stopped ? { stopped } : {}) },

@@ -149,7 +149,7 @@ describe("rebuilding a joined copy", () => {
       manifest: "gone",
       view: { reach: { signature: "r2", visibilitySignature: "v2" }, rebuild: undefined },
     });
-    expect(state.notices).toEqual([{ kind: "clear" }]);
+    expect(state.notices).toEqual([{ kind: "running" }, { kind: "clear" }]);
   });
 
   it("says where files left out of reach were saved", async () => {
@@ -160,7 +160,7 @@ describe("rebuilding a joined copy", () => {
       folder: ".dohc/local/recovery/2026-11-16 10-00 UTC",
       count: 2,
     });
-    expect(state.notices).toEqual([{ kind: "clear" }]);
+    expect(state.notices).toEqual([{ kind: "running" }, { kind: "clear" }]);
   });
 
   it("builds again under the newer reach when it moved during the build", async () => {
@@ -206,6 +206,7 @@ describe("rebuilding a joined copy", () => {
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(state.slept).toEqual([1_000, 2_000, 5_000]);
     expect(state.notices).toEqual([
+      { kind: "running" },
       { kind: "waiting" },
       { kind: "waiting" },
       { kind: "waiting" },
@@ -218,7 +219,7 @@ describe("rebuilding a joined copy", () => {
     const { state, rebuilds } = copy([new Removed()]);
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toEqual({ kind: "ended" });
     expect(state).toMatchObject({ open: false, held: false, view: { rebuild: "rebuild-1" } });
-    expect(state.notices).toEqual([{ kind: "ended" }]);
+    expect(state.notices).toEqual([{ kind: "running" }, { kind: "ended" }]);
     expect(shareViewRebuildStop({ kind: "ended" })).toEqual({
       reason: "ended",
       detail: "Your membership ended. What arrived stays in this folder.",
@@ -233,7 +234,7 @@ describe("rebuilding a joined copy", () => {
       error: failure,
     });
     expect(state).toMatchObject({ open: false, held: false, view: { rebuild: "rebuild-1" } });
-    expect(state.notices).toEqual([{ kind: "failed", error: failure }]);
+    expect(state.notices).toEqual([{ kind: "running" }, { kind: "failed", error: failure }]);
   });
 
   // The engine no longer knows the rebuild, so nothing says which reach the
@@ -288,6 +289,23 @@ describe("rebuilding a joined copy", () => {
     expect(rebuilds.running("w")).toBe(false);
   });
 
+  // Try again: the view drops the earlier stop as the new try starts, so
+  // "Updating access" shows no failure while it runs.
+  it("clears an earlier stop as soon as a new try starts", async () => {
+    const gate = deferred<ShareViewRebuildAnswer<Reach>>();
+    const { state, rebuilds } = copy([
+      new Error("share-view-rebuild-rename-failed"),
+      () => gate.promise,
+    ]);
+    await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "failed" });
+    expect(state.notices.at(-1)).toMatchObject({ kind: "failed" });
+    const retried = rebuilds.run("w", "rebuild-1");
+    await vi.waitFor(() => expect(state.held).toBe(true));
+    expect(state.notices.at(-1)).toEqual({ kind: "running" });
+    gate.resolve(rebuilt({ signature: "r2", visibilitySignature: "v2" }));
+    await expect(retried).resolves.toMatchObject({ kind: "rebuilt" });
+  });
+
   it("leaves the copy closed when its sessions can't be held", async () => {
     const { state } = copy([]);
     const held = new Error("a live note could not be saved");
@@ -309,7 +327,7 @@ describe("rebuilding a joined copy", () => {
       sleep: async () => undefined,
     });
     await expect(failing.run("w", "rebuild-1")).resolves.toEqual({ kind: "failed", error: held });
-    expect(state.notices).toEqual([{ kind: "failed", error: held }]);
+    expect(state.notices).toEqual([{ kind: "running" }, { kind: "failed", error: held }]);
   });
 
   // Main closes every joined live page of the copy and waits for each. A page
@@ -354,7 +372,7 @@ describe("rebuilding a joined copy", () => {
     expect(stopped).toMatchObject({ kind: "failed", error: expect.any(LivePageUnkeptError) });
     expect(rebuiltCalls).toBe(0);
     expect(state.held).toBe(false);
-    const [notice] = state.notices;
+    const notice = state.notices.at(-1);
     expect(shareViewRebuildStop(notice!)).toEqual({
       reason: "failed",
       detail:

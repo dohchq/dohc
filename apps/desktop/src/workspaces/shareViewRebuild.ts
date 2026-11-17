@@ -33,6 +33,7 @@ export type ShareViewRebuildOutcome =
   | { kind: "failed"; error: unknown };
 
 export type ShareViewRebuildNotice =
+  | { kind: "running" }
   | { kind: "waiting" }
   | { kind: "failed"; error: unknown }
   | { kind: "ended" }
@@ -89,6 +90,8 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
   const runs = new Map<string, Promise<ShareViewRebuildOutcome>>();
 
   async function rebuild(workspaceId: string, rebuildId: string): Promise<ShareViewRebuildOutcome> {
+    // A new try replaces what stopped the last one.
+    steps.notice(workspaceId, { kind: "running" });
     let reopen: boolean;
     try {
       ({ reopen } = await steps.hold(workspaceId));
