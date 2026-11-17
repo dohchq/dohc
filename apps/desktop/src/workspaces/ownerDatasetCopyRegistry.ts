@@ -391,10 +391,13 @@ export function createOwnerDatasetCopyRegistry(options: {
       ownerKey: string;
     }): SavedCollectionsList {
       const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, "list", new URL(input.origin).origin, input.ownerKey]).slice(0, 16)}`;
-      const file = async () => {
-        await barrier.catch(() => undefined);
+      const mine = () => {
         if (!owns(input.ownerKey))
           throw Error("The Collection owner changed. Reopen the workspace.");
+      };
+      const file = async () => {
+        await barrier.catch(() => undefined);
+        mine();
         requested.add(input.rootPath);
         const folder = await localDatasetFolder(
           {
@@ -408,7 +411,11 @@ export function createOwnerDatasetCopyRegistry(options: {
         return join(resolve(await realpath(folder)), "list.json");
       };
       return {
-        read: async () => JSON.parse(await readFile(await file(), "utf8")) as unknown,
+        read: async () => {
+          const text = await readFile(await file(), "utf8");
+          mine();
+          return JSON.parse(text) as unknown;
+        },
         write: async (value) => atomicWriteFile(await file(), JSON.stringify(value)),
       };
     },

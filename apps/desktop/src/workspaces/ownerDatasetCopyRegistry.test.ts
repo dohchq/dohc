@@ -23,6 +23,8 @@ const files = vi.hoisted(() => ({
   removed: [] as string[],
   busy: new Set<string>(),
   unreadable: new Set<string>(),
+  // Holds the next read of a file whose name ends so, until the test lets it go.
+  hold: null as { name: string; reached(): void; until: Promise<void> } | null,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -31,7 +33,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     readFile: (async (...args: Parameters<typeof actual.readFile>) => {
       if (files.unreadable.has(String(args[0])))
         throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
-      return actual.readFile(...args);
+      const text = await actual.readFile(...args);
+      const hold = files.hold;
+      if (hold && String(args[0]).endsWith(hold.name)) {
+        files.hold = null;
+        hold.reached();
+        await hold.until;
+      }
+      return text;
     }) as typeof actual.readFile,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       if (files.busy.has(String(args[0]))) {
@@ -344,6 +353,20 @@ it("removes every other account's copies when one signs in while the record cann
   await expect(after.get({ ...f.input, lifetime: new AbortController().signal })).rejects.toThrow(
     "Sign in to your server first.",
   );
+});
+it("gives a signed-out list read nothing once another account has signed in during it", async () => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).write([]);
+  await f.registry.credentialsChanged(null);
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.hold = { name: "list.json", reached: reached.resolve, until: release.promise };
+  const reading = f.registry.savedList(input).read();
+  await reached.promise;
+  await f.registry.credentialsChanged(other, "https://relay");
+  release.resolve();
+  await expect(reading).rejects.toThrow(/owner changed/);
 });
 it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),

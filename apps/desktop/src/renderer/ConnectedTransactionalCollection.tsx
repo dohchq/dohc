@@ -423,6 +423,18 @@ function ScopedCollection({
       }),
     [workspaceId, readQuietly],
   );
+  // A signed-out copy belongs to the account signed in last. When a session
+  // starts, the page drops it and any read under way, and reads again once
+  // the session is ready, so another account never sees it.
+  const signedOutCopy = copy?.signedOut === true;
+  useEffect(() => {
+    if (!signedOutCopy) return;
+    return bridge().onCloudSessionChanged(({ phase }) => {
+      request.current++;
+      setDataset(null);
+      if (phase === "ready") void refresh();
+    });
+  }, [signedOutCopy, refresh]);
   // Each read brings this computer's copy up to date from the server
   // afterwards, so an open page that shows a copy reads again now and then.
   const showsCopy = owner && copy !== undefined;
