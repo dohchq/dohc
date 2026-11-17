@@ -1410,8 +1410,7 @@ fn judge_folder(
         Ok(disk) => with_touches(disk, rule_touches),
         Err(_) => return Ok(Plan::Verdict(Verdict::Waits)),
     };
-    if order.writer == Writer::Capture
-        && disk.len() > 1
+    if disk.len() > 1
         && access_rule_holds::hold_in(conn, workspace, version, folder)?.is_some()
     {
         return Ok(Plan::Verdict(Verdict::Held {
