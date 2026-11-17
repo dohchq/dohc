@@ -3,6 +3,7 @@
 //! materialization jobs, added once by id.
 
 use super::ActorHandle;
+use super::materialization::{MaterializationReplayScope, replay_pending_materializations};
 use crate::error::RuntimeError;
 use dohc_engine_storage::{
     MaterializationJobSpec, NoFaults, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -10,6 +11,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 
 /// One converge job: write `content_sha256` at the path, or delete the file
 /// there. A delete names the bytes it expects as its content and preimage.
@@ -416,6 +418,43 @@ impl ActorHandle {
                     StorageError::corrupt_public(std::io::Error::other("rebuild jobs not added")),
                 )),
             }
+        })
+        .await
+    }
+
+    /// Run a wave's jobs. The rebuild planned each one against the new
+    /// store's heads, so a delete of one spelling runs even where a head at
+    /// another spelling reaches the same file, as when an unsent rename by
+    /// case alone is undone.
+    pub async fn rebuild_run_jobs(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        job_ids: Vec<String>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        #[cfg(unix)]
+        self.retained_root.set(root_dir.clone());
+        self.run(move |store, _| {
+            let selected: HashSet<String> = job_ids.into_iter().collect();
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    holds: None,
+                    workspace_id: &workspace_id,
+                    self_writes: None,
+                    progress: None,
+                    file_outcomes_settled: false,
+                    released_hold_paths: None,
+                    planned_against_active_heads: true,
+                },
+                now_ms,
+                &NoFaults,
+                Some(&selected),
+                false,
+            )
+            .map(|_| ())
         })
         .await
     }

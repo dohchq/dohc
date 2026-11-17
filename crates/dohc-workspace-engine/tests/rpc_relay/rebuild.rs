@@ -748,6 +748,51 @@ async fn an_unsent_restore_then_move_is_saved() {
     finish(&copy).await;
 }
 
+/// The member renames a file by case alone and doesn't send it. On a file
+/// system that ignores case, both spellings read the one file, which must
+/// not go to the recovery folder as an unsent file of its own: the rename is
+/// undone like any other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_rename_by_case_alone_is_undone() {
+    let copy = closed_copy_with(
+        "rpc-rebuild-unsent-case",
+        true,
+        false,
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                let root = scratch.path();
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.rename",
+                    json!({
+                        "versionId": "main", "fromPath": "open/d.md", "toPath": "open/D.md",
+                        "origin": "api",
+                    }),
+                )
+                .await;
+                std::fs::rename(root.join("open/d.md"), root.join("open/D.md")).expect("rename");
+            })
+        },
+    )
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(names_in(&root.join("open")), ["a.md", "c.md", "d.md"]);
+    assert_eq!(std::fs::read(root.join("open/d.md")).expect("d"), D_BYTES);
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(names_in(&recovery), ["0001 b.md", "contents.md"]);
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("- `open/D.md` moved back to `open/d.md`"),
+        "{contents}"
+    );
+    finish(&copy).await;
+}
+
 /// A file on disk whose bytes the new store holds is replaced in place, with
 /// those bytes as its preimage, and nothing goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

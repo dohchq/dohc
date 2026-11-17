@@ -179,11 +179,16 @@ fn job_id(rebuild_id: &str, wave: u8, path: &str) -> String {
     )
 }
 
-/// The hash of the file at `path`, or `None` when no file is there.
+/// The hash of the file at `path`, or `None` when no file is there. On a disk
+/// that ignores case, a file stored under another spelling of its name is not
+/// at `path`: the member renamed it, and the plan must not take it for a
+/// second file.
 fn disk_sha(root: &Path, path: &str) -> Option<String> {
-    std::fs::read(root.join(path))
-        .ok()
-        .map(|bytes| dohc_engine_storage::hex_sha256(&bytes))
+    let bytes = std::fs::read(root.join(path)).ok()?;
+    if dohc_engine_files::stored_under_other_spelling(root, path) {
+        return None;
+    }
+    Some(dohc_engine_storage::hex_sha256(&bytes))
 }
 
 impl EngineService {
@@ -739,7 +744,12 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         actor
-            .materialize_replay_pending(root.to_path_buf(), workspace_id.to_owned(), now)
+            .rebuild_run_jobs(
+                root.to_path_buf(),
+                workspace_id.to_owned(),
+                ids.clone(),
+                now,
+            )
             .await
             .map_err(map_runtime)?;
         let statuses = actor
