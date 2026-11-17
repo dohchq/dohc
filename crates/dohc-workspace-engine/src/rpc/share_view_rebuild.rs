@@ -126,7 +126,8 @@ struct OldRead {
 /// What `closed` read from the new store and the disk.
 struct NewRead {
     heads: Vec<RebuildHead>,
-    /// The hash of each file on disk at a path either store holds.
+    /// The hash of each file on disk at a path either store holds, and of
+    /// each other file the engine tracks there.
     disk: BTreeMap<String, String>,
     /// The disk hashes whose bytes the new store holds.
     held: HashSet<String>,
@@ -189,6 +190,24 @@ fn disk_sha(root: &Path, path: &str) -> Option<String> {
         return None;
     }
     Some(dohc_engine_storage::hex_sha256(&bytes))
+}
+
+/// Every file the engine tracks on disk, with its hash.
+async fn files_on_disk(root: &Path) -> Result<Vec<(String, String)>, WireError> {
+    let root = root.to_path_buf();
+    let scanned = tokio::task::spawn_blocking(move || {
+        let scanner = dohc_engine_files::Scanner::new(dohc_engine_files::ScanBounds::default())?;
+        scanner.scan(&root, &dohc_engine_files::CancellationToken::new())
+    })
+    .await;
+    match scanned {
+        Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) => Ok(listing
+            .files
+            .into_iter()
+            .map(|file| (file.path, file.sha256))
+            .collect()),
+        _ => Err(failed("share-view-rebuild-disk-unreadable")),
+    }
 }
 
 impl EngineService {
@@ -548,15 +567,24 @@ impl EngineService {
             .rebuild_main_heads(params.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
-        let disk: BTreeMap<String, String> = old
+        let stored: BTreeSet<&str> = old
             .heads
             .iter()
             .chain(&heads)
             .map(|head| head.path.as_str())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter_map(|path| disk_sha(root, path).map(|sha| (path.to_owned(), sha)))
             .collect();
+        let mut disk: BTreeMap<String, String> = stored
+            .iter()
+            .filter_map(|path| disk_sha(root, path).map(|sha| ((*path).to_owned(), sha)))
+            .collect();
+        // A file neither store holds is the member's, which the old store
+        // never recorded because the copy closed first.
+        disk.extend(
+            files_on_disk(root)
+                .await?
+                .into_iter()
+                .filter(|(path, _)| !stored.contains(path.as_str())),
+        );
         let held = open
             .actor
             .rebuild_held_blobs(disk.values().cloned().collect())
@@ -710,6 +738,43 @@ impl EngineService {
             self.rebuild_wave_jobs(&actor, root, workspace_id, manifest, 3)
                 .await?;
         }
+        // A folder whose files all left the disk goes too, so a hidden folder
+        // doesn't stay behind empty. Each call is safe to repeat.
+        let removed: BTreeSet<String> = manifest
+            .plan
+            .iter()
+            .flat_map(|plan| {
+                let deletes = plan
+                    .jobs
+                    .iter()
+                    .filter(|job| job.delete)
+                    .map(|job| &job.path);
+                let saved = plan
+                    .recovery
+                    .iter()
+                    .filter(|item| item.source == RecoverySource::Disk)
+                    .map(|item| &item.path);
+                deletes.chain(saved)
+            })
+            .flat_map(|path| {
+                let mut folders = Vec::new();
+                let mut at = path.as_str();
+                while let Some((parent, _)) = at.rsplit_once('/') {
+                    folders.push(parent.to_owned());
+                    at = parent;
+                }
+                folders
+            })
+            .collect();
+        // Deepest first, so a parent is empty once its children are gone.
+        let mut removed: Vec<String> = removed.into_iter().collect();
+        removed.sort_by_key(|folder| std::cmp::Reverse(folder.matches('/').count()));
+        for folder in removed {
+            actor
+                .rebuild_remove_empty_folder(root.to_path_buf(), folder)
+                .await
+                .map_err(map_runtime)?;
+        }
         Ok(())
     }
 
@@ -848,9 +913,18 @@ fn plan(
         .filter(|version| !moved_back.contains(version.path.as_str()))
         .map(|version| (version.path.as_str(), version.sha256.as_str()))
         .collect();
-    let replaceable =
-        |path: &str, d: &String| new.held.contains(d) && !own_on_disk.contains(&(path, d.as_str()));
-    let paths: BTreeSet<&str> = old_heads.keys().chain(new_heads.keys()).copied().collect();
+    // A path neither store holds is the member's file, never replaced.
+    let replaceable = |path: &str, d: &String| {
+        (old_heads.contains_key(path) || new_heads.contains_key(path))
+            && new.held.contains(d)
+            && !own_on_disk.contains(&(path, d.as_str()))
+    };
+    let paths: BTreeSet<&str> = old_heads
+        .keys()
+        .chain(new_heads.keys())
+        .copied()
+        .chain(new.disk.keys().map(String::as_str))
+        .collect();
     let mut jobs = Vec::new();
     // What to save: where it comes from, what it was, its name and why.
     let mut saves: Vec<(RecoverySource, String, String, &str)> = Vec::new();

@@ -621,6 +621,40 @@ async fn an_unsent_copy_of_a_held_file_in_a_hidden_folder_is_saved() {
     finish(&copy).await;
 }
 
+/// The member writes a new file in a folder the owner then hides, and the copy
+/// closes before the engine records it. Neither store holds it, so only the
+/// disk knows it: it is the member's own and goes to the recovery folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_file_the_engine_never_recorded_in_a_hidden_folder_is_saved() {
+    let copy = closed_copy_with("rpc-rebuild-unrecorded", true, false, |_, _, scratch| {
+        Box::pin(async move {
+            std::fs::write(scratch.path().join("hidden/ideas.md"), "a rain barrel").expect("ideas");
+        })
+    })
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert!(!root.join("hidden/ideas.md").exists());
+    // The hidden folder holds nothing now, so it goes too.
+    assert!(!root.join("hidden").exists());
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 ideas.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 ideas.md")).expect("ideas"),
+        b"a rain barrel"
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("| 0002 ideas.md | hidden/ideas.md | Not sent. |"),
+        "{contents}"
+    );
+    finish(&copy).await;
+}
+
 /// The member restores an older version of a shared file and doesn't send it.
 /// The new store holds that version in History, but the restore is the
 /// member's: it goes to the recovery folder before the shared version returns.
