@@ -1020,7 +1020,7 @@ it("shows its kept copy brought up to date in place, and leaves read-only by its
   expect(input.getAttribute("data-records-version")).toBe("1");
 });
 
-it("drops a signed-out copy when an account signs in, and shows nothing of it if the next read fails", async () => {
+it("drops a signed-out copy when an account signs in, shows no read that answers meanwhile, and shows nothing of it if the next read fails", async () => {
   const session: Array<
     (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
   > = [];
@@ -1028,6 +1028,11 @@ it("drops a signed-out copy when an account signs in, and shows nothing of it if
     session.push(listener);
     return () => session.splice(session.indexOf(listener), 1);
   }) as never);
+  const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+  backend.onCollectionCopyChanged.mockImplementation((listener) => {
+    copyChanged.push(listener);
+    return () => undefined;
+  });
   backend.dataset.mockResolvedValue({
     kind: "description",
     dataset,
@@ -1046,11 +1051,22 @@ it("drops a signed-out copy when an account signs in, and shows nothing of it if
     />,
   );
   await screen.findByLabelText("Collection view state");
-  backend.dataset.mockRejectedValue(new Error("The other account can't read this."));
   act(() => {
     for (const listener of [...session]) listener({ sessionKey: "b", phase: "changing" });
   });
   expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  // A quiet read that answers while the session changes shows nothing.
+  const reads = backend.dataset.mock.calls.length;
+  act(() => {
+    for (const listener of copyChanged)
+      listener({ workspaceId: "workspace-a", datasetId: dataset.datasetId });
+  });
+  await waitFor(() => expect(backend.dataset.mock.calls.length).toBeGreaterThan(reads));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(screen.queryByLabelText("Collection view state")).toBeNull();
+  backend.dataset.mockRejectedValue(new Error("The other account can't read this."));
   act(() => {
     for (const listener of [...session]) listener({ sessionKey: "b", phase: "ready" });
   });

@@ -361,6 +361,8 @@ function ScopedCollection({
   // Reads the Collection again without the loading line, and says nothing when
   // the read fails. A read the page started meanwhile wins.
   const quietRecords = useRef(false);
+  // A session is starting while the page shows a signed-out copy: quiet reads show nothing.
+  const sessionChanging = useRef(false);
   const quiet = useWorkspaceQuery(useWorkspaceSession(), {
     key: `${datasetPath}\0${owner ? "owner" : "reader"}`,
     manual: true,
@@ -377,6 +379,7 @@ function ScopedCollection({
   });
   useEffect(() => {
     const answer = quiet.value;
+    if (sessionChanging.current) return;
     if (!answer || answer.sequence !== request.current || answer.result.kind !== "description")
       return;
     quietShown.current++;
@@ -429,11 +432,16 @@ function ScopedCollection({
   const signedOutCopy = copy?.signedOut === true;
   useEffect(() => {
     if (!signedOutCopy) return;
-    return bridge().onCloudSessionChanged(({ phase }) => {
+    const stop = bridge().onCloudSessionChanged(({ phase }) => {
       request.current++;
+      sessionChanging.current = phase === "changing";
       setDataset(null);
       if (phase === "ready") void refresh();
     });
+    return () => {
+      stop();
+      sessionChanging.current = false;
+    };
   }, [signedOutCopy, refresh]);
   // Each read brings this computer's copy up to date from the server
   // afterwards, so an open page that shows a copy reads again now and then.
