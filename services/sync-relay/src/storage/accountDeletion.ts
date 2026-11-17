@@ -175,8 +175,8 @@ export function fenceAccount(
         findChannelCreateKind(storage, workspaceId, channelWireId),
     };
     for (const shareId of shareIds) {
-      // The purge erases what says a share is an old direct message, so its
-      // recipients get no ended row now that Received would list.
+      // An old direct message stays out of Received. The purge erases what
+      // says a share is one, so decide now and record no ended row for it.
       const share = storage.db
         .prepare("SELECT workspace_id, selector_json FROM sync_relay_shares WHERE share_id=?")
         .get(shareId);

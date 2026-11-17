@@ -711,18 +711,32 @@ describe("DM grants over the relay", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate()]);
+    const ops = [dmChannelCreate(), dmThreadCreate()];
+    ops.push(
+      chatOp(
+        "chat.channel.create",
+        chatChannelCreate("wire-general", { name: "General", slug: "general", kind: "channel" })
+          .payload,
+      ),
+    );
+    await appendOwnerOps(h, ops);
     await createDmGrant(h);
+    const chatShareId = await createDmGrant(h, {
+      recipientEmail: `${MEMBER}@dohc.test`,
+      channelWireId: "wire-general",
+      access: "read-write",
+    });
     const context = storage as unknown as StorageContext;
     const key = "account-deletion-key-at-least-32-bytes";
     initializeAccountDeletion(context, key);
     const { manifest } = fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
     purgeAccountRows(context, OWNER, `${OWNER}@dohc.test`, manifest!);
-    for (const path of ["/sync/shares", "/sync/shares?received=true"]) {
-      const listing = await json(await h(request(MEMBER, path)));
-      expect(listing.received).toEqual([]);
-      expect(listing.removed).toEqual([]);
-    }
+    // An ordinary chat share still says its owner removed it.
+    const listing = await json(await h(request(MEMBER, "/sync/shares")));
+    expect(listing.received).toEqual([]);
+    expect((listing.removed as Array<{ shareId: string }>).map((row) => row.shareId)).toEqual([
+      chatShareId,
+    ]);
   });
 
   it("refuses appends through a read-only chat grant and through a PATH grant", async () => {
