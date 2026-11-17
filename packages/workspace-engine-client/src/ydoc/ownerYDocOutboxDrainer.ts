@@ -185,12 +185,15 @@ export class OwnerYDocOutboxDrainer {
   }
 
   private async drainHeld(): Promise<OwnerYDocDrainResult> {
-    let pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>;
-    try {
-      pending = await this.outbox.readHead(this.outboxId);
-    } catch (error) {
-      if (error instanceof OwnerYDocOutboxReadChangedError) return "retry";
-      throw error;
+    let pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> | undefined;
+    while (pending === undefined) {
+      try {
+        pending = await this.outbox.readHead(this.outboxId);
+      } catch (error) {
+        // The queue changed while it was read, as it does while its owner types: read the newer head.
+        if (!(error instanceof OwnerYDocOutboxReadChangedError)) throw error;
+        if (this.disposed) return "retry";
+      }
     }
     if (this.disposed) return "retry";
     const known = this.refusals.get(this.outboxId);
