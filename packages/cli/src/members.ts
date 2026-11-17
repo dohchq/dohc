@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
-  MAX_MEMBER_EMAIL_CHARS, MEMBER_STATES, WORKSPACE_ROLES,
-  type InviteLinkAction, type WorkspaceMembersView,
+  MAX_MEMBER_EMAIL_CHARS,
+  MEMBER_STATES,
+  WORKSPACE_ROLES,
+  type InviteLinkAction,
+  type WorkspaceMembersView,
 } from "@dohc/security-contract/workspace-members";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 
@@ -11,8 +14,16 @@ import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 const level = z.enum(["view", "comment", "edit"]);
 /** A member id from `list`, or the email of an invite or a person. */
 const person = z.string().trim().min(1).max(MAX_MEMBER_EMAIL_CHARS);
-const email = z.string().trim().min(3).max(MAX_MEMBER_EMAIL_CHARS).regex(/^[^\s@]+@[^\s@]+$/, "Enter an email address.");
-const linkChange = z.enum(["turn-on", "turn-off", "reset"] satisfies [InviteLinkAction, ...InviteLinkAction[]]);
+const email = z
+  .string()
+  .trim()
+  .min(3)
+  .max(MAX_MEMBER_EMAIL_CHARS)
+  .regex(/^[^\s@]+@[^\s@]+$/, "Enter an email address.");
+const linkChange = z.enum(["turn-on", "turn-off", "reset"] satisfies [
+  InviteLinkAction,
+  ...InviteLinkAction[],
+]);
 
 const ownerActions = [
   z.object({ action: z.literal("list") }).strict(),
@@ -30,7 +41,10 @@ export const OwnerMembersRequest = z.discriminatedUnion("action", [...ownerActio
 export type OwnerMembersRequest = z.infer<typeof OwnerMembersRequest>;
 
 /** What the Members page sends. Admins and members can also leave. */
-export const MembersRequest = z.discriminatedUnion("action", [...ownerActions, z.object({ action: z.literal("leave") }).strict()]);
+export const MembersRequest = z.discriminatedUnion("action", [
+  ...ownerActions,
+  z.object({ action: z.literal("leave") }).strict(),
+]);
 export type MembersRequest = z.infer<typeof MembersRequest>;
 
 export const MEMBERS_CAPABILITIES = {
@@ -46,42 +60,60 @@ export const MEMBERS_CAPABILITIES = {
 } as const satisfies Record<MembersRequest["action"], CapabilityId>;
 
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
-const WorkspacePersonSchema = z.object({
-  memberId: z.string().min(1).max(256),
-  role: z.enum(WORKSPACE_ROLES),
-  state: z.enum(MEMBER_STATES),
-  name: z.string().max(1024).nullable(),
-  email: z.string().max(MAX_MEMBER_EMAIL_CHARS).nullable(),
-  invitedAtMs: time,
-  joinedAtMs: time,
-  removedAtMs: time,
-}).strict().refine(
-  (person) => (person.role === "owner") === (person.memberId === "owner") && (person.role !== "owner" || person.state === "active"),
-  "Only the owner's entry is the owner, and it is active.",
-);
+const WorkspacePersonSchema = z
+  .object({
+    memberId: z.string().min(1).max(256),
+    role: z.enum(WORKSPACE_ROLES),
+    state: z.enum(MEMBER_STATES),
+    name: z.string().max(1024).nullable(),
+    email: z.string().max(MAX_MEMBER_EMAIL_CHARS).nullable(),
+    invitedAtMs: time,
+    joinedAtMs: time,
+    removedAtMs: time,
+  })
+  .strict()
+  .refine(
+    (person) =>
+      (person.role === "owner") === (person.memberId === "owner") &&
+      (person.role !== "owner" || person.state === "active"),
+    "Only the owner's entry is the owner, and it is active.",
+  );
 
-const InviteLinkSchema = z.object({ enabled: z.boolean(), url: z.string().url().max(4096).nullable() }).strict()
-  .refine((link) => link.enabled === (link.url !== null), "An invite link has a URL exactly while it is on.");
+const InviteLinkSchema = z
+  .object({ enabled: z.boolean(), url: z.string().url().max(4096).nullable() })
+  .strict()
+  .refine(
+    (link) => link.enabled === (link.url !== null),
+    "An invite link has a URL exactly while it is on.",
+  );
 
 /**
  * The relay's Members answer. A view that breaks a rule is unreadable, never
  * a narrower answer: the owner and admins get the invite link, and a member
  * sees only active people and no emails.
  */
-const WorkspaceMembersViewSchema = z.object({
-  workspaceId: z.string().min(1).max(256),
-  workspaceName: z.string().max(1024),
-  viewer: z.object({ memberId: z.string().min(1).max(256), role: z.enum(WORKSPACE_ROLES) }).strict(),
-  memberLevel: level,
-  inviteLink: InviteLinkSchema.nullable(),
-  people: z.array(WorkspacePersonSchema),
-}).strict().refine(
-  (view) => (view.viewer.role !== "member") === (view.inviteLink !== null),
-  "Only the owner and admins get the invite link.",
-).refine(
-  (view) => view.viewer.role !== "member" || view.people.every((person) => person.email === null && person.state === "active"),
-  "A member sees only active people and no emails.",
-) satisfies z.ZodType<WorkspaceMembersView>;
+const WorkspaceMembersViewSchema = z
+  .object({
+    workspaceId: z.string().min(1).max(256),
+    workspaceName: z.string().max(1024),
+    viewer: z
+      .object({ memberId: z.string().min(1).max(256), role: z.enum(WORKSPACE_ROLES) })
+      .strict(),
+    memberLevel: level,
+    inviteLink: InviteLinkSchema.nullable(),
+    people: z.array(WorkspacePersonSchema),
+  })
+  .strict()
+  .refine(
+    (view) => (view.viewer.role !== "member") === (view.inviteLink !== null),
+    "Only the owner and admins get the invite link.",
+  )
+  .refine(
+    (view) =>
+      view.viewer.role !== "member" ||
+      view.people.every((person) => person.email === null && person.state === "active"),
+    "A member sees only active people and no emails.",
+  ) satisfies z.ZodType<WorkspaceMembersView>;
 
 export const MembersResult = z.discriminatedUnion("status", [
   // The workspace's people as the relay answered them for this account.

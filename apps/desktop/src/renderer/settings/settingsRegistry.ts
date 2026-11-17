@@ -159,7 +159,17 @@ export const SETTINGS_SECTIONS = [
     label: "Members",
     scope: "Workspace",
     group: "workspace",
-    keywords: ["members", "people", "invite", "invite link", "admin", "owner", "remove", "leave", "level"],
+    keywords: [
+      "members",
+      "people",
+      "invite",
+      "invite link",
+      "admin",
+      "owner",
+      "remove",
+      "leave",
+      "level",
+    ],
     Icon: Users,
   },
   {

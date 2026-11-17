@@ -22,7 +22,12 @@ export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
 
 /** The file side: a scope only the relay builds, never stored or sent. */
 export function workspaceFileReach(selector: WorkspaceShareSelector) {
-  return { paths: [] as string[], versionId: null, access: selector.access, wholeWorkspace: true as const };
+  return {
+    paths: [] as string[],
+    versionId: null,
+    access: selector.access,
+    wholeWorkspace: true as const,
+  };
 }
 
 /** Whether the workspace share reaches this channel's messages. */
@@ -30,8 +35,12 @@ export function workspaceGroupReachable(
   channelWireId: unknown,
   chat: { channelKind(channelWireId: string): string | null | undefined } | undefined,
 ): channelWireId is string {
-  return typeof channelWireId === "string" && channelWireId.length > 0 &&
-    channelWireId !== GENERAL_CHANNEL_WIRE_ID && chat?.channelKind(channelWireId) === "channel";
+  return (
+    typeof channelWireId === "string" &&
+    channelWireId.length > 0 &&
+    channelWireId !== GENERAL_CHANNEL_WIRE_ID &&
+    chat?.channelKind(channelWireId) === "channel"
+  );
 }
 
 /** View reads a Group. Comment and Edit read and post. */

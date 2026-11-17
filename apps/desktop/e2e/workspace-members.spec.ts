@@ -20,8 +20,16 @@ import {
 // admin. The invited member's own desktop lists the workspace under Shared
 // with you, and the relay hides emails and the link from a member.
 
-const OWNER = { token: "test:e2e-members-owner", user: "e2e-members-owner", email: "e2e-members-owner@dohc.test" };
-const MEMBER = { token: "test:e2e-members-sam", user: "e2e-members-sam", email: "e2e-members-sam@dohc.test" };
+const OWNER = {
+  token: "test:e2e-members-owner",
+  user: "e2e-members-owner",
+  email: "e2e-members-owner@dohc.test",
+};
+const MEMBER = {
+  token: "test:e2e-members-sam",
+  user: "e2e-members-sam",
+  email: "e2e-members-sam@dohc.test",
+};
 const JOINER = { token: "test:e2e-members-kai", email: "e2e-members-kai@dohc.test" };
 const VIEWER_ORIGIN = "https://viewer.example.com";
 
@@ -32,15 +40,24 @@ interface MembersView {
   people: { memberId: string; role: string; state: string; email: string | null }[];
 }
 
-async function membersView(relay: SyncRelayHandle, token: string, workspaceId: string): Promise<MembersView> {
-  const answer = await relayJson(relay.baseUrl, token, `/sync/${encodeURIComponent(workspaceId)}/members`);
+async function membersView(
+  relay: SyncRelayHandle,
+  token: string,
+  workspaceId: string,
+): Promise<MembersView> {
+  const answer = await relayJson(
+    relay.baseUrl,
+    token,
+    `/sync/${encodeURIComponent(workspaceId)}/members`,
+  );
   expect(answer.status, answer.body).toBe(200);
   return JSON.parse(answer.body) as MembersView;
 }
 
 // Opens Settings on Members, or reloads Members when Settings is already open.
 async function openMembers(page: Page) {
-  if (!(await page.getByTestId(settingsNavPin("members")).isVisible())) await page.getByTestId(activityPin("settings")).click();
+  if (!(await page.getByTestId(settingsNavPin("members")).isVisible()))
+    await page.getByTestId(activityPin("settings")).click();
   await page.getByTestId(settingsNavPin("general")).click();
   await page.getByTestId(settingsNavPin("members")).click();
   const members = page.getByTestId("settings-members-page");
@@ -61,14 +78,28 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
   try {
     relay = await spawnSyncRelay({
       dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
-      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: randomBytes(32).toString("base64url"), publicViewerOrigin: VIEWER_ORIGIN },
+      linkBoundary: {
+        linkKey: randomBytes(32).toString("base64url"),
+        relayExchangeKey: randomBytes(32).toString("base64url"),
+        publicViewerOrigin: VIEWER_ORIGIN,
+      },
     });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
     await seedWorkspaceRegistry(ownerTemp, [
-      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+      {
+        workspaceId,
+        rootPath: ownerTemp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user },
+      },
     ]);
-    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+    await seedCloudCredentials(ownerTemp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: OWNER.email,
+      userId: OWNER.user,
+      token: OWNER.token,
+    });
 
     owner = await launchDesktopApp({ workspace: ownerTemp });
     const { page } = owner;
@@ -100,11 +131,17 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     const token = ((await url.textContent()) ?? "").split("#")[1]!;
 
     // Kai joins with the link. The relay previews the workspace first.
-    const preview = await relayJson(relay.baseUrl, JOINER.token, "/sync/members/join-preview", { method: "POST", body: JSON.stringify({ token }) });
+    const preview = await relayJson(relay.baseUrl, JOINER.token, "/sync/members/join-preview", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
     expect(preview.status, preview.body).toBe(200);
     const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
     expect(JSON.parse(preview.body)).toMatchObject({ workspaceName, alreadyMember: false });
-    const joined = await relayJson(relay.baseUrl, JOINER.token, "/sync/members/join", { method: "POST", body: JSON.stringify({ token }) });
+    const joined = await relayJson(relay.baseUrl, JOINER.token, "/sync/members/join", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
     expect(joined.status, joined.body).toBe(200);
     expect(JSON.parse(joined.body)).toMatchObject({ workspaceId, workspaceName });
 
@@ -112,9 +149,14 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     members = await openMembers(page);
     const rows = members.getByTestId("settings-members-row");
     await expect(rows).toHaveCount(3);
-    await members.getByTestId("settings-members-level-control").getByRole("radio", { name: "Edit" }).click();
+    await members
+      .getByTestId("settings-members-level-control")
+      .getByRole("radio", { name: "Edit" })
+      .click();
     await expect(members.getByTestId("settings-members-level-busy")).toHaveCount(0);
-    await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel).toBe("edit");
+    await expect
+      .poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel)
+      .toBe("edit");
 
     const kai = rows.filter({ hasText: JOINER.email });
     await kai.getByTestId("settings-members-row-menu").click();
@@ -128,13 +170,18 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
       members = await openMembers(page);
       await expect(rows).toHaveCount(3);
-      await page.getByTestId("settings-members").screenshot({ path: shot(`members-owner-${theme.toLowerCase()}`) });
+      await page
+        .getByTestId("settings-members")
+        .screenshot({ path: shot(`members-owner-${theme.toLowerCase()}`) });
     }
 
     // Turning the link off stops new joins.
     await members.getByRole("switch", { name: "Invite link" }).click();
     await expect(url).toHaveCount(0);
-    const late = await relayJson(relay.baseUrl, "test:e2e-members-late", "/sync/members/join", { method: "POST", body: JSON.stringify({ token }) });
+    const late = await relayJson(relay.baseUrl, "test:e2e-members-late", "/sync/members/join", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
     expect(late.status).toBe(404);
     await page.getByRole("button", { name: "Close settings" }).click();
 
@@ -147,12 +194,22 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
 
     // Sam's own desktop lists the workspace under Shared with you.
     await seedWorkspaceManifest(memberTemp, "members-sam-own");
-    await seedWorkspaceRegistry(memberTemp, [{ workspaceId: "members-sam-own", rootPath: memberTemp.rootPath }]);
-    await seedCloudCredentials(memberTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: MEMBER.email, userId: MEMBER.user, token: MEMBER.token });
+    await seedWorkspaceRegistry(memberTemp, [
+      { workspaceId: "members-sam-own", rootPath: memberTemp.rootPath },
+    ]);
+    await seedCloudCredentials(memberTemp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: MEMBER.email,
+      userId: MEMBER.user,
+      token: MEMBER.token,
+    });
     member = await launchDesktopApp({ workspace: memberTemp });
     await openWorkspaceFromFirstRun(member.page, memberTemp);
     await member.page.getByTestId(activityPin("sharing")).click();
-    const received = member.page.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
+    const received = member.page
+      .getByTestId("sharing-received-row")
+      .filter({ hasText: workspaceName });
     await expect(received).toBeVisible({ timeout: 60_000 });
     await expect(received.getByTestId("sharing-row-who")).toContainText("Member ·");
     await expect(received.getByTestId("sharing-row-who")).toContainText("lets members edit");
@@ -166,10 +223,17 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     await members.getByTestId("settings-members-end-open").click();
     await page.getByTestId("settings-members-confirm").click();
     await expect(page.getByTestId("settings-members-ended")).toBeVisible();
-    expect((await relayJson(relay.baseUrl, MEMBER.token, `/sync/${workspaceId}/members`)).status).not.toBe(200);
+    expect(
+      (await relayJson(relay.baseUrl, MEMBER.token, `/sync/${workspaceId}/members`)).status,
+    ).not.toBe(200);
     await expect(members.getByTestId("settings-members-end-open")).toHaveCount(0);
-    await members.getByTestId("settings-members-level-control").getByRole("radio", { name: "View" }).click();
-    await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel).toBe("view");
+    await members
+      .getByTestId("settings-members-level-control")
+      .getByRole("radio", { name: "View" })
+      .click();
+    await expect
+      .poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel)
+      .toBe("view");
     await page.getByTestId("settings-members").screenshot({ path: shot("members-ended") });
 
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);

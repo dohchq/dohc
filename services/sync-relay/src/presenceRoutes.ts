@@ -115,9 +115,10 @@ export function createPresenceRoutes(
           ? resolver.threadChannelWireId(thread) != null
           : resolver.channelKind(topic) != null;
       // A workspace share answers for each Group itself.
-      const selector = channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
-        ? chatSideOf(authorized.effectiveSelector)
-        : authorized.effectiveSelector;
+      const selector =
+        channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
+          ? chatSideOf(authorized.effectiveSelector)
+          : authorized.effectiveSelector;
       if (!selector || !presenceTopicAllowedForShare(selector, topic, resolver)) throw notFound();
     }
     return authorized;

@@ -11,7 +11,9 @@ async function signUpHeaders(next: string, stored: string | null, storageThrows 
   const elements: Record<string, unknown> = {
     form: {
       querySelector: () => ({ disabled: false }),
-      addEventListener: (_: string, handler: typeof submit) => { submit = handler; },
+      addEventListener: (_: string, handler: typeof submit) => {
+        submit = handler;
+      },
     },
     name: input("Ada"),
     email: input("ada@example.test"),
@@ -20,7 +22,10 @@ async function signUpHeaders(next: string, stored: string | null, storageThrows 
   };
   const requests: { path: string; headers: Record<string, string> }[] = [];
   runInNewContext(ACCOUNT_JS, {
-    document: { body: { dataset: { page: "sign-up", next } }, getElementById: (id: string) => elements[id] ?? null },
+    document: {
+      body: { dataset: { page: "sign-up", next } },
+      getElementById: (id: string) => elements[id] ?? null,
+    },
     location: { host: "server.example.test", assign: () => {} },
     sessionStorage: {
       getItem: (key: string) => {
@@ -43,7 +48,10 @@ async function signUpHeaders(next: string, stored: string | null, storageThrows 
 
 describe("sign-up page", () => {
   it("sends the invite link token when the person came from the join page", async () => {
-    expect(await signUpHeaders("/join", TOKEN)).toEqual({ "content-type": "application/json", "x-dohc-invite-link": TOKEN });
+    expect(await signUpHeaders("/join", TOKEN)).toEqual({
+      "content-type": "application/json",
+      "x-dohc-invite-link": TOKEN,
+    });
   });
 
   it("sends no token for other pages, malformed tokens, or blocked storage", async () => {

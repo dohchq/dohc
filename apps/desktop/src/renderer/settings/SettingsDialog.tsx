@@ -334,7 +334,10 @@ export function SettingsDialog(props: {
 
   // A shared view lists no Members: the workspace it came from does.
   const sections = useMemo(
-    () => (props.sharedView ? SETTINGS_SECTIONS.filter((section) => section.id !== "members") : SETTINGS_SECTIONS),
+    () =>
+      props.sharedView
+        ? SETTINGS_SECTIONS.filter((section) => section.id !== "members")
+        : SETTINGS_SECTIONS,
     [props.sharedView],
   );
   const filteredSections = useMemo(
@@ -897,7 +900,9 @@ export function SettingsDialog(props: {
             {props.sharedView ? null : (
               <MembersSettings
                 workspaceId={props.workspaceId}
-                workspaceName={props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+                workspaceName={
+                  props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
+                }
                 {...(props.cloud ? { cloud: props.cloud } : {})}
                 onOpenSync={() => {
                   setQuery("");

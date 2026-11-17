@@ -1077,13 +1077,31 @@ it("routes the owner's Members actions with no workspace id, and refuses leave b
   const view = { status: "refused" };
   const request = vi.fn(async (_request: { verb: string; args: unknown }) => view);
   const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request });
-  const result = await client.callTool({ name: "dohc_members", arguments: { request: { action: "role", person: "ana@example.com", role: "admin" } } });
+  const result = await client.callTool({
+    name: "dohc_members",
+    arguments: { request: { action: "role", person: "ana@example.com", role: "admin" } },
+  });
   expect(result.structuredContent).toEqual(view);
   // The CLI exits with an error for the same answer.
   expect(result.isError).toBe(true);
-  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "members", args: { cwd: "/workspace", actor: "agent", request: { action: "role", person: "ana@example.com", role: "admin" } } }));
-  for (const bad of [{ action: "leave" }, { action: "list", workspaceId: "w" }, { action: "invite", email: "nobody" }]) {
-    expect(await client.callTool({ name: "dohc_members", arguments: { request: bad } })).toMatchObject({ isError: true });
+  expect(request).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "members",
+      args: {
+        cwd: "/workspace",
+        actor: "agent",
+        request: { action: "role", person: "ana@example.com", role: "admin" },
+      },
+    }),
+  );
+  for (const bad of [
+    { action: "leave" },
+    { action: "list", workspaceId: "w" },
+    { action: "invite", email: "nobody" },
+  ]) {
+    expect(
+      await client.callTool({ name: "dohc_members", arguments: { request: bad } }),
+    ).toMatchObject({ isError: true });
   }
   expect(request).toHaveBeenCalledTimes(1);
 });

@@ -97,10 +97,14 @@ export function createNamedShareTransportRoutes(
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
       const clientOrigin = url.searchParams.get("originId");
-      const ownOriginId = clientOrigin === null || clientOrigin === ""
-        ? null
-        : namedShareOrigin(share.shareId, actor.userId,
-          parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS));
+      const ownOriginId =
+        clientOrigin === null || clientOrigin === ""
+          ? null
+          : namedShareOrigin(
+              share.shareId,
+              actor.userId,
+              parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS),
+            );
       const channelKinds = {
         channelKind: (id: string) => storage.findChannelCreateKind(share.workspaceId, id),
       };
@@ -145,8 +149,11 @@ export function createNamedShareTransportRoutes(
         let scanSince = since;
         const readPage = (): typeof page => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
-          if (fresh.share.workspaceId !== share.workspaceId ||
-              JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)) throw notFound();
+          if (
+            fresh.share.workspaceId !== share.workspaceId ||
+            JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)
+          )
+            throw notFound();
           const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
@@ -321,15 +328,14 @@ export function createNamedShareTransportRoutes(
           // A workspace share's thread sits in the Group the filter just
           // admitted, or on a file when it names none.
           const boundChannel = isWorkspaceSelector(share.selector)
-            ? typeof created.channelWireId === "string" ? created.channelWireId : null
-            : chatSideOf(share.selector)?.channelWireId ?? null;
+            ? typeof created.channelWireId === "string"
+              ? created.channelWireId
+              : null
+            : (chatSideOf(share.selector)?.channelWireId ?? null);
           if (typeof threadId === "string" && threadId.length > 0) {
             if (boundChannel !== null) {
               pendingThreadBindings.set(threadId, boundChannel);
-            } else if (
-              typeof created.linkedPath === "string" &&
-              created.linkedPath.length > 0
-            ) {
+            } else if (typeof created.linkedPath === "string" && created.linkedPath.length > 0) {
               // The accept door converts the binding.
               //
               // A recipient names its file by path because its own object

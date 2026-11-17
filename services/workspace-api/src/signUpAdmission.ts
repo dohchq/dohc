@@ -24,7 +24,9 @@ export function createSignUpAdmission(
       const response = await send(url, {
         method: "POST",
         headers: { "content-type": "application/json", [SIGN_UP_INVITE_KEY_HEADER]: options.key },
-        body: JSON.stringify(inviteToken === null ? { email: address } : { email: address, inviteToken }),
+        body: JSON.stringify(
+          inviteToken === null ? { email: address } : { email: address, inviteToken },
+        ),
         signal: AbortSignal.timeout(INVITE_CHECK_TIMEOUT_MS),
       });
       const body = response.ok ? ((await response.json()) as { invited?: unknown }) : null;

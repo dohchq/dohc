@@ -135,7 +135,9 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_switch_automation: ["automation.switch"],
     dohc_dataset: Object.values(DATASET_CAPABILITIES),
     dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
-    dohc_members: Object.values(MEMBERS_CAPABILITIES).filter((id) => id !== MEMBERS_CAPABILITIES.leave),
+    dohc_members: Object.values(MEMBERS_CAPABILITIES).filter(
+      (id) => id !== MEMBERS_CAPABILITIES.leave,
+    ),
     dohc_list_workspaces: ["workspace.list"],
     dohc_workspace_status: ["workspace.status"],
     dohc_stop_workspace_sync: ["workspace.sync.stop"],

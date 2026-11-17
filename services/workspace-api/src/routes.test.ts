@@ -286,15 +286,24 @@ describe("account pages", () => {
 
   it("tells a person signing up from an invite link to open it again after confirming", async () => {
     for (const closedSignUp of [true, false]) {
-      const body = await (await router({ closedSignUp })(get("/account/verify-email?next=%2Fjoin"))).text();
+      const body = await (
+        await router({ closedSignUp })(get("/account/verify-email?next=%2Fjoin"))
+      ).text();
       expect(body).toContain("Then open your invite link again to join the workspace.");
     }
-    const plain = await (await router({ closedSignUp: true })(get("/account/verify-email?next=%2Faccount"))).text();
+    const plain = await (
+      await router({ closedSignUp: true })(get("/account/verify-email?next=%2Faccount"))
+    ).text();
     expect(plain).not.toContain("invite link");
     // Sign-up keeps the join page, so the page sends the invite link's token from this tab.
-    expect(await (await router({ closedSignUp: true })(get("/account/sign-up?next=%2Fjoin"))).text()).toContain('data-next="/join"');
+    expect(
+      await (await router({ closedSignUp: true })(get("/account/sign-up?next=%2Fjoin"))).text(),
+    ).toContain('data-next="/join"');
     for (const refused of ["%2F%2Fjoin", "%2Fjoin%3Fx", "%2Fjoinx"]) {
-      expect(await (await router()(get(`/account/sign-up?next=${refused}`))).text(), refused).not.toContain("data-next");
+      expect(
+        await (await router()(get(`/account/sign-up?next=${refused}`))).text(),
+        refused,
+      ).not.toContain("data-next");
     }
   });
 

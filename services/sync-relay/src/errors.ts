@@ -175,7 +175,8 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   too_many_paths: "too many paths",
   unknown_chat_op: "unrecognized chat op cannot be authorship-verified",
   member_exists: "That person is already in this workspace or has an invite.",
-  member_removed: "That account was removed from this workspace. Let it back in from the Members page.",
+  member_removed:
+    "That account was removed from this workspace. Let it back in from the Members page.",
   members_forbidden: "Only the owner or an admin can do this.",
   workspace_full: "This workspace has as many people as it can hold.",
   workspace_name_required: "Name the workspace before inviting people.",

@@ -199,17 +199,43 @@ it("retains received Group validity and excludes secrets from the recipient's ow
   expect(JSON.stringify(answer)).not.toMatch(/secret|bearer|credential|Invitation|shareCode/);
 });
 it("lists a received workspace membership for the account without matching it to this workspace's paths", () => {
-  const member = (patch: object) => ({ ...grant("member"), createdAtMs: 1, genericChatWritable: false, subjectName: "Community",
-    selector: { kind: "workspace", role: "member" }, access: "comment", ...patch });
+  const member = (patch: object) => ({
+    ...grant("member"),
+    createdAtMs: 1,
+    genericChatWritable: false,
+    subjectName: "Community",
+    selector: { kind: "workspace", role: "member" },
+    access: "comment",
+    ...patch,
+  });
   const inventory = parseReceivedInventory({ received: [member({})], removed: [] })!;
-  const query = createAccessQuery(), base = { ...input(), observation: { inventory, checkedAtMs: 100, freshness: "fresh" as const },
-    recipientUserId: "recipient", ref: null, coverage: "received-account" as const };
-  expect(query.answer(base).rows).toMatchObject([{ shareId: "member", subjectName: "Community", access: "comment",
-    selector: { kind: "workspace", role: "member" } }]);
+  const query = createAccessQuery(),
+    base = {
+      ...input(),
+      observation: { inventory, checkedAtMs: 100, freshness: "fresh" as const },
+      recipientUserId: "recipient",
+      ref: null,
+      coverage: "received-account" as const,
+    };
+  expect(query.answer(base).rows).toMatchObject([
+    {
+      shareId: "member",
+      subjectName: "Community",
+      access: "comment",
+      selector: { kind: "workspace", role: "member" },
+    },
+  ]);
   expect(query.answer({ ...base, ref }).rows).toEqual([]);
   // An owner never receives their own workspace, and a membership has the three levels.
-  expect(parseReceivedInventory({ received: [member({ selector: { kind: "workspace", role: "owner" } })], removed: [] })).toBeNull();
-  expect(parseReceivedInventory({ received: [member({ access: "read-write" })], removed: [] })).toBeNull();
+  expect(
+    parseReceivedInventory({
+      received: [member({ selector: { kind: "workspace", role: "owner" } })],
+      removed: [],
+    }),
+  ).toBeNull();
+  expect(
+    parseReceivedInventory({ received: [member({ access: "read-write" })], removed: [] }),
+  ).toBeNull();
 });
 it("treats received Groups with missing file-scope facts as damaged copies", () => {
   expect(
@@ -324,15 +350,42 @@ it("excludes revoked named grants, former automation writers and ended links fro
 
 it("answers a tracked file on main with each workspace member, and leaves memberships out of the Sharing list", () => {
   const member = grant("member", { selector: { kind: "workspace" }, access: "edit" });
-  const source = readStoredRoster({ grants: [grant("active"), member, grant("member", { grantId: "ana", recipientEmail: "ana@test.dev", access: "comment", selector: { kind: "workspace" } })],
-    formerGrants: [{ grant: { ...member, grantId: "former", access: "view" }, automationsGeneration: 1 }], endedGrants: [], links: [] })!;
+  const source = readStoredRoster({
+    grants: [
+      grant("active"),
+      member,
+      grant("member", {
+        grantId: "ana",
+        recipientEmail: "ana@test.dev",
+        access: "comment",
+        selector: { kind: "workspace" },
+      }),
+    ],
+    formerGrants: [
+      { grant: { ...member, grantId: "former", access: "view" }, automationsGeneration: 1 },
+    ],
+    endedGrants: [],
+    links: [],
+  })!;
   const query = createAccessQuery();
-  expect(query.answer(input(source)).rows).toMatchObject([{ shareId: "active" }, { grantId: "ana", access: "comment" }, { grantId: "member", access: "edit" }]);
-  expect(query.answer({ ...input(source), ref: { ...ref, path: "elsewhere.md" } }).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["ana", "member"]);
+  expect(query.answer(input(source)).rows).toMatchObject([
+    { shareId: "active" },
+    { grantId: "ana", access: "comment" },
+    { grantId: "member", access: "edit" },
+  ]);
+  expect(
+    query
+      .answer({ ...input(source), ref: { ...ref, path: "elsewhere.md" } })
+      .rows.map((row) => (row.kind === "share" ? row.grantId : null)),
+  ).toEqual(["ana", "member"]);
   // Members reach main only, and never a secret or untracked path.
   expect(query.answer({ ...input(source), ref: { ...ref, versionId: "draft" } }).rows).toEqual([]);
   expect(query.answer({ ...input(source), ref: { ...ref, path: "Notes/.env" } }).rows).toEqual([]);
-  expect(query.answer({ ...input(source), ref: null }).rows.map(row => row.kind === "share" ? row.shareId : null)).toEqual(["active"]);
+  expect(
+    query
+      .answer({ ...input(source), ref: null })
+      .rows.map((row) => (row.kind === "share" ? row.shareId : null)),
+  ).toEqual(["active"]);
 });
 
 it("reports unreadable when a stored roster cannot establish grants", () => {
@@ -364,13 +417,41 @@ it("reports no received listing yet without claiming absence", () => {
 });
 
 it("answers an ordinary Group with each workspace member only when the caller says members reach it", () => {
-  const ana = grant("member", { grantId: "ana", access: "comment", selector: { kind: "workspace" } });
-  const gone = grant("member", { grantId: "gone", access: "edit", status: "revoked", selector: { kind: "workspace" } });
-  const source = readStoredRoster({ grants: [grant("group", { selector: { kind: "chat", channelWireId: "group-wire" }, access: "read-only" }), ana, gone],
-    formerGrants: [], endedGrants: [], links: [] })!;
+  const ana = grant("member", {
+    grantId: "ana",
+    access: "comment",
+    selector: { kind: "workspace" },
+  });
+  const gone = grant("member", {
+    grantId: "gone",
+    access: "edit",
+    status: "revoked",
+    selector: { kind: "workspace" },
+  });
+  const source = readStoredRoster({
+    grants: [
+      grant("group", {
+        selector: { kind: "chat", channelWireId: "group-wire" },
+        access: "read-only",
+      }),
+      ana,
+      gone,
+    ],
+    formerGrants: [],
+    endedGrants: [],
+    links: [],
+  })!;
   const query = createAccessQuery();
   const chat = { ...input(source), ref: { kind: "chat" as const, channelWireId: "group-wire" } };
-  expect(query.answer({ ...chat, members: true }).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["group", "ana"]);
-  expect(query.answer(chat).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["group"]);
-  expect(query.answer({ ...chat, ref: { kind: "chat" as const, channelWireId: "dm-wire" } }).rows).toEqual([]);
+  expect(
+    query
+      .answer({ ...chat, members: true })
+      .rows.map((row) => (row.kind === "share" ? row.grantId : null)),
+  ).toEqual(["group", "ana"]);
+  expect(query.answer(chat).rows.map((row) => (row.kind === "share" ? row.grantId : null))).toEqual(
+    ["group"],
+  );
+  expect(
+    query.answer({ ...chat, ref: { kind: "chat" as const, channelWireId: "dm-wire" } }).rows,
+  ).toEqual([]);
 });

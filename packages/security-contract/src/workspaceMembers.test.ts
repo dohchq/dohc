@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MEMBER_ACTION_ROLES, memberMay, type MemberAction, type WorkspaceRole } from "./workspaceMembers";
+import {
+  MEMBER_ACTION_ROLES,
+  memberMay,
+  type MemberAction,
+  type WorkspaceRole,
+} from "./workspaceMembers";
 
 describe("memberMay", () => {
   // Every action, with the roles that may do it.
@@ -16,7 +21,10 @@ describe("memberMay", () => {
 
   it("follows the role table for every action and role", () => {
     expect(Object.keys(matrix).sort()).toEqual(Object.keys(MEMBER_ACTION_ROLES).sort());
-    for (const [action, allowed] of Object.entries(matrix) as [MemberAction, readonly WorkspaceRole[]][]) {
+    for (const [action, allowed] of Object.entries(matrix) as [
+      MemberAction,
+      readonly WorkspaceRole[],
+    ][]) {
       for (const role of ["owner", "admin", "member"] as const) {
         expect(memberMay(role, action), `${role} ${action}`).toBe(allowed.includes(role));
       }

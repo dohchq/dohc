@@ -202,7 +202,7 @@ export function createShareSummaries(
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see. Only the detail route adds a recipient source handle.
-    const base = shareSummaryBase(row);
+    const base = shareSummaryBase(row, "member");
     return {
       ...base,
       ...workspaceRoleOfRow(row, base.selector),

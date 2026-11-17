@@ -4,14 +4,52 @@ import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protoc
 import { parseCliArguments } from "./args";
 
 const view = {
-  workspaceId: "ws-1", workspaceName: "Community",
-  viewer: { memberId: "owner", role: "owner" }, memberLevel: "comment",
+  workspaceId: "ws-1",
+  workspaceName: "Community",
+  viewer: { memberId: "owner", role: "owner" },
+  memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
   people: [
-    { memberId: "owner", role: "owner", state: "active", name: "Ice", email: "ice@test", invitedAtMs: null, joinedAtMs: 1, removedAtMs: null },
-    { memberId: "m-ana", role: "admin", state: "active", name: "Ana", email: "ana@test", invitedAtMs: 1, joinedAtMs: 2, removedAtMs: null },
-    { memberId: "m-bo", role: "member", state: "invited", name: null, email: "bo@test", invitedAtMs: 3, joinedAtMs: null, removedAtMs: null },
-    { memberId: "m-cy", role: "member", state: "removed", name: "Cy", email: "cy@test", invitedAtMs: 1, joinedAtMs: 2, removedAtMs: 4 },
+    {
+      memberId: "owner",
+      role: "owner",
+      state: "active",
+      name: "Ice",
+      email: "ice@test",
+      invitedAtMs: null,
+      joinedAtMs: 1,
+      removedAtMs: null,
+    },
+    {
+      memberId: "m-ana",
+      role: "admin",
+      state: "active",
+      name: "Ana",
+      email: "ana@test",
+      invitedAtMs: 1,
+      joinedAtMs: 2,
+      removedAtMs: null,
+    },
+    {
+      memberId: "m-bo",
+      role: "member",
+      state: "invited",
+      name: null,
+      email: "bo@test",
+      invitedAtMs: 3,
+      joinedAtMs: null,
+      removedAtMs: null,
+    },
+    {
+      memberId: "m-cy",
+      role: "member",
+      state: "removed",
+      name: "Cy",
+      email: "cy@test",
+      invitedAtMs: 1,
+      joinedAtMs: 2,
+      removedAtMs: 4,
+    },
   ],
 };
 
@@ -30,7 +68,10 @@ describe("dohc members", () => {
     [["link", "reset"], { action: "link", change: "reset" }],
     [["end", "--everyone"], { action: "end" }],
   ])("parses members %j", (operands, request) => {
-    expect(parseCliArguments(["members", ...operands], {})).toMatchObject({ verb: "members", request });
+    expect(parseCliArguments(["members", ...operands], {})).toMatchObject({
+      verb: "members",
+      request,
+    });
   });
 
   it.each([
@@ -48,62 +89,126 @@ describe("dohc members", () => {
 
   it("sends the request with no workspace, and prints people, invites, and removed accounts with their ids", async () => {
     const request = vi.fn(async () => ({ status: "ready", view }));
-    const result = await executeCli({ argv: ["members", "list"], cwd: "/workspace", env: {}, request });
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "members", args: { cwd: expect.any(String), actor: "human", request: { action: "list" } } }));
+    const result = await executeCli({
+      argv: ["members", "list"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verb: "members",
+        args: { cwd: expect.any(String), actor: "human", request: { action: "list" } },
+      }),
+    );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe([
-      "Community: members can comment.",
-      "Invite link: https://share.test/join#token",
-      "",
-      "owner · Owner · Ice · ice@test",
-      "m-ana · Admin · Ana · ana@test",
-      "",
-      "Invites (dohc sends no email; each joins when they sign in with that address)",
-      "m-bo · Invited · bo@test",
-      "",
-      "Removed (dohc members let-back-in <id>)",
-      "m-cy · Removed · Cy · cy@test",
-      "",
-    ].join("\n"));
+    expect(result.stdout).toBe(
+      [
+        "Community: members can comment.",
+        "Invite link: https://share.test/join#token",
+        "",
+        "owner · Owner · Ice · ice@test",
+        "m-ana · Admin · Ana · ana@test",
+        "",
+        "Invites (dohc sends no email; each joins when they sign in with that address)",
+        "m-bo · Invited · bo@test",
+        "",
+        "Removed (dohc members let-back-in <id>)",
+        "m-cy · Removed · Cy · cy@test",
+        "",
+      ].join("\n"),
+    );
   });
 
   it("exits with the refusal when the server lists no Members page", async () => {
-    for (const argv of [["members", "list"], ["members", "list", "--json"]]) {
-      const result = await executeCli({ argv, cwd: "/workspace", env: {}, request: async () => ({ status: "refused" }) });
+    for (const argv of [
+      ["members", "list"],
+      ["members", "list", "--json"],
+    ]) {
+      const result = await executeCli({
+        argv,
+        cwd: "/workspace",
+        env: {},
+        request: async () => ({ status: "refused" }),
+      });
       expect(result.exitCode, argv.join(" ")).toBe(1);
       expect(result.stdout, argv.join(" ")).toBe("");
-      expect(result.stderr, argv.join(" ")).toContain("Your server does not list Members for this workspace and account.");
+      expect(result.stderr, argv.join(" ")).toContain(
+        "Your server does not list Members for this workspace and account.",
+      );
     }
   });
 
   it("refuses a caller-supplied workspace or leave at socket parsing", () => {
     const base = { protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "members" };
-    expect(cliRequestSchema.safeParse({ ...base, args: { cwd: "/w", actor: "human", request: { action: "list" } } }).success).toBe(true);
-    expect(cliRequestSchema.safeParse({ ...base, args: { cwd: "/w", actor: "human", workspaceId: "ws-2", request: { action: "list" } } }).success).toBe(false);
-    expect(cliRequestSchema.safeParse({ ...base, args: { cwd: "/w", actor: "human", request: { action: "list", workspaceId: "ws-2" } } }).success).toBe(false);
-    expect(cliRequestSchema.safeParse({ ...base, args: { cwd: "/w", actor: "human", request: { action: "leave" } } }).success).toBe(false);
+    expect(
+      cliRequestSchema.safeParse({
+        ...base,
+        args: { cwd: "/w", actor: "human", request: { action: "list" } },
+      }).success,
+    ).toBe(true);
+    expect(
+      cliRequestSchema.safeParse({
+        ...base,
+        args: { cwd: "/w", actor: "human", workspaceId: "ws-2", request: { action: "list" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      cliRequestSchema.safeParse({
+        ...base,
+        args: { cwd: "/w", actor: "human", request: { action: "list", workspaceId: "ws-2" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      cliRequestSchema.safeParse({
+        ...base,
+        args: { cwd: "/w", actor: "human", request: { action: "leave" } },
+      }).success,
+    ).toBe(false);
   });
 
   it("pins results to the contract", () => {
     expect(parseCliResult("members", { status: "done" })).toEqual({ status: "done" });
     expect(parseCliResult("members", { status: "ready", view })).toMatchObject({ status: "ready" });
-    expect(() => parseCliResult("members", { status: "ready", view: { ...view, token: "secret" } })).toThrow();
+    expect(() =>
+      parseCliResult("members", { status: "ready", view: { ...view, token: "secret" } }),
+    ).toThrow();
     expect(() => parseCliResult("members", { status: "refused", view })).toThrow();
   });
 
   const owner = view.people[0]!;
-  const sam = { memberId: "m1", role: "member", state: "active", name: "Sam", email: null, invitedAtMs: 2, joinedAtMs: 3, removedAtMs: null };
-  const memberView = { workspaceId: "w1", workspaceName: "Community", viewer: { memberId: "m1", role: "member" }, memberLevel: "comment", inviteLink: null };
-  const ready = (value: unknown) => () => parseCliResult("members", { status: "ready", view: value });
+  const sam = {
+    memberId: "m1",
+    role: "member",
+    state: "active",
+    name: "Sam",
+    email: null,
+    invitedAtMs: 2,
+    joinedAtMs: 3,
+    removedAtMs: null,
+  };
+  const memberView = {
+    workspaceId: "w1",
+    workspaceName: "Community",
+    viewer: { memberId: "m1", role: "member" },
+    memberLevel: "comment",
+    inviteLink: null,
+  };
+  const ready = (value: unknown) => () =>
+    parseCliResult("members", { status: "ready", view: value });
 
   it("reads a member's view", () => {
-    expect(ready({ ...memberView, people: [{ ...owner, email: null }, sam] })()).toMatchObject({ view: { people: [{ name: "Ice" }, { name: "Sam" }] } });
+    expect(ready({ ...memberView, people: [{ ...owner, email: null }, sam] })()).toMatchObject({
+      view: { people: [{ name: "Ice" }, { name: "Sam" }] },
+    });
   });
 
   it("refuses a member's view that carries emails, invites, or the invite link", () => {
     expect(ready({ ...memberView, people: [owner] })).toThrow();
     expect(ready({ ...memberView, people: [{ ...sam, state: "invited" }] })).toThrow();
-    expect(ready({ ...memberView, inviteLink: { enabled: false, url: null }, people: [] })).toThrow();
+    expect(
+      ready({ ...memberView, inviteLink: { enabled: false, url: null }, people: [] }),
+    ).toThrow();
   });
 
   it("refuses a manager's view without the invite link", () => {
@@ -115,7 +220,9 @@ describe("dohc members", () => {
     expect(ready({ ...view, people: [{ ...owner, memberId: "m-x" }] })).toThrow();
     expect(ready({ ...view, people: [{ ...owner, state: "removed" }] })).toThrow();
     expect(ready({ ...view, inviteLink: { enabled: true, url: null } })).toThrow();
-    expect(ready({ ...view, inviteLink: { enabled: false, url: "https://share.test/join#token" } })).toThrow();
+    expect(
+      ready({ ...view, inviteLink: { enabled: false, url: "https://share.test/join#token" } }),
+    ).toThrow();
     expect(ready({ ...view, memberLevel: "Edit" })).toThrow();
   });
 });

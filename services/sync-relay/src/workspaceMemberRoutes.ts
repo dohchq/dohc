@@ -58,8 +58,18 @@ export function isWorkspaceMemberRoute(route: { route: string }): route is Works
   return Object.hasOwn(WORKSPACE_MEMBER_ROUTE_PATTERNS, route.route);
 }
 
-const WORKSPACE_ACTIONS = { invites: "members-invite", level: "members-level", "invite-link": "members-invite-link", leave: "members-leave", end: "members-end" } as const;
-const MEMBER_ACTIONS = { role: "members-role", remove: "members-remove", "let-back-in": "members-let-back-in" } as const;
+const WORKSPACE_ACTIONS = {
+  invites: "members-invite",
+  level: "members-level",
+  "invite-link": "members-invite-link",
+  leave: "members-leave",
+  end: "members-end",
+} as const;
+const MEMBER_ACTIONS = {
+  role: "members-role",
+  remove: "members-remove",
+  "let-back-in": "members-let-back-in",
+} as const;
 
 /** Parses `/sync/members/join*` and `/sync/:workspaceId/members/...`; null for any other path. */
 export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMemberRoute | null {
@@ -70,7 +80,11 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
   }
   if (parts[2] !== "members" || parts.length < 3 || parts.length > 5) return null;
   let workspaceId: string;
-  try { workspaceId = parseWorkspaceId(parts[1]); } catch { return null; }
+  try {
+    workspaceId = parseWorkspaceId(parts[1]);
+  } catch {
+    return null;
+  }
   if (parts.length === 3) return { route: "members", workspaceId };
   if (parts.length === 4) {
     const route = WORKSPACE_ACTIONS[parts[3] as keyof typeof WORKSPACE_ACTIONS];
@@ -92,10 +106,20 @@ export function hashWorkspaceInviteToken(token: string, key: string | Uint8Array
   return hashLinkBearer(`workspace-invite-v1:${token}`, key);
 }
 
-type MemberRouteStorage = Pick<SyncRelayStorage,
-  | "readWorkspaceMembers" | "inviteWorkspaceMember" | "setWorkspaceMemberLevel" | "setWorkspaceMemberRole"
-  | "removeWorkspaceMember" | "letWorkspaceMemberBackIn" | "leaveWorkspace" | "endWorkspaceMembership"
-  | "changeWorkspaceInviteLink" | "previewWorkspaceJoin" | "joinWorkspace">;
+type MemberRouteStorage = Pick<
+  SyncRelayStorage,
+  | "readWorkspaceMembers"
+  | "inviteWorkspaceMember"
+  | "setWorkspaceMemberLevel"
+  | "setWorkspaceMemberRole"
+  | "removeWorkspaceMember"
+  | "letWorkspaceMemberBackIn"
+  | "leaveWorkspace"
+  | "endWorkspaceMembership"
+  | "changeWorkspaceInviteLink"
+  | "previewWorkspaceJoin"
+  | "joinWorkspace"
+>;
 
 export function createWorkspaceMemberRoutes(options: {
   storage: MemberRouteStorage;
@@ -112,22 +136,33 @@ export function createWorkspaceMemberRoutes(options: {
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog">;
 }) {
   const { storage, linkKey, shareWebOrigin } = options;
-  const sealContext = (workspaceId: string, generation: number) => [`workspace-invite:${workspaceId}`, String(generation)] as const;
+  const sealContext = (workspaceId: string, generation: number) =>
+    [`workspace-invite:${workspaceId}`, String(generation)] as const;
   const hashToken = (token: string) => hashWorkspaceInviteToken(token, linkKey!);
 
   const inviteUrl = (link: WorkspaceInviteLinkRow | null): string | null => {
     if (!link?.enabled || !linkKey || !shareWebOrigin) return null;
-    const token = unsealLinkBearer(link.secretSealed, linkKey, ...sealContext(link.workspaceId, link.generation));
+    const token = unsealLinkBearer(
+      link.secretSealed,
+      linkKey,
+      ...sealContext(link.workspaceId, link.generation),
+    );
     return token === null ? null : `${shareWebOrigin}/join#${token}`;
   };
 
   const lookupEmail = async (userId: string) => {
-    try { return (await options.lookupUserEmail?.(userId)) ?? null; } catch { return null; }
+    try {
+      return (await options.lookupUserEmail?.(userId)) ?? null;
+    } catch {
+      return null;
+    }
   };
 
   const view = async (snapshot: WorkspaceMembersSnapshot): Promise<WorkspaceMembersView> => {
     const manages = snapshot.viewer.role !== "member";
-    const shown = manages ? snapshot.members : snapshot.members.filter((entry) => entry.state === "active");
+    const shown = manages
+      ? snapshot.members
+      : snapshot.members.filter((entry) => entry.state === "active");
     const owner: WorkspacePerson = {
       memberId: "owner",
       role: "owner",
@@ -138,16 +173,25 @@ export function createWorkspaceMemberRoutes(options: {
       joinedAtMs: snapshot.membership?.createdAtMs ?? null,
       removedAtMs: null,
     };
-    const people = await Promise.all(shown.map(async (entry): Promise<WorkspacePerson> => ({
-      memberId: entry.memberId,
-      role: entry.role,
-      state: entry.state,
-      name: entry.userId === null ? null : await accountDisplayName(options.lookupUserDisplayName, entry.userId),
-      email: !manages ? null : entry.userId === null ? entry.email : await lookupEmail(entry.userId),
-      invitedAtMs: entry.invitedAtMs,
-      joinedAtMs: entry.state === "active" ? entry.joinedAtMs : null,
-      removedAtMs: entry.state === "removed" ? entry.endedAtMs : null,
-    })));
+    const people = await Promise.all(
+      shown.map(async (entry): Promise<WorkspacePerson> => ({
+        memberId: entry.memberId,
+        role: entry.role,
+        state: entry.state,
+        name:
+          entry.userId === null
+            ? null
+            : await accountDisplayName(options.lookupUserDisplayName, entry.userId),
+        email: !manages
+          ? null
+          : entry.userId === null
+            ? entry.email
+            : await lookupEmail(entry.userId),
+        invitedAtMs: entry.invitedAtMs,
+        joinedAtMs: entry.state === "active" ? entry.joinedAtMs : null,
+        removedAtMs: entry.state === "removed" ? entry.endedAtMs : null,
+      })),
+    );
     const url = manages ? inviteUrl(snapshot.inviteLink) : null;
     return {
       workspaceId: snapshot.workspaceId,
@@ -173,22 +217,31 @@ export function createWorkspaceMemberRoutes(options: {
       return;
     }
     switch (result.reason) {
-      case "not-found": throw notFound();
-      case "forbidden": throw relayError("members_forbidden");
-      case "name-required": throw relayError("workspace_name_required");
+      case "not-found":
+        throw notFound();
+      case "forbidden":
+        throw relayError("members_forbidden");
+      case "name-required":
+        throw relayError("workspace_name_required");
       case "already-member":
-      case "already-invited": throw relayError("member_exists");
-      case "removed": throw relayError("member_removed");
-      case "full": throw relayError("workspace_full");
-      case "account-unavailable": throw notFound();
+      case "already-invited":
+        throw relayError("member_exists");
+      case "removed":
+        throw relayError("member_removed");
+      case "full":
+        throw relayError("workspace_full");
+      case "account-unavailable":
+        throw notFound();
     }
   };
 
   const parseWorkspaceName = (value: unknown): string | undefined => {
     if (value === undefined) return undefined;
-    if (typeof value !== "string" || value.length > WORKSPACE_NAME_MAX_CHARS * 4) throw badRequest("workspaceName is invalid");
+    if (typeof value !== "string" || value.length > WORKSPACE_NAME_MAX_CHARS * 4)
+      throw badRequest("workspaceName is invalid");
     const name = normalizeShareLabel(value, WORKSPACE_NAME_MAX_CHARS);
-    if (name === null || [...value.trim()].length > WORKSPACE_NAME_MAX_CHARS) throw badRequest(`workspaceName must be 1 to ${WORKSPACE_NAME_MAX_CHARS} characters`);
+    if (name === null || [...value.trim()].length > WORKSPACE_NAME_MAX_CHARS)
+      throw badRequest(`workspaceName must be 1 to ${WORKSPACE_NAME_MAX_CHARS} characters`);
     return name;
   };
 
@@ -197,10 +250,18 @@ export function createWorkspaceMemberRoutes(options: {
     return value;
   };
 
-  return async function respondToWorkspaceMembers(request: Request, route: WorkspaceMemberRoute, actor: { userId: string }): Promise<Response> {
+  return async function respondToWorkspaceMembers(
+    request: Request,
+    route: WorkspaceMemberRoute,
+    actor: { userId: string },
+  ): Promise<Response> {
     // A browser signs in with a cookie. Only the share site may send it here,
     // so another site cannot invite, remove, or join on a person's behalf.
-    if (request.headers.has("cookie") && (!shareWebOrigin || request.headers.get("origin") !== shareWebOrigin)) throw notFound();
+    if (
+      request.headers.has("cookie") &&
+      (!shareWebOrigin || request.headers.get("origin") !== shareWebOrigin)
+    )
+      throw notFound();
     const userId = actor.userId;
     if (route.route === "members") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
@@ -223,7 +284,11 @@ export function createWorkspaceMemberRoutes(options: {
         return jsonResponse(body, 200, { "cache-control": "private, no-store" });
       }
       const joined = storage.joinWorkspace({
-        secretHash, userId, newMemberId: options.newId, newGrantId: options.newGrantId, nowMs: options.nowMs(),
+        secretHash,
+        userId,
+        newMemberId: options.newId,
+        newGrantId: options.newGrantId,
+        nowMs: options.nowMs(),
       });
       if (!joined.ok) {
         if (joined.reason === "removed") throw relayError("member_removed");
@@ -233,7 +298,11 @@ export function createWorkspaceMemberRoutes(options: {
         throw relayError("member_exists");
       }
       options.discussionActivity.wakeLog(joined.workspaceId);
-      const body: WorkspaceJoinResult = { workspaceId: joined.workspaceId, shareId: joined.shareId, workspaceName: joined.workspaceName };
+      const body: WorkspaceJoinResult = {
+        workspaceId: joined.workspaceId,
+        shareId: joined.shareId,
+        workspaceName: joined.workspaceName,
+      };
       return jsonResponse(body, 200, { "cache-control": "private, no-store" });
     }
 
@@ -242,57 +311,124 @@ export function createWorkspaceMemberRoutes(options: {
     const nowMs = options.nowMs();
     switch (route.route) {
       case "members-invite": {
-        if (!options.resolveUserIdByEmail) throw badRequest("recipient email lookup is not available on this relay");
-        if (typeof input.email !== "string" || input.email.length > MAX_MEMBER_EMAIL_CHARS) throw badRequest("email is invalid");
+        if (!options.resolveUserIdByEmail)
+          throw badRequest("recipient email lookup is not available on this relay");
+        if (typeof input.email !== "string" || input.email.length > MAX_MEMBER_EMAIL_CHARS)
+          throw badRequest("email is invalid");
         const email = normalizeEmail(input.email);
         if (!/^[^\s@]+@[^\s@]+$/u.test(email)) throw badRequest("email is invalid");
         const workspaceName = parseWorkspaceName(input.workspaceName);
         const resolved = await options.resolveUserIdByEmail(email);
-        const invite = (recipientUserId: string | null) => storage.inviteWorkspaceMember({
-          workspaceId, actorUserId: userId, workspaceName, email, recipientUserId,
-          newMemberId: options.newId, newGrantId: options.newGrantId, newShareId: options.newShareId, nowMs,
-        });
+        const invite = (recipientUserId: string | null) =>
+          storage.inviteWorkspaceMember({
+            workspaceId,
+            actorUserId: userId,
+            workspaceName,
+            email,
+            recipientUserId,
+            newMemberId: options.newId,
+            newGrantId: options.newGrantId,
+            newShareId: options.newShareId,
+            nowMs,
+          });
         let result = invite(resolved);
         // An account being deleted counts as no account: its address gets an email invite.
-        if (!result.ok && result.reason === "account-unavailable" && resolved !== null) result = invite(null);
+        if (!result.ok && result.reason === "account-unavailable" && resolved !== null)
+          result = invite(null);
         settle(result, workspaceId);
         return respondWithView(workspaceId, userId);
       }
       case "members-level": {
-        if (!isShareAccessValue(input.level)) throw badRequest('level must be "view", "comment", or "edit"');
+        if (!isShareAccessValue(input.level))
+          throw badRequest('level must be "view", "comment", or "edit"');
         const workspaceName = parseWorkspaceName(input.workspaceName);
-        settle(storage.setWorkspaceMemberLevel({ workspaceId, actorUserId: userId, level: input.level, workspaceName, newShareId: options.newShareId, nowMs }), workspaceId);
+        settle(
+          storage.setWorkspaceMemberLevel({
+            workspaceId,
+            actorUserId: userId,
+            level: input.level,
+            workspaceName,
+            newShareId: options.newShareId,
+            nowMs,
+          }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
       }
       case "members-role": {
-        if (input.role !== "admin" && input.role !== "member") throw badRequest('role must be "admin" or "member"');
-        settle(storage.setWorkspaceMemberRole({ workspaceId, actorUserId: userId, memberId: route.memberId, role: input.role }), workspaceId);
+        if (input.role !== "admin" && input.role !== "member")
+          throw badRequest('role must be "admin" or "member"');
+        settle(
+          storage.setWorkspaceMemberRole({
+            workspaceId,
+            actorUserId: userId,
+            memberId: route.memberId,
+            role: input.role,
+          }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
       }
       case "members-remove":
-        settle(storage.removeWorkspaceMember({ workspaceId, actorUserId: userId, memberId: route.memberId, nowMs }), workspaceId);
+        settle(
+          storage.removeWorkspaceMember({
+            workspaceId,
+            actorUserId: userId,
+            memberId: route.memberId,
+            nowMs,
+          }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
       case "members-let-back-in":
-        settle(storage.letWorkspaceMemberBackIn({ workspaceId, actorUserId: userId, memberId: route.memberId, newGrantId: options.newGrantId, nowMs }), workspaceId);
+        settle(
+          storage.letWorkspaceMemberBackIn({
+            workspaceId,
+            actorUserId: userId,
+            memberId: route.memberId,
+            newGrantId: options.newGrantId,
+            nowMs,
+          }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
       case "members-invite-link": {
-        if (!isInviteLinkAction(input.action)) throw badRequest('action must be "turn-on", "turn-off", or "reset"');
+        if (!isInviteLinkAction(input.action))
+          throw badRequest('action must be "turn-on", "turn-off", or "reset"');
         if (input.action !== "turn-off" && (!linkKey || !shareWebOrigin)) throw notFound();
         const workspaceName = parseWorkspaceName(input.workspaceName);
-        settle(storage.changeWorkspaceInviteLink({
-          workspaceId, actorUserId: userId, action: input.action, workspaceName, newShareId: options.newShareId, nowMs,
-          mint: (generation) => {
-            const token = mintLinkBearer();
-            return { secretHash: hashToken(token), secretSealed: sealLinkBearer(token, linkKey!, ...sealContext(workspaceId, generation)) };
-          },
-        }), workspaceId);
+        settle(
+          storage.changeWorkspaceInviteLink({
+            workspaceId,
+            actorUserId: userId,
+            action: input.action,
+            workspaceName,
+            newShareId: options.newShareId,
+            nowMs,
+            mint: (generation) => {
+              const token = mintLinkBearer();
+              return {
+                secretHash: hashToken(token),
+                secretSealed: sealLinkBearer(
+                  token,
+                  linkKey!,
+                  ...sealContext(workspaceId, generation),
+                ),
+              };
+            },
+          }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
       }
       case "members-leave":
         settle(storage.leaveWorkspace({ workspaceId, userId, nowMs }), workspaceId);
         return jsonResponse({ ok: true }, 200, { "cache-control": "no-store" });
       case "members-end":
-        settle(storage.endWorkspaceMembership({ workspaceId, actorUserId: userId, nowMs }), workspaceId);
+        settle(
+          storage.endWorkspaceMembership({ workspaceId, actorUserId: userId, nowMs }),
+          workspaceId,
+        );
         return respondWithView(workspaceId, userId);
     }
   };

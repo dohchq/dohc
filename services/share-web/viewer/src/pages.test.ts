@@ -3,7 +3,13 @@ import { build, type Rolldown } from "vite";
 import { expect, it } from "vitest";
 import { VIEWER_PAGES, viewerPage } from "./pages";
 
-const ROUTES = ["App.tsx", "NamedRecipientApp.tsx", "NamedChatApp.tsx", "NamedApp.tsx", "JoinApp.tsx"];
+const ROUTES = [
+  "App.tsx",
+  "NamedRecipientApp.tsx",
+  "NamedChatApp.tsx",
+  "NamedApp.tsx",
+  "JoinApp.tsx",
+];
 const EDITOR = ["NamedDocumentEditor.tsx", "DiscardDraft.tsx"];
 
 it("loads only each route's own code before it renders", async () => {

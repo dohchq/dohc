@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import {
   accountDeletionKey,
   ACCOUNT_DELETION_PATH,
@@ -121,13 +122,22 @@ describe("sync relay startup guards", () => {
     },
   );
 
-  it.each(["true", "", "OFF"])("refuses an invalid invite-link sign-up setting before opening storage: %j", async value => {
-    const dbPath = join(await tempRoot("invalid-invite-link-sign-up"), "relay.sqlite");
-    const {code, stderr} = await spawnRelayExpectExit({NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1",
-      SYNC_RELAY_PORT: "0", SYNC_RELAY_DB_PATH: dbPath, DOHC_INVITE_LINK_SIGN_UP: value});
-    expect(code).toBe(1); expect(stderr).toContain("DOHC_INVITE_LINK_SIGN_UP must be on or off.");
-    await expect(access(dbPath)).rejects.toMatchObject({code: "ENOENT"});
-  });
+  it.each(["true", "", "OFF"])(
+    "refuses an invalid invite-link sign-up setting before opening storage: %j",
+    async (value) => {
+      const dbPath = join(await tempRoot("invalid-invite-link-sign-up"), "relay.sqlite");
+      const { code, stderr } = await spawnRelayExpectExit({
+        NODE_ENV: "test",
+        SYNC_RELAY_TEST_AUTH: "1",
+        SYNC_RELAY_PORT: "0",
+        SYNC_RELAY_DB_PATH: dbPath,
+        DOHC_INVITE_LINK_SIGN_UP: value,
+      });
+      expect(code).toBe(1);
+      expect(stderr).toContain("DOHC_INVITE_LINK_SIGN_UP must be on or off.");
+      await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 
   it.each([
     {

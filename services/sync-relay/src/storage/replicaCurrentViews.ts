@@ -105,7 +105,8 @@ export function replicaCurrentViewSelectors(
     .flatMap((row) => {
       const selector = parseStoredAnyShareSelectorJson(String(row.selector_json));
       // A workspace share reads every tracked path in main.
-      if (selector && "kind" in selector && selector.kind === "workspace") return [{ versionId: MAIN_VERSION_ID, paths: [] }];
+      if (selector && "kind" in selector && selector.kind === "workspace")
+        return [{ versionId: MAIN_VERSION_ID, paths: [] }];
       if (
         !selector ||
         ("kind" in selector && selector.kind === "chat") ||

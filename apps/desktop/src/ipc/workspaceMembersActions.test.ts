@@ -7,51 +7,112 @@ import { deferred } from "../testing/deferred";
 
 type Credentials = { userId: string; token: string };
 const view = (overrides: Partial<WorkspaceMembersView> = {}): WorkspaceMembersView => ({
-  workspaceId: "ws-1", workspaceName: "Community",
-  viewer: { memberId: "owner", role: "owner" }, memberLevel: "comment",
+  workspaceId: "ws-1",
+  workspaceName: "Community",
+  viewer: { memberId: "owner", role: "owner" },
+  memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
   people: [
-    { memberId: "owner", role: "owner", state: "active", name: "Ice", email: "ice@test", invitedAtMs: null, joinedAtMs: 1, removedAtMs: null },
-    { memberId: "m-ana", role: "member", state: "active", name: "Ana", email: "ana@test", invitedAtMs: 1, joinedAtMs: 2, removedAtMs: null },
+    {
+      memberId: "owner",
+      role: "owner",
+      state: "active",
+      name: "Ice",
+      email: "ice@test",
+      invitedAtMs: null,
+      joinedAtMs: 1,
+      removedAtMs: null,
+    },
+    {
+      memberId: "m-ana",
+      role: "member",
+      state: "active",
+      name: "Ana",
+      email: "ana@test",
+      invitedAtMs: 1,
+      joinedAtMs: 2,
+      removedAtMs: null,
+    },
   ],
   ...overrides,
 });
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 function harness(options: { shareView?: unknown } = {}) {
-  let generation = 1, open = true;
-  const workspace = { workspaceId: "ws-1", rootPath: "C:\\Users\\me\\Community", shareView: options.shareView };
-  const relay = vi.fn(async (_credentials: Credentials, _path: string, _init: RequestInit): Promise<Response> => json(view()));
-  const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) =>
-    ({ credentials: { userId: "owner", token: "secret" }, credentialGeneration: generation }));
+  let generation = 1,
+    open = true;
+  const workspace = {
+    workspaceId: "ws-1",
+    rootPath: "C:\\Users\\me\\Community",
+    shareView: options.shareView,
+  };
+  const relay = vi.fn(
+    async (_credentials: Credentials, _path: string, _init: RequestInit): Promise<Response> =>
+      json(view()),
+  );
+  const remote = vi.fn(
+    async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({
+      credentials: { userId: "owner", token: "secret" },
+      credentialGeneration: generation,
+    }),
+  );
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
   const members = createWorkspaceMembersActions<typeof workspace, Credentials>({
-    remoteForWorkspace: remote, currentCredentialGeneration: () => generation, relayResponse: relay, sharesChanged,
+    remoteForWorkspace: remote,
+    currentCredentialGeneration: () => generation,
+    relayResponse: relay,
+    sharesChanged,
   });
   const listeners = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>();
-  registerOperations({
-    handle: (channel, listener) => listeners.set(channel, listener),
-    assertTrustedSender: () => undefined,
-    withActiveWorkspace: async (_event, workspaceId, message, work) => {
-      const assertCurrent = () => { if (!open || workspaceId !== workspace.workspaceId) throw new Error(message); };
-      assertCurrent();
-      const result = await work({ workspace, assertCurrent });
-      assertCurrent();
-      return result;
+  registerOperations(
+    {
+      handle: (channel, listener) => listeners.set(channel, listener),
+      assertTrustedSender: () => undefined,
+      withActiveWorkspace: async (_event, workspaceId, message, work) => {
+        const assertCurrent = () => {
+          if (!open || workspaceId !== workspace.workspaceId) throw new Error(message);
+        };
+        assertCurrent();
+        const result = await work({ workspace, assertCurrent });
+        assertCurrent();
+        return result;
+      },
     },
-  }, memberOperations, { workspaceMembers: ({ request }, { operation }) => members(operation as Parameters<typeof members>[0], request) });
-  const bridge = operationBridge(memberOperations, (channel, payload) => listeners.get(channel)!({}, payload));
-  return { bridge, relay, remote, sharesChanged, rotate: () => { generation++; }, close: () => { open = false; } };
+    memberOperations,
+    {
+      workspaceMembers: ({ request }, { operation }) =>
+        members(operation as Parameters<typeof members>[0], request),
+    },
+  );
+  const bridge = operationBridge(memberOperations, (channel, payload) =>
+    listeners.get(channel)!({}, payload),
+  );
+  return {
+    bridge,
+    relay,
+    remote,
+    sharesChanged,
+    rotate: () => {
+      generation++;
+    },
+    close: () => {
+      open = false;
+    },
+  };
 }
 
 const calls = (relay: ReturnType<typeof harness>["relay"]) =>
-  relay.mock.calls.map(([, path, init]) => `${init.method} ${path}${init.body ? ` ${String(init.body)}` : ""}`);
+  relay.mock.calls.map(
+    ([, path, init]) => `${init.method} ${path}${init.body ? ` ${String(init.body)}` : ""}`,
+  );
 
 describe("workspace members actions", () => {
   it("lists through the window's workspace and signed-in account, allowing a paused remote", async () => {
     const h = harness();
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }))
-      .resolves.toEqual({ status: "ready", view: view() });
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).resolves.toEqual({ status: "ready", view: view() });
     expect(calls(h.relay)).toEqual(["GET /sync/ws-1/members"]);
     expect(h.relay.mock.calls[0]![0]).toEqual({ userId: "owner", token: "secret" });
     expect(h.remote.mock.calls[0]![1]).toEqual({ allowPaused: true });
@@ -61,39 +122,65 @@ describe("workspace members actions", () => {
     for (const status of [403, 404]) {
       const h = harness();
       h.relay.mockResolvedValueOnce(json({ error: "no" }, status));
-      await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } })).resolves.toEqual({ status: "refused" });
+      await expect(
+        h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+      ).resolves.toEqual({ status: "refused" });
     }
   });
 
   it("refuses a received share view before asking the relay", async () => {
-    const h = harness({ shareView: { shareId: "s", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["a"], versionId: null, access: "view" } } });
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }))
-      .rejects.toThrow("Open the original workspace to manage its members.");
+    const h = harness({
+      shareView: {
+        shareId: "s",
+        granterEmail: null,
+        genericChatWritable: false,
+        grantedSelector: { paths: ["a"], versionId: null, access: "view" },
+      },
+    });
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).rejects.toThrow("Open the original workspace to manage its members.");
     expect(h.relay).not.toHaveBeenCalled();
   });
 
   it("rejects a view for another workspace or one the contract refuses, instead of showing it", async () => {
     const h = harness();
     h.relay.mockResolvedValueOnce(json(view({ workspaceId: "ws-2" })));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } })).rejects.toThrow("could not read Members");
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).rejects.toThrow("could not read Members");
     // A member's view must carry no emails.
-    h.relay.mockResolvedValueOnce(json(view({ viewer: { memberId: "m-ana", role: "member" }, inviteLink: null })));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } })).rejects.toThrow("could not read Members");
+    h.relay.mockResolvedValueOnce(
+      json(view({ viewer: { memberId: "m-ana", role: "member" }, inviteLink: null })),
+    );
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).rejects.toThrow("could not read Members");
   });
 
   it("says the server is unreachable when the request fails, and keeps the session-change error when the account changed", async () => {
     const h = harness();
     h.relay.mockRejectedValueOnce(new TypeError("fetch failed"));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } })).rejects.toThrow(MEMBERS_UNREACHABLE);
-    h.relay.mockImplementationOnce(async () => { h.rotate(); throw new TypeError("aborted"); });
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } })).rejects.toThrow("Your server session changed. Try again.");
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).rejects.toThrow(MEMBERS_UNREACHABLE);
+    h.relay.mockImplementationOnce(async () => {
+      h.rotate();
+      throw new TypeError("aborted");
+    });
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).rejects.toThrow("Your server session changed. Try again.");
   });
 
   it("drops an answer that arrives after the account changed", async () => {
     const h = harness();
     const answer = deferred<Response>();
     h.relay.mockReturnValueOnce(answer.promise);
-    const pending = h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "level", level: "edit" } });
+    const pending = h.bridge.workspaceMembers({
+      workspaceId: "ws-1",
+      request: { action: "level", level: "edit" },
+    });
     await vi.waitFor(() => expect(h.relay).toHaveBeenCalled());
     h.rotate();
     answer.resolve(json(view({ memberLevel: "edit" })));
@@ -113,9 +200,15 @@ describe("workspace members actions", () => {
 
   it("invites with the folder's name and answers the view the relay returns, without listing again", async () => {
     const h = harness();
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: " bo@test " } }))
-      .resolves.toEqual({ status: "ready", view: view() });
-    expect(calls(h.relay)).toEqual(['POST /sync/ws-1/members/invites {"email":"bo@test","workspaceName":"Community"}']);
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "invite", email: " bo@test " },
+      }),
+    ).resolves.toEqual({ status: "ready", view: view() });
+    expect(calls(h.relay)).toEqual([
+      'POST /sync/ws-1/members/invites {"email":"bo@test","workspaceName":"Community"}',
+    ]);
   });
 
   it("sends each change to its route and answers the view the relay returns", async () => {
@@ -128,7 +221,8 @@ describe("workspace members actions", () => {
       { action: "link", change: "turn-off" },
       { action: "link", change: "reset" },
     ] as const;
-    for (const request of requests) await h.bridge.workspaceMembers({ workspaceId: "ws-1", request });
+    for (const request of requests)
+      await h.bridge.workspaceMembers({ workspaceId: "ws-1", request });
     expect(calls(h.relay)).toEqual([
       'POST /sync/ws-1/members/level {"level":"view","workspaceName":"Community"}',
       'POST /sync/ws-1/members/m-ana/role {"role":"admin"}',
@@ -143,12 +237,26 @@ describe("workspace members actions", () => {
     const h = harness();
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } });
     h.relay.mockResolvedValueOnce(json({ error: "forbidden" }, 403));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } })).rejects.toThrow();
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "remove", person: "m-ana" },
+      }),
+    ).rejects.toThrow();
     expect(h.sharesChanged).not.toHaveBeenCalled();
 
-    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "level", level: "view" } });
-    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } });
-    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: "bo@test" } });
+    await h.bridge.workspaceMembers({
+      workspaceId: "ws-1",
+      request: { action: "level", level: "view" },
+    });
+    await h.bridge.workspaceMembers({
+      workspaceId: "ws-1",
+      request: { action: "remove", person: "m-ana" },
+    });
+    await h.bridge.workspaceMembers({
+      workspaceId: "ws-1",
+      request: { action: "invite", email: "bo@test" },
+    });
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } });
     expect(h.sharesChanged.mock.calls).toEqual([["ws-1"], ["ws-1"], ["ws-1"], ["ws-1"]]);
   });
@@ -158,9 +266,13 @@ describe("workspace members actions", () => {
       const h = harness();
       const answer = deferred<Response>();
       h.relay.mockReturnValueOnce(answer.promise);
-      const pending = h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } });
+      const pending = h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "remove", person: "m-ana" },
+      });
       await vi.waitFor(() => expect(h.relay).toHaveBeenCalled());
-      if (leave === "close") h.close(); else h.rotate();
+      if (leave === "close") h.close();
+      else h.rotate();
       answer.resolve(json(view()));
       await expect(pending).rejects.toThrow();
       expect(h.sharesChanged.mock.calls).toEqual([["ws-1"]]);
@@ -169,41 +281,80 @@ describe("workspace members actions", () => {
 
   it("finds a person by email for the owner's tools, and says so when no one has it", async () => {
     const h = harness();
-    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "ANA@test" } });
-    expect(calls(h.relay)).toEqual(["GET /sync/ws-1/members", "POST /sync/ws-1/members/m-ana/remove {}"]);
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "cy@test" } }))
-      .rejects.toThrow("No one in this workspace has the email cy@test.");
+    await h.bridge.workspaceMembers({
+      workspaceId: "ws-1",
+      request: { action: "remove", person: "ANA@test" },
+    });
+    expect(calls(h.relay)).toEqual([
+      "GET /sync/ws-1/members",
+      "POST /sync/ws-1/members/m-ana/remove {}",
+    ]);
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "remove", person: "cy@test" },
+      }),
+    ).rejects.toThrow("No one in this workspace has the email cy@test.");
   });
 
   it("names the workspace by its folder when the relay has no membership to name it", async () => {
     const h = harness();
-    h.relay.mockResolvedValueOnce(json(view({ workspaceName: "", inviteLink: { enabled: false, url: null } })));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }))
-      .resolves.toMatchObject({ status: "ready", view: { workspaceName: "Community" } });
+    h.relay.mockResolvedValueOnce(
+      json(view({ workspaceName: "", inviteLink: { enabled: false, url: null } })),
+    );
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
+    ).resolves.toMatchObject({ status: "ready", view: { workspaceName: "Community" } });
   });
 
   it("answers the owner's view after ending membership, and done after leaving", async () => {
     const h = harness();
-    const alone = view({ workspaceName: "", inviteLink: { enabled: false, url: null }, people: [view().people[0]!] });
+    const alone = view({
+      workspaceName: "",
+      inviteLink: { enabled: false, url: null },
+      people: [view().people[0]!],
+    });
     h.relay.mockResolvedValueOnce(json(alone));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } }))
-      .resolves.toEqual({ status: "ready", view: { ...alone, workspaceName: "Community" } });
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } }),
+    ).resolves.toEqual({ status: "ready", view: { ...alone, workspaceName: "Community" } });
     h.relay.mockResolvedValueOnce(json({ ok: true }));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "leave" } })).resolves.toEqual({ status: "done" });
-    expect(calls(h.relay)).toEqual(["POST /sync/ws-1/members/end {}", "POST /sync/ws-1/members/leave {}"]);
+    await expect(
+      h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "leave" } }),
+    ).resolves.toEqual({ status: "done" });
+    expect(calls(h.relay)).toEqual([
+      "POST /sync/ws-1/members/end {}",
+      "POST /sync/ws-1/members/leave {}",
+    ]);
   });
 
   it("names what failed and what to do for a refused change", async () => {
     const h = harness();
     h.relay.mockResolvedValueOnce(json({ error: "forbidden" }, 403));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "role", person: "m-ana", role: "admin" } }))
-      .rejects.toThrow("dohc could not change this person's role because your role in this workspace no longer allows it.");
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "role", person: "m-ana", role: "admin" },
+      }),
+    ).rejects.toThrow(
+      "dohc could not change this person's role because your role in this workspace no longer allows it.",
+    );
   });
 
   it("refuses a malformed request before main runs it", async () => {
     const h = harness();
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: "not an email" } as never })).rejects.toThrow();
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "level", level: "owner" } as never })).rejects.toThrow();
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "invite", email: "not an email" } as never,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "level", level: "owner" } as never,
+      }),
+    ).rejects.toThrow();
     expect(h.relay).not.toHaveBeenCalled();
   });
 });

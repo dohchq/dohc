@@ -114,19 +114,30 @@ export function isInviteLinkAction(value: unknown): value is InviteLinkAction {
   return typeof value === "string" && (INVITE_LINK_ACTIONS as readonly string[]).includes(value);
 }
 
-const isNullableString = (value: unknown): value is string | null => value === null || typeof value === "string";
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === "string";
 
 export function parseWorkspaceJoinPreview(value: unknown): WorkspaceJoinPreview | null {
   if (!isRecord(value)) return null;
   const { workspaceName, ownerName, alreadyMember } = value;
-  if (typeof workspaceName !== "string" || !isNullableString(ownerName) || typeof alreadyMember !== "boolean") return null;
+  if (
+    typeof workspaceName !== "string" ||
+    !isNullableString(ownerName) ||
+    typeof alreadyMember !== "boolean"
+  )
+    return null;
   return { workspaceName, ownerName, alreadyMember };
 }
 
 export function parseWorkspaceJoinResult(value: unknown): WorkspaceJoinResult | null {
   if (!isRecord(value)) return null;
   const { workspaceId, shareId, workspaceName } = value;
-  if (typeof workspaceId !== "string" || typeof shareId !== "string" || typeof workspaceName !== "string") return null;
+  if (
+    typeof workspaceId !== "string" ||
+    typeof shareId !== "string" ||
+    typeof workspaceName !== "string"
+  )
+    return null;
   return { workspaceId, shareId, workspaceName };
 }
 
@@ -149,7 +160,11 @@ export const MEMBER_ACTION_ROLES = {
 export type MemberAction = keyof typeof MEMBER_ACTION_ROLES;
 
 /** Whether `viewer` may do `action`, to a person whose role is `target` when it acts on one. */
-export function memberMay(viewer: WorkspaceRole, action: MemberAction, target?: WorkspaceRole): boolean {
+export function memberMay(
+  viewer: WorkspaceRole,
+  action: MemberAction,
+  target?: WorkspaceRole,
+): boolean {
   // The one exception to the table: only the owner removes an admin.
   const needs = action === "remove" && target === "admin" ? "owner" : MEMBER_ACTION_ROLES[action];
   return needs === "anyone" || viewer === "owner" || (needs === "manager" && viewer === "admin");

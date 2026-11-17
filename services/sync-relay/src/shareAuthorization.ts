@@ -42,7 +42,8 @@ type ShareAuthorizationStorage = Pick<
   | "getShareGrant"
   | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
-> & Partial<Pick<SyncRelayStorage, "workspaceMemberGrantIsCurrent">>;
+> &
+  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantIsCurrent">>;
 
 export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
   ok: true;
@@ -186,7 +187,10 @@ export function authorizeLinkShareAction(
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   // A link never holds a workspace share.
-  const files = result.ok && !isWorkspaceSelector(result.effectiveSelector) ? fileSideOf(result.effectiveSelector) : null;
+  const files =
+    result.ok && !isWorkspaceSelector(result.effectiveSelector)
+      ? fileSideOf(result.effectiveSelector)
+      : null;
   if (!result.ok || !files) return { ok: false, reason: "gauntlet" };
   return { ...result, effectiveSelector: files };
 }
@@ -229,9 +233,13 @@ function validateCurrentShareGrant(
   if (!storedSelector) return { ok: false, reason: "gauntlet" };
   // A workspace share is held only by people in the workspace, each through
   // an independent grant on an active member entry.
-  if ("kind" in storedSelector && storedSelector.kind === "workspace" &&
-      (grant.principalKind !== "user" || grant.parentGrantId !== null ||
-       storage.workspaceMemberGrantIsCurrent?.(share.shareId, grant.grantId) !== true)) {
+  if (
+    "kind" in storedSelector &&
+    storedSelector.kind === "workspace" &&
+    (grant.principalKind !== "user" ||
+      grant.parentGrantId !== null ||
+      storage.workspaceMemberGrantIsCurrent?.(share.shareId, grant.grantId) !== true)
+  ) {
     return { ok: false, reason: "gauntlet" };
   }
 

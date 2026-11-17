@@ -10,9 +10,12 @@ export const memberOperations = {
   workspaceMembers: {
     capabilityIdsByAction: MEMBERS_CAPABILITIES,
     channel: "desktop:workspace-members",
-    payload: z.object({ workspaceId: z.string().min(1).max(256), request: MembersRequest }).strict(),
+    payload: z
+      .object({ workspaceId: z.string().min(1).max(256), request: MembersRequest })
+      .strict(),
     result: MembersResult,
-    guard: "active-workspace", scope: "workspace",
+    guard: "active-workspace",
+    scope: "workspace",
     inactiveMessage: MEMBERS_INACTIVE_MESSAGE,
   },
 } as const satisfies OperationTable;

@@ -66,11 +66,22 @@ try {
 const describeWithPostgres = describe.skipIf(!pgAvailable);
 
 describe("the page an emailed link returns to", () => {
-  const link = (callbackURL: string) => `http://localhost:1786/api/auth/verify?token=t&callbackURL=${encodeURIComponent(callbackURL)}`;
+  const link = (callbackURL: string) =>
+    `http://localhost:1786/api/auth/verify?token=t&callbackURL=${encodeURIComponent(callbackURL)}`;
   it("keeps a device sign-in and the join page, and nothing else", () => {
-    expect(emailedLinkNextPage(link("/device?user_code=ABCD-EFGH"))).toBe("/device?user_code=ABCD-EFGH");
+    expect(emailedLinkNextPage(link("/device?user_code=ABCD-EFGH"))).toBe(
+      "/device?user_code=ABCD-EFGH",
+    );
     expect(emailedLinkNextPage(link("/join"))).toBe("/join");
-    for (const refused of ["//join", "/join?x", "/joinx", "/join#token", "/join/", "https://evil.example/join", "/account"]) {
+    for (const refused of [
+      "//join",
+      "/join?x",
+      "/joinx",
+      "/join#token",
+      "/join/",
+      "https://evil.example/join",
+      "/account",
+    ]) {
       expect(emailedLinkNextPage(link(refused)), refused).toBeNull();
     }
     expect(emailedLinkNextPage("http://localhost:1786/api/auth/verify?token=t")).toBeNull();
@@ -151,7 +162,11 @@ if (pgAvailable) {
 }
 
 describeWithPostgres("closed sign-up", () => {
-  function closedAuth(admission: SignUpAdmission, asked: string[] = [], tokens: Array<string | null> = []): WorkspaceAuth {
+  function closedAuth(
+    admission: SignUpAdmission,
+    asked: string[] = [],
+    tokens: Array<string | null> = [],
+  ): WorkspaceAuth {
     return createWorkspaceAuth({
       pool,
       baseURL: "http://localhost:1786",
@@ -174,7 +189,9 @@ describeWithPostgres("closed sign-up", () => {
       body: { email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" },
       headers: new Headers({ [SIGN_UP_INVITE_LINK_HEADER]: "invite-token-0123456789" }),
     });
-    await auth.api.signUpEmail({ body: { email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" } });
+    await auth.api.signUpEmail({
+      body: { email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" },
+    });
     expect(tokens).toEqual(["invite-token-0123456789", null]);
   });
 

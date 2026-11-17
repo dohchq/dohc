@@ -5,7 +5,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { openSyncRelayStorage } from "./storage";
 import { RelayWriteOwner } from "./storage/writeOwner";
-import { claimWorkspace, closeTestStorages, createShare, json, jsonBody, LINK_KEY, request, SHARE_WEB_ORIGIN, tempRoot, testHandler, testStorage } from "./testing";
+import {
+  claimWorkspace,
+  closeTestStorages,
+  createShare,
+  json,
+  jsonBody,
+  LINK_KEY,
+  request,
+  SHARE_WEB_ORIGIN,
+  tempRoot,
+  testHandler,
+  testStorage,
+} from "./testing";
 
 afterEach(closeTestStorages);
 
@@ -17,20 +29,36 @@ async function relay() {
   const storage = await testStorage();
   const h = testHandler(storage);
   await claimWorkspace(h, OWNER, WORKSPACE);
-  return { storage, h, route: createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: LINK_KEY }) };
+  return {
+    storage,
+    h,
+    route: createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: LINK_KEY }),
+  };
 }
 
-function ask(route: (request: Request) => Promise<Response>, email: unknown, key: string | null = KEY, extra: Record<string, unknown> = {}): Promise<Response> {
+function ask(
+  route: (request: Request) => Promise<Response>,
+  email: unknown,
+  key: string | null = KEY,
+  extra: Record<string, unknown> = {},
+): Promise<Response> {
   return route(
     new Request(`http://sync-relay:1788${SIGN_UP_INVITE_PATH}`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(key === null ? {} : { [SIGN_UP_INVITE_KEY_HEADER]: key }) },
+      headers: {
+        "content-type": "application/json",
+        ...(key === null ? {} : { [SIGN_UP_INVITE_KEY_HEADER]: key }),
+      },
       body: JSON.stringify({ email, ...extra }),
     }),
   );
 }
 
-async function invited(route: (request: Request) => Promise<Response>, email: string, inviteToken?: string): Promise<unknown> {
+async function invited(
+  route: (request: Request) => Promise<Response>,
+  email: string,
+  inviteToken?: string,
+): Promise<unknown> {
   const response = await ask(route, email, KEY, inviteToken === undefined ? {} : { inviteToken });
   expect(response.status).toBe(200);
   return ((await response.json()) as { invited: unknown }).invited;
@@ -95,7 +123,10 @@ describe("sign-up invite check", () => {
     try {
       const h = testHandler(storage);
       await claimWorkspace(h, OWNER, WORKSPACE);
-      await createShare(h, OWNER, WORKSPACE, { recipientEmail: "late@corp.example", paths: ["docs"] });
+      await createShare(h, OWNER, WORKSPACE, {
+        recipientEmail: "late@corp.example",
+        paths: ["docs"],
+      });
       const route = createSignUpInviteRoute({ storage, key: KEY, inviteLinkKey: LINK_KEY });
       expect(await invited(route, "late@corp.example")).toBe(true);
 
@@ -116,8 +147,17 @@ describe("sign-up invite check", () => {
   });
 
   describe("through a workspace invite link", () => {
-    async function inviteLink(h: ReturnType<typeof testHandler>, action: string): Promise<string | null> {
-      const response = await h(request(OWNER, `/sync/${WORKSPACE}/members/invite-link`, jsonBody({ action, workspaceName: "Community" })));
+    async function inviteLink(
+      h: ReturnType<typeof testHandler>,
+      action: string,
+    ): Promise<string | null> {
+      const response = await h(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/members/invite-link`,
+          jsonBody({ action, workspaceName: "Community" }),
+        ),
+      );
       expect(response.status, await response.clone().text()).toBe(200);
       const url = ((await json(response)).inviteLink as { url: string | null }).url;
       return url === null ? null : url.slice(`${SHARE_WEB_ORIGIN}/join#`.length);
@@ -128,7 +168,13 @@ describe("sign-up invite check", () => {
       const token = (await inviteLink(h, "turn-on"))!;
       expect(await invited(route, "newcomer@corp.example", token)).toBe(true);
       expect(await invited(route, "newcomer@corp.example")).toBe(false);
-      expect(await invited(route, "newcomer@corp.example", `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`)).toBe(false);
+      expect(
+        await invited(
+          route,
+          "newcomer@corp.example",
+          `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`,
+        ),
+      ).toBe(false);
       expect(await invited(route, "newcomer@corp.example", "short")).toBe(false);
     });
 
@@ -151,7 +197,9 @@ describe("sign-up invite check", () => {
 
     it("refuses a token that is not a string", async () => {
       const { route } = await relay();
-      expect((await ask(route, "newcomer@corp.example", KEY, { inviteToken: 42 })).status).toBe(400);
+      expect((await ask(route, "newcomer@corp.example", KEY, { inviteToken: 42 })).status).toBe(
+        400,
+      );
     });
   });
 });

@@ -58,9 +58,17 @@ describe("relay share lanes", () => {
 
   // The Members page lists and ends a membership; Sharing never does.
   it("leaves a workspace membership out of both lanes", () => {
-    const membership = (shareId: string) => ({ ...pathRow(shareId), selector: { kind: "workspace", role: "member" }, access: "comment" });
+    const membership = (shareId: string) => ({
+      ...pathRow(shareId),
+      selector: { kind: "workspace", role: "member" },
+      access: "comment",
+    });
     // The relay could not read a received membership's role.
-    const damagedMembership = { ...damagedPathRow("r-damaged-member"), access: "comment", selectorKind: "workspace" };
+    const damagedMembership = {
+      ...damagedPathRow("r-damaged-member"),
+      access: "comment",
+      selectorKind: "workspace",
+    };
     const lanes = pathShareLanes({
       granted: [pathRow("s-path"), membership("s-member")],
       received: [pathRow("r-path"), membership("r-member"), damagedMembership],

@@ -15,7 +15,10 @@ const MAX_EMAIL_CHARS = 320;
 // route. Storage the relay has retired answers 503, so no account rests on
 // its reads. `inviteLinkKey` is null when invite-link sign-up is turned off.
 export function createSignUpInviteRoute(options: {
-  storage: Pick<SyncRelayStorage, "hasPendingInvite" | "inviteLinkAdmitsSignUp" | "captureStanding" | "unavailable">;
+  storage: Pick<
+    SyncRelayStorage,
+    "hasPendingInvite" | "inviteLinkAdmitsSignUp" | "captureStanding" | "unavailable"
+  >;
   key: string;
   inviteLinkKey: string | null;
 }) {
@@ -27,7 +30,8 @@ export function createSignUpInviteRoute(options: {
       return Response.json({ ok: false, error: "not found" }, { status: 404 });
     }
     const body: unknown = await request.json().catch(() => null);
-    const fields = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const fields =
+      body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
     const email = fields.email;
     if (typeof email !== "string" || email.length > MAX_EMAIL_CHARS || !normalizeEmail(email)) {
       return Response.json({ ok: false, error: "email required" }, { status: 400 });
@@ -39,9 +43,15 @@ export function createSignUpInviteRoute(options: {
     const linkAdmits = (token: string) =>
       options.inviteLinkKey !== null &&
       isWorkspaceInviteToken(token) &&
-      options.storage.inviteLinkAdmitsSignUp(hashWorkspaceInviteToken(token, options.inviteLinkKey));
+      options.storage.inviteLinkAdmitsSignUp(
+        hashWorkspaceInviteToken(token, options.inviteLinkKey),
+      );
     return Response.json(
-      { invited: options.storage.hasPendingInvite(normalizeEmail(email)) || (inviteToken !== undefined && linkAdmits(inviteToken)) },
+      {
+        invited:
+          options.storage.hasPendingInvite(normalizeEmail(email)) ||
+          (inviteToken !== undefined && linkAdmits(inviteToken)),
+      },
       { headers: { "cache-control": "no-store" } },
     );
   });

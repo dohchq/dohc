@@ -8,10 +8,14 @@ const RELAY = "http://sync-relay:1788";
 afterEach(() => vi.restoreAllMocks());
 
 function relay(invites: string[]) {
-  const asked: Array<{ url: string; key: string | null; email: unknown; inviteToken?: unknown }> = [];
+  const asked: Array<{ url: string; key: string | null; email: unknown; inviteToken?: unknown }> =
+    [];
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
-    const { email, ...rest } = JSON.parse(String(init?.body)) as { email: unknown; inviteToken?: unknown };
+    const { email, ...rest } = JSON.parse(String(init?.body)) as {
+      email: unknown;
+      inviteToken?: unknown;
+    };
     asked.push({ url: String(input), key: headers.get(SIGN_UP_INVITE_KEY_HEADER), email, ...rest });
     return Response.json({ invited: typeof email === "string" && invites.includes(email) });
   });
@@ -34,13 +38,24 @@ describe("closed sign-up", () => {
   it("admits an address with a pending invite, asking the relay with the key and the normalized address", async () => {
     const { asked, fetch } = relay(["guest@example.com"]);
     expect(await admission(fetch)(" Guest@Example.com ", null)).toBe("admitted");
-    expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" }]);
+    expect(asked).toEqual([
+      { url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" },
+    ]);
   });
 
   it("passes an invite-link token to the relay, which decides", async () => {
     const { asked, fetch } = relay([]);
-    expect(await admission(fetch)("newcomer@example.com", "invite-token-0123456789")).toBe("refused");
-    expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "newcomer@example.com", inviteToken: "invite-token-0123456789" }]);
+    expect(await admission(fetch)("newcomer@example.com", "invite-token-0123456789")).toBe(
+      "refused",
+    );
+    expect(asked).toEqual([
+      {
+        url: `${RELAY}/internal/sign-up-invite`,
+        key: KEY,
+        email: "newcomer@example.com",
+        inviteToken: "invite-token-0123456789",
+      },
+    ]);
   });
 
   it("refuses an address that is neither listed nor invited", async () => {
@@ -59,7 +74,9 @@ describe("closed sign-up", () => {
       },
     ];
     for (const fetch of failing) {
-      expect(await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com", null)).toBe("unavailable");
+      expect(
+        await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com", null),
+      ).toBe("unavailable");
     }
   });
 });

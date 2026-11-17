@@ -1,21 +1,26 @@
 // @vitest-environment jsdom
-import {act} from "react";
-import {createRoot, type Root} from "react-dom/client";
-import {afterEach, beforeEach, expect, it, vi} from "vitest";
-import JoinApp, {takeJoinToken} from "./JoinApp";
-import {jsonResponse, settle, setControlValue} from "./testing";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import JoinApp, { takeJoinToken } from "./JoinApp";
+import { jsonResponse, settle, setControlValue } from "./testing";
 
 const TOKEN = "invite_token_0123456789";
-const PREVIEW = {workspaceName: "Community", ownerName: "Ana", alreadyMember: false};
-const JOINED = {workspaceId: "ws-1", shareId: "share-1", workspaceName: "Community"};
+const PREVIEW = { workspaceName: "Community", ownerName: "Ana", alreadyMember: false };
+const JOINED = { workspaceId: "ws-1", shareId: "share-1", workspaceName: "Community" };
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
-  container = document.createElement("div"); document.body.append(container); root = createRoot(container);
-  Object.assign(globalThis, {IS_REACT_ACT_ENVIRONMENT: true});
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   sessionStorage.clear();
 });
 afterEach(async () => {
-  await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+  await act(async () => root.unmount());
+  container.remove();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   history.replaceState(null, "", "/");
 });
 
@@ -32,19 +37,26 @@ function server(routes: Record<string, Handler>) {
 /** A response the test sends when it chooses. */
 function held() {
   let send: (response: Response) => void = () => undefined;
-  const response = new Promise<Response>((resolve) => { send = resolve; });
-  return {response, send: (value: Response) => send(value)};
+  const response = new Promise<Response>((resolve) => {
+    send = resolve;
+  });
+  return { response, send: (value: Response) => send(value) };
 }
-const signedIn = () => jsonResponse({user: {id: "user-sam", name: "Sam"}});
-const signedOut = () => jsonResponse({user: null});
+const signedIn = () => jsonResponse({ user: { id: "user-sam", name: "Sam" } });
+const signedOut = () => jsonResponse({ user: null });
 const text = () => container.textContent ?? "";
 const heading = () => container.querySelector("h1");
 const announced = () => container.querySelector('[role="status"]')?.textContent;
 const paths = (fetch: ReturnType<typeof server>) => fetch.mock.calls.map(([path]) => String(path));
 const ready = () => !container.querySelector("[aria-busy]");
-async function render(token: string | null = TOKEN) { await act(async () => root.render(<JoinApp token={token} />)); await settle(ready); }
+async function render(token: string | null = TOKEN) {
+  await act(async () => root.render(<JoinApp token={token} />));
+  await settle(ready);
+}
 function button(label: string) {
-  const found = [...container.querySelectorAll("button")].find(node => node.textContent === label);
+  const found = [...container.querySelectorAll("button")].find(
+    (node) => node.textContent === label,
+  );
   expect(found, label).toBeDefined();
   return found!;
 }
@@ -78,54 +90,87 @@ it("previews the workspace and its owner, says before Join that dohc can't open 
   sessionStorage.setItem("dohc.join.token", TOKEN);
   const fetch = server({
     "/api/account/session": signedIn,
-    "/api/members/join-preview": body => { expect(body).toEqual({token: TOKEN}); return jsonResponse(PREVIEW); },
-    "/api/members/join": body => { expect(body).toEqual({token: TOKEN}); return jsonResponse(JOINED); },
+    "/api/members/join-preview": (body) => {
+      expect(body).toEqual({ token: TOKEN });
+      return jsonResponse(PREVIEW);
+    },
+    "/api/members/join": (body) => {
+      expect(body).toEqual({ token: TOKEN });
+      return jsonResponse(JOINED);
+    },
   });
   await render();
   expect(heading()?.textContent).toBe("Join Community");
   expect(text()).toContain("Ana owns this workspace.");
-  expect(text()).toContain("People in it will see your name. The owner and admins will also see your email.");
+  expect(text()).toContain(
+    "People in it will see your name. The owner and admins will also see your email.",
+  );
   const limit = container.querySelector('[data-testid="join-limit"]')!;
-  expect(limit.textContent).toBe("This version of dohc can't open a joined workspace yet. Once you join, it's listed in the dohc app, in Sharing under Shared with me.");
+  expect(limit.textContent).toBe(
+    "This version of dohc can't open a joined workspace yet. Once you join, it's listed in the dohc app, in Sharing under Shared with me.",
+  );
   // The limit comes before the button that acts on it.
-  expect(limit.compareDocumentPosition(button("Join workspace")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(
+    limit.compareDocumentPosition(button("Join workspace")) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
   expect(text()).toContain("Signed in as Sam · Sign out");
   await click("Join workspace");
   expect(heading()?.textContent).toBe("You joined Community");
-  expect(container.querySelector('[data-testid="join-limit"]')?.textContent)
-    .toBe("It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet.");
+  expect(container.querySelector('[data-testid="join-limit"]')?.textContent).toBe(
+    "It's listed in the dohc app, in Sharing under Shared with me. This version of dohc can't open it yet.",
+  );
   expect(text()).toContain("Signed in as Sam · Sign out");
   expect(sessionStorage.getItem("dohc.join.token")).toBeNull();
-  expect(paths(fetch)).toEqual(["/api/account/session", "/api/members/join-preview", "/api/members/join"]);
+  expect(paths(fetch)).toEqual([
+    "/api/account/session",
+    "/api/members/join-preview",
+    "/api/members/join",
+  ]);
 });
 
 it("tells a person already in the workspace so, with no Join", async () => {
-  server({"/api/account/session": signedIn, "/api/members/join-preview": () => jsonResponse({...PREVIEW, alreadyMember: true})});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => jsonResponse({ ...PREVIEW, alreadyMember: true }),
+  });
   await render();
   expect(heading()?.textContent).toBe("You're already in Community");
   expect(text()).toContain("It's listed in the dohc app");
-  expect([...container.querySelectorAll("button")].map(node => node.textContent)).toEqual(["Sign out"]);
+  expect([...container.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Sign out",
+  ]);
 });
 
 it("signs in, then previews; and offers an account to someone new, keeping the link's place", async () => {
   let session = false;
   server({
-    "/api/account/session": () => session ? signedIn() : signedOut(),
-    "/api/account/sign-in": body => { expect(body).toEqual({email: "sam@example.com", password: "pw"}); session = true; return jsonResponse({ok: true, user: {id: "user-sam", name: "Sam"}}); },
+    "/api/account/session": () => (session ? signedIn() : signedOut()),
+    "/api/account/sign-in": (body) => {
+      expect(body).toEqual({ email: "sam@example.com", password: "pw" });
+      session = true;
+      return jsonResponse({ ok: true, user: { id: "user-sam", name: "Sam" } });
+    },
     "/api/members/join-preview": () => jsonResponse(PREVIEW),
   });
   await render();
   expect(heading()?.textContent).toBe("Join a workspace on dohc");
-  expect(container.querySelector<HTMLAnchorElement>('a[href^="/account/sign-up"]')?.getAttribute("href")).toBe("/account/sign-up?next=%2Fjoin");
+  expect(
+    container.querySelector<HTMLAnchorElement>('a[href^="/account/sign-up"]')?.getAttribute("href"),
+  ).toBe("/account/sign-up?next=%2Fjoin");
   await signInAs("sam@example.com", "pw");
   await settle(() => heading()?.textContent === "Join Community");
 });
 
 it("says who signed in, with Sign out, when the server fails right after sign-in", async () => {
-  let session = false, up = false;
+  let session = false,
+    up = false;
   server({
-    "/api/account/session": () => !session ? signedOut() : up ? signedIn() : jsonResponse({error: "unavailable"}, 503),
-    "/api/account/sign-in": () => { session = true; return jsonResponse({ok: true, user: {id: "user-sam", name: "Sam"}}); },
+    "/api/account/session": () =>
+      !session ? signedOut() : up ? signedIn() : jsonResponse({ error: "unavailable" }, 503),
+    "/api/account/sign-in": () => {
+      session = true;
+      return jsonResponse({ ok: true, user: { id: "user-sam", name: "Sam" } });
+    },
     "/api/members/join-preview": () => {
       if (!up) throw new TypeError("Failed to fetch");
       return jsonResponse(PREVIEW);
@@ -143,43 +188,67 @@ it("says who signed in, with Sign out, when the server fails right after sign-in
 });
 
 it("keeps the sign-in form with the reason when sign-in fails", async () => {
-  server({"/api/account/session": signedOut, "/api/account/sign-in": () => jsonResponse({ok: false}, 401)});
+  server({
+    "/api/account/session": signedOut,
+    "/api/account/sign-in": () => jsonResponse({ ok: false }, 401),
+  });
   await render();
   await signInAs("sam@example.com", "wrong");
   await settle(() => container.querySelector('[role="alert"]') !== null);
-  expect(container.querySelector('[role="alert"]')?.textContent).toBe("dohc could not sign you in. Check your email and password, then try again.");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "dohc could not sign you in. Check your email and password, then try again.",
+  );
   expect(container.querySelector("form")).not.toBeNull();
 });
 
 it.each([
-  ["link_off", 404, "This invite link no longer works", "Ask them to turn it on, then choose Try again."],
-  ["removed", 403, "You were removed from this workspace", "Ask them to let you back in, then choose Try again."],
+  [
+    "link_off",
+    404,
+    "This invite link no longer works",
+    "Ask them to turn it on, then choose Try again.",
+  ],
+  [
+    "removed",
+    403,
+    "You were removed from this workspace",
+    "Ask them to let you back in, then choose Try again.",
+  ],
   ["full", 409, "This workspace is full", "It already has 1,000 people."],
-] as const)("says why a %s link cannot join, keeps the link and the account, and previews again from Try again", async (code, status, title, words) => {
-  sessionStorage.setItem("dohc.join.token", TOKEN);
-  let fixed = false;
-  const fetch = server({"/api/account/session": signedIn,
-    "/api/members/join-preview": () => fixed ? jsonResponse(PREVIEW) : jsonResponse({ok: false, code}, status)});
-  await render();
-  expect(heading()?.textContent).toBe(title);
-  expect(text()).toContain(words);
-  expect(text()).toContain("Signed in as Sam · Sign out");
-  expect(sessionStorage.getItem("dohc.join.token")).toBe(TOKEN);
-  fixed = true;
-  await click("Try again");
-  expect(heading()?.textContent).toBe("Join Community");
-  expect(paths(fetch).filter(path => path === "/api/members/join-preview")).toHaveLength(2);
-});
+] as const)(
+  "says why a %s link cannot join, keeps the link and the account, and previews again from Try again",
+  async (code, status, title, words) => {
+    sessionStorage.setItem("dohc.join.token", TOKEN);
+    let fixed = false;
+    const fetch = server({
+      "/api/account/session": signedIn,
+      "/api/members/join-preview": () =>
+        fixed ? jsonResponse(PREVIEW) : jsonResponse({ ok: false, code }, status),
+    });
+    await render();
+    expect(heading()?.textContent).toBe(title);
+    expect(text()).toContain(words);
+    expect(text()).toContain("Signed in as Sam · Sign out");
+    expect(sessionStorage.getItem("dohc.join.token")).toBe(TOKEN);
+    fixed = true;
+    await click("Try again");
+    expect(heading()?.textContent).toBe("Join Community");
+    expect(paths(fetch).filter((path) => path === "/api/members/join-preview")).toHaveLength(2);
+  },
+);
 
 it("says it is checking while Try again asks again", async () => {
   sessionStorage.setItem("dohc.join.token", TOKEN);
   const again = held();
   let first = true;
-  server({"/api/account/session": signedIn, "/api/members/join-preview": () => {
-    if (!first) return again.response;
-    first = false;
-    return jsonResponse({ok: false, code: "full"}, 409);
-  }});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => {
+      if (!first) return again.response;
+      first = false;
+      return jsonResponse({ ok: false, code: "full" }, 409);
+    },
+  });
   await render();
   await act(async () => button("Try again").click());
   expect(button("Checking…").getAttribute("aria-busy")).toBe("true");
@@ -190,8 +259,11 @@ it("says it is checking while Try again asks again", async () => {
 it("previews again after a refresh once an admin fixed access", async () => {
   history.replaceState(null, "", `/join#${TOKEN}`);
   let removed = true;
-  server({"/api/account/session": signedIn,
-    "/api/members/join-preview": () => removed ? jsonResponse({ok: false, code: "removed"}, 403) : jsonResponse(PREVIEW)});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () =>
+      removed ? jsonResponse({ ok: false, code: "removed" }, 403) : jsonResponse(PREVIEW),
+  });
   await render(takeJoinToken());
   expect(heading()?.textContent).toBe("You were removed from this workspace");
   await act(async () => root.unmount());
@@ -204,8 +276,11 @@ it("previews again after a refresh once an admin fixed access", async () => {
 });
 
 it("asks to sign in again when the session ends before joining", async () => {
-  server({"/api/account/session": signedIn, "/api/members/join-preview": () => jsonResponse(PREVIEW),
-    "/api/members/join": () => jsonResponse({ok: false, code: "signed_out"}, 401)});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => jsonResponse(PREVIEW),
+    "/api/members/join": () => jsonResponse({ ok: false, code: "signed_out" }, 401),
+  });
   await render();
   await click("Join workspace");
   expect(heading()?.textContent).toBe("Join a workspace on dohc");
@@ -214,12 +289,18 @@ it("asks to sign in again when the session ends before joining", async () => {
 
 it("keeps the preview when the server is down at join, and joins from Try again", async () => {
   let up = false;
-  server({"/api/account/session": signedIn, "/api/members/join-preview": () => jsonResponse(PREVIEW),
-    "/api/members/join": () => up ? jsonResponse(JOINED) : jsonResponse({ok: false, code: "unavailable"}, 503)});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => jsonResponse(PREVIEW),
+    "/api/members/join": () =>
+      up ? jsonResponse(JOINED) : jsonResponse({ ok: false, code: "unavailable" }, 503),
+  });
   await render();
   await click("Join workspace");
   expect(heading()?.textContent).toBe("Join Community");
-  expect(container.querySelector('[role="alert"]')?.textContent).toBe("dohc could not reach the server. Check your connection. Try again");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "dohc could not reach the server. Check your connection. Try again",
+  );
   up = true;
   await click("Try again");
   expect(heading()?.textContent).toBe("You joined Community");
@@ -227,26 +308,35 @@ it("keeps the preview when the server is down at join, and joins from Try again"
 
 it("retries a failed sign-out as a sign-out, never a join", async () => {
   let up = false;
-  const fetch = server({"/api/account/session": signedIn, "/api/members/join-preview": () => jsonResponse(PREVIEW),
+  const fetch = server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => jsonResponse(PREVIEW),
     "/api/members/join": () => jsonResponse(JOINED),
-    "/api/account/sign-out": () => up ? jsonResponse({ok: true}) : jsonResponse({ok: false}, 500)});
+    "/api/account/sign-out": () =>
+      up ? jsonResponse({ ok: true }) : jsonResponse({ ok: false }, 500),
+  });
   await render();
   await click("Sign out");
   expect(heading()?.textContent).toBe("Join Community");
-  expect(container.querySelector('[role="alert"]')?.textContent).toBe("dohc could not sign you out. Try again");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    "dohc could not sign you out. Try again",
+  );
   up = true;
   await click("Try again");
   expect(paths(fetch)).not.toContain("/api/members/join");
-  expect(paths(fetch).filter(path => path === "/api/account/sign-out")).toHaveLength(2);
+  expect(paths(fetch).filter((path) => path === "/api/account/sign-out")).toHaveLength(2);
   expect(heading()?.textContent).toBe("Join a workspace on dohc");
 });
 
 it("reads the link again from Try again when the server could not be reached at first", async () => {
   let up = false;
-  server({"/api/account/session": signedIn, "/api/members/join-preview": () => {
-    if (!up) throw new TypeError("Failed to fetch");
-    return jsonResponse(PREVIEW);
-  }});
+  server({
+    "/api/account/session": signedIn,
+    "/api/members/join-preview": () => {
+      if (!up) throw new TypeError("Failed to fetch");
+      return jsonResponse(PREVIEW);
+    },
+  });
   await render();
   expect(heading()?.textContent).toBe("dohc could not check this invite link");
   expect(text()).toContain("Signed in as Sam · Sign out");
@@ -259,8 +349,11 @@ it("moves focus to each new stage's heading, or to the sign-in form's first fiel
   let session = false;
   const joining = held();
   server({
-    "/api/account/session": () => session ? signedIn() : signedOut(),
-    "/api/account/sign-in": () => { session = true; return jsonResponse({ok: true, user: {id: "user-sam", name: "Sam"}}); },
+    "/api/account/session": () => (session ? signedIn() : signedOut()),
+    "/api/account/sign-in": () => {
+      session = true;
+      return jsonResponse({ ok: true, user: { id: "user-sam", name: "Sam" } });
+    },
     "/api/members/join-preview": () => jsonResponse(PREVIEW),
     "/api/members/join": () => joining.response,
   });
@@ -285,18 +378,18 @@ it("moves focus to each new stage's heading, or to the sign-in form's first fiel
 
 it("marks Sign in busy while it signs in", async () => {
   const signing = held();
-  server({"/api/account/session": signedOut, "/api/account/sign-in": () => signing.response});
+  server({ "/api/account/session": signedOut, "/api/account/sign-in": () => signing.response });
   await render();
   await signInAs("sam@example.com", "pw");
   expect(button("Signing in…").getAttribute("aria-busy")).toBe("true");
-  await act(async () => signing.send(jsonResponse({ok: false}, 401)));
+  await act(async () => signing.send(jsonResponse({ ok: false }, 401)));
   await settle(() => container.querySelector('[role="alert"]') !== null);
   expect(button("Sign in").getAttribute("aria-busy")).toBeNull();
 });
 
 it("asks a person with no token in this tab to open the invite link again, and asks the server nothing", async () => {
   // A person who confirmed their email in another tab arrives here signed in, without the token.
-  const fetch = server({"/api/account/session": signedIn});
+  const fetch = server({ "/api/account/session": signedIn });
   await render(null);
   expect(heading()?.textContent).toBe("Open your invite link again");
   expect(text()).toContain("To join, open the whole invite link you were sent.");
