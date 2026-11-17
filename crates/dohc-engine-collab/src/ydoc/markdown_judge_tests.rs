@@ -374,7 +374,10 @@ mod generated {
     }
 
     fn keeps(found: &[String], wanted: &[String]) -> bool {
-        read_markdown::holds_words(found.iter().map(String::as_str), wanted.iter().map(String::as_str))
+        read_markdown::holds_words(
+            found.iter().map(String::as_str),
+            wanted.iter().map(String::as_str),
+        )
     }
 
     pub(super) fn check(
@@ -493,8 +496,8 @@ mod generated {
         use super::*;
         use std::collections::BTreeMap;
         use std::io::Write as _;
-        use std::sync::{Arc, Mutex};
         use std::path::Path;
+        use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
         /// splitmix64: a seeded stream, so a run repeats from its seed.
@@ -550,13 +553,23 @@ mod generated {
         }
 
         const SPECIAL: &[&str] = &[
-            "[", "]", "(", ")", "*", "_", "~", "$", "=", "<", ">", "\\", "`", "|", "!", "{",
-            "}", "#", "-", "+", ":", "&", ";", "\"", "'", "\n", " ", "[[", "]]", "{{atom:",
-            "&#35;", "|---|", "> ", "- ", "1. ", "    ", "==", "$$", "```", "\n\n",
+            "[", "]", "(", ")", "*", "_", "~", "$", "=", "<", ">", "\\", "`", "|", "!", "{", "}",
+            "#", "-", "+", ":", "&", ";", "\"", "'", "\n", " ", "[[", "]]", "{{atom:", "&#35;",
+            "|---|", "> ", "- ", "1. ", "    ", "==", "$$", "```", "\n\n",
         ];
 
         const PREFIXES: &[&str] = &[
-            " ", "  ", "   ", "    ", "\t", "> ", "- ", "1. ", "- [ ] ", "> [!note]\n> ", "| ",
+            " ",
+            "  ",
+            "   ",
+            "    ",
+            "\t",
+            "> ",
+            "- ",
+            "1. ",
+            "- [ ] ",
+            "> [!note]\n> ",
+            "| ",
         ];
 
         fn boundary(text: &str, rng: &mut Rng) -> usize {
@@ -589,8 +602,9 @@ mod generated {
                     lines.swap(i, j);
                 }
                 3 => {
-                    let other: Vec<&str> =
-                        seeds[rng.below(seeds.len())].split_inclusive('\n').collect();
+                    let other: Vec<&str> = seeds[rng.below(seeds.len())]
+                        .split_inclusive('\n')
+                        .collect();
                     if !other.is_empty() {
                         let i = rng.below(other.len());
                         let j = (i + 1 + rng.below(4)).min(other.len());
@@ -669,8 +683,29 @@ mod generated {
         }
 
         fn in_runs(content: &Value) -> Vec<String> {
+            // A front matter key is kept as a key of its map, not a string.
+            fn keys(value: &Value, out: &mut String) {
+                match value {
+                    Value::Array(items) => items.iter().for_each(|item| keys(item, out)),
+                    Value::Object(fields) => {
+                        for (key, field) in fields {
+                            out.push_str(key);
+                            out.push('\n');
+                            keys(field, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let mut found = String::new();
             strings(content, &mut found);
+            if let Some(Value::Object(fields)) = content["frontmatter"].get("value") {
+                for (key, field) in fields {
+                    found.push_str(key);
+                    found.push('\n');
+                    keys(&field["value"], &mut found);
+                }
+            }
             tokens(&found)
         }
 
@@ -785,7 +820,9 @@ mod generated {
                     .filter(|&i| !blank(lines[i]) && (i == 0 || blank(lines[i - 1])))
                     .collect();
                 let i = *starts.get(rng.below(starts.len()))?;
-                let j = (i..lines.len()).find(|&j| blank(lines[j])).unwrap_or(lines.len());
+                let j = (i..lines.len())
+                    .find(|&j| blank(lines[j]))
+                    .unwrap_or(lines.len());
                 let mut unit = lines[i..j].concat();
                 if !unit.ends_with('\n') {
                     unit.push('\n');
@@ -907,7 +944,11 @@ mod generated {
                     step("reread");
                     let again = Ydoc::wire();
                     let read = again.rewrite_content_to_markdown(ContentKind::Richdoc, &written);
-                    step(if read.is_ok() { "rewrite" } else { "reread-refused" });
+                    step(if read.is_ok() {
+                        "rewrite"
+                    } else {
+                        "reread-refused"
+                    });
                     let _ = again.project_richdoc();
                     let sealed = doc.canonical_content().to_string().contains("rawBlock");
                     step(&format!("done sealed={sealed}"));
@@ -937,16 +978,29 @@ mod generated {
                             .iter()
                             .map(|k| read_time(&scaled.at(times * k)).as_secs_f64() * 1000.0)
                             .collect();
-                        println!("{}", serde_json::json!({"source": source, "times": times, "ms": ms}));
+                        println!(
+                            "{}",
+                            serde_json::json!({"source": source, "times": times, "ms": ms})
+                        );
                         continue;
                     }
                 }
                 let kind = judge(&source).map(|kind| format!("{kind:?}"));
                 let first = attempt(&source).ok().flatten();
-                let w1 = first.as_ref().map(|read| read.1.clone()).unwrap_or_default();
+                let w1 = first
+                    .as_ref()
+                    .map(|read| read.1.clone())
+                    .unwrap_or_default();
                 let second = attempt(&w1).ok().flatten();
-                let w2 = second.as_ref().map(|read| read.1.clone()).unwrap_or_default();
-                let w3 = attempt(&w2).ok().flatten().map(|read| read.1).unwrap_or_default();
+                let w2 = second
+                    .as_ref()
+                    .map(|read| read.1.clone())
+                    .unwrap_or_default();
+                let w3 = attempt(&w2)
+                    .ok()
+                    .flatten()
+                    .map(|read| read.1)
+                    .unwrap_or_default();
                 let missing = |found: &[String], wanted: &[String]| {
                     let mut left: HashMap<&str, usize> = HashMap::new();
                     for word in found {
@@ -967,9 +1021,10 @@ mod generated {
                 let lost = first
                     .as_ref()
                     .map(|read| missing(&in_runs(&read.0), &wanted(&source)));
-                let lost_after = first.as_ref().zip(second.as_ref()).map(|(one, two)| {
-                    missing(&in_runs(&two.0), &in_runs(&one.0))
-                });
+                let lost_after = first
+                    .as_ref()
+                    .zip(second.as_ref())
+                    .map(|(one, two)| missing(&in_runs(&two.0), &in_runs(&one.0)));
                 println!(
                     "{}",
                     serde_json::json!({
@@ -992,24 +1047,28 @@ mod generated {
         fn mutation_run() {
             let env = |name: &str| std::env::var(name).ok();
             let seeds_path = env("DOHC_MUTATION_SEEDS").expect("DOHC_MUTATION_SEEDS");
-            let out = std::path::PathBuf::from(env("DOHC_MUTATION_OUT").expect("DOHC_MUTATION_OUT"));
-            let seconds: u64 = env("DOHC_MUTATION_SECONDS").map_or(60, |s| s.parse().expect("seconds"));
+            let out =
+                std::path::PathBuf::from(env("DOHC_MUTATION_OUT").expect("DOHC_MUTATION_OUT"));
+            let seconds: u64 =
+                env("DOHC_MUTATION_SECONDS").map_or(60, |s| s.parse().expect("seconds"));
             let base: u64 = env("DOHC_MUTATION_SEED").map_or(1, |s| s.parse().expect("seed"));
-            let threads: usize = env("DOHC_MUTATION_THREADS").map_or(4, |s| s.parse().expect("threads"));
+            let threads: usize =
+                env("DOHC_MUTATION_THREADS").map_or(4, |s| s.parse().expect("threads"));
             std::fs::create_dir_all(&out).expect("out folder");
             // A panic is a finding, counted; its message is noise here.
             std::panic::set_hook(Box::new(|_| {}));
-            let mut seeds: Vec<(String, String)> =
-                serde_json::from_str::<Vec<Value>>(&std::fs::read_to_string(seeds_path).expect("seeds"))
-                    .expect("seeds json")
-                    .into_iter()
-                    .map(|seed| {
-                        (
-                            seed["id"].as_str().unwrap_or_default().to_owned(),
-                            quote_words(seed["source"].as_str().unwrap_or_default()),
-                        )
-                    })
-                    .collect();
+            let mut seeds: Vec<(String, String)> = serde_json::from_str::<Vec<Value>>(
+                &std::fs::read_to_string(seeds_path).expect("seeds"),
+            )
+            .expect("seeds json")
+            .into_iter()
+            .map(|seed| {
+                (
+                    seed["id"].as_str().unwrap_or_default().to_owned(),
+                    quote_words(seed["source"].as_str().unwrap_or_default()),
+                )
+            })
+            .collect();
             // The named cases, without this round's two: the run must find
             // those by itself.
             seeds.extend(
@@ -1018,7 +1077,8 @@ mod generated {
                     .filter(|named| !named.id.starts_with("R8-"))
                     .map(|named| (named.id.to_owned(), named.source)),
             );
-            let sources: Arc<Vec<String>> = Arc::new(seeds.iter().map(|seed| seed.1.clone()).collect());
+            let sources: Arc<Vec<String>> =
+                Arc::new(seeds.iter().map(|seed| seed.1.clone()).collect());
             let seeds = Arc::new(seeds);
             let found: Arc<Mutex<BTreeMap<(Kind, String), Found>>> = Arc::default();
             let log = Arc::new(Mutex::new(
@@ -1141,8 +1201,12 @@ mod generated {
                     "unit": item.unit.as_ref().map(|u| &u.0), "seed": item.seed, "count": item.count,
                 })).collect::<Vec<_>>(),
             });
-            std::fs::write(out.join(format!("summary-{base}.json")), report.to_string()).expect("summary");
-            println!("{}", serde_json::to_string_pretty(&report["shapes"]).expect("shapes"));
+            std::fs::write(out.join(format!("summary-{base}.json")), report.to_string())
+                .expect("summary");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report["shapes"]).expect("shapes")
+            );
         }
 
         /// A short run of the random test from a fixed seed, for the gate.
@@ -1150,8 +1214,10 @@ mod generated {
         /// writer change.
         #[test]
         fn a_short_random_run_finds_no_harm() {
-            let seeds: Vec<String> =
-                super::super::named_cases().into_iter().map(|named| named.source).collect();
+            let seeds: Vec<String> = super::super::named_cases()
+                .into_iter()
+                .map(|named| named.source)
+                .collect();
             let mut rng = Rng(20_261_117);
             let mut found = Vec::new();
             for _ in 0..SHORT_RUN {
@@ -1171,6 +1237,20 @@ mod generated {
 
         /// About a second in a release build.
         const SHORT_RUN: usize = 2_000;
+
+        /// The 30-minute run found these as lost, though each is written back
+        /// byte for byte: front matter keeps a key as a key of its map.
+        #[test]
+        fn a_front_matter_key_is_not_lost() {
+            for source in [
+                "---\nq: q\n---\n\n",
+                "---\nq: q\n---\n\nqb\n",
+                "---\nqa:\n  qb: qc\n---\n\nqd\n",
+            ] {
+                let found = judge(source);
+                assert!(found.is_none(), "{source:?}: {found:?}");
+            }
+        }
     }
 }
 
@@ -1548,10 +1628,20 @@ fn a_paragraph_past_the_size_limit_keeps_its_source() {
         let (body, written) = read(&source);
         let (short, _) = read(&format!("{before}{}{after}", lines(prefix, 2)));
         assert_eq!(written, source, "{before:?}");
-        let tags = |body: &Value| body.as_array().unwrap().iter().map(|block| block["tag"].clone()).collect::<Vec<_>>();
+        let tags = |body: &Value| {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block["tag"].clone())
+                .collect::<Vec<_>>()
+        };
         assert!(tags(&body).contains(&Value::from("rawBlock")), "{before:?}");
         assert_eq!(body[0], short[0], "{before:?}");
-        assert_eq!(body.as_array().unwrap().last(), short.as_array().unwrap().last(), "{before:?}");
+        assert_eq!(
+            body.as_array().unwrap().last(),
+            short.as_array().unwrap().last(),
+            "{before:?}"
+        );
     }
     let time = |source: &str| {
         (0..3)
