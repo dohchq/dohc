@@ -208,7 +208,8 @@ export function createNamedShareTransportRoutes(
         half,
         ["user", actor.userId],
       );
-      // The selector that filtered the page being returned.
+      // The selector that filtered the page being returned. A held read
+      // refilters with the grant's level at each wake.
       let pageSelector = readSelector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       // A held read names the level its reader knew, so a change that landed

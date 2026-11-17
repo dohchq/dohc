@@ -152,6 +152,7 @@ export function createShareSummaries(
         : null
       : grant.principalEmail;
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    // The granter reads the label as they wrote it, so a refresh compares like with like.
     const base = shareSummaryBase(row, "owner", selector);
     return {
       ...base,

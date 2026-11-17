@@ -301,7 +301,12 @@ export function MembersSettings(props: {
 
   return (
     <div data-testid="settings-members">
-      <MembersGateView gate={gate} cloud={props.cloud} onOpenSync={props.onOpenSync}>
+      <MembersGateView
+        gate={gate}
+        joined={props.joined === true}
+        cloud={props.cloud}
+        onOpenSync={props.onOpenSync}
+      >
         <MembersLoadView
           load={shown}
           running={running}
@@ -318,6 +323,7 @@ export function MembersSettings(props: {
 
 function MembersGateView(props: {
   gate: MembersGate;
+  joined: boolean;
   cloud: CloudSettings | undefined;
   onOpenSync: () => void;
   children: ReactNode;
@@ -362,7 +368,9 @@ function MembersGateView(props: {
         >
           {gate.kind === "other-account" && gate.joined
             ? joinedByAnother(gate.joined.email)
-            : "Sync this workspace with your server to see who is in it."}
+            : props.joined
+              ? "Connect your server to see who is in this workspace."
+              : "Sync this workspace with your server to see who is in it."}
         </GateState>
       );
     }

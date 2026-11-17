@@ -54,6 +54,7 @@ export function useSharingSearch(
 ): SharingResult[] {
   const session = useWorkspaceSession();
   const readAll = async (signal: AbortSignal) => {
+    // Someone else's shared workspace grants nothing from here.
     const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
     const answers = await Promise.all(
       lanes.map((lane) =>

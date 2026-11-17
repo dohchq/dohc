@@ -2246,6 +2246,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     try {
       return this.owner.write(run);
     } finally {
+      // A committed write must not fail because this read did, so a failed read counts as a change.
       try {
         const after = this.unavailable.aborted ? undefined : revision.get()!;
         if (!after) notifyRelayWrite(this);

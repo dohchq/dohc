@@ -294,9 +294,7 @@ describe("Members page", () => {
       const { props } = renderMembers({ cloud: joined({ connected: false }), joined: true });
       const gate = screen.getByTestId("settings-members-gate");
       expect(gate.dataset.reason).toBe("signed-out");
-      expect(gate.textContent).toContain(
-        "Sync this workspace with your server to see who is in it.",
-      );
+      expect(gate.textContent).toContain("Connect your server to see who is in this workspace.");
       await userEvent.click(within(gate).getByRole("button", { name: "Connect server" }));
       expect(props.cloud!.onConnect).toHaveBeenCalled();
       expect(bridge.workspaceMembers).not.toHaveBeenCalled();

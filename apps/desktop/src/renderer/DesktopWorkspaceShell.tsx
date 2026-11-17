@@ -731,7 +731,6 @@ function recoverLiveDrafts(
 }
 
 // One row in Notices for failed reads of the Collections list; a read that works removes it.
-const COLLECTIONS_LIST_NOTICE = "collections-list";
 
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
@@ -2655,7 +2654,6 @@ export function DesktopWorkspaceShell(props: {
     shareViewReadsCollections,
     shareViewEnded,
     () => {
-      clearIdentity(COLLECTIONS_LIST_NOTICE);
       clearIdentity(COLLECTIONS_READ);
     },
   );

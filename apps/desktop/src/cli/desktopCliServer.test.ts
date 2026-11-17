@@ -1143,6 +1143,13 @@ describe("desktop CLI workspace context", () => {
       work({ queryCollectionRecords } as unknown as VersionedLiveAdapter);
     const context = await f.create().openCliWorkspace(f.workspace);
     expect(context.joined).toBe(true);
+    await f.create().startDesktopCliServer();
+    expect(f.options().listWorkspaces()).toContainEqual({
+      workspaceId: "workspace",
+      rootPath: f.workspace.rootPath,
+      readOnly: true,
+      joined: true,
+    });
     await expect(context.listMoments({ limit: 5, objectId: "object" })).resolves.toEqual([
       { ...moment, workspaceId: "workspace" },
     ]);

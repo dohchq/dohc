@@ -1177,7 +1177,7 @@ it("lists everyone in a joined workspace by name and role, from the Members page
   expect(document.body.textContent).not.toContain("@");
 });
 
-it("says on the member's own row that the membership ended", async () => {
+it("says on the member's own row, beside the role, that the membership ended", async () => {
   bridgeMock.getObjectAccess.mockResolvedValue(
     answer({
       unknownReason: null,
