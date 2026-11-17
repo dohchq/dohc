@@ -122,6 +122,9 @@ struct OldRead {
     version_bytes: BTreeMap<String, Vec<u8>>,
     /// Read markers, bookmarks, follows and feed read state.
     carried: RebuildCarried,
+    /// The files the old store last captured, which the disk scan starts
+    /// from: a file a cloud provider evicted is then not downloaded.
+    scan_seed: dohc_engine_files::ScanManifest,
 }
 
 /// What `closed` read from the new store and the disk.
@@ -231,28 +234,46 @@ fn disk_sha(root: &Path, path: &str, twins: &HashSet<String>) -> Result<Option<S
     Ok(Some(dohc_engine_storage::hex_sha256(&bytes)))
 }
 
-/// Every file the engine tracks on disk, with its hash. A path the scan
-/// couldn't read may be the member's own file that no store recorded, so the
-/// rebuild stops with the copy closed until it can read every path: Try again
-/// then saves it. A file over the size cap is never sent, so it stays where
-/// it is.
-async fn files_on_disk(root: &Path) -> Result<Vec<(String, String)>, WireError> {
+/// Every file the engine tracks on disk, with its hash, as the disk spells
+/// its path. One scan reads each file once. A file the old store captured
+/// that a cloud provider evicted keeps the hash it was captured with, so it
+/// isn't downloaded.
+///
+/// A path the scan couldn't read may be the member's own file that no store
+/// recorded, so the rebuild stops with the copy closed until it can read
+/// every path: Try again then saves it. A file over the size cap is never
+/// sent, so it stays where it is.
+async fn files_on_disk(
+    root: &Path,
+    seed: &dohc_engine_files::ScanManifest,
+) -> Result<HashMap<String, String>, WireError> {
     let root = root.to_path_buf();
+    let prior = seed.clone();
     let scanned = tokio::task::spawn_blocking(move || {
         let scanner = dohc_engine_files::Scanner::new(dohc_engine_files::ScanBounds::default())?;
-        scanner.scan(&root, &dohc_engine_files::CancellationToken::new())
+        scanner.scan_with_prior(&root, &prior, &dohc_engine_files::CancellationToken::new())
     })
     .await;
-    match scanned {
+    let listing = match scanned {
         Ok(Ok(dohc_engine_files::ScanOutcome::Completed(listing))) if !listing.degraded() => {
-            Ok(listing
-                .files
-                .into_iter()
-                .map(|file| (file.path, file.sha256))
-                .collect())
+            listing
         }
-        _ => Err(failed("share-view-rebuild-disk-unreadable")),
-    }
+        _ => return Err(failed("share-view-rebuild-disk-unreadable")),
+    };
+    let evicted = listing.skipped.into_iter().filter_map(|skipped| {
+        let captured = seed.get(&skipped.path)?;
+        // A seed can carry a marker in place of a hash; that file is read.
+        (skipped.reason == dohc_engine_files::SkipReason::Evicted
+            && captured.sha256.len() == 64
+            && captured.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| (skipped.path, captured.sha256.clone()))
+    });
+    Ok(listing
+        .files
+        .into_iter()
+        .map(|file| (file.path, file.sha256))
+        .chain(evicted)
+        .collect())
 }
 
 impl EngineService {
@@ -523,11 +544,35 @@ impl EngineService {
             .rebuild_carried(params.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
+        let version_id = actor
+            .active_version_id(params.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
+        let scan_seed = dohc_engine_files::ScanManifest::from_entries(
+            actor
+                .capture_manifest_seed(params.workspace_id.clone(), version_id)
+                .await
+                .map_err(map_runtime)?
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.path,
+                        dohc_engine_files::ManifestEntry {
+                            size: entry.size,
+                            sha256: entry.sha256,
+                            // The store keeps no mtime, so every file that is
+                            // present is read.
+                            mtime_ms: 0,
+                        },
+                    )
+                }),
+        );
         Ok(OldRead {
             heads,
             unsent,
             version_bytes,
             carried,
+            scan_seed,
         })
     }
 
@@ -633,16 +678,23 @@ impl EngineService {
             .chain(&heads)
             .map(|head| head.path.as_str())
             .collect();
-        let scanned = files_on_disk(root).await?;
+        let mut scanned = files_on_disk(root, &old.scan_seed).await?;
         let twins = case_twins(
             stored
                 .iter()
                 .copied()
-                .chain(scanned.iter().map(|(path, _)| path.as_str())),
+                .chain(scanned.keys().map(String::as_str)),
         );
         let mut disk = BTreeMap::new();
         for path in &stored {
-            if let Some(sha) = disk_sha(root, path, &twins)? {
+            // The scan names a file as the disk spells it and never goes
+            // through a link, so a listed path holds that file. Any other is
+            // absent, spelled otherwise, behind a link or over the size cap.
+            let sha = match scanned.remove(*path) {
+                Some(sha) => Some(sha),
+                None => disk_sha(root, path, &twins)?,
+            };
+            if let Some(sha) = sha {
                 disk.insert((*path).to_owned(), sha);
             }
         }
@@ -650,10 +702,11 @@ impl EngineService {
         // never recorded because the copy closed first. A file
         // `.dohc/files.toml` keeps out of dohc is never sent, so it stays.
         let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
-        disk.extend(scanned.into_iter().filter(|(path, _)| {
-            !stored.contains(path.as_str())
-                && !crate::capture_driver::policy_excludes(&policy, path)
-        }));
+        disk.extend(
+            scanned
+                .into_iter()
+                .filter(|(path, _)| !crate::capture_driver::policy_excludes(&policy, path)),
+        );
         let held = open
             .actor
             .rebuild_held_blobs(disk.values().cloned().collect())
