@@ -1657,17 +1657,20 @@ fn commit_rule_changes(
     folder: &str,
     changes: Vec<RuleChange>,
 ) -> Result<(), RuntimeError> {
-    let writes = changes.iter().filter(|(_, bytes)| bytes.is_some()).count();
-    let deletes = changes.len() - writes;
-    let remains = store
+    let mut remaining: HashSet<_> = store
         .read_with(|conn| committed_rule_paths(conn, order.workspace_id, order.version_id, folder))?
-        .len()
-        + writes
-        > deletes;
+        .into_iter()
+        .collect();
     for (path, bytes) in changes {
         match bytes {
-            Some(bytes) => commit_disk_rule(store, order, folder, path, bytes)?,
-            None => retire_rule(store, order, folder, path, !remains)?,
+            Some(bytes) => {
+                remaining.insert(path.clone());
+                commit_disk_rule(store, order, folder, path, bytes)?;
+            }
+            None => {
+                remaining.remove(&path);
+                retire_rule(store, order, folder, path, remaining.is_empty())?;
+            }
         }
         RULE_COMMITS.with(|commits| commits.set(commits.get() + 1));
     }

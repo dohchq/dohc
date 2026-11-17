@@ -3379,3 +3379,93 @@ fn hiding_two_new_edit_spellings_cannot_publish_a_widening_prefix() {
     assert!(!f.root().join("team/access.yaml").exists());
     assert!(!f.root().join("team/\u{FF41}ccess.yaml").exists());
 }
+
+#[test]
+fn removing_a_hidden_edit_pair_cannot_publish_a_widening_prefix() {
+    let f = Fixture::new();
+    f.put("access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["access.yaml", "team/a.md"]);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.decide("team", AccessRuleDecision::Accept).unwrap();
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.settle();
+    f.capture_ok(&["team/\u{FF41}ccess.yaml", "team/a.md"]);
+    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+        std::fs::remove_file(f.root().join(path)).unwrap();
+    }
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(!f.hold_views()[0].can_accept);
+    let before = f.journal();
+    let result = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "removed",
+        30,
+        Arc::new(CrashAfterOneMoment(
+            f.db.clone(),
+            moments(&f.db),
+            Default::default(),
+        )),
+    );
+    // The seed was an explicit owner write; inspect only the attempted removal.
+    assert_eq!(
+        recorded_reach(&f, "members"),
+        None,
+        "no single EDIT rule may remain: {result:?}"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Domain(DomainError::InvalidInput { .. }))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(f.journal(), before);
+    f.decide("team", AccessRuleDecision::Restore).unwrap();
+    assert_eq!(f.journal(), before);
+}
+
+#[test]
+fn removing_a_hidden_pair_deletes_the_wider_spelling_first() {
+    let f = ruled_team();
+    f.put("access.yaml", VIEW);
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.settle();
+    f.capture_ok(&["access.yaml", "team/\u{FF41}ccess.yaml"]);
+    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+        std::fs::remove_file(f.root().join(path)).unwrap();
+    }
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert!(f.hold_views()[0].can_accept);
+    let before = f.journal();
+    let result = f.decided_at(
+        "team",
+        AccessRuleDecision::Accept,
+        None,
+        "removed",
+        30,
+        Arc::new(CrashAfterOneMoment(
+            f.db.clone(),
+            moments(&f.db),
+            Default::default(),
+        )),
+    );
+    assert!(
+        matches!(result, Err(RuntimeError::OperationCrashed)),
+        "{result:?}"
+    );
+    assert_eq!(recorded_reach(&f, "members"), Some(Level::View));
+    assert_eq!(
+        f.journal()[before.len()..],
+        lines(&["delete team/\u{FF41}ccess.yaml"])
+    );
+    f.decide("team", AccessRuleDecision::Accept).unwrap();
+    assert_rule_prefixes_at_most_view(&f);
+}
