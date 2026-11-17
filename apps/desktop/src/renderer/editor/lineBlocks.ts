@@ -213,16 +213,30 @@ function mathBlockEnd(lines: string[], start: number, maxIndent = 3): number | n
   return null;
 }
 
-/** Whether a setext underline ends the paragraph run starting at `start`.
- *  marked reads a setext heading before display math, so a `$$` line inside
- *  that run is the heading's text. */
-function underlinedAhead(lines: string[], start: number): boolean {
+/** Where the paragraph run from `start` stops, and whether a setext underline
+ *  stops it. marked reads a setext heading before display math, so a `$$`
+ *  line inside an underlined run is the heading's text. The answer is the
+ *  same from any line before `end`. */
+function setextRun(lines: string[], start: number): { end: number; underlined: boolean } {
   for (let index = start; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    if (BLANK_RE.test(line)) return false;
-    if (SETEXT_RE.test(line)) return true;
+    if (BLANK_RE.test(line)) return { end: index, underlined: false };
+    if (SETEXT_RE.test(line)) return { end: index, underlined: true };
+    const kind = blockKind(line);
+    if (
+      kind === "bullet" ||
+      kind === "task" ||
+      kind === "ordered" ||
+      kind === "quote" ||
+      kind === "heading" ||
+      kind === "break" ||
+      fenceOpener(line) ||
+      HTML_BLOCK_RE.test(line)
+    ) {
+      return { end: index, underlined: false };
+    }
   }
-  return false;
+  return { end: lines.length, underlined: false };
 }
 
 /** The last line of a link reference definition starting at `start`, or null
@@ -373,6 +387,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openMarker = "";
   let openIndent = 1;
   let openHtml = false;
+  let setext = { end: -1, underlined: false };
   let previousEndsLazy = false;
   let quoteOpen = false;
   let quoteCallout = false;
@@ -477,10 +492,11 @@ export function blockForLine(body: string, line: number): LineBlock {
       (listOpen && (open || indent >= openIndent)) ||
       (openKind === "quote" && (open || quoteOpen)) ||
       (open && (openKind === "table" || openHtml));
-    const mathClose =
-      open && openKind === "other" && underlinedAhead(lines, index + 1)
-        ? null
-        : mathBlockEnd(lines, index, continues ? 0 : 3);
+    let mathClose = mathBlockEnd(lines, index, continues ? 0 : 3);
+    if (mathClose !== null && open && openKind === "other") {
+      if (index + 1 > setext.end) setext = setextRun(lines, index + 1);
+      if (setext.underlined) mathClose = null;
+    }
     const resumes =
       (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");

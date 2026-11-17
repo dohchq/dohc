@@ -379,6 +379,33 @@ describe("blockForLine — the index", () => {
     expect(large.read, `${small.read} -> ${large.read}`).toBeLessThan(small.read * 2.2);
   });
 
+  it.each(["text", "text\n  $$x$$"])(
+    "maps a run of %j with no blank line in linear work",
+    (unit) => {
+      const { test } = RegExp.prototype;
+      const work = (pairs: number) => {
+        const body = `${Array.from({ length: pairs }, () => unit).join("\n")}\n\nAfter`;
+        let read = 0;
+        const spy = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (
+          this: RegExp,
+          source: string,
+        ) {
+          read += 1;
+          return Reflect.apply(test, this, [source]) as boolean;
+        });
+        try {
+          blockForLine(body, body.split("\n").length);
+        } finally {
+          spy.mockRestore();
+        }
+        return read;
+      };
+      const small = work(500);
+      const large = work(1000);
+      expect(large, `${small} -> ${large}`).toBeLessThan(small * 2.2);
+    },
+  );
+
   it("rejects a fence opener that is already four columns in", () => {
     // `\t```” reaches column four, so the parser reads indented code and the
     // backticks are its text. The ``` below it is the real fence.
@@ -1047,6 +1074,14 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       lands: [
         [2, "$$x$$"],
         [4, "After"],
+      ],
+    },
+    {
+      name: "an underline in a later block does not reach back over math",
+      body: "Compute the energy:\n$$E=mc^2$$\n```yaml\n---\nenergy: 42\n```\n\nResults",
+      lands: [
+        [2, "E=mc^2"],
+        [8, "Results"],
       ],
     },
     {
