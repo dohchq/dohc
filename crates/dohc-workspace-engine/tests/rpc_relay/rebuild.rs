@@ -782,37 +782,30 @@ async fn an_unsent_restore_then_move_is_saved() {
     finish(&copy).await;
 }
 
-/// The member renames a file by case alone and doesn't send it. On a file
-/// system that ignores case, both spellings read the one file, which must
-/// not go to the recovery folder as an unsent file of its own: the rename is
-/// undone like any other.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unsent_rename_by_case_alone_is_undone() {
-    let copy = closed_copy_with(
-        "rpc-rebuild-unsent-case",
-        true,
-        false,
-        |transport, handle, scratch| {
-            Box::pin(async move {
-                let mut id = 50;
-                let root = scratch.path();
-                call(
-                    transport,
-                    handle,
-                    &mut id,
-                    "versionedText.rename",
-                    json!({
-                        "versionId": "main", "fromPath": "open/d.md", "toPath": "open/D.md",
-                        "origin": "api",
-                    }),
-                )
-                .await;
-                std::fs::rename(root.join("open/d.md"), root.join("open/D.md")).expect("rename");
-            })
-        },
-    )
-    .await;
-    let result = rebuild(&copy).await;
+/// A copy whose member renamed `open/d.md` to `open/D.md` and didn't send it.
+async fn case_renamed_copy(workspace_id: &str) -> ClosedCopy {
+    closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {
+        Box::pin(async move {
+            let mut id = 50;
+            let root = scratch.path();
+            call(
+                transport,
+                handle,
+                &mut id,
+                "versionedText.rename",
+                json!({
+                    "versionId": "main", "fromPath": "open/d.md", "toPath": "open/D.md",
+                    "origin": "api",
+                }),
+            )
+            .await;
+            std::fs::rename(root.join("open/d.md"), root.join("open/D.md")).expect("rename");
+        })
+    })
+    .await
+}
+
+fn assert_case_rename_undone(copy: &ClosedCopy, result: &Value) {
     assert_eq!(result["state"], "rebuilt", "{result}");
     let root = copy.scratch.path();
     assert_eq!(names_in(&root.join("open")), ["a.md", "c.md", "d.md"]);
@@ -824,6 +817,35 @@ async fn an_unsent_rename_by_case_alone_is_undone() {
         contents.contains("- `open/D.md` moved back to `open/d.md`"),
         "{contents}"
     );
+}
+
+/// The member renames a file by case alone and doesn't send it. On a file
+/// system that ignores case, both spellings read the one file, which must
+/// not go to the recovery folder as an unsent file of its own: the rename is
+/// undone like any other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_rename_by_case_alone_is_undone() {
+    let copy = case_renamed_copy("rpc-rebuild-unsent-case").await;
+    let result = rebuild(&copy).await;
+    assert_case_rename_undone(&copy, &result);
+    finish(&copy).await;
+}
+
+/// The engine stops after a wave's jobs are stored and before they run. The
+/// restarted rebuild's open must not settle them by the meaning an ordinary
+/// open gives a pending job: the delete of `open/D.md` would then be retired,
+/// because the new store's `open/d.md` reaches the same file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_rename_by_case_alone_is_undone_after_a_stop_before_its_wave_runs() {
+    let copy = case_renamed_copy("rpc-rebuild-unsent-case-stop").await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("added-1");
+    let crashed = rebuild_on(&service, &copy).await.expect_err("crashed");
+    assert_eq!(crashed.message, "rebuild-crash-for-harness");
+    assert_eq!(manifest(&copy).expect("manifest")["phase"], "swapped");
+    drop(service);
+    let result = rebuild(&copy).await;
+    assert_case_rename_undone(&copy, &result);
     finish(&copy).await;
 }
 

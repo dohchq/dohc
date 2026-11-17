@@ -34,8 +34,8 @@ use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::{
-    ActorHandle, RebuildCarried, RebuildHead, RebuildJob, RebuildRemoval, RebuildUnsent,
-    RelayOperation, RelayOperationOutcome,
+    ActorHandle, REBUILD_JOB_PREFIX, RebuildCarried, RebuildHead, RebuildJob, RebuildRemoval,
+    RebuildUnsent, RelayOperation, RelayOperationOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -175,7 +175,7 @@ fn remove_folder(path: &Path) -> std::io::Result<()> {
 
 fn job_id(rebuild_id: &str, wave: u8, path: &str) -> String {
     format!(
-        "rebuild-{rebuild_id}-w{wave}-{}",
+        "{REBUILD_JOB_PREFIX}{rebuild_id}-w{wave}-{}",
         dohc_engine_storage::hex_sha256(path.as_bytes())
     )
 }
@@ -808,6 +808,7 @@ impl EngineService {
             .rebuild_add_jobs(workspace_id.to_owned(), jobs, now)
             .await
             .map_err(map_runtime)?;
+        self.rebuild_crash_point(&format!("added-{wave}"))?;
         actor
             .rebuild_run_jobs(
                 root.to_path_buf(),

@@ -13,6 +13,11 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
+/// How every rebuild job's id starts. Only the rebuild's own waves run these
+/// jobs: it plans them against the new store's heads, which an ordinary
+/// replay doesn't, so a replay at open leaves them pending.
+pub const REBUILD_JOB_PREFIX: &str = "rebuild-";
+
 /// One converge job: write `content_sha256` at the path, or delete the file
 /// there. A delete names the bytes it expects as its content and preimage.
 #[derive(Debug, Clone, PartialEq, Eq)]
