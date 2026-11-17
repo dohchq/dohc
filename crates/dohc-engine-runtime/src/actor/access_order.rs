@@ -1410,11 +1410,6 @@ fn judge_folder(
         Ok(disk) => with_touches(disk, rule_touches),
         Err(_) => return Ok(Plan::Verdict(Verdict::Waits)),
     };
-    if disk.len() > 1 && access_rule_holds::hold_in(conn, workspace, version, folder)?.is_some() {
-        return Ok(Plan::Verdict(Verdict::Held {
-            reason: access_rule_holds::WIDENED,
-        }));
-    }
     let changes = rule_changes(committed.as_ref(), &disk);
     if changes.is_empty() {
         // Capture records the committed rule again; its moment dedupes.
@@ -1422,6 +1417,11 @@ fn judge_folder(
     }
     if rule_touches.is_empty() && committed.as_ref().is_some_and(|c| !c.reached_disk) {
         return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
+    }
+    if disk.len() > 1 && access_rule_holds::hold_in(conn, workspace, version, folder)?.is_some() {
+        return Ok(Plan::Verdict(Verdict::Held {
+            reason: access_rule_holds::WIDENED,
+        }));
     }
     if !settled(order.root, folder, &disk) {
         return Ok(Plan::Verdict(Verdict::Waits));

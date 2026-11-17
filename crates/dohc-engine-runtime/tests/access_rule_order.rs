@@ -3576,3 +3576,20 @@ fn capture_cannot_expose_a_hidden_rule_while_removing_an_empty_folder() {
     assert_rule_prefixes_at_most_view(&f);
     assert_eq!(recorded_reach(&f, "members"), None);
 }
+
+#[test]
+fn putting_back_the_recorded_pair_ends_its_hold() {
+    let f = ruled_team();
+    f.put("team/\u{FF41}ccess.yaml", VIEW);
+    f.settle();
+    f.capture_ok(&["team/\u{FF41}ccess.yaml"]);
+    std::fs::remove_file(f.root().join("team/\u{FF41}ccess.yaml")).unwrap();
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let before = f.journal();
+    f.put("team/\u{FF41}ccess.yaml", VIEW);
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    assert!(f.holds().is_empty());
+    assert_eq!(f.journal(), before);
+}
