@@ -31,6 +31,8 @@ import { ShellErrorReporter, ShellNoticeClear } from "./shell/useShellError";
 import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
+import { PathLine } from "./ui/PathLine";
+import { revealInFileManagerLabel } from "../workspaces/explorerMenu";
 import { useSentNotices } from "./shell/useSentNotices";
 import {
   useHeldWorkspacePathOpenFailures,
@@ -100,6 +102,17 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       );
   };
   const workspaceId = props.workspace.workspaceId;
+  const showFolder = (): void => {
+    void bridge()
+      .revealWorkspaceFolder({ workspaceId })
+      .catch((error: unknown) =>
+        reportFailure?.({
+          message: "dohc could not show this workspace's folder.",
+          cause: error,
+          retry: showFolder,
+        }),
+      );
+  };
   const stopped = props.workspace.shareView?.updatingAccessStopped;
   const ended = stopped?.reason === "ended";
   const identity = `update-access:${workspaceId}`;
@@ -178,8 +191,20 @@ function UpdatingAccess(props: { workspace: Workspace }) {
           ) : null}
         </div>
       ) : null}
+      {/* "This folder" is the copy's own: name it, and open it. */}
+      {ended ? (
+        <PathLine
+          path={props.workspace.rootPath}
+          className="max-w-md justify-center select-text text-[12px] text-muted"
+        />
+      ) : null}
       <div className="flex flex-wrap items-center justify-center gap-2">
         {stopped && !ended ? <SecondaryButton onClick={tryAgain}>Try again</SecondaryButton> : null}
+        {ended ? (
+          <SecondaryButton onClick={showFolder}>
+            {revealInFileManagerLabel(bridge().platform)}
+          </SecondaryButton>
+        ) : null}
         <SecondaryButton onClick={manageWorkspaces}>Open another workspace</SecondaryButton>
         {report === null ? null : (
           <button

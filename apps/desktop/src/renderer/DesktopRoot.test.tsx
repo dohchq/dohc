@@ -414,10 +414,13 @@ describe("workspace summary changes", () => {
     expect(toast.textContent).toContain("dohc could not reach the server");
   });
 
-  it("says a membership ended during an update, with no Try again", async () => {
+  it("says a membership ended during an update, with no Try again, and shows its folder", async () => {
     const h = setup();
+    const revealWorkspaceFolder = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
       ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      platform: "win32",
+      revealWorkspaceFolder,
       getUpdateState: () => new Promise(() => {}),
       onUpdateState: () => () => {},
     });
@@ -443,6 +446,10 @@ describe("workspace summary changes", () => {
     expect(within(panel).queryByText(/The owner changed what you can see/u)).toBeNull();
     expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(within(panel).getByRole("button", { name: "Open another workspace" })).toBeTruthy();
+    // "This folder" is named, and opens.
+    expect(panel.textContent).toContain("/tmp/a");
+    fireEvent.click(within(panel).getByRole("button", { name: "Show in File Explorer" }));
+    expect(revealWorkspaceFolder).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
   });
 
   it("shows Updating access instead of the shell while a joined copy is closed", async () => {
