@@ -738,14 +738,21 @@ mod generated {
             }
 
             /// Four times the repeats taking more than eight times as long,
-            /// twice over: time that grows faster than the length.
+            /// and four times that again, twice over: time that grows faster
+            /// than the length. One step alone can be the net reading a note
+            /// in parts at one size and whole at the other, which costs a few
+            /// times more but grows with the length.
             fn slow(&self, times: usize, current: &Path) -> bool {
                 let check = || {
                     let small = self.at(times);
                     let big = self.at(times * 4);
                     let _ = std::fs::write(current, &big);
                     let (t1, t4) = (read_time(&small), read_time(&big));
-                    t4 > t1 * 8 && t4 > Duration::from_millis(25)
+                    t4 > t1 * 8 && t4 > Duration::from_millis(25) && {
+                        let bigger = self.at(times * 16);
+                        let _ = std::fs::write(current, &bigger);
+                        read_time(&bigger) > t4 * 8
+                    }
                 };
                 check() && check()
             }
@@ -1137,6 +1144,33 @@ mod generated {
             std::fs::write(out.join(format!("summary-{base}.json")), report.to_string()).expect("summary");
             println!("{}", serde_json::to_string_pretty(&report["shapes"]).expect("shapes"));
         }
+
+        /// A short run of the random test from a fixed seed, for the gate.
+        /// The timed run, `mutation_run`, is the full check for a reader or
+        /// writer change.
+        #[test]
+        fn a_short_random_run_finds_no_harm() {
+            let seeds: Vec<String> =
+                super::super::named_cases().into_iter().map(|named| named.source).collect();
+            let mut rng = Rng(20_261_117);
+            let mut found = Vec::new();
+            for _ in 0..SHORT_RUN {
+                let mut source = seeds[rng.below(seeds.len())].clone();
+                for _ in 0..1 + rng.below(4) {
+                    source = mutate(&source, &seeds, &mut rng);
+                }
+                if source.len() > 64 * 1024 {
+                    continue;
+                }
+                if let Some(kind) = judge(&source) {
+                    found.push((kind, source));
+                }
+            }
+            assert!(found.is_empty(), "{found:#?}");
+        }
+
+        /// About a second in a release build.
+        const SHORT_RUN: usize = 2_000;
     }
 }
 
@@ -1480,6 +1514,63 @@ fn a_long_line_of_one_character_reads_in_linear_time() {
         }
     }
     assert!(slow.is_empty(), "{slow:#?}");
+}
+
+/// A paragraph past the size limit keeps its source, in a list or a quote
+/// too, and the blocks around it read as they do beside a short paragraph.
+/// A title over its lines, of a link or a definition, then reads in time
+/// that grows no faster than its length, in the source and in what the
+/// writer writes for it.
+#[test]
+fn a_paragraph_past_the_size_limit_keeps_its_source() {
+    let read = |source: &str| {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        let body = doc.canonical_content()["body"]["children"].clone();
+        (body, doc.project_richdoc().unwrap())
+    };
+    let lines = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|at| format!("{prefix}qw{at} qv"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let long = read_markdown::MAX_PARAGRAPH / 8 + 1;
+    for (before, prefix, after) in [
+        ("# qh\n\n", "", "\n\n- qi\n- qj\n"),
+        ("# qh\n\n- qi\n\n", "  ", "\n- qj\n\nqafter\n"),
+        ("# qh\n\n> qq\n", "> ", "\n\nqafter\n"),
+        ("# qh\n\n[qa](/u \"qt\n", "", "\n\n- qi\n"),
+        ("# qh\n\n[qx]: /u 'qt\n", "", "\n\n- qi\n"),
+    ] {
+        let source = format!("{before}{}{after}", lines(prefix, long));
+        let (body, written) = read(&source);
+        let (short, _) = read(&format!("{before}{}{after}", lines(prefix, 2)));
+        assert_eq!(written, source, "{before:?}");
+        let tags = |body: &Value| body.as_array().unwrap().iter().map(|block| block["tag"].clone()).collect::<Vec<_>>();
+        assert!(tags(&body).contains(&Value::from("rawBlock")), "{before:?}");
+        assert_eq!(body[0], short[0], "{before:?}");
+        assert_eq!(body.as_array().unwrap().last(), short.as_array().unwrap().last(), "{before:?}");
+    }
+    let time = |source: &str| {
+        (0..3)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                read(source);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    for start in ["[qa](/u \"qt\n", "[qx]: /u 'qt\n"] {
+        let title = |bytes: usize| format!("{start}{}", "t\n".repeat(bytes / 2));
+        let (half, full) = (time(&title(32 * 1024)), time(&title(64 * 1024)));
+        assert!(
+            full < half * 3 || full < std::time::Duration::from_millis(20),
+            "{start:?}: {half:?} then {full:?}"
+        );
+    }
 }
 
 /// The sixth review round's findings, each checked as the generated cases
