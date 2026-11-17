@@ -496,7 +496,14 @@ fn assert_rule_prefixes_at_most_view(f: &Fixture) {
     for row in rows {
         let payload: serde_json::Value = serde_json::from_str(&row.unwrap()).unwrap();
         let path = payload["path"].as_str().unwrap();
-        if !["access.yaml", "team/access.yaml", "team/\u{FF41}ccess.yaml"].contains(&path) {
+        if ![
+            "access.yaml",
+            "team/access.yaml",
+            "team/\u{FF41}ccess.yaml",
+            "team/a\u{FF43}cess.yaml",
+        ]
+        .contains(&path)
+        {
             continue;
         }
         if payload["operation"] == "delete" {
@@ -3594,20 +3601,25 @@ fn putting_back_the_recorded_pair_ends_its_hold() {
 }
 
 #[test]
-fn removing_a_hidden_pair_can_continue_one_file_at_a_time() {
-    let f = Fixture::new();
+fn removing_three_hidden_edit_files_never_widens_past_inherited_view() {
+    let f = ruled_team();
     f.put("access.yaml", VIEW);
-    f.put("team/a.md", "alpha");
     f.settle();
-    f.capture_ok(&["access.yaml", "team/a.md"]);
-    f.put("team/access.yaml", EDIT);
+    f.capture_ok(&["access.yaml"]);
+    let paths = [
+        "team/access.yaml",
+        "team/\u{FF41}ccess.yaml",
+        "team/a\u{FF43}cess.yaml",
+    ];
+    for path in &paths[1..] {
+        f.put(path, EDIT);
+    }
     f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    f.decide("team", AccessRuleDecision::Accept).unwrap();
-    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    f.capture_ok(&paths[1..]);
+    f.put(paths[0], EDIT);
     f.settle();
-    f.capture_ok(&["team/\u{FF41}ccess.yaml"]);
-    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+    f.capture_ok(&[paths[0]]);
+    for path in paths {
         std::fs::remove_file(f.root().join(path)).unwrap();
     }
     f.settle();
@@ -3615,23 +3627,25 @@ fn removing_a_hidden_pair_can_continue_one_file_at_a_time() {
     assert!(!f.hold_views()[0].can_accept);
     f.decide("team", AccessRuleDecision::Restore).unwrap();
     assert!(f.holds().is_empty());
-    assert!(f.root().join("team/access.yaml").exists());
-    assert!(f.root().join("team/\u{FF41}ccess.yaml").exists());
-    std::fs::remove_file(f.root().join("team/\u{FF41}ccess.yaml")).unwrap();
+    for path in paths {
+        assert_eq!(std::fs::read_to_string(f.root().join(path)).unwrap(), EDIT);
+    }
+    f.put(paths[0], VIEW);
     f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    assert!(f.hold_views()[0].can_accept);
-    f.decide("team", AccessRuleDecision::Accept).unwrap();
-    assert_eq!(recorded_reach(&f, "members"), Some(Level::Edit));
-    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.capture_ok(&[paths[0]]);
+    assert!(f.holds().is_empty());
+    for path in paths {
+        std::fs::remove_file(f.root().join(path)).unwrap();
+    }
     f.settle();
     assert!(held(&f.capture(&["team/a.md"])[0], "team"));
     assert!(f.hold_views()[0].can_accept);
     f.decide("team", AccessRuleDecision::Accept).unwrap();
     assert!(f.holds().is_empty());
-    assert!(!f.root().join("team/access.yaml").exists());
+    assert_rule_prefixes_at_most_view(&f);
     let conn = rusqlite::Connection::open(&f.db).unwrap();
-    for path in ["team/access.yaml", "team/\u{FF41}ccess.yaml"] {
+    for path in paths {
+        assert!(!f.root().join(path).exists());
         assert!(
             dohc_engine_domain::select_snapshot_by_path_in_tx(&conn, WS, "main", path)
                 .unwrap()
