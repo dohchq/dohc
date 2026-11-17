@@ -1408,6 +1408,106 @@ async fn a_recovery_folder_linked_while_the_rebuild_was_stopped_stops_it() {
     .await;
 }
 
+/// The rebuild stops once the first wave has moved "my edit" into recovery as
+/// `0002 a.md`. While it is stopped, that file changes, so the rebuild must
+/// write the version again from the aside store as `0003 a.md`, and `link`
+/// makes its staging path, or the staging folder, a link to another
+/// workspace's file. On the next run the rebuild writes nothing through the
+/// link: it stops at the link, the other file keeps its bytes, and the aside
+/// store stays. Once the link is gone, it finishes with both versions.
+async fn linked_staging_after_a_stop(
+    workspace_id: &str,
+    linked: impl FnOnce(&std::path::Path, &std::path::Path) -> (String, Box<dyn FnOnce()>),
+) {
+    let copy = edited_copy(workspace_id).await;
+    let service = Arc::new(EngineService::new());
+    service.crash_rebuild_at_for_harness("recovered-2");
+    rebuild_on(&service, &copy).await.expect_err("crashed");
+    drop(service);
+    let root = copy.scratch.path();
+    let folder = manifest(&copy).expect("manifest")["plan"]["recoveryFolder"]
+        .as_str()
+        .expect("recovery folder")
+        .to_owned();
+    std::fs::write(root.join(&folder).join("0002 a.md"), "changed later").expect("change");
+    let elsewhere = ScratchDir::new().expect("other workspace");
+    let theirs = elsewhere.path().join("0003 a.md");
+    std::fs::write(&theirs, "not yours").expect("their file");
+    let staging = root.join(".dohc").join("local").join("rebuild");
+    std::fs::create_dir_all(&staging).expect("staging");
+    let (at, restore) = linked(&staging, elsewhere.path());
+
+    let outcome = rebuild_on(&Arc::new(EngineService::new()), &copy).await;
+    assert_eq!(
+        outcome.expect("stopped"),
+        json!({
+            "state": "stopped",
+            "code": "share-view-rebuild-linked-folder",
+            "path": format!(".dohc/local/rebuild/{at}"),
+        })
+    );
+    assert_eq!(std::fs::read(&theirs).expect("their file"), b"not yours");
+    assert!(root.join(".dohc/local/rebuild-aside/engine").exists());
+
+    restore();
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let recovery = root.join(&folder);
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 a.md", "0003 a.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0003 a.md")).expect("edit"),
+        b"my edit"
+    );
+    assert_eq!(std::fs::read(&theirs).expect("their file"), b"not yours");
+    finish(&copy).await;
+    assert_no_old_store(&copy.scratch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_staging_file_linked_while_the_rebuild_was_stopped_stops_it() {
+    linked_staging_after_a_stop("rpc-rebuild-linked-staging-file", |staging, elsewhere| {
+        let saved = staging.join("saved");
+        std::fs::create_dir_all(&saved).expect("saved");
+        let file = saved.join("0003 a.md");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(elsewhere.join("0003 a.md"), &file)
+            .expect("file link: turn on Developer Mode");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(elsewhere.join("0003 a.md"), &file).expect("file link");
+        (
+            "saved/0003 a.md".to_owned(),
+            Box::new(move || std::fs::remove_file(&file).expect("remove link")),
+        )
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_staging_folder_linked_while_the_rebuild_was_stopped_stops_it() {
+    linked_staging_after_a_stop("rpc-rebuild-linked-staging-folder", |staging, elsewhere| {
+        let saved = staging.join("saved");
+        let kept = staging.join("saved.kept");
+        let had = saved.exists();
+        if had {
+            std::fs::rename(&saved, &kept).expect("set aside");
+        }
+        link_folder(&saved, elsewhere);
+        (
+            "saved".to_owned(),
+            Box::new(move || {
+                remove_link(&saved);
+                if had {
+                    std::fs::rename(&kept, &saved).expect("restore");
+                }
+            }),
+        )
+    })
+    .await;
+}
+
 /// A copy whose member edited `open/a.md` to "my edit" and didn't send it.
 async fn edited_copy(workspace_id: &str) -> ClosedCopy {
     closed_copy_with(workspace_id, true, false, |transport, handle, scratch| {

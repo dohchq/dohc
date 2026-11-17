@@ -1630,6 +1630,9 @@ fn place_version(root: &Path, sha256: &str, name: &str, destination: &Path) -> R
     };
     drop(store);
     let copy = saved_copies(root).join(name);
+    // Staging may have changed while the rebuild was stopped, and a write
+    // through a link would replace a file outside the workspace.
+    link_free(root, &copy)?;
     std::fs::create_dir_all(saved_copies(root))
         .and_then(|()| write_synced(&copy, &bytes))
         .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
