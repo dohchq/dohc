@@ -262,6 +262,24 @@ export function findThreadCreateLane(
   return undefined;
 }
 
+/** The thread's earliest admitted append still in the log, or null. A deleted message's appends are tombstones. */
+export function firstLiveAppendInThread(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+): { relaySeq: number; messageId: unknown } | null {
+  const row = storage.db
+    .prepare(
+      `SELECT relay_seq, json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
+     WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ?
+       AND op_kind = 'chat.message.append' AND json_valid(payload_json)
+       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
+     ORDER BY relay_seq LIMIT 1`,
+    )
+    .get(workspaceId, threadId);
+  return row ? { relaySeq: Number(row.relay_seq), messageId: row.message_id } : null;
+}
+
 /**
  * The message that starts a thread: its earliest admitted message, deleted or
  * not, so a reply never takes a deleted first message's place. The push index
@@ -273,18 +291,10 @@ export function findThreadFirstMessageId(
   workspaceId: string,
   threadId: string,
 ): string | undefined {
-  const row = storage.db
-    .prepare(
-      `SELECT relay_seq, json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
-     WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ?
-       AND op_kind = 'chat.message.append' AND json_valid(payload_json)
-       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
-     ORDER BY relay_seq LIMIT 1`,
-    )
-    .get(workspaceId, threadId);
+  const live = firstLiveAppendInThread(storage, workspaceId, threadId);
   const deleted = firstDeletedInThread(storage, workspaceId, threadId);
-  if (deleted && (!row || deleted.relaySeq < Number(row.relay_seq))) return deleted.messageId;
-  return typeof row?.message_id === "string" ? row.message_id : undefined;
+  if (deleted && (!live || deleted.relaySeq < live.relaySeq)) return deleted.messageId;
+  return typeof live?.messageId === "string" ? live.messageId : undefined;
 }
 
 /** A Group's chat: the earliest chat-lane thread bound to it, or null before anyone chats. */

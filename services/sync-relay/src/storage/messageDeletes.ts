@@ -15,7 +15,7 @@ import { removeChatMessageNotices } from "./notices";
 import {
   findChannelCreateKind,
   findThreadCreateChannelWireId,
-  findThreadFirstMessageId,
+  firstLiveAppendInThread,
 } from "./objectIndex";
 import { commentFileOf, type CommentFile, type PersonalCredential } from "./personalAgentChat";
 import { personalReachIn, readPersonalAuthority } from "./personalAgents";
@@ -148,10 +148,9 @@ export function threadFirstMessageDeleted(
   threadId: string,
 ): boolean {
   const deleted = firstDeletedInThread(storage, workspaceId, threadId);
-  return (
-    deleted !== null &&
-    findThreadFirstMessageId(storage, workspaceId, threadId) === deleted.messageId
-  );
+  if (!deleted) return false;
+  const live = firstLiveAppendInThread(storage, workspaceId, threadId);
+  return !live || deleted.relaySeq < live.relaySeq;
 }
 
 /** The digests of a deleted coordinate's append, for a retry of it, or null. */
