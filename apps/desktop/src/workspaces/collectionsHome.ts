@@ -118,14 +118,19 @@ export function createServerHomeData(input: {
       const kept = saved.datasets.filter(
         (dataset) => dataset.datasetId <= from || (last !== null && dataset.datasetId > last),
       );
+      // A page that ends the list makes the saved list whole. A page that goes on
+      // keeps a whole list whole only if it holds Collections after the page;
+      // otherwise the server has more than it saved, and it is whole only through the page.
+      const whole =
+        last === null ||
+        (saved.through === null && kept.some((dataset) => dataset.datasetId > last));
       return {
         datasets: [...kept, ...page.datasets].sort((a, b) => (a.datasetId < b.datasetId ? -1 : 1)),
-        through:
-          last === null || saved.through === null
-            ? null
-            : last > saved.through
-              ? last
-              : saved.through,
+        through: whole
+          ? null
+          : saved.through === null || last > saved.through
+            ? last
+            : saved.through,
       };
     });
   return routeEachDataset(input.copy, async (page) => {
