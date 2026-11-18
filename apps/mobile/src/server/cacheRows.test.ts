@@ -499,6 +499,7 @@ describe("emptying the cache", () => {
     const { files } = await signedIn(server, disk);
     await files.flush();
     expect(stored(disk)).toHaveLength(1);
+    disk.cache.crash();
 
     const signedOut = launch(disk);
     const account = createAccount({ store: memoryStore(null).store, fetch: server.fetch });
