@@ -157,16 +157,22 @@ export function chatMessageForIpc(
 
 // In a joined workspace every other person shows their account name, so the
 // viewer's own messages say "You", whatever name this computer wrote them under.
+// A rebuilt copy pulls them back without the key this computer wrote, so the
+// account that opened the copy also marks them. The relay names every pulled
+// author by that same account id.
 function namedForViewer<
   Record extends {
     authorKind: string;
     authorDisplayName: string;
+    authorUserId?: string;
     presentation: ActorPresentation | null;
   },
->(scope: Pick<ChatScope, "kind">, record: Record): Record {
-  return scope.kind === "share" && record.authorKind === "human" && record.presentation?.self
-    ? { ...record, authorDisplayName: "You" }
-    : record;
+>(scope: Pick<ChatScope, "kind" | "workspace">, record: Record): Record {
+  if (scope.kind !== "share" || record.authorKind !== "human") return record;
+  const viewer = scope.workspace.shareView?.recipientUserId;
+  const own =
+    record.presentation?.self === true || (viewer !== undefined && record.authorUserId === viewer);
+  return own ? { ...record, authorDisplayName: "You" } : record;
 }
 
 type StoreDecision = Awaited<ReturnType<DesktopLinkedChatStore["listThreadDecisions"]>>[number];

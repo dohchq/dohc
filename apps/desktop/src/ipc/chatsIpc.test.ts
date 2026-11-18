@@ -1599,6 +1599,32 @@ describe("a joined workspace", () => {
     ]);
   });
 
+  // A rebuilt copy pulls the viewer's posts back from the relay, which names
+  // each author by account and serves no key this computer wrote.
+  it("names the viewer's own message You after the copy was rebuilt", async () => {
+    const test = fixture("member");
+    const pulled = {
+      ...test.message,
+      author: { kind: "human" as const, displayName: "Sam Rivera" },
+      authorUserId: "owner",
+    };
+    const other = {
+      ...test.message,
+      id: "other",
+      author: { kind: "human" as const, displayName: "Alice Chen" },
+      authorUserId: "alice",
+    };
+    test.storeMethods.listMessages.mockResolvedValueOnce([pulled, other]);
+    const listed = (await test.invoke(chatOperations.listChatMessages.channel, {
+      workspaceId: "workspace",
+      threadId: "thread",
+    })) as { messages: ChatMessageRecord[] };
+    expect(listed.messages.map((message) => message.authorDisplayName)).toEqual([
+      "You",
+      "Alice Chen",
+    ]);
+  });
+
   it("keeps your own name in your own workspace", async () => {
     const test = fixture();
     const own = {
