@@ -10,7 +10,6 @@ import {
 } from "../shareFilter";
 import { canonicalLiveSelector } from "./liveDocumentAuthority";
 import { currentServiceHostEnrollments, serviceHostOwnerRetains } from "./serviceHostEnrollment";
-import { currentLineagePaused } from "./liveRoomPauses";
 import {
   listServiceActivationRetirements,
   type ServiceActivationRetirement,
@@ -134,12 +133,11 @@ export function readServiceHostFeedScope(
       row.objectId
     )
       departed.add(row.objectId);
-    // A Pause, the owner's or the live room's, cuts reads at once, like a revoked grant, while the enabled
+    // A Pause cuts reads at once, like a revoked grant, while the enabled
     // enrollment takes the host's settled work until the host releases it.
     // Recorded demand, or the owner's restore that kept its live session, keeps it shared.
     else if (
       row.ownerStop === null &&
-      !currentLineagePaused(storage, workspaceId, row.objectId) &&
       (row.demandAtMs !== null ||
         selectors.some((selector) => pathVisibleThroughShare(selector, row.path)) ||
         serviceHostOwnerRetains(storage, row))

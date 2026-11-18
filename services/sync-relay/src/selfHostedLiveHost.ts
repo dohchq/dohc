@@ -13,8 +13,6 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage } from "./storage";
-import type { StorageContext } from "./storage/context";
-import { liveRoomPaused } from "./storage/liveRoomPauses";
 import type { SessionHostBlock } from "./linkRefusal";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
@@ -103,8 +101,8 @@ const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
  * hosted replica, and departed ones under an obsolete identity, whose old
  * store is fenced, so they have none to leave. A document is hosted while an
  * active Edit grant covers it at its enrolled path, or an open or Resume asked
- * for it, its owner has not paused or stopped it, and its live room is not
- * paused. `moved` holds moved and room-paused documents whose replica let them go.
+ * for it, and its owner has not paused or stopped it. `moved` holds moved
+ * documents whose replica let them go.
  */
 export function selectHostedDocuments(
   storage: SyncRelayStorage,
@@ -114,9 +112,9 @@ export function selectHostedDocuments(
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused by its owner, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
-  const released = (row: ServiceHostEnrollment, covered: boolean) =>
+  const departs = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
     !covered ||
     row.ownerStop !== null ||
@@ -125,21 +123,16 @@ export function selectHostedDocuments(
   const targets: ServiceHostEnrollment[] = [],
     departing: ServiceHostEnrollment[] = [],
     obsolete: ServiceHostEnrollment[] = [],
-    away: ServiceHostEnrollment[] = [],
-    resting: ServiceHostEnrollment[] = [];
+    away: ServiceHostEnrollment[] = [];
   for (const row of page.documents) {
     const holds = storage.serviceHostEnrollmentCovered(row);
     // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
     // opens here, before any update lets the document go, so the host retires its activation.
     if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
-    if (released(row, holds)) (matching(row) ? departing : obsolete).push(row);
-    else if (!matching(row)) continue;
-    // A note its live room paused keeps its enrollment, so once its replica let it go nothing selects it until Resume.
-    else if (liveRoomPaused(storage as StorageContext, row))
-      (moved.has(movedKey(row)) ? resting : departing).push(row);
-    else (atPath(storage, row) ? targets : away).push(row);
+    if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
+    else if (matching(row)) (atPath(storage, row) ? targets : away).push(row);
   }
-  const still = new Set([...away, ...resting].map(movedKey));
+  const still = new Set(away.map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
   departing.push(
     ...away.filter((row) => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)),
@@ -205,8 +198,8 @@ export async function startSelfHostedLiveHost(options: {
   const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) =>
     JSON.stringify([row.workspaceId, row.objectId]);
-  // Moved or room-paused documents whose replica let them go. Nothing releases one: its
-  // enrollment stays, so it is hosted again once it returns to its path or its owner resumes it.
+  // Moved documents whose replica let them go. Nothing releases one: its
+  // enrollment stays, so it is hosted again once it returns to its path.
   const moved = new Set<string>();
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
