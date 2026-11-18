@@ -1129,7 +1129,9 @@ it("decodes folders whose access rule waits for the owner", () => {
     recoveryUnavailable: false,
     keptFiles: [],
     captureRecoveries: [],
+    mergeRemovals: [],
     heldFiles: [],
+    outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: [],
     heldAccessRules: [

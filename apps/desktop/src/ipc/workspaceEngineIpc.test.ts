@@ -908,7 +908,9 @@ describe("workspace engine IPC registrations", () => {
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      mergeRemovals: [],
       heldFiles: [],
+      outsideChanges: [],
       heldAccessRules: [judgedAgain],
       retainedCopies: { count: 0, bytes: 0 },
     });
