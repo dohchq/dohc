@@ -249,6 +249,52 @@ export function createCollectionsSendUp(input: {
 }
 
 /**
+ * One workspace attachment's background send. A workspace that already synced
+ * but still keeps Collections sends them when it opens. Only an existing store
+ * opens. The send belongs to the attachment that opened it: once that closes,
+ * it stops and never reads a later opening of the same workspace.
+ */
+export function createAttachmentCollectionsSendUp<Workspace extends { rootPath: string }>(
+  attachment: { workspaceId: string; attachmentId: symbol },
+  input: {
+    findWorkspace(workspaceId: string): Workspace | null;
+    /** Aborts when the attachment closes. Throws if it already has. */
+    retirementSignal(workspaceId: string, attachmentId: symbol): AbortSignal;
+    storeExists(rootPath: string): Promise<boolean>;
+    localHost(workspace: Workspace, signal: AbortSignal): Promise<SendUpStore>;
+    transferSession(
+      workspace: Workspace,
+      signal: AbortSignal,
+    ): Omit<Parameters<typeof sendCollectionsUp>[0], "local">;
+    server(workspace: Workspace): ReturnType<Parameters<typeof sendCollectionsUp>[0]["server"]>;
+    reported(unsent: Map<string, unknown>): void;
+  },
+) {
+  const opened = () => {
+    const signal = input.retirementSignal(attachment.workspaceId, attachment.attachmentId);
+    const workspace = input.findWorkspace(attachment.workspaceId);
+    if (!workspace) throw new Error("This workspace is no longer available.");
+    return { workspace, signal };
+  };
+  return createCollectionsSendUp({
+    open: async () => {
+      const { workspace, signal } = opened();
+      if (!(await input.storeExists(workspace.rootPath))) return null;
+      signal.throwIfAborted();
+      return input.localHost(workspace, signal);
+    },
+    session: () => {
+      const { workspace, signal } = opened();
+      return {
+        ...input.transferSession(workspace, signal),
+        server: () => input.server(opened().workspace),
+      };
+    },
+    reported: input.reported,
+  });
+}
+
+/**
  * A Collection's transfer record as a background read goes by it, as the
  * Collections list does: the record once its move finished, or null while
  * this computer still keeps the Collection's records. It never waits for an

@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import {
   collectionPlace,
+  createAttachmentCollectionsSendUp,
   createCollectionsSendUp,
   finishedTransfer,
   movedTransfer,
@@ -367,4 +368,58 @@ it("starts a send that couldn't open this computer's store once more before a re
   await expect(stuck.start()).rejects.toBe(unreadable);
   await expect(stuck.sent("a", new AbortController().signal)).resolves.toBeUndefined();
   expect(broken).toHaveBeenCalledTimes(2);
+});
+
+it("stops an attachment's send when the workspace closes, and never sends the reopened workspace's Collections", async () => {
+  const attachmentId = Symbol("first opening");
+  let opened = { rootPath: "/first" };
+  let current = attachmentId;
+  const retirement = new AbortController();
+  const asked: string[] = [];
+  let refuse!: (error: Error) => void;
+  const store = {
+    keptDatasetIds: () => ["a", "b"],
+    transferStatus: () => null,
+    transferInFlight: () => null,
+    transferToShared() {},
+  } as never;
+  const reported = vi.fn();
+  const sendUp = createAttachmentCollectionsSendUp(
+    { workspaceId: "workspace-a", attachmentId },
+    {
+      findWorkspace: () => opened,
+      retirementSignal: (_workspaceId, id) => {
+        if (id !== current) throw new Error("This workspace was closed. Open it again.");
+        return retirement.signal;
+      },
+      storeExists: async () => true,
+      localHost: async (_workspace, signal) => {
+        signal.throwIfAborted();
+        return store;
+      },
+      transferSession: (workspace, signal) =>
+        ({ workspaceId: "workspace-a", rootPath: workspace.rootPath, signal }) as never,
+      server: (workspace) => {
+        asked.push(workspace.rootPath);
+        // Only the first question waits; the test answers it once the workspace has opened again.
+        if (asked.length > 1) return Promise.reject(Error("The server refused."));
+        return new Promise<never>((_resolve, reject) => (refuse = reject));
+      },
+      reported,
+    },
+  );
+  const done = sendUp.start();
+  await vi.waitFor(() => expect(asked).toEqual(["/first"]));
+  // The workspace closes and opens again while the server hasn't answered for "a".
+  retirement.abort();
+  current = Symbol("second opening");
+  opened = { rootPath: "/second" };
+  refuse(Error("The server didn't answer."));
+  const outcome = await done.then(
+    () => "finished",
+    () => "stopped",
+  );
+  expect(asked).toEqual(["/first"]);
+  expect(outcome).toBe("stopped");
+  expect(reported).not.toHaveBeenCalled();
 });
