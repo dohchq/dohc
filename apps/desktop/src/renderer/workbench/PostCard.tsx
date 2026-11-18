@@ -11,6 +11,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { neutralPresentation } from "./actorPresentation";
 import {
   chatAuthorLabel,
+  DeletedMessageLine,
   MessageReactions,
   RowToolbar,
   TOOLBAR_BUTTON,
@@ -205,23 +206,27 @@ export function PostCard(props: {
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  const { heading, excerpt } = message
-    ? postText(props.thread.title, message.bodySnippet)
-    : { heading: props.thread.title, excerpt: "" };
-  const plain = message !== null && excerpt === "";
+  // A deleted post keeps its title, author and time, and shows nothing it held.
+  const deleted = message?.deletedAtMs !== undefined;
+  const { heading, excerpt } =
+    message && !deleted
+      ? postText(props.thread.title, message.bodySnippet)
+      : { heading: props.thread.title, excerpt: "" };
+  const plain = message !== null && !deleted && excerpt === "";
   const openDecision = (props.thread.openDecisionCount ?? 0) > 0;
   const work = props.thread.work;
 
-  const reactions = message
-    ? props.data.reactions.filter((reaction) => reaction.messageId === message.id)
-    : [];
+  const reactions =
+    message && !deleted
+      ? props.data.reactions.filter((reaction) => reaction.messageId === message.id)
+      : [];
   const byEmoji = new Map<string, ChatReactionRecord[]>();
   for (const reaction of reactions) {
     const list = byEmoji.get(reaction.emoji);
     if (list) list.push(reaction);
     else byEmoji.set(reaction.emoji, [reaction]);
   }
-  const readOnly = props.reactionControls.readOnly === true || message === null;
+  const readOnly = props.reactionControls.readOnly === true || message === null || deleted;
   const actions = (
     <>
       <ActionButton
@@ -329,7 +334,9 @@ export function PostCard(props: {
           >
             <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
           </span>
-          {excerpt ? (
+          {deleted ? (
+            <DeletedMessageLine testId="chats-post-deleted" className="mt-px" />
+          ) : excerpt ? (
             <span
               data-testid="chats-post-excerpt"
               className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"

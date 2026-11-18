@@ -118,6 +118,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+import { MessageDeleteRole } from "./workbench/messageDelete";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
@@ -674,6 +675,15 @@ function InvalidSitePathFallback({
   }, [activeTab, onClose]);
 
   return null;
+}
+
+// What the workspace's chats and Collections read once per workspace visit.
+function WorkspaceReads(props: { workspaceId: string; children: ReactNode }) {
+  return (
+    <CollectionFieldMarksProvider workspaceId={props.workspaceId}>
+      <MessageDeleteRole workspaceId={props.workspaceId}>{props.children}</MessageDeleteRole>
+    </CollectionFieldMarksProvider>
+  );
 }
 
 /**
@@ -8189,7 +8199,7 @@ export function DesktopWorkspaceShell(props: {
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
           <CustomizeContext.Provider value={customizeContext}>
-            <CollectionFieldMarksProvider workspaceId={workspaceId}>
+            <WorkspaceReads workspaceId={workspaceId}>
               <ShellErrorReporter.Provider value={reportShellFailure}>
                 <MessageLinks.Provider value={makeMessageLink}>
                   <WorkReferences.Provider value={workReferenceLinks}>
@@ -10248,7 +10258,7 @@ export function DesktopWorkspaceShell(props: {
                   </WorkReferences.Provider>
                 </MessageLinks.Provider>
               </ShellErrorReporter.Provider>
-            </CollectionFieldMarksProvider>
+            </WorkspaceReads>
           </CustomizeContext.Provider>
         </AgentColorContext.Provider>
       </AgentSettingsProvider>

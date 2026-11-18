@@ -1,12 +1,13 @@
 import { shareSenderLabel, shareAccessLabel } from "@dohc/security-contract/share-labels";
-import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { GENERAL_CHANNEL_WIRE_ID, isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { ShareSender } from "../ShareSender";
-import { MessageReactions } from "./chatMessages";
+import { DeletedMessageLine, MessageReactions } from "./chatMessages";
 import { WorkLinkText } from "./workReferences";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
+import { useMessageDelete } from "./messageDelete";
 import {
   ActionButton,
   FEED_META,
@@ -1471,6 +1472,9 @@ export function ChatsView(props: {
                       bodySnippet: preview.bodySnippet,
                       ...(preview.automation ? { automation: preview.automation } : {}),
                       ...(preview.authorReported ? { authorReported: preview.authorReported } : {}),
+                      ...(preview.deletedAtMs === undefined
+                        ? {}
+                        : { deletedAtMs: preview.deletedAtMs }),
                     }
                   : null,
                 reactions: preview?.reactions ?? [],
@@ -3485,6 +3489,13 @@ export function ChatsView(props: {
     }),
     [threadReactions.reactions, reactionReadOnly, toggleReaction, threadReactions.viewerAuthorId],
   );
+  // Only a Group's posts can be deleted: not General's, an agent's or a DM's.
+  const threadDelete = useMessageDelete({
+    workspaceId,
+    viewerAuthorId: threadReactions.viewerAuthorId,
+    enabled:
+      nav.level === "thread" && isWorkspaceGroup(nav.channel.wireId ?? null, nav.channel.kind),
+  });
 
   const decisionsByMessage = useMemo(
     () => new Map(decisions.map((decision) => [decision.messageId, decision])),
@@ -3904,16 +3915,19 @@ export function ChatsView(props: {
                 focusMessageId: item.message.id,
               });
             };
-            const body = (
-              <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
-                <MentionText
-                  body={item.message.body}
-                  candidates={mentionCandidates}
-                  attachments={item.message.attachments}
-                  onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
-                />
-              </span>
-            );
+            const body =
+              item.message.deletedAtMs !== undefined ? (
+                <DeletedMessageLine testId="chats-feed-item-deleted" className="mt-0.5" />
+              ) : (
+                <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
+                  <MentionText
+                    body={item.message.body}
+                    candidates={mentionCandidates}
+                    attachments={item.message.attachments}
+                    onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
+                  />
+                </span>
+              );
             return (
               <div
                 key={item.message.id}
@@ -4258,7 +4272,9 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               onNavCommand={props.onNavCommand}
               setMessageNode={setMessageNode}
+              deleteAction={threadDelete.action}
             />
+            {threadDelete.dialog}
           </div>
           <TypingIndicator
             names={presence.typingNames}

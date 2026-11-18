@@ -28,6 +28,7 @@ import type { AccessContext } from "./accessReason";
 import { ChatComposer, ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
+import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
 
 // The composer's replacement when this person cannot comment. The shell
@@ -43,11 +44,6 @@ function ReadOnlyNotice({ reason }: { reason: string }) {
       <span>{reason}</span>
     </p>
   );
-}
-
-// One function for every render, so typing in the composer keeps the list's memo.
-function copyLinkAction(message: ChatMessageRecord) {
-  return <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />;
 }
 
 const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
@@ -504,6 +500,22 @@ export function LinkedChatsPanel(props: {
     }),
     [threadReactions, toggleReaction, readOnly],
   );
+  const messageDelete = useMessageDelete({
+    workspaceId,
+    viewerAuthorId: threadReactions.viewerAuthorId,
+    enabled: true,
+  });
+  const deleteAction = messageDelete.action;
+  // Stable while typing in the composer, so the list keeps its memo.
+  const rowActions = useCallback(
+    (message: ChatMessageRecord) => (
+      <>
+        <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />
+        {deleteAction(message, "linked-chat-delete")}
+      </>
+    ),
+    [deleteAction],
+  );
 
   if (activeThread) {
     return (
@@ -540,8 +552,9 @@ export function LinkedChatsPanel(props: {
           listRef={listRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
-          rowActions={copyLinkAction}
+          rowActions={rowActions}
         />
+        {messageDelete.dialog}
         <AgentThreadLines
           workspaceId={workspaceId}
           chatThreadIds={activeChatThreadIds}

@@ -160,6 +160,7 @@ const FALLBACK: Record<MembersRequest["action"], string> = {
   leave: "dohc could not leave this workspace.",
   end: "dohc could not end membership.",
   group: "dohc could not change this Group's access.",
+  deleteMessage: "dohc could not delete the message.",
 };
 
 /**

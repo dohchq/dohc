@@ -155,6 +155,7 @@ export function chatMessageForIpc(
       ? { automation: automationForIpc(message.automation, collectionOf) }
       : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
+    ...(message.deletedAtMs === undefined ? {} : { deletedAtMs: message.deletedAtMs }),
   };
 }
 
@@ -719,6 +720,9 @@ export function registerChatsIpcHandlers<
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,
+            ...(summary.openingMessage.deletedAtMs === undefined
+              ? {}
+              : { deletedAtMs: summary.openingMessage.deletedAtMs }),
           }
         : null,
     };

@@ -40,6 +40,7 @@ import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorP
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import {
+  DeletedMessageLine,
   MessageReactions,
   TOOLBAR_BUTTON,
   chatAuthorLabel,
@@ -561,6 +562,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
+  // Delete on a message the reader may delete, last on its hover bar.
+  deleteAction?: (message: ChatMessageRecord, testId: string) => ReactNode;
 }) {
   // Long messages parse in the chat's worker; start it before they need it.
   useEffect(retainChatParser, []);
@@ -617,8 +620,12 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const openingTime = formatChatTime(openingMessage.createdAtMs);
-  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS;
-  const openingDecision = decisionsByMessage.get(openingMessage.id);
+  // A deleted message keeps its author and time, and shows nothing it held.
+  const openingDeleted = openingMessage.deletedAtMs !== undefined;
+  const openingAttachments = openingDeleted
+    ? NO_ATTACHMENTS
+    : (attachmentsByMessage.get(openingMessage.id) ?? NO_ATTACHMENTS);
+  const openingDecision = openingDeleted ? undefined : decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = isAgentAuthor(openingMessage);
   const hasExplicitTitle = !titleRepeatsFirstLine(
@@ -676,8 +683,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   ): ReactNode => {
     const comment = node.message;
     const commentTime = formatChatTime(comment.createdAtMs);
-    const commentDecision = decisionsByMessage.get(comment.id);
-    const commentAttachments = attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS;
+    const commentDeleted = comment.deletedAtMs !== undefined;
+    const commentDecision = commentDeleted ? undefined : decisionsByMessage.get(comment.id);
+    const commentAttachments = commentDeleted
+      ? NO_ATTACHMENTS
+      : (attachmentsByMessage.get(comment.id) ?? NO_ATTACHMENTS);
     const isAgent = isAgentAuthor(comment);
     const continues =
       previous !== undefined &&
@@ -809,14 +819,18 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {formatShortTime(comment.createdAtMs)}
               </time>
             </div>
-            <ChatMarkdown
-              body={comment.body}
-              candidates={mentionCandidates}
-              attachments={commentAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-              className="mt-px"
-            />
+            {commentDeleted ? (
+              <DeletedMessageLine testId="chats-comment-deleted" className="mt-px" />
+            ) : (
+              <ChatMarkdown
+                body={comment.body}
+                candidates={mentionCandidates}
+                attachments={commentAttachments}
+                testId="chats-message-body"
+                onOpenPath={props.onOpenPath}
+                className="mt-px"
+              />
+            )}
             {commentAttachments.length > 0 ? (
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 {commentAttachments.map((attachment) => (
@@ -829,7 +843,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 ))}
               </div>
             ) : null}
-            {comment.work ? (
+            {comment.work && !commentDeleted ? (
               <div className="mt-2">
                 <WorkStatus testIdPrefix="chats-comment" work={comment.work} />
               </div>
@@ -855,54 +869,57 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 {replyCount} {replyCount === 1 ? "reply" : "replies"}
               </span>
             ) : null}
-            <MessageReactions
-              testIdPrefix="chats"
-              messageId={comment.id}
-              records={reactionsByMessage.get(comment.id) ?? []}
-              controls={reactionControls}
-              hoverToolbar
-              toolbarActions={
-                <>
-                  {!threadLocked ? (
-                    <button
-                      type="button"
-                      data-testid="chats-comment-reply"
-                      aria-label="Reply"
-                      title="Reply"
-                      onClick={() => beginReply(comment)}
-                      className={TOOLBAR_BUTTON}
-                    >
-                      <Reply size={14} strokeWidth={1.9} aria-hidden />
-                    </button>
-                  ) : null}
-                  <CopyMessageLink messageId={comment.id} testId="chats-comment-copy-link" />
-                  <BookmarkAction
-                    active={Boolean(commentBookmark)}
-                    busy={bookmarkBusy.has(commentBookmarkKey)}
-                    destinationPath={commentBookmark?.destinationPath}
-                    onToggle={
-                      threadLocked
-                        ? undefined
-                        : (mode) =>
-                            void toggleBookmark({
-                              target: {
-                                kind: "message",
-                                threadId: nav.thread.id,
-                                messageId: comment.id,
-                              },
-                              mode,
-                            })
-                    }
-                    onOpen={
-                      commentBookmark && props.onOpenPath
-                        ? () => props.onOpenPath?.(commentBookmark.destinationPath)
-                        : undefined
-                    }
-                    testId="chats-message-bookmark"
-                  />
-                </>
-              }
-            />
+            {commentDeleted ? null : (
+              <MessageReactions
+                testIdPrefix="chats"
+                messageId={comment.id}
+                records={reactionsByMessage.get(comment.id) ?? []}
+                controls={reactionControls}
+                hoverToolbar
+                toolbarActions={
+                  <>
+                    {!threadLocked ? (
+                      <button
+                        type="button"
+                        data-testid="chats-comment-reply"
+                        aria-label="Reply"
+                        title="Reply"
+                        onClick={() => beginReply(comment)}
+                        className={TOOLBAR_BUTTON}
+                      >
+                        <Reply size={14} strokeWidth={1.9} aria-hidden />
+                      </button>
+                    ) : null}
+                    <CopyMessageLink messageId={comment.id} testId="chats-comment-copy-link" />
+                    {props.deleteAction?.(comment, "chats-comment-delete")}
+                    <BookmarkAction
+                      active={Boolean(commentBookmark)}
+                      busy={bookmarkBusy.has(commentBookmarkKey)}
+                      destinationPath={commentBookmark?.destinationPath}
+                      onToggle={
+                        threadLocked
+                          ? undefined
+                          : (mode) =>
+                              void toggleBookmark({
+                                target: {
+                                  kind: "message",
+                                  threadId: nav.thread.id,
+                                  messageId: comment.id,
+                                },
+                                mode,
+                              })
+                      }
+                      onOpen={
+                        commentBookmark && props.onOpenPath
+                          ? () => props.onOpenPath?.(commentBookmark.destinationPath)
+                          : undefined
+                      }
+                      testId="chats-message-bookmark"
+                    />
+                  </>
+                }
+              />
+            )}
           </div>
         </AgentColorScope>
         {runRecords[comment.id] && comment.id !== failedEnd ? (
@@ -1011,14 +1028,18 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             </h1>
             {/* A plain post is its body; the title above repeats it for the
               heading only. */}
-            <ChatMarkdown
-              body={openingMessage.body}
-              candidates={mentionCandidates}
-              attachments={openingAttachments}
-              testId="chats-message-body"
-              onOpenPath={props.onOpenPath}
-              className="mt-1"
-            />
+            {openingDeleted ? (
+              <DeletedMessageLine testId="chats-message-deleted" className="mt-1" />
+            ) : (
+              <ChatMarkdown
+                body={openingMessage.body}
+                candidates={mentionCandidates}
+                attachments={openingAttachments}
+                testId="chats-message-body"
+                onOpenPath={props.onOpenPath}
+                className="mt-1"
+              />
+            )}
             {openingAttachments.length > 0 ? (
               <div
                 data-testid="chats-message-attachments"
@@ -1034,7 +1055,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 ))}
               </div>
             ) : null}
-            {openingMessage.work || openingDecision || runRecords[openingMessage.id] ? (
+            {!openingDeleted &&
+            (openingMessage.work || openingDecision || runRecords[openingMessage.id]) ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {openingMessage.work ? (
                   <WorkStatus testIdPrefix="chats-message" work={openingMessage.work} />
@@ -1061,41 +1083,47 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ) : null}
             {failedLine(openingMessage.id, "mt-2", false)}
             {waitingLine(openingMessage.id, "mt-2")}
-            <MessageReactions
-              testIdPrefix="chats"
-              messageId={openingMessage.id}
-              records={reactionsByMessage.get(openingMessage.id) ?? []}
-              controls={reactionControls}
-              hoverToolbar
-              toolbarActions={
-                <>
-                  <CopyMessageLink messageId={openingMessage.id} testId="chats-message-copy-link" />
-                  <SaveAsFileActions
-                    testIdPrefix="chats-message-bookmark"
-                    bookmark={openingBookmark}
-                    busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-                    onToggle={
-                      threadLocked
-                        ? undefined
-                        : (mode) =>
-                            void toggleBookmark({
-                              target: {
-                                kind: "message",
-                                threadId: nav.thread.id,
-                                messageId: openingMessage.id,
-                              },
-                              mode,
-                            })
-                    }
-                    onOpen={
-                      openingBookmark && props.onOpenPath
-                        ? () => props.onOpenPath?.(openingBookmark.destinationPath)
-                        : undefined
-                    }
-                  />
-                </>
-              }
-            />
+            {openingDeleted ? null : (
+              <MessageReactions
+                testIdPrefix="chats"
+                messageId={openingMessage.id}
+                records={reactionsByMessage.get(openingMessage.id) ?? []}
+                controls={reactionControls}
+                hoverToolbar
+                toolbarActions={
+                  <>
+                    <CopyMessageLink
+                      messageId={openingMessage.id}
+                      testId="chats-message-copy-link"
+                    />
+                    {props.deleteAction?.(openingMessage, "chats-message-delete")}
+                    <SaveAsFileActions
+                      testIdPrefix="chats-message-bookmark"
+                      bookmark={openingBookmark}
+                      busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                      onToggle={
+                        threadLocked
+                          ? undefined
+                          : (mode) =>
+                              void toggleBookmark({
+                                target: {
+                                  kind: "message",
+                                  threadId: nav.thread.id,
+                                  messageId: openingMessage.id,
+                                },
+                                mode,
+                              })
+                      }
+                      onOpen={
+                        openingBookmark && props.onOpenPath
+                          ? () => props.onOpenPath?.(openingBookmark.destinationPath)
+                          : undefined
+                      }
+                    />
+                  </>
+                }
+              />
+            )}
           </div>
         </article>
       </AgentColorScope>

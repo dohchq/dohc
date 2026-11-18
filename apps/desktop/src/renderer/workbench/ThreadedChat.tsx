@@ -95,8 +95,10 @@ export function ThreadedChat(props: {
   listRef: RefObject<ChatMessageListHandle | null>;
   firstUnreadMessageId?: string | null;
   flashMessageId?: string | null;
+  // Delete on a message the reader may delete, last on its hover bar.
+  deleteAction?: (message: ChatMessageRecord, testId: string) => ReactNode;
 }) {
-  const { testIdPrefix: prefix, listRef } = props;
+  const { testIdPrefix: prefix, listRef, deleteAction } = props;
   const [openRootId, setOpenRootId] = useState<string | null>(null);
   const [answering, setAnswering] = useState<{ rootId: string; messageId: string } | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<string, string>>(new Map());
@@ -321,21 +323,25 @@ export function ThreadedChat(props: {
     [detailsId, runs],
   );
   const renderThreadFooter = useCallback(
-    (message: ChatMessageRecord) => (
-      <>
-        {renderMessageFooter?.(message, () => answer(message.id), "thread")}
-        {runDetails(message)}
-      </>
-    ),
+    (message: ChatMessageRecord) =>
+      // A deleted message keeps only its line.
+      message.deletedAtMs !== undefined ? null : (
+        <>
+          {renderMessageFooter?.(message, () => answer(message.id), "thread")}
+          {runDetails(message)}
+        </>
+      ),
     [answer, renderMessageFooter, runDetails],
   );
   const renderStreamFooter = useCallback(
     (message: ChatMessageRecord) => {
       const replies = threads.replies.get(message.id);
+      // A deleted message keeps its replies and nothing else under its line.
+      const deleted = message.deletedAtMs !== undefined;
       return (
         <>
-          {renderMessageFooter?.(message, () => answer(message.id), "stream")}
-          {runDetails(message)}
+          {deleted ? null : renderMessageFooter?.(message, () => answer(message.id), "stream")}
+          {deleted ? null : runDetails(message)}
           {replies ? (
             <ThreadSummary
               testIdPrefix={prefix}
@@ -384,9 +390,10 @@ export function ThreadedChat(props: {
         />
         <CopyMessageLink messageId={message.id} testId={`${prefix}-copy-link`} />
         {moreAction(message, `${prefix}-more`)}
+        {deleteAction?.(message, `${prefix}-delete`)}
       </>
     ),
-    [moreAction, openThread, prefix],
+    [deleteAction, moreAction, openThread, prefix],
   );
   const threadActions = useCallback(
     (message: ChatMessageRecord) => (
@@ -399,9 +406,10 @@ export function ThreadedChat(props: {
         />
         <CopyMessageLink messageId={message.id} testId={`${prefix}-thread-copy-link`} />
         {moreAction(message, `${prefix}-thread-more`)}
+        {deleteAction?.(message, `${prefix}-thread-delete`)}
       </>
     ),
-    [moreAction, prefix],
+    [deleteAction, moreAction, prefix],
   );
 
   const openRoot = openRootId
