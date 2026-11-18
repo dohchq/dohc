@@ -66,6 +66,7 @@ import { createHash } from "node:crypto";
 import {
   type ShareSelector,
   type WorkspaceShareSelector,
+  fileSideOf,
   fileWriteSideOf,
   isLiveEditShareSelector,
   pathVisibleThroughShare,
@@ -1904,14 +1905,15 @@ function bindLiveDocument(
   if (share.workspaceId !== document.workspaceId)
     return { kind: "refused", reason: "not-authorized" };
   const path = stored.binding.currentPath;
-  // A member edits the document through the workspace's write reach, and
+  // A member reaches the document through the workspace's file reach, and
   // the binding names only this document.
   const reached =
     "kind" in selector
-      ? pathVisibleThroughShare(fileWriteSideOf(selector)!, path)
+      ? pathVisibleThroughShare(fileSideOf(selector)!, path)
       : canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
   if (!reached) return { kind: "refused", reason: "stale-selector" };
-  const files = fileSideOf(selector);
+  // An admin reads rule files but writes none, so an edit is judged by write reach.
+  const files = access === "edit" ? fileWriteSideOf(selector) : fileSideOf(selector);
   if (
     !files ||
     (access === "edit" ? pathLevel(files, path) !== "edit" : pathLevel(files, path) === null)
