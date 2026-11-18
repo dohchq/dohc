@@ -3107,7 +3107,9 @@ mod tests {
                 "pending"
             };
             conn.execute(
-                "INSERT INTO materialization_jobs VALUES ('ws',?1,'sha',?2,'write')",
+                "INSERT INTO materialization_jobs \
+                 (workspace_id,target_path,content_sha256,preimage_present,status,operation) \
+                 VALUES ('ws',?1,'sha',0,?2,'write')",
                 [path.as_str(), status],
             )
             .unwrap();
