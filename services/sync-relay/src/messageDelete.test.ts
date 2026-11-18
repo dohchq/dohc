@@ -2,6 +2,7 @@ import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import {
   RELAY_EXCHANGE_KEY,
   SHARE_WEB_ORIGIN,
@@ -683,5 +684,74 @@ describe("a member's raw pull", () => {
     expect(await answer.text()).not.toMatch(/the (first|second) words/u);
     const next = await pull(h, ana.shareId);
     expect(next.status).toBe(200);
+  });
+});
+
+describe("the owner's raw pull", () => {
+  type Pulled = {
+    ops: Array<{ relaySeq: number; opKind: string; payload: Record<string, unknown> }>;
+  };
+  // The owner route itself, with each reference read running `during` first. The route holds its page across that read.
+  function ownerPull(storage: SyncRelayStorage, during: () => void) {
+    const reading = new Proxy(storage, {
+      get(target, key) {
+        if (key === "listWorkReferences")
+          return (...args: Parameters<SyncRelayStorage["listWorkReferences"]>) => {
+            during();
+            return target.listWorkReferences(...args);
+          };
+        const value = Reflect.get(target, key) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const routes = createWorkspaceReplicationRoutes(
+      reading,
+      () => 2000,
+      { wakeLog() {}, wait: async () => {} },
+      { watched: () => false },
+    );
+    return routes.respondToWorkspaceReplication(
+      request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`),
+      { route: "log", workspaceId: WORKSPACE },
+      { userId: OWNER },
+    );
+  }
+  const remove = (storage: SyncRelayStorage, messageId: string) =>
+    expect(
+      storage.deleteWorkspaceMessage({
+        workspaceId: WORKSPACE,
+        threadId: "t-team",
+        messageId,
+        actor: { kind: "account", userId: OWNER },
+        nowMs: 2000,
+      }).ok,
+    ).toBe(true);
+
+  it("answers with the tombstone when the message is deleted while the page waits on references", async () => {
+    const { storage } = await seed();
+    const [append] = rowsOf(storage, "msg-team");
+    let reads = 0;
+    const answer = await ownerPull(storage, () => {
+      if (reads++ === 0) remove(storage, "msg-team");
+    });
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    const { ops } = (await json(answer)) as Pulled;
+    expect(JSON.stringify(ops)).not.toContain("welcome to the team");
+    expect(ops.find((op) => op.relaySeq === append!.relay_seq)?.opKind).toBe(
+      "chat.message.tombstone",
+    );
+    expect(ops.at(-1)).toMatchObject({ opKind: "chat.message.delete" });
+  });
+
+  it("answers busy, with nothing from either read, when the rebuild goes stale too", async () => {
+    const { storage, h } = await seed();
+    await ownerAppend(h, [ownerMessage("m-two", "t-team", "the second words")]);
+    const deletes = ["msg-team", "m-two"];
+    await expect(
+      ownerPull(storage, () => {
+        const next = deletes.shift();
+        if (next) remove(storage, next);
+      }),
+    ).rejects.toMatchObject({ code: "server_busy", statusCode: 503 });
   });
 });

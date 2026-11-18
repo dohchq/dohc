@@ -76,6 +76,7 @@ export function createWorkspaceReplicationRoutes(
     | "workspaceIsOwnedBy"
     | "listWorkReferences"
     | "prepareWorkReferenceRegistration"
+    | "deletedMessageCount"
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
@@ -272,20 +273,30 @@ export function createWorkspaceReplicationRoutes(
         });
       }
       const limit = parseLimit(url.searchParams.get("limit"));
-      const page = storage.fetchLogPage({
-        workspaceId: route.workspaceId,
-        sinceRelaySeq: since,
-        limit,
-      });
-      const mappings =
-        url.searchParams.get("includeReferences") === "false"
-          ? { references: [], nextAfter: null, hasMore: false }
-          : await storage.listWorkReferences({
-              workspaceId: route.workspaceId,
-              reader: { kind: "user", userId: actor.userId },
-              after: url.searchParams.get("referenceAfter") || undefined,
-            });
-      guard();
+      // A delete rewrites the stored rows of a page held across the reference
+      // read. A page read before a delete builds once more from the request's
+      // cursors, and a second stale build answers busy.
+      const buildAnswer = async () => {
+        const mark = storage.deletedMessageCount(route.workspaceId);
+        const page = storage.fetchLogPage({
+          workspaceId: route.workspaceId,
+          sinceRelaySeq: since,
+          limit,
+        });
+        const mappings =
+          url.searchParams.get("includeReferences") === "false"
+            ? { references: [], nextAfter: null, hasMore: false }
+            : await storage.listWorkReferences({
+                workspaceId: route.workspaceId,
+                reader: { kind: "user", userId: actor.userId },
+                after: url.searchParams.get("referenceAfter") || undefined,
+              });
+        guard();
+        return storage.deletedMessageCount(route.workspaceId) === mark ? { page, mappings } : null;
+      };
+      const built = (await buildAnswer()) ?? (await buildAnswer());
+      if (!built) throw relayError("server_busy");
+      const { page, mappings } = built;
       const response = jsonResponse({
         ok: true,
         ...(mappings.references.length || mappings.nextAfter
