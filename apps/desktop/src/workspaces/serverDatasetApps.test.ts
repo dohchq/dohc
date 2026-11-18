@@ -43,19 +43,45 @@ async function computerWithApp(latencyMs = 0) {
   cleanups.push(() => rm(workspaceRoot, { recursive: true, force: true }));
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const trips: string[] = [];
-  // Requests the server has answered, and a wait a test can put before a request reaches it.
+  // Requests the server has answered, and a wait a test can put before a request reaches it. A request held in
+  // `before` has not left this computer: once its caller stops waiting, it is never sent. A request held in `late`
+  // has left: its caller can stop waiting, and the server still takes it. `deliveries` settles with each request
+  // once the server has answered it or it can no longer reach the server. A request held in `lookup` waits, as
+  // main's does for this computer's server session, for a step its signal does not stop.
   const answered: string[] = [];
-  const gate: { before?: (trip: string) => Promise<void> } = {};
+  const gate: {
+    lookup?: (trip: string) => Promise<void>;
+    before?: (trip: string) => Promise<void>;
+    late?: (trip: string) => Promise<void>;
+  } = {};
+  const deliveries: Array<Promise<unknown>> = [];
   const server = createServerCollectionsTransport("w", async (path, body, signal) => {
     const trip = path.replace(/^\/sync\/w\/[^/]+\/[^/]+\//, "");
     trips.push(trip);
+    const lookup = gate.lookup?.(trip);
+    if (lookup) {
+      deliveries.push(lookup);
+      await lookup;
+    }
     if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs));
-    await gate.before?.(trip);
-    const response = await fetch(`${relay.origin}${path}`, {
-      method: "POST",
-      headers: { authorization: "Bearer owner", "content-type": "application/json" },
-      body: JSON.stringify(body),
-      ...(signal ? { signal } : {}),
+    const send = (signal?: AbortSignal) =>
+      fetch(`${relay.origin}${path}`, {
+        method: "POST",
+        headers: { authorization: "Bearer owner", "content-type": "application/json" },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      });
+    const delivery = (async () => {
+      await gate.before?.(trip);
+      const late = gate.late;
+      if (!late) return send(signal);
+      await late(trip);
+      return send();
+    })();
+    deliveries.push(delivery.catch(() => undefined));
+    const response = await new Promise<Response>((resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      delivery.then(resolve, reject);
     });
     answered.push(trip);
     // Read as main's transport reads the server's answer.
@@ -117,7 +143,41 @@ async function computerWithApp(latencyMs = 0) {
     ((await (await relay.computer()).read()).result as Array<{ name: string }>).map(
       (row) => row.name,
     );
-  return { relay, server, host, open, app, published, submit, names, trips, answered, gate };
+  // What the server answers a change sent to it directly, as the app: "ran", or the refusal's status.
+  const serverRuns = () =>
+    server.request(published.publicationId, "invoke", submit("Drew", 1)).then(
+      () => "ran",
+      (error: Error) => error.message.slice(0, 3),
+    );
+  // Holds the next request of this kind before it leaves this computer, until `release`.
+  const hold = (kind: "lookup" | "before" | "late", trip: string) => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      gate[kind] = async (sent) => {
+        if (sent !== trip) return;
+        gate[kind] = undefined;
+        resolve();
+        await new Promise<void>((go) => (release = go));
+      };
+    });
+    return { held, release: () => release() };
+  };
+  return {
+    relay,
+    server,
+    host,
+    open,
+    app,
+    published,
+    submit,
+    names,
+    trips,
+    answered,
+    gate,
+    deliveries,
+    serverRuns,
+    hold,
+  };
 }
 
 it("approves an app on this computer over a Collection on the workspace's server, and the server runs its changes as that app", async () => {
@@ -202,6 +262,26 @@ it("withdrawing the app on this computer withdraws it on the server", async () =
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
+it("withdraws the app on the server once it can be reached, after a withdrawal that could not reach it", async () => {
+  const f = await computerWithApp();
+  f.gate.before = async (trip) => {
+    if (trip !== "binding") return;
+    f.gate.before = undefined;
+    throw new TypeError("fetch failed");
+  };
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await expect
+    .poll(
+      () =>
+        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+          () => "ran",
+          (error: Error) => error.message.slice(0, 3),
+        ),
+      { timeout: 15_000, interval: 1_000 },
+    )
+    .toBe("404");
+}, 60_000);
+
 it("runs no change from an app withdrawn here while the change was on its way, and does not approve it again", async () => {
   const f = await computerWithApp();
   let release!: () => void;
@@ -269,6 +349,122 @@ it("withdraws the app on the server after an approval that was on its way when t
     )
     .toBe("404");
   expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("withdraws the app on the server after an approval this computer stopped waiting for, when the server takes that approval late", async () => {
+  const f = await computerWithApp();
+  await f.host.close();
+  const reopened = await f.open();
+  let release!: () => void;
+  const sent = new Promise<void>((resolve) => {
+    // After a restart, the app's first change gives the server this computer's approval first.
+    f.gate.late = async (trip) => {
+      if (trip !== "binding") return;
+      f.gate.late = undefined;
+      resolve();
+      await new Promise<void>((go) => (release = go));
+    };
+  });
+  const stop = new AbortController();
+  const change = reopened.apps.request(
+    f.published.publicationId,
+    "invoke",
+    f.submit("Alex"),
+    stop.signal,
+  );
+  change.catch(() => undefined);
+  await sent;
+  stop.abort();
+  await expect(change).rejects.toThrow();
+  f.answered.length = 0;
+  await reopened.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  // A withdrawal that does not wait for the approval reaches the server first. This wait times out when the
+  // withdrawal waits, as it should; it only sets the order a withdrawal that did not wait would have.
+  await expect
+    .poll(() => f.answered.includes("binding"), { timeout: 1_000 })
+    .toBe(true)
+    .catch(() => undefined);
+  release();
+  // The server has taken the late approval: what it answers from here on follows it.
+  await Promise.all(f.deliveries);
+  await expect.poll(f.serverRuns, { timeout: 10_000 }).toBe("404");
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("keeps the app approved on the server when this computer approves it again while a withdrawal waits for that approval", async () => {
+  const f = await computerWithApp();
+  const approval = f.hold("before", "binding");
+  // The same app approved again, as when the owner approves it a second time.
+  const again = f.host.apps.activate(f.app, new AbortController().signal);
+  await approval.held;
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  approval.release();
+  await again;
+  await Promise.all(f.deliveries);
+  expect(f.host.apps.list("app")).toEqual([
+    expect.objectContaining({ publicationId: f.published.publicationId, active: true }),
+  ]);
+  expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("keeps the app approved on the server when this computer approves it again while its withdrawal is on its way", async () => {
+  const f = await computerWithApp();
+  const withdrawal = f.hold("before", "binding");
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await withdrawal.held;
+  const again = f.host.apps.activate(f.app, new AbortController().signal);
+  again.catch(() => undefined);
+  // An approval that does not wait for the withdrawal reaches the server first. This wait times out when the
+  // approval waits, as it should; it only sets the order an approval that did not wait would have.
+  await expect
+    .poll(() => f.answered.includes("binding"), { timeout: 1_000 })
+    .toBe(true)
+    .catch(() => undefined);
+  withdrawal.release();
+  await again;
+  await Promise.all(f.deliveries);
+  expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("sends no withdrawal after the workspace closes, so it cannot undo an approval made after reopening", async () => {
+  const f = await computerWithApp();
+  const withdrawal = f.hold("before", "binding");
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await withdrawal.held;
+  await f.host.close();
+  const reopened = await f.open();
+  await reopened.apps.activate(f.app, new AbortController().signal);
+  withdrawal.release();
+  await Promise.all(f.deliveries);
+  expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("closes while a withdrawal waits for this computer's server session, and sends that withdrawal nowhere", async () => {
+  const f = await computerWithApp();
+  f.answered.length = 0;
+  const withdrawal = f.hold("lookup", "binding");
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await withdrawal.held;
+  await f.host.close();
+  withdrawal.release();
+  await Promise.all(f.deliveries);
+  expect(f.answered).not.toContain("binding");
+  expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("closes while an approval waits for this computer's server session", async () => {
+  const f = await computerWithApp();
+  await f.server.withdraw(id(1), f.published.publicationId);
+  const approval = f.hold("lookup", "binding");
+  f.answered.length = 0;
+  const change = f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  change.catch(() => undefined);
+  await approval.held;
+  await f.host.close();
+  await expect(change).rejects.toThrow();
+  approval.release();
+  await Promise.all(f.deliveries);
+  expect(f.answered).not.toContain("binding");
 }, 60_000);
 
 it("withdraws the app on the server after every approval on its way, when two changes approve it again at once", async () => {

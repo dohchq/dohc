@@ -1493,6 +1493,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
           lifetime.abort();
           // Admitted Collection responses settle within their own deadline and still record their outcomes.
           await localApps.close();
+          // A withdrawal not sent by now is not sent, so it cannot undo an approval made after reopening.
+          await onServer.close();
           await Promise.allSettled([...active]);
           await recovery.close();
           try {
@@ -1595,9 +1597,11 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       workspaceId,
       assertCurrent,
       agentRun: () => options.agentRun?.() ?? null,
+      lifetime: lifetime.signal,
       server: {
         approve: (candidate, signal) => serverApps().approve(candidate, signal),
-        withdraw: (datasetId, publicationId) => serverApps().withdraw(datasetId, publicationId),
+        withdraw: (datasetId, publicationId, signal) =>
+          serverApps().withdraw(datasetId, publicationId, signal),
         request: (publicationId, action, body, signal) =>
           serverApps().request(publicationId, action, body, signal),
       },
