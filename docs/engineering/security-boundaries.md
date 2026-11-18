@@ -292,6 +292,6 @@ Existing comments cite the former ADR numbers. Their current boundaries are here
 | ADR 0004, ADR 0006 | [App approval](#app-approval-pins-code-and-capabilities) |
 | ADR 0007, ADR 0010, ADR 0011 | [Dataset and document authority](#dataset-hosts-commit-authority) |
 | ADR 0008, ADR 0012 | [Automation access](#automation-edits-do-not-widen-access) |
-| ADR 0009 | [Hosting requirements](../reference/desktop-capabilities.md) and [local ownership](../../AGENTS.md#product-commitments) |
+| ADR 0009 | [Hosting requirements](../reference/desktop-capabilities.md) and [local ownership](../../AGENTS.md#what-dohc-stands-for) |
 | ADR 0013 | [Direct Collection writes](#direct-collection-writes-stay-narrow) |
 | ADR 0014 | [Share history](#share-history-needs-edit) |
