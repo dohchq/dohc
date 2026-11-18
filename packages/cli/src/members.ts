@@ -45,6 +45,15 @@ const agentActions = [
   z
     .object({ action: z.literal("group"), group, level: groupRuleLevel.nullable().optional() })
     .strict(),
+  // A message in a Group or a file's Comments: your own, or any for the owner
+  // or an admin. The relay decides.
+  z
+    .object({
+      action: z.literal("deleteMessage"),
+      threadId: z.string().min(1).max(512),
+      messageId: z.string().min(1).max(512),
+    })
+    .strict(),
 ] as const;
 
 /** What agents send through the CLI and MCP. Leaving stays in the app. */
@@ -69,6 +78,7 @@ export const MEMBERS_CAPABILITIES = {
   end: "members.end",
   leave: "members.leave",
   group: "members.group.rule",
+  deleteMessage: "chat.message.delete",
 } as const satisfies Record<MembersRequest["action"], CapabilityId>;
 
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
@@ -145,7 +155,7 @@ export const MembersResult = z.discriminatedUnion("status", [
   // The relay lists no Members page for this account: membership ended, the
   // account was removed, or the workspace was never shared with members.
   z.object({ status: z.literal("refused") }).strict(),
-  // Leave finished. This account has no page left to show.
+  // Leave or a delete finished. Leave leaves no page to show.
   z.object({ status: z.literal("done") }).strict(),
   // One Group's access, as `dohc members group` shows it. Null is no rule:
   // the Group takes the member level.
@@ -159,6 +169,10 @@ export const MembersResult = z.discriminatedUnion("status", [
     .strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
+// A message's Delete shows these after "Couldn't delete the message.", and
+// the CLI after its own words.
+export const MESSAGE_DELETE_REFUSED = "You can no longer delete it.";
+export const MESSAGE_DELETE_OFFLINE = "Deleting needs a connection.";
 export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";
 
 // The desktop's Members words point at its page. A terminal has no page to

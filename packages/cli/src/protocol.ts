@@ -247,6 +247,7 @@ const reactArgsSchema = z
     emoji: z.string().min(1),
   })
   .strict();
+const chatDeleteArgsSchema = z.object({ ...argsBase, message: z.string().min(1) }).strict();
 const grepArgsSchema = z
   .object({
     ...argsBase,
@@ -1060,6 +1061,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     .object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema })
     .strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("chatDelete"), args: chatDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("export"), args: exportArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("moments"), args: momentsArgsSchema }).strict(),
@@ -1299,6 +1301,7 @@ export const CLI_CAPABILITIES = distinct(
     reply: ["chat.reply"],
     nothingToReport: ["chat.reply"],
     react: ["chat.react"],
+    chatDelete: ["chat.message.delete"],
     grep: ["chat.search"],
     export: ["chat.export"],
     moments: ["history.list"],
@@ -2959,6 +2962,13 @@ export const cliResultSchemas = distinct(
       .object({ threadId: z.string().min(1), nothingToReport: z.literal(true) })
       .strict(),
     react: reactResultSchema,
+    chatDelete: z
+      .object({
+        threadId: z.string().min(1),
+        messageId: z.string().min(1),
+        deleted: z.literal(true),
+      })
+      .strict(),
     grep: grepResultSchema,
     export: exportResultSchema,
     moments: momentsResultSchema,
