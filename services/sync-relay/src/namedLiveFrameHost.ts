@@ -809,6 +809,8 @@ function captureLiveFrameHost(options: {
       },
       sender(context) {
         check();
+        // A member who lost Edit keeps reading here but no longer writes.
+        if (!editable) return null;
         const authorContext =
           context === undefined || freshRead ? undefined : parseLiveAuthorContext(context);
         if (claimsPersonalAgent(authorContext)) return null;

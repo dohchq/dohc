@@ -1085,6 +1085,8 @@ it("keeps a member's live reads after an Edit drop, refuses submissions, and clo
     ),
   ).toEqual({ result: "refused", reason: "authority-refused" });
   expect(f.validate).not.toHaveBeenCalled();
+  // The shared live room writes through its sender, not `submit`.
+  expect(capture.room.sender(undefined)).toBeNull();
   expect(capture.invalidated.aborted).toBe(false);
   context.tx(() =>
     context.db
