@@ -357,8 +357,8 @@ function PropertyRow(props: RowProps) {
                 acknowledgedWriteId={props.acknowledgedWriteId?.(record, field.name) ?? 0}
                 subscribeToDiscardedWrites={props.subscribeToDiscardedWrites}
                 carried={props.carried}
-                // The edit starts from what the value shows, so a refused value is not typed twice.
-                indexed={indexed}
+                // The edit starts from what was typed, so a refused value is not typed twice.
+                indexed={shownValue(field.name, stored, status, true)}
                 emit={(value, previousValues) =>
                   onCellChange({
                     ...cell,
