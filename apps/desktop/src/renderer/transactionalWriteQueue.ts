@@ -229,8 +229,13 @@ type Deletion = {
   name: string;
   reason: string;
 };
-/** A confirmed value. */
-type Settled = { id: number; seq: number; status: TableCellStatus };
+/** A confirmed value. `refusal`: a later change's refusal, made to show this value as the stored one. */
+type Settled = {
+  id: number;
+  seq: number;
+  status: TableCellStatus;
+  refusal?: { of: TableCellStatus; status: TableCellStatus };
+};
 /** One of the queue's own confirmed changes to a record: the version it was sent with, and the version its receipt gave. */
 type Step = { sent: number; version: number; seq: number };
 /**
@@ -397,9 +402,21 @@ export class WriteQueue {
     return (page.view = {
       statuses: {
         subscribe: this.subscribe,
-        get: (recordId, field) =>
-          this.shown.get(recordId)?.get(field)?.status ??
-          page.settled.get(recordId)?.get(field)?.status,
+        get: (recordId, field) => {
+          const shown = this.shown.get(recordId)?.get(field)?.status,
+            settled = page.settled.get(recordId)?.get(field);
+          if (!settled) return shown;
+          // A refused later change leaves the saved value, which a read of an offline copy may not show yet.
+          if (shown?.state === "refused" && shown.stored) {
+            if (settled.refusal?.of !== shown)
+              settled.refusal = {
+                of: shown,
+                status: { ...shown, stored: { value: settled.status.value } },
+              };
+            return settled.refusal.status;
+          }
+          return shown ?? settled.status;
+        },
       },
       acknowledged: (record, field) => {
         let lowest = this.nextId;

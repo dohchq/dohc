@@ -86,7 +86,9 @@ export interface TableFieldMark {
  * What the person did to one cell that the host has not confirmed. `value`
  * shows in place of the stored one, and the editor opens on it. With
  * `stored`, the Collection refused the change: the cell shows the stored
- * value, and `value` only starts the next edit. The host
+ * value, and `value` only starts the next edit. The stored value is
+ * `stored.value` when the host knows of a saved change the record does not
+ * show yet. The host
  * gives the words: the table cannot know why a change waits or was refused.
  * `discard` gives the change up for good. Absent, the cell offers only Try again.
  */
@@ -94,7 +96,12 @@ export type TableCellStatus = { value: CollectionValue } & (
   | { state: "pending" }
   | { state: "waiting"; reason: string }
   | { state: "unconfirmed"; reason: string; retry(): void; discard?(): void }
-  | { state: "refused"; reason: string; dismiss(): void; stored?: true }
+  | {
+      state: "refused";
+      reason: string;
+      dismiss(): void;
+      stored?: true | { value: CollectionValue };
+    }
 );
 
 /**
@@ -677,10 +684,12 @@ export function shownValue(
   status: TableCellStatus | undefined,
   editing = false,
 ): CollectionIndexedValue | undefined {
-  if (!status || (status.state === "refused" && status.stored && !editing)) return indexed;
+  if (!status) return indexed;
+  const stored = status.state === "refused" && !editing ? status.stored : undefined;
+  if (stored === true) return indexed;
   return {
     field,
-    value: status.value,
+    value: (stored ?? status).value,
     validation: { status: "valid" },
     resolvedRelations: indexed?.resolvedRelations ?? [],
   };
