@@ -2,7 +2,13 @@ import { createLiveBufferBudget } from "@dohc/live-session-contract/live-connect
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fatal, installShutdown, parseGracePeriodMs, serveFetchHandler } from "@dohc/service-http";
+import {
+  fatal,
+  installShutdown,
+  parseGracePeriodMs,
+  serveFetchHandler,
+  waitsOnQuery,
+} from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
@@ -80,6 +86,8 @@ const server = serveFetchHandler({
         ? config.namedBrowserSessionLimits.maxRequestBytes
         : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
+  // A page keeps a read open for up to 30 s to hear of a change: the log, chat, and comment activity.
+  waits: waitsOnQuery("hold"),
   oversized: (url) =>
     url.pathname === "/api/named-chat/messages"
       ? Response.json(
