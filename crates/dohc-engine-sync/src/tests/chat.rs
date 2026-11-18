@@ -5624,7 +5624,8 @@ fn a_tombstone_over_its_journaled_append_is_accepted_and_a_delete_comes_only_fro
                 author_kind: ChatActorKind::Human,
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,
-                author_user_id: None,
+                // Only a message with its author account journals.
+                author_user_id: Some("ada".to_owned()),
                 parent_message_id: None,
                 origin: None,
                 body: "Mine to take back".to_owned(),
