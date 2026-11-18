@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   parseAppPublicationCandidate,
   type AppPublicationCandidate,
@@ -94,6 +95,19 @@ export function createServerCollectionsTransport(
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
+/** How long a withdrawal that could not reach the server waits before it goes again. */
+const WITHDRAWAL_RETRY_MS = 10_000;
+
+/** Waits for `work` until `signal` stops the wait; `work` itself goes on. */
+function until<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    signal.addEventListener("abort", stop, { once: true });
+    void work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
 /**
  * Apps approved on this computer over Collections on the workspace's server.
  * This computer keeps each approval; the server keeps it too, and runs the
@@ -106,6 +120,8 @@ export function createServerDatasetApps(options: {
   assertCurrent(): void;
   agentRun(): LocalDatasetAgent | null;
   server: Pick<ServerCollectionsTransport, "approve" | "withdraw" | "request">;
+  /** Aborts when the workspace closes. */
+  lifetime: AbortSignal;
 }): ReturnType<typeof createLocalDatasetApps> {
   // The server's approval revision for each app this computer approved, once the server has it.
   const approvals = new Map<string, Promise<number>>();
@@ -122,13 +138,16 @@ export function createServerDatasetApps(options: {
     candidate: AppPublicationCandidate,
     signal: AbortSignal,
   ) => {
-    const sent = options.server.approve(candidate, signal);
+    if (signal.aborted) return Promise.reject(signal.reason);
+    // A request already sent can still reach the server after its caller stops waiting, so the approval waits for
+    // the server's answer, and a withdrawal that waits for it reaches the server after it.
+    const sent = options.server.approve(candidate, options.lifetime);
     const settled = Promise.allSettled([approving.get(publicationId), sent]);
     approving.set(publicationId, settled);
     void settled.then(() => {
       if (approving.get(publicationId) === settled) approving.delete(publicationId);
     });
-    return sent;
+    return until(sent, signal);
   };
   function current(id: string, expected?: number) {
     const row = options.store.row(id, expected);
@@ -153,12 +172,32 @@ export function createServerDatasetApps(options: {
     }
     return revision;
   };
-  const withdraw = (row: LocalAppRow) => {
+  const approvedHere = (publicationId: string) => {
+    try {
+      current(publicationId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // A withdrawal that cannot reach the server goes again while the workspace is open, until the server takes it
+  // or this computer approves the app again.
+  const withdraw = async (row: LocalAppRow) => {
     approvals.delete(row.publicationId);
-    // The approval only narrows what the owner may do, so one the server keeps a while does no harm.
-    void Promise.resolve(approving.get(row.publicationId))
-      .then(() => options.server.withdraw(row.resourceId, row.publicationId))
-      .catch(() => undefined);
+    while (!options.lifetime.aborted) {
+      await approving.get(row.publicationId);
+      if (options.lifetime.aborted || approvedHere(row.publicationId)) return;
+      try {
+        await options.server.withdraw(row.resourceId, row.publicationId);
+        return;
+      } catch (error) {
+        // The server holds no such app or Collection.
+        if (isDatasetServerNotFound(error)) return;
+      }
+      await delay(WITHDRAWAL_RETRY_MS, undefined, { signal: options.lifetime }).catch(
+        () => undefined,
+      );
+    }
   };
   async function send(
     publicationId: string,
@@ -221,13 +260,13 @@ export function createServerDatasetApps(options: {
         signal,
         (existing, _displaced, commit) => {
           commit();
-          if (existing && existing.publicationId !== publicationId) withdraw(existing);
+          if (existing && existing.publicationId !== publicationId) void withdraw(existing);
         },
       );
     },
     withdrawBinding(value: LocalAppRow, commit: () => void) {
       commit();
-      withdraw(value);
+      void withdraw(value);
     },
     describe(value: LocalAppRow) {
       let active = false;

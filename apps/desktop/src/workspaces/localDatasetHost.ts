@@ -1589,6 +1589,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       workspaceId,
       assertCurrent,
       agentRun: () => options.agentRun?.() ?? null,
+      lifetime: lifetime.signal,
       server: {
         approve: (candidate, signal) => serverApps().approve(candidate, signal),
         withdraw: (datasetId, publicationId) => serverApps().withdraw(datasetId, publicationId),

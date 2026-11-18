@@ -43,20 +43,34 @@ async function computerWithApp(latencyMs = 0) {
   cleanups.push(() => rm(workspaceRoot, { recursive: true, force: true }));
   await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
   const trips: string[] = [];
-  // Requests the server has answered, and a wait a test can put before a request reaches it.
+  // Requests the server has answered, and a wait a test can put before a request reaches it. A wait in `late`
+  // comes after the request has left this computer: its caller can stop waiting, and the server still takes it.
   const answered: string[] = [];
-  const gate: { before?: (trip: string) => Promise<void> } = {};
+  const gate: {
+    before?: (trip: string) => Promise<void>;
+    late?: (trip: string) => Promise<void>;
+  } = {};
   const server = createServerCollectionsTransport("w", async (path, body, signal) => {
     const trip = path.replace(/^\/sync\/w\/[^/]+\/[^/]+\//, "");
     trips.push(trip);
     if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs));
     await gate.before?.(trip);
-    const response = await fetch(`${relay.origin}${path}`, {
-      method: "POST",
-      headers: { authorization: "Bearer owner", "content-type": "application/json" },
-      body: JSON.stringify(body),
-      ...(signal ? { signal } : {}),
-    });
+    const send = (signal?: AbortSignal) =>
+      fetch(`${relay.origin}${path}`, {
+        method: "POST",
+        headers: { authorization: "Bearer owner", "content-type": "application/json" },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
+      });
+    const late = gate.late;
+    const response = await (late
+      ? new Promise<Response>((resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          void late(trip)
+            .then(() => send())
+            .then(resolve, reject);
+        })
+      : send(signal));
     answered.push(trip);
     // Read as main's transport reads the server's answer.
     const value = (await readDatasetResponse(
@@ -202,6 +216,26 @@ it("withdrawing the app on this computer withdraws it on the server", async () =
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
+it("withdraws the app on the server once it can be reached, after a withdrawal that could not reach it", async () => {
+  const f = await computerWithApp();
+  f.gate.before = async (trip) => {
+    if (trip !== "binding") return;
+    f.gate.before = undefined;
+    throw new TypeError("fetch failed");
+  };
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await expect
+    .poll(
+      () =>
+        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+          () => "ran",
+          (error: Error) => error.message.slice(0, 3),
+        ),
+      { timeout: 15_000, interval: 1_000 },
+    )
+    .toBe("404");
+}, 60_000);
+
 it("runs no change from an app withdrawn here while the change was on its way, and does not approve it again", async () => {
   const f = await computerWithApp();
   let release!: () => void;
@@ -258,6 +292,53 @@ it("withdraws the app on the server after an approval that was on its way when t
     .toBe(true);
   release();
   await expect(change).rejects.toThrow();
+  await expect
+    .poll(
+      () =>
+        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+          () => "ran",
+          (error: Error) => error.message.slice(0, 3),
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe("404");
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("withdraws the app on the server after an approval this computer stopped waiting for, when the server takes that approval late", async () => {
+  const f = await computerWithApp();
+  await f.host.close();
+  const reopened = await f.open();
+  let release!: () => void;
+  const sent = new Promise<void>((resolve) => {
+    // After a restart, the app's first change gives the server this computer's approval first.
+    f.gate.late = async (trip) => {
+      if (trip !== "binding") return;
+      f.gate.late = undefined;
+      resolve();
+      await new Promise<void>((go) => (release = go));
+    };
+  });
+  const stop = new AbortController();
+  const change = reopened.apps.request(
+    f.published.publicationId,
+    "invoke",
+    f.submit("Alex"),
+    stop.signal,
+  );
+  change.catch(() => undefined);
+  await sent;
+  stop.abort();
+  await expect(change).rejects.toThrow();
+  f.answered.length = 0;
+  await reopened.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  // A withdrawal that does not wait for the approval reaches the server first. This wait times out when the
+  // withdrawal waits, as it should; it only sets the order a withdrawal that did not wait would have.
+  await expect
+    .poll(() => f.answered.includes("binding"), { timeout: 1_000 })
+    .toBe(true)
+    .catch(() => undefined);
+  release();
   await expect
     .poll(
       () =>
