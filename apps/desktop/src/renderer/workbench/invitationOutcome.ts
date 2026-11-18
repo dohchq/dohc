@@ -10,21 +10,19 @@ export interface InvitationProgress {
   // A row that stands for the invitation is mounted (ShareRowMark).
   rowMounted: boolean;
   shares: InvitationList;
-  dms: InvitationList;
 }
 
 // What each list's reads since the reveal said, which Chats reports per
 // reveal. Whether the row is mounted is reported by share id instead, so a
 // newer reveal doesn't hide the handoff's own row.
-export type InvitationLists = Pick<InvitationProgress, "shares" | "dms">;
+export type InvitationLists = Pick<InvitationProgress, "shares">;
 
 export type InvitationOutcome = "shown" | "off" | "failed" | "absent" | "late" | "pending";
 
 // How long a handoff may stay on "Opening share…". A healthy reveal answers
-// within one share read and one message sync, which may queue behind a sync
-// already running; each takes well under the 5 s poll period, or polls would
-// pile up. Three poll periods leaves room for a slow relay, and a later
-// answer still replaces `late`.
+// within one share read, which may queue behind a read already running and
+// takes well under the 5 s poll period, or polls would pile up. Three poll
+// periods leaves room for a slow relay, and a later answer still replaces `late`.
 export const INVITATION_WAIT_MS = 15_000;
 
 export function invitationOutcome(input: {
@@ -35,8 +33,8 @@ export function invitationOutcome(input: {
   const { progress } = input;
   if (progress?.rowMounted) return "shown";
   if (!input.chatsOn) return "off";
-  if (progress?.shares === "failed" || progress?.dms === "failed") return "failed";
-  if (progress?.shares === "listed" && progress.dms === "listed") return "absent";
+  if (progress?.shares === "failed") return "failed";
+  if (progress?.shares === "listed") return "absent";
   return input.waitedTooLong ? "late" : "pending";
 }
 

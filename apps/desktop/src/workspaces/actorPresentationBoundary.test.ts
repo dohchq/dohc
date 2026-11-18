@@ -21,7 +21,6 @@ it("keeps admitted identity readers out of renderer and other main modules", asy
     "workspaces/actorPresentation.ts",
     "workspaces/chatWrites.ts",
     "workspaces/chatRelayIdentity.ts",
-    "ipc/directMessagesIpc.ts",
   ]);
   const violations: string[] = [];
   async function scan(dir: string): Promise<void> {
@@ -33,7 +32,7 @@ it("keeps admitted identity readers out of renderer and other main modules", asy
         if (allowed.has(name) || (!name.startsWith("renderer/") && /\.test\./.test(name))) continue;
         let source = await readFile(path, "utf8");
         // URL canonicalization reads no actor key. Keep this exception to this import.
-        if (name === "workspaces/dmRequests.ts")
+        if (name === "workspaces/sharedChannelHolders.ts")
           source = source
             .replace(
               'import { createActorIssuer } from "@dohc/workspace-contracts/actor-identity";',

@@ -31,17 +31,11 @@ import {
   scopeJoinedChannels,
 } from "../workspaces/sharedChannels";
 import {
-  requireShareableChatChannel,
-  resolveDmKinds,
-  shareIdsToWithholdFromOrdinaryInvites,
-  type DmPeekResult,
-} from "../workspaces/dmChats";
-import {
   liveSharedChannelHoldersByShareId,
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
-} from "../workspaces/dmRequests";
+} from "../workspaces/sharedChannelHolders";
 import { fetchSharedChannelInfo, type SharedChannelInfo } from "../workspaces/sharedChannelInfo";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import { shareMountRecordsForId } from "../workspaces/shareMounts";
@@ -91,8 +85,6 @@ export function createSharedChannelsIpc<
   };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   normalizeServerUrl(url: string): string;
-  peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
-  peekReceivedGrantKindForShare(relay: SyncRelayConnection, shareId: string): Promise<DmPeekResult>;
   acknowledgeWorkspaceShareSkips(
     workspaceId: string,
     shareId: string | undefined,
@@ -134,8 +126,6 @@ export function createSharedChannelsIpc<
     relayClientForWorkspace,
     projectPendingChatBookmarksAfterPull,
     normalizeServerUrl,
-    peekedReceivedGrantKinds,
-    peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
     mountShareFolder,
@@ -149,11 +139,12 @@ export function createSharedChannelsIpc<
     operation.assertCurrent();
     assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
-    const channel = await requireShareableChatChannel({
-      workspaceId: workspace.workspaceId,
-      channelId: input.channelId,
-      store,
-    });
+    // The engine says what the channel is: a window's request can't make a person-to-person chat a Group.
+    const channel = (await store.listChannels({ workspaceId: workspace.workspaceId })).find(
+      (candidate) => candidate.id === input.channelId,
+    );
+    if (!channel) throw new Error("This group no longer exists.");
+    if (channel.kind !== "channel") throw new Error("Only groups can be shared.");
     operation.assertCurrent();
     const wireId = await store.getChannelWireId({
       workspaceId: workspace.workspaceId,
@@ -401,40 +392,6 @@ export function createSharedChannelsIpc<
         // resumes answers as live.
         await reconcileReceivedShares(listing);
         assertCurrentShareSession();
-        const receivedShareIds = Array.isArray(listing.received)
-          ? listing.received.flatMap((row) => {
-              const selector = row.selector as { kind?: unknown } | undefined;
-              return selector?.kind === "chat" && typeof row.shareId === "string"
-                ? [row.shareId]
-                : [];
-            })
-          : [];
-        // This adds bounded relay reads only for uncached grants. The one-time
-        // cost closes the request-gate window before the first syncDms poll.
-        await resolveDmKinds({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-          peekKind: async (shareId) => {
-            assertCurrentShareSession();
-            const kind = await peekReceivedGrantKindForShare(
-              {
-                baseUrl: normalizeServerUrl(credentials.relayUrl!),
-                token: credentials.token,
-                fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
-              },
-              shareId,
-            );
-            assertCurrentShareSession();
-            return kind;
-          },
-        });
-        assertCurrentShareSession();
-        for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-        })) {
-          shareIdsClaimedElsewhere.add(shareId);
-        }
         return listing;
       },
       workspaceId: workspace.remote ? workspace.workspaceId : null,
@@ -520,7 +477,9 @@ export function createSharedChannelsIpc<
         recipientUserId: joinedRecipientUserId,
         relayUrl: joinedRelayUrl,
         serverUrl: joinCredentials.serverUrl,
+        // A re-grant has a new share id for a channel another workspace may still hold.
         preWrite: (info) => {
+          assertShareNotHeldElsewhere(info.shareId, workspace.workspaceId, info.channelWireId);
           grant.info = info;
         },
       });
@@ -567,10 +526,7 @@ export function createSharedChannelsIpc<
 
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
-  // the read-only write gate survive after live grant data is gone. Shared by
-  // leaveSharedChannel and leaveDm — a DM's accepted row IS a
-  // JoinedSharedChannel row in the same registry, so ending it is the same
-  // operation regardless of which surface asked.
+  // the read-only write gate survive after live grant data is gone.
   async function endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void> {
     const workspaceId = operation.workspace.workspaceId;
     await updateWorkspaceSharedChannels(workspaceId, (channels) => {
@@ -645,7 +601,6 @@ export function createSharedChannelsIpc<
       leaveSharedChannel: leaveSharedChannelHandler,
       dismissShareSkips: dismissShareSkipsHandler,
     },
-    assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,
     endWorkspaceJoinedChannel,
   };

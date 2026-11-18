@@ -1,7 +1,6 @@
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import * as Y from "yjs";
 // @vitest-environment jsdom
-import { installGraphFixture } from "../testing/graphPage.fixture";
 import "./DesktopWorkspaceShell.testSupport";
 import "./CollectionPage";
 import { act, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
@@ -9,7 +8,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   RefreshSharedViewResult,
-  SyncDmsResult,
   WriteWorkspaceTextPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -25,9 +23,6 @@ import {
   STORED_STATE,
   storedStateWithTabs,
   storedTabs,
-  DM_GRAPH_NODE,
-  CANONICAL_DM,
-  dmSyncResult,
   makeBridge,
   renderShell,
   enterMarkdownSource,
@@ -836,63 +831,6 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  // Cancelling on every workbench write would make this seam hostile: a user
-  // who clicks a DM and then adjusts the sidebar would lose the click when the
-  // final width commits — and the syncDms failure branch is isCurrent-gated
-  // too, so nothing would surface. Only a destination change cancels.
-  it("keeps an in-flight DM navigation through a sidebar width drag", async () => {
-    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    const sync = deferred<SyncDmsResult>();
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    installGraphFixture(bridge, {
-      nodes: [DM_GRAPH_NODE],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 1,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    });
-    bridge.syncDms = vi.fn(() => sync.promise);
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-graph"));
-    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByTestId("graph-file-row")
-          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
-      ).toBe(true),
-    );
-    const rows = await screen.findAllByTestId("graph-file-row");
-    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
-    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
-
-    const panel = screen.getByTestId("side-panel");
-    expect(panel.style.width).toBe("240px");
-    const handle = screen.getByTestId("sidebar-resize");
-    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420, pointerId: 1 });
-    fireEvent.pointerUp(handle, { button: 0, pointerId: 1 });
-    await waitFor(() => expect(panel.style.width).toBe("420px"));
-
-    await act(async () => {
-      sync.resolve(dmSyncResult([CANONICAL_DM]));
-      await sync.promise;
-    });
-
-    expect(
-      await screen.findByTestId(
-        `tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`,
-      ),
-    ).toBeTruthy();
-  });
-
   // The session signal reaches the SHELL: cloudStatus derives the presence
   // collaboration, so a sign-out must tear the old account's presence down
   // (abort its long poll) and re-query the status immediately — not when
@@ -978,156 +916,6 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() =>
       expect(bridge.cloudStatus.mock.calls.length).toBeGreaterThan(statusQueries),
     );
-  });
-
-  // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
-  // engine bridge only stubs the navigator's overview surface.
-  function chatsPageBridge(uiState: WorkspaceUiState) {
-    const bridge = makeBridge(Promise.resolve(uiState));
-    const syncAnswers: Array<(value: SyncDmsResult) => void> = [];
-    bridge.syncDms = vi.fn(
-      () =>
-        new Promise<SyncDmsResult>((resolve) => {
-          syncAnswers.push(resolve);
-        }),
-    );
-    bridge.listChatChannels = vi.fn(async () => ({
-      channels: [
-        {
-          id: "channel-team",
-          name: "team",
-          slug: "team",
-          kind: "channel" as const,
-          createdAtMs: 1,
-          updatedAtMs: 1,
-          threadCount: 1,
-          unreadCount: 0,
-        },
-      ],
-      fileThreads: [],
-    }));
-    installGraphFixture(bridge, {
-      nodes: [DM_GRAPH_NODE],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 1,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    });
-    return Object.assign(bridge, {
-      syncAnswers,
-      listPersonalChatFeed: vi.fn(async () => ({
-        items: [
-          {
-            message: {
-              presentation: { group: "fixture", hue: null, self: false },
-              id: "message-feed",
-              threadId: "thread-team",
-              authorKind: "human" as const,
-              authorDisplayName: "You",
-              body: "Feed update worth revisiting",
-              createdAtMs: 1,
-            },
-            thread: {
-              id: "thread-team",
-              title: "Feed thread",
-              createdAtMs: 1,
-              updatedAtMs: 1,
-              channelId: "channel-team",
-              messageCount: 1,
-              lastReadSequence: 1,
-              unreadCount: 0,
-            },
-            channel: {
-              id: "channel-team",
-              name: "team",
-              slug: "team",
-              kind: "channel" as const,
-            },
-            reactions: [],
-            matchedBy: ["channel" as const],
-          },
-        ],
-      })),
-      listChatMessages: vi.fn(async () => ({
-        messages: [
-          {
-            presentation: { group: "fixture", hue: null, self: false },
-            id: "message-feed",
-            threadId: "thread-team",
-            authorKind: "human" as const,
-            authorDisplayName: "You",
-            body: "Feed update worth revisiting",
-            createdAtMs: 1,
-          },
-        ],
-      })),
-      listChatReactions: vi.fn(async () => ({ reactions: [], viewerAuthorId: "you" })),
-      listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
-      listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
-      chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
-      chatDispatchStateForThread: vi.fn(async () => ({
-        liveRunId: null,
-        liveTriggerMessageId: null,
-        pendingCount: 0,
-        paused: false,
-      })),
-      markChatThreadRead: vi.fn(async () => ({ lastReadSequence: 1, revision: 1 })),
-    });
-  }
-
-  const CHATS_PAGE_STATE: WorkspaceUiState = {
-    ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
-    aboutVisible: false,
-  };
-
-  // The Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
-  // pending DM lookup synchronously in the click — the passive nav report is
-  // an effect that flushes after the microtask queue, so a DM answer landing
-  // in the same tick as the click would pass its isCurrent() check first and
-  // remount the page over the message the user just jumped to.
-  it("discards a DM answer that lands in the same tick as a page feed click", async () => {
-    const user = userEvent.setup();
-    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
-    renderShell(bridge);
-
-    await screen.findByTestId("chats-personal-feed");
-    const post = await screen.findByText("Feed update worth revisiting");
-    const postButton = post.closest("button")!;
-
-    await user.click(screen.getByTestId("activity-graph"));
-    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByTestId("graph-file-row")
-          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
-      ).toBe(true),
-    );
-    const rows = await screen.findAllByTestId("graph-file-row");
-    const dmCallsBefore = bridge.syncDms.mock.calls.length;
-    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
-    await waitFor(() => expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1));
-    // Collapse the sidebar so only the Chats page answers the queries below.
-    await user.click(screen.getByTestId("activity-graph"));
-
-    // The DM answers in the same tick the user clicks the feed item: the
-    // answer's continuation is queued first, and the click handler runs
-    // before it does. Only a cancellation issued before the next macrotask
-    // wins this race — the passive nav report flushes too late.
-    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
-    await act(async () => {
-      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
-      postButton.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-    });
-
-    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-    expect(
-      screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`),
-    ).toBeNull();
   });
 
   it("stored state applies when the user touched nothing before the load", async () => {

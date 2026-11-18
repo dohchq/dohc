@@ -26,7 +26,7 @@ describe("workspace modes", () => {
 });
 
 describe("manifest validation", () => {
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])(
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account", "direct"])(
     "refuses the reserved manifest ID %s",
     (workspaceId) => {
       expect(

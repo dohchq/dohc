@@ -16,7 +16,11 @@ import {
 import type { SyncRelayHandler } from "@dohc/sync-relay";
 import type { SyncRelayStorage } from "@dohc/sync-relay/storage";
 import { type NoticeReach } from "@dohc/workspace-contracts/relay";
-import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
+import {
+  ListNoticesResult,
+  RetryAutomationNoticeResult,
+  type NoticeRef,
+} from "../ipc/bridgeContract";
 import { SHARE_CHAT_REFUSED } from "./settlementRefusal";
 import {
   AUTOMATION_SWITCHED_OFF_BODY,
@@ -1369,7 +1373,7 @@ describe("automation notices reach the people involved", () => {
     lastChangedBy: async () => extra.lastChangedBy ?? null,
     onError: vi.fn(),
   });
-  const refOf = (row: { store: "local" | "account"; noticeId: string }) => ({
+  const refOf = (row: Pick<NoticeRef, "store" | "noticeId">) => ({
     store: row.store,
     noticeId: row.noticeId,
   });

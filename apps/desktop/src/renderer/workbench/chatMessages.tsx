@@ -659,7 +659,9 @@ export const DENSITY = {
 
 // Whether a message continues the run before it: the same author within
 // five minutes on the same day. Every connected agent shares the unnamed
-// agent's group, so an agent's run also needs the same name.
+// agent's group, so an agent's run also needs the same name. People on a
+// relay share one group too, so two messages with different accounts never
+// join.
 export function continuesRun(
   previous: ChatMessageRecord | undefined,
   message: ChatMessageRecord,
@@ -670,6 +672,9 @@ export function continuesRun(
     previous.authorKind === message.authorKind &&
     previous.presentation.group === message.presentation.group &&
     (message.authorKind !== "agent" || previous.authorDisplayName === message.authorDisplayName) &&
+    (previous.authorUserId === undefined ||
+      message.authorUserId === undefined ||
+      previous.authorUserId === message.authorUserId) &&
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS
   );
 }
@@ -733,6 +738,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   openMessageId?: string | null;
   // A thread's parent comes first; this line divides it from the replies.
   dividerAfterFirst?: string;
+  // A row before the first message, such as Show earlier messages. It scrolls with the messages.
+  header?: ReactElement | null;
   // A row after the last message, such as an agent at work.
   footer?: ReactElement | null;
   // A stream sits at the bottom, above its composer, with a line for each day.
@@ -1222,6 +1229,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         estimatedItemSize={80}
         initialScrollAtEnd={anchor === "end"}
         alignItemsAtEnd={anchor === "end"}
+        ListHeaderComponent={props.header}
         ListFooterComponent={props.footer}
         maintainScrollAtEnd={{
           animated: false,

@@ -97,12 +97,7 @@ import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
 import { useWorkspaceTrust } from "./useWorkspaceTrust";
 import { RestrictedAgentsBand, TRUST_READ_FAILED_MESSAGE } from "./RestrictedMode";
-import {
-  chatMentionOpenTarget,
-  graphChatOpenTarget,
-  type DmChatLocator,
-} from "./shell/chatOpenTarget";
-import { runCanonicalDmNavigation } from "./shell/canonicalDmNavigation";
+import { chatMentionOpenTarget, graphChatOpenTarget } from "./shell/chatOpenTarget";
 import {
   chatsOffCopy,
   fileObservationFailureCopy,
@@ -312,6 +307,7 @@ import { useFocusReturn, useFocusSurface } from "./ui/focusReturn";
 import { countInput, inputCount } from "./ui/inputCount";
 import { CUSTOMIZE_TARGETS, CustomizeContext, type CustomizePart } from "./settings/customize";
 import { NoticeCenter, type WorkspaceErrorNotice } from "./workbench/NoticeCenter";
+import { titleBarNamesServer } from "./workbench/WorkspaceSyncStatus";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import {
@@ -407,6 +403,7 @@ import {
   setCollectionActiveView,
   setCollectionOpenRecord,
   setRecordPanelWidth,
+  setDirectTabName,
   setFolderExpanded,
   setExplorerMode,
   setOpenEditorsHeight,
@@ -507,22 +504,6 @@ function groupsMountingNewDocument(current: WorkbenchState, next: WorkbenchState
       ? [after.id]
       : [];
   });
-}
-
-/** The record a pending canonical DM navigation checks itself against. */
-type DmNavigationRequest = { workspaceId: string; sequence: number };
-
-// Cancel any in-flight canonical DM navigation so its late answer cannot land
-// a chat destination over wherever the user went meanwhile. REPLACE the
-// record, never increment it in place: openCanonicalDmInTab installs the very
-// object it then compares against, so an in-place increment moves the pending
-// navigation's captured sequence too, its isCurrent() compares the object with
-// itself, and the cancellation is a no-op.
-function invalidateDmNavigation(request: { current: DmNavigationRequest }): void {
-  request.current = {
-    workspaceId: request.current.workspaceId,
-    sequence: request.current.sequence + 1,
-  };
 }
 
 export function pendingHeadingTargetForOpen(
@@ -1045,16 +1026,6 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     noteWorkspaceLabel(workspaceId, workspaceName(props.workspace));
   }, [workspaceId, props.workspace]);
-  // Every workbench destination change invalidates an in-flight canonical DM
-  // lookup. Kept beside the central mutateWb seam so file/graph/history/tab
-  // navigation cannot be missed by a one-off opener.
-  const dmNavigationRequest = useRef({ workspaceId, sequence: 0 });
-  if (dmNavigationRequest.current.workspaceId !== workspaceId) {
-    dmNavigationRequest.current = {
-      workspaceId,
-      sequence: dmNavigationRequest.current.sequence + 1,
-    };
-  }
   const refreshShareViewRef = useRef<
     (trigger?: ShareViewRefreshTrigger) => Promise<ShareViewRefresh>
   >(async () => "current");
@@ -1934,7 +1905,7 @@ export function DesktopWorkspaceShell(props: {
             !sharedView &&
             tab.path !== focusedTabPath &&
             parsed.kind === "chat" &&
-            (parsed.target.kind === "channel" || parsed.target.kind === "dm")
+            parsed.target.kind === "channel"
           );
         }),
       ),
@@ -2053,20 +2024,9 @@ export function DesktopWorkspaceShell(props: {
   // the only other writers.
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
-      // A pending canonical DM navigation loses to a DESTINATION change, not
-      // to every workbench write. Most writes here are not one: a panel resize
-      // commits its final size, and the share-mount poll reaches this seam with
-      // no user involved at all — cancelling on those would silently discard a
-      // DM the user had just clicked.
       const current = wbRef.current;
       const next = updater(current);
       if (next === current) return;
-      if (
-        next.activeEditorGroup !== current.activeEditorGroup ||
-        activeTabPath(next) !== activeTabPath(current)
-      ) {
-        invalidateDmNavigation(dmNavigationRequest);
-      }
       writeWb(next);
     },
     [writeWb],
@@ -2385,17 +2345,6 @@ export function DesktopWorkspaceShell(props: {
     const next = prune(current);
     if (next === current) return;
     const groupsOpeningFiles = groupsMountingNewDocument(current, next);
-    if (
-      next.activeEditorGroup !== current.activeEditorGroup ||
-      activeTabPath(next) !== activeTabPath(current)
-    ) {
-      // This commits through the direct setter, on purpose: reconciling is not
-      // a user action. But it moves the active tab exactly as mutateWb does, so
-      // it owes the same invalidation — otherwise an in-flight DM navigation
-      // still passes its isCurrent() check and lands its destination on top of
-      // the tab we just activated.
-      invalidateDmNavigation(dmNavigationRequest);
-    }
     // Activating a neighbour remounts the keyed inspector — that is an open
     // (closeFileTab idiom). Without the mark, the inspector's mount measure
     // brackets whatever stale mark came before it.
@@ -3876,10 +3825,6 @@ export function DesktopWorkspaceShell(props: {
       const isCurrentRequest = () =>
         fileOpenRequests.current.workspaceId === workspaceId &&
         fileOpenRequests.current.sequenceByGroup.get(targetGroupId) === requestSequence;
-      // A heading jump is a destination change mutateWb's tab check cannot
-      // see: the file may already BE the active tab, and the user still went
-      // somewhere new inside it.
-      if (target) invalidateDmNavigation(dmNavigationRequest);
       // Heading jumps are one open command, never durable tab state. Every
       // ordinary explorer/tab open therefore clears a prior jump before the
       // file can become active again.
@@ -4396,7 +4341,6 @@ export function DesktopWorkspaceShell(props: {
           progress: {
             rowMounted: handoffChats.rowMounted,
             shares: handoffChats.lists?.shares ?? "waiting",
-            dms: handoffChats.lists?.dms ?? "waiting",
           },
           chatsOn: !(captureDecided && !captureAvailable),
           waitedTooLong: handoffChats.late,
@@ -4638,7 +4582,6 @@ export function DesktopWorkspaceShell(props: {
   const openVersionsTab = useCallback(() => {
     openVirtualTab(VERSIONS_TAB_PATH, false, true);
   }, [openVirtualTab]);
-  const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
   const chatPaths = useMemo(
     () =>
       allTabs(wb)
@@ -4655,16 +4598,23 @@ export function DesktopWorkspaceShell(props: {
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
   const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
-  const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
+  const saveDirectName = useCallback(
+    (conversationId: string, account: string, name: string) => {
+      mutateWb((state) => setDirectTabName(state, conversationId, account, name));
+    },
+    [mutateWb],
+  );
   const chatEditors = useChatEditorTabs({
     workspaceId,
     onOpen: openVirtualTab,
-    onNavigate: cancelDmNavigation,
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => (group.activeTab ? [group.activeTab] : [])),
     enabled: chatsAvailable,
     agents: settingsAgents,
-    readRevision: chatsReadRevision + chatsDmReadRevision,
+    readRevision: chatsReadRevision,
+    directNames: wb.directNames,
+    onDirectName: saveDirectName,
+    accountKey: cloudStatus === null ? undefined : (cloudStatus.sessionKey ?? null),
   });
   const selectedChatsNav =
     focusedTabPath && parseTab(focusedTabPath)?.kind === "chat"
@@ -4734,9 +4684,6 @@ export function DesktopWorkspaceShell(props: {
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
-  const onChatsDmRead = useCallback(() => {
-    setChatsDmReadRevision((current) => current + 1);
-  }, []);
   const onChatsThreadStarted = useCallback(() => {
     setChatsThreadRevision((current) => current + 1);
   }, []);
@@ -4756,30 +4703,6 @@ export function DesktopWorkspaceShell(props: {
   const openChatsTab = useCallback(() => {
     openChatsNavInTab({ level: "feed" });
   }, [openChatsNavInTab]);
-  const openCanonicalDmInTab = useCallback(
-    async (locator: DmChatLocator) => {
-      const request = {
-        workspaceId,
-        sequence: dmNavigationRequest.current.sequence + 1,
-      };
-      dmNavigationRequest.current = request;
-      await runCanonicalDmNavigation({
-        locator,
-        syncDms: () => bridge().syncDms({ workspaceId }),
-        isCurrent: () =>
-          dmNavigationRequest.current.workspaceId === request.workspaceId &&
-          dmNavigationRequest.current.sequence === request.sequence,
-        open: openChatsNavInTab,
-        onUnavailable: (error) =>
-          reportShellError(
-            "Could not open this conversation.",
-            error,
-            () => void openCanonicalDmInTab(locator),
-          ),
-      });
-    },
-    [openChatsNavInTab, reportShellError, workspaceId],
-  );
   // The one way a file's chat thread lands in About (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to About's consume-once seam and
@@ -4792,11 +4715,6 @@ export function DesktopWorkspaceShell(props: {
       focusMessageId?: string,
       tab: string | null = focusedTabRef.current,
     ) => {
-      // The user picked a different chat destination. The panel is not the
-      // editor, so no tab moves and the check in mutateWb cannot see this —
-      // but a pending DM answering late would open the Chats TAB over the
-      // thread they just chose.
-      invalidateDmNavigation(dmNavigationRequest);
       setSearchChatTarget({
         thread: {
           id: thread.id,
@@ -4823,13 +4741,9 @@ export function DesktopWorkspaceShell(props: {
         openChatsTab();
         return;
       }
-      if (target.surface === "dm") {
-        void openCanonicalDmInTab(target);
-        return;
-      }
       openChatsNavInTab(target.nav);
     },
-    [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
+    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   const openGraphChatThread = useCallback(
     (node: GraphNode) => {
@@ -4842,13 +4756,9 @@ export function DesktopWorkspaceShell(props: {
         openChatsTab();
         return;
       }
-      if (target.surface === "dm") {
-        void openCanonicalDmInTab(target);
-        return;
-      }
       openChatsNavInTab(target.nav);
     },
-    [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
+    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   // Engine history diff: one diff tab per group, pointed at each moment.
   const openMomentDiffTab = useCallback(
@@ -5106,9 +5016,6 @@ export function DesktopWorkspaceShell(props: {
   // Open a file and land at a line: a search result, or a link in About.
   const openPathAtLine = useCallback(
     (path: string, line: number) => {
-      // Landing at a line is a destination change openFile cannot see: the
-      // line may be in the file the user is already reading.
-      invalidateDmNavigation(dmNavigationRequest);
       openFile(path, undefined, {
         line,
         nonce: ++scrollNonce.current,
@@ -7183,7 +7090,6 @@ export function DesktopWorkspaceShell(props: {
           if (signal.aborted || workspaceIdRef.current !== owner) return null;
           if (place === null) return CHAT_NOT_FOUND_NOTE;
           if (place.open === "file") openFileChatInPanel(place.thread, place.focusMessageId);
-          else if (place.open === "dm") void openCanonicalDmInTab(place.locator);
           else openChatsNavInTab(place.nav);
           return null;
         }
@@ -7199,6 +7105,9 @@ export function DesktopWorkspaceShell(props: {
           return null;
         case "chats-invitation":
           openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
+          return null;
+        case "direct":
+          openChatsNavInTab({ level: "direct", conversationId: target.conversationId });
           return null;
         case "automation":
           return openAutomation(target.automation, target.run ?? null, null, false, signal);
@@ -7245,7 +7154,6 @@ export function DesktopWorkspaceShell(props: {
       refreshFiles,
       openAutomation,
       openAutomationControls,
-      openCanonicalDmInTab,
       openCaptureRecovery,
       openChatsInvitation,
       openChatsNavInTab,
@@ -7518,16 +7426,6 @@ export function DesktopWorkspaceShell(props: {
 
   // The editor is the one live conversation surface. It owns presence,
   // drafts, and navigation state.
-  const dmWorkspaceOptions = useMemo(
-    () =>
-      props.workspaces
-        .filter((workspace) => !workspace.shareView)
-        .map((workspace) => ({
-          workspaceId: workspace.workspaceId,
-          label: workspaceName(workspace),
-        })),
-    [props.workspaces],
-  );
   // The add-agent form writes the same settings file the dialog does. The
   // root hears the write through the settings-changed broadcast and the
   // agent setup summary follows.
@@ -7537,16 +7435,20 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
+  // One outage, one notice: while the title bar says the server is unreachable,
+  // direct messages file none of their own.
+  const chatsServerNamed = titleBarNamesServer(syncStatus, failedSaves);
   const chatsViewProps = {
     workspaceId,
-    workspaces: dmWorkspaceOptions,
+    savedDirectName: chatEditors.savedDirectName,
+    serverNamed: chatsServerNamed,
     onOpenNavigator: openChatsNavigator,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,
-    onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: reportChatsError,
+    onClearError: clearIdentity,
     onNotice: showSuccessNotice,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
@@ -7556,6 +7458,7 @@ export function DesktopWorkspaceShell(props: {
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    onOpenSettings: openSettings,
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
@@ -7567,8 +7470,8 @@ export function DesktopWorkspaceShell(props: {
   // navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
   // conversation does not double every chat read. The page's landed
-  // reads still reach the navigator through their local-thread and DM
-  // revisions, and it still reloads the Group list on activity.
+  // reads still reach the navigator through their local-thread revision, and
+  // it still reloads the Group list on activity.
   const chatsTabIsLive = wb.editorGroups.some(
     (group) => parseTab(group.activeTab)?.kind === "chat",
   );
@@ -7578,11 +7481,10 @@ export function DesktopWorkspaceShell(props: {
   // and never seeds or reports a destination.
   const chatsNavigatorProps = {
     workspaceId,
-    workspaces: dmWorkspaceOptions,
+    serverNamed: chatsServerNamed,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
-    dmReadRevision: chatsDmReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
@@ -7590,7 +7492,6 @@ export function DesktopWorkspaceShell(props: {
     onNotice: chatsNavigatorNotice,
     onClearError: clearIdentity,
     onThreadRead: onChatsThreadRead,
-    onDmRead: onChatsDmRead,
     onBookmarkArchived: onChatBookmarkArchived,
     shareRemovals,
     mentionCandidates,
@@ -7605,6 +7506,7 @@ export function DesktopWorkspaceShell(props: {
     onShareRowMounted: handleShareRowMounted,
     agentSetup,
     onSetupAgent: openAgentSettings,
+    onOpenSettings: openSettings,
     userSettings: props.userSettings?.settings ?? null,
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
@@ -9006,7 +8908,12 @@ export function DesktopWorkspaceShell(props: {
                                                     // Each loading state of the tab puts its lines at the top, so
                                                     // each one takes over from the last without blinking.
                                                     <SkeletonSlot>
-                                                      {chatsAvailable ? (
+                                                      {/* Direct messages belong to the signed-in account and live on
+                                                      its server, so they open wherever the workspace's own chats
+                                                      cannot: no recording, a shared view. */}
+                                                      {chatsAvailable ||
+                                                      groupTab.target.kind === "dm" ||
+                                                      groupTab.target.kind === "new" ? (
                                                         <div className="flex min-h-0 flex-1 flex-col">
                                                           {agentsRestricted ? (
                                                             <RestrictedAgentsBand
@@ -9047,6 +8954,15 @@ export function DesktopWorkspaceShell(props: {
                                                               }
                                                               editorTabPath={groupTab.path}
                                                               onOpenInTab={openChatsNavInTab}
+                                                              onCloseTab={() => {
+                                                                if (tab)
+                                                                  closeTabsAfterFlush([
+                                                                    {
+                                                                      groupId: editorGroup.id,
+                                                                      tab,
+                                                                    },
+                                                                  ]);
+                                                              }}
                                                               variant="page"
                                                             />
                                                           </Suspense>
@@ -10050,6 +9966,10 @@ export function DesktopWorkspaceShell(props: {
                             }}
                           >
                             <LazyDesktopSettings
+                              onMessageMember={(memberId) => {
+                                closeSettings();
+                                openChatsNavInTab({ level: "direct-new", memberId });
+                              }}
                               workspaceIsReady={workspaceIsReady}
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}

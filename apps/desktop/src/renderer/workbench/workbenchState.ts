@@ -6,6 +6,7 @@
 
 import { basenameOf } from "../path";
 import { parseDatasetPath } from "@dohc/security-contract/dataset";
+import { isDirectId } from "@dohc/security-contract/direct-messages";
 import type { FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
@@ -483,6 +484,16 @@ export interface WorkbenchState {
   // drops its entry.
   openRecords: Record<string, string>;
   recordPanelWidth: number;
+  // The other person's name for each open direct message tab, by conversation
+  // id, with the account it was read as (the cloud session key). A tab
+  // restored while the server is away shows it, to that account only. Only
+  // the name is kept, and only while the tab is open.
+  directNames: Record<string, DirectTabName>;
+}
+
+export interface DirectTabName {
+  account: string;
+  name: string;
 }
 
 type EditorTransitionActivation = "target" | "preserve";
@@ -521,6 +532,10 @@ export const MAX_RECENT_FILES = 20;
 export const MAX_COLLECTION_VIEWS = 100;
 // Bounds a stored record reference, as a path is bounded.
 export const MAX_OPEN_RECORD_CHARS = 4096;
+// A direct tab's saved name: one per open tab, so the tab cap bounds the map.
+export const MAX_DIRECT_NAMES = MAX_OPEN_TABS;
+export const MAX_DIRECT_NAME_CHARS = 200;
+export const MAX_DIRECT_ACCOUNT_CHARS = 4096;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -539,6 +554,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     collectionViews: {},
     openRecords: {},
     recordPanelWidth: RECORD_PANEL_DEFAULT_WIDTH,
+    directNames: {},
   };
 }
 
@@ -856,10 +872,10 @@ function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
   const closed = Object.keys(state.openRecords).filter(
     (path) => !state.editorGroups.some((group) => group.tabs.some((tab) => tab.path === path)),
   );
-  if (closed.length === 0) return state;
+  if (closed.length === 0) return keepOpenDirectNames(state);
   const openRecords = { ...state.openRecords };
   for (const path of closed) delete openRecords[path];
-  return { ...state, openRecords };
+  return keepOpenDirectNames({ ...state, openRecords });
 }
 
 export function moveTab(
@@ -1224,6 +1240,40 @@ export function setRecordPanelWidth(state: WorkbenchState, width: number): Workb
   return clamped === state.recordPanelWidth ? state : { ...state, recordPanelWidth: clamped };
 }
 
+// Saves the name a direct tab shows before the list reads, as `account` read
+// it. Only an open tab keeps one.
+export function setDirectTabName(
+  state: WorkbenchState,
+  conversationId: string,
+  account: string,
+  name: string,
+): WorkbenchState {
+  const saved = state.directNames[conversationId];
+  if (saved?.account === account && saved.name === name) return state;
+  if (!openDirectIds(state).has(conversationId)) return state;
+  return { ...state, directNames: { ...state.directNames, [conversationId]: { account, name } } };
+}
+
+function openDirectIds(state: Pick<WorkbenchState, "editorGroups">): Set<string> {
+  const ids = new Set<string>();
+  for (const tab of state.editorGroups.flatMap((group) => group.tabs)) {
+    const parsed = parseTab(tab.path);
+    if (parsed.kind === "chat" && parsed.target.kind === "dm") ids.add(parsed.target.id);
+  }
+  return ids;
+}
+
+// A closed tab's name goes with it.
+function keepOpenDirectNames(state: WorkbenchState): WorkbenchState {
+  const ids = Object.keys(state.directNames);
+  if (ids.length === 0) return state;
+  const open = openDirectIds(state);
+  if (ids.every((id) => open.has(id))) return state;
+  const directNames: Record<string, DirectTabName> = {};
+  for (const id of ids) if (open.has(id)) directNames[id] = state.directNames[id]!;
+  return { ...state, directNames };
+}
+
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -1370,6 +1420,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     collectionViews: state.collectionViews,
     openRecords: state.openRecords,
     recordPanelWidth: clampRecordPanelWidth(state.recordPanelWidth),
+    directNames: keepOpenDirectNames(state).directNames,
   };
 }
 
@@ -1518,7 +1569,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawAboutWidth = own("aboutWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
   const rawRecordPanelWidth = own("recordPanelWidth");
-  return {
+  const parsed: Omit<WorkbenchState, "directNames"> = {
     activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
       typeof rawSidebarVisible === "boolean" ? rawSidebarVisible : defaults.sidebarVisible,
@@ -1551,6 +1602,42 @@ export function parseUiState(raw: unknown): WorkbenchState {
         ? clampRecordPanelWidth(rawRecordPanelWidth)
         : defaults.recordPanelWidth,
   };
+  return {
+    ...parsed,
+    directNames: collectDirectNames(own("directNames"), openDirectIds(parsed)),
+  };
+}
+
+// The collectOpenRecords posture: only a restored tab's name is read, so names for closed tabs can't crowd it out.
+function collectDirectNames(
+  raw: unknown,
+  open: ReadonlySet<string>,
+): Record<string, DirectTabName> {
+  const out: Record<string, DirectTabName> = Object.create(null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  const record = raw as Record<string, unknown>;
+  let collected = 0;
+  for (const id of open) {
+    if (collected >= MAX_DIRECT_NAMES) break;
+    if (!Object.hasOwn(record, id) || !isDirectId(id)) continue;
+    const entry = record[id];
+    if (typeof entry !== "object" || entry === null) continue;
+    const account = Object.hasOwn(entry, "account")
+      ? (entry as Record<string, unknown>).account
+      : undefined;
+    const name = Object.hasOwn(entry, "name") ? (entry as Record<string, unknown>).name : undefined;
+    if (
+      typeof account !== "string" ||
+      account.length === 0 ||
+      account.length > MAX_DIRECT_ACCOUNT_CHARS
+    )
+      continue;
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_DIRECT_NAME_CHARS)
+      continue;
+    out[id] = { account, name };
+    collected += 1;
+  }
+  return out;
 }
 
 // The collectCollectionViews posture for the open records: own string

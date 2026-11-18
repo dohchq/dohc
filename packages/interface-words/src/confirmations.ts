@@ -13,7 +13,7 @@ export const confirmWords = {
     `Delete ${paths.length === 1 ? (paths[0]?.split("/").pop() ?? "") : `${paths.length} items`}?`,
   deleteFilesBody: (count: number, workspace: string) =>
     `${one(count, "It goes", "They go")} from ${workspace} for everyone now. There is no trash to restore ${one(count, "it", "them")} from.`,
-  // workbench/DmPlacement.tsx
+  // The phone's chat demo.
   leave: "Leave",
   leaveConversationTitle: (peer: string) => `Leave your conversation with ${peer}?`,
   leaveConversationBody: (workspace: string) =>

@@ -447,6 +447,22 @@ export interface ReadError {
 
 const NOT_A_WORKSPACE = { canRetry: false, refusal: "not-a-workspace" } as const;
 
+/** The code of a request that needs the workspace to sync first. Its words stay the error's own. */
+export const WORKSPACE_NOT_SYNCED = "workspace-not-synced";
+
+/** A direct message's failure that trying again cannot change, such as a block or being signed out. */
+export const DIRECT_FINAL = "direct-final";
+/** A direct message's failure that may pass on another try, such as an unreachable server. */
+export const DIRECT_RETRY = "direct-retry";
+/** A direct message's failure because nobody is signed in. A view that already says so needs no notice. */
+export const DIRECT_SIGNED_OUT = "direct-signed-out";
+/**
+ * A first message whose window changed workspaces. The change can come after the send left, so it may have
+ * arrived. Sending it again is safe: the server takes the same message id and words once.
+ */
+export const DIRECT_START_INACTIVE_MESSAGE =
+  "This window changed workspaces, so the message may not have been sent. Check the conversation in Chats before sending it again.";
+
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
   if (
@@ -467,6 +483,15 @@ export function readError(error: unknown): ReadError {
       cause: name === "DaemonRefusalError" ? text : null,
       canRetry: false,
       ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}),
+    };
+  }
+  if (code === WORKSPACE_NOT_SYNCED) return { words: message, mapped: false, cause: null };
+  if (name === "DirectMessageError") {
+    return {
+      words: message || null,
+      mapped: false,
+      cause: text,
+      ...(code === DIRECT_FINAL || code === DIRECT_SIGNED_OUT ? { canRetry: false as const } : {}),
     };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {

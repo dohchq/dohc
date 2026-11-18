@@ -4,6 +4,7 @@ import {
   SERVER_RUN_FAILED_NOTICE_PREFIX,
 } from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceSummary } from "../ipc/bridgeContract";
+import { DIRECT_NOTICE_KIND } from "./directNotices";
 
 // Where Open takes a notice sent to you, on this computer.
 export type SentNoticePlace =
@@ -20,7 +21,9 @@ export type SentNoticePlace =
   | { kind: "not-here" }
   // Settings › Agents, where the account's personal agents are, at the page
   // of the personal agent whose id the notice names.
-  | { kind: "agents-settings"; agent: string | null };
+  | { kind: "agents-settings"; agent: string | null }
+  // A direct conversation, which belongs to the account rather than a workspace.
+  | { kind: "direct"; conversationId: string };
 
 /**
  * Finds a sent notice's target on this computer. A share can be a separate
@@ -28,13 +31,15 @@ export type SentNoticePlace =
  * stays where the person is when it can.
  */
 export function sentNoticePlace(
-  notice: Pick<NoticeRow, "workspaceId" | "recipientShareId" | "target">,
+  notice: Pick<NoticeRow, "workspaceId" | "recipientShareId" | "target"> & { kind?: string },
   workspaces: readonly WorkspaceSummary[],
   currentWorkspaceId: string,
 ): SentNoticePlace {
   if (notice.target === null) return { kind: "access-ended" };
   if (notice.target.settings === "agents")
     return { kind: "agents-settings", agent: notice.target.agent ?? null };
+  if (notice.kind === DIRECT_NOTICE_KIND && notice.target.thread)
+    return { kind: "direct", conversationId: notice.target.thread };
   const path = notice.target.path ?? null;
   if (notice.workspaceId !== null) {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === notice.workspaceId);

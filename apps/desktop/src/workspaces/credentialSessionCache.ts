@@ -40,6 +40,24 @@ export class CredentialSessionCache<Credentials> {
     return this.ready!;
   }
 
+  /**
+   * The current credentials, loading them first if needed. Rejects with the
+   * error when the store can't be read, so a caller doesn't take it as a sign-out.
+   */
+  async read(load: () => Promise<Credentials | null>): Promise<Credentials | null> {
+    for (;;) {
+      const waited = this.warm(load);
+      const generation = this.generation;
+      const unreadable = await waited;
+      // A refresh, set, or clear replaced the load this read waited on, even
+      // one that failed. Read what replaced it, not that load's error or the
+      // null a refresh shows while it reads.
+      if (this.generation !== generation) continue;
+      if (unreadable) throw unreadable.error;
+      return this.credentials;
+    }
+  }
+
   refresh(load: () => Promise<Credentials | null>): Promise<void> {
     return this.beginLoad(load);
   }

@@ -58,6 +58,7 @@ import type { OperationDefinition, OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
 import { memberOperations } from "./memberOperations";
+import { directMessageOperations } from "./directMessageOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { explorerMenuOperations } from "./explorerMenuOperations";
 
@@ -84,6 +85,7 @@ export const OPERATION_TABLES = [
   serverAccountOperations,
   accessOperations,
   memberOperations,
+  directMessageOperations,
   updateDownloadOperations,
   workspaceVersionOperations,
   historyOperations,

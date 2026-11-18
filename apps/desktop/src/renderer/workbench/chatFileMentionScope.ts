@@ -4,9 +4,6 @@ import type { FileMentionCandidate } from "./MentionComposer";
 
 const NO_FILES: readonly FileMentionCandidate[] = [];
 
-// A direct message links no file.
-export const DM_FILE_CANDIDATES = NO_FILES;
-
 // The files a composer offers in a chat: those its messages may link, by the
 // rule the send checks. A chat whose rule the channel list has not given
 // offers every file. A joined Group's files are this workspace's copy of its

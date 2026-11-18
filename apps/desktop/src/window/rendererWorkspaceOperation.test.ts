@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLastKnownDmRequestLanesCache } from "../workspaces/dmRequests";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner } from "./rendererWorkspaceOperation";
 import { deferred } from "../testing/deferred";
@@ -231,63 +230,5 @@ describe("renderer workspace operation runner", () => {
 
     await expect(pending).rejects.toThrow("inactive");
     expect(effect).not.toHaveBeenCalled();
-  });
-
-  it("does not expose attachment A's DM request lanes to same-id successor B", async () => {
-    let workspace: { workspaceId: string; rootPath: string } | null = {
-      workspaceId: "workspace",
-      rootPath: "C:/workspace",
-    };
-    const owner = createWorkspaceAuthorityOwner({
-      findWorkspace: () => workspace,
-      canonicalizeRoot: (rootPath: string) => rootPath,
-      createState: () => ({
-        lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),
-      }),
-    });
-    const first = owner.acquire("workspace");
-    let session: TestSession = {
-      workspaceId: "workspace",
-      attachmentId: first.binding.attachmentId,
-      generation: 1,
-      isCurrent: () => true,
-    };
-    first.release();
-    const run = createRendererWorkspaceOperationRunner<
-      object,
-      TestWorkspace,
-      {
-        lastKnownDmRequestLanes: ReturnType<typeof createLastKnownDmRequestLanesCache>;
-      },
-      TestSession
-    >({
-      currentSession: () => session,
-      withPhysicalOperation: (workspaceId, work) => owner.withOperation(workspaceId, work),
-    });
-
-    await run({}, "workspace", "inactive", (operation) => {
-      operation.state.lastKnownDmRequestLanes.set("workspace", {
-        pending: [{ shareId: "share-a", granterEmail: "a@example.com" }],
-        declined: [],
-      });
-    });
-
-    workspace = null;
-    await owner.invalidate("workspace");
-    workspace = { workspaceId: "workspace", rootPath: "C:/workspace" };
-    const successor = owner.acquire("workspace");
-    session = {
-      workspaceId: "workspace",
-      attachmentId: successor.binding.attachmentId,
-      generation: 2,
-      isCurrent: () => true,
-    };
-    successor.release();
-
-    await expect(
-      run({}, "workspace", "inactive", (operation) =>
-        operation.state.lastKnownDmRequestLanes.get("workspace"),
-      ),
-    ).resolves.toBeUndefined();
   });
 });

@@ -12,6 +12,7 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
+  continuesRun,
   pinnedChatDay,
 } from "./chatMessages";
 import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
@@ -765,6 +766,26 @@ describe("formatChatTime", () => {
       }),
       iso: new Date(at).toISOString(),
     });
+  });
+});
+
+describe("continuesRun", () => {
+  const relayPerson = { group: "", hue: null, self: false };
+  const record = (id: string, authorUserId: string, createdAtMs: number): ChatMessageRecord => ({
+    id,
+    threadId: "dm",
+    presentation: relayPerson,
+    authorKind: "human",
+    authorDisplayName: authorUserId,
+    authorUserId,
+    body: id,
+    createdAtMs,
+  });
+
+  it("joins one account's messages, never two accounts' that share a presentation group", () => {
+    const at = new Date(2026, 10, 15, 9).getTime();
+    expect(continuesRun(record("a", "ana", at), record("b", "ana", at + 1_000))).toBe(true);
+    expect(continuesRun(record("a", "ana", at), record("b", "sam", at + 1_000))).toBe(false);
   });
 });
 

@@ -239,8 +239,10 @@ export function registerCloudIpcHandlers<
         },
       ));
     }
+    const sessionKey = status.connected ? chatShareSessionKey(currentCredentials()) : null;
     return CloudStatusResult.parse({
       ...status,
+      ...(sessionKey === null ? {} : { sessionKey }),
       ownPresentation: ownActorPresentation(
         dependencies.localInstallationId(),
         currentCredentials(),

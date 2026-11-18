@@ -3,43 +3,39 @@ import { invitationOutcome, nextInvitationList, type InvitationList } from "./in
 
 const LISTS: InvitationList[] = ["waiting", "listed", "failed"];
 const EVERY_INPUT = LISTS.flatMap((shares) =>
-  LISTS.flatMap((dms) =>
-    [false, true].flatMap((rowMounted) =>
-      [false, true].flatMap((chatsOn) =>
-        [false, true].map((waitedTooLong) => ({
-          progress: { rowMounted, shares, dms },
-          chatsOn,
-          waitedTooLong,
-        })),
-      ),
+  [false, true].flatMap((rowMounted) =>
+    [false, true].flatMap((chatsOn) =>
+      [false, true].map((waitedTooLong) => ({
+        progress: { rowMounted, shares },
+        chatsOn,
+        waitedTooLong,
+      })),
     ),
   ),
 );
 
 describe("invitationOutcome", () => {
   it.each([
-    // rowMounted, shares, dms, chatsOn, waitedTooLong → outcome
-    [false, "waiting", "waiting", true, false, "pending"],
-    [false, "listed", "waiting", true, false, "pending"],
-    [false, "waiting", "listed", true, false, "pending"],
-    [false, "listed", "listed", true, false, "absent"],
-    [false, "failed", "waiting", true, false, "failed"],
-    [false, "listed", "failed", true, false, "failed"],
-    [false, "waiting", "waiting", true, true, "late"],
-    [false, "listed", "waiting", true, true, "late"],
-    [false, "listed", "listed", true, true, "absent"],
-    [false, "failed", "listed", true, true, "failed"],
-    [false, "waiting", "waiting", false, false, "off"],
-    [false, "listed", "listed", false, true, "off"],
-    [true, "waiting", "waiting", true, false, "shown"],
-    [true, "failed", "failed", true, true, "shown"],
-    [true, "listed", "listed", false, false, "shown"],
+    // rowMounted, shares, chatsOn, waitedTooLong → outcome
+    [false, "waiting", true, false, "pending"],
+    [false, "listed", true, false, "absent"],
+    [false, "failed", true, false, "failed"],
+    [false, "waiting", true, true, "late"],
+    [false, "listed", true, true, "absent"],
+    [false, "failed", true, true, "failed"],
+    [false, "waiting", false, false, "off"],
+    [false, "listed", false, true, "off"],
+    // A notice's Open revealed another invitation, so this one's list is
+    // never read again, but its row mounted.
+    [true, "waiting", true, false, "shown"],
+    [true, "failed", true, true, "shown"],
+    [true, "listed", false, false, "shown"],
   ] as const)(
-    "row %s, shares %s, messages %s, chats on %s, waited too long %s: %s",
-    (rowMounted, shares, dms, chatsOn, waitedTooLong, outcome) => {
-      expect(
-        invitationOutcome({ progress: { rowMounted, shares, dms }, chatsOn, waitedTooLong }),
-      ).toBe(outcome);
+    "row %s, shares %s, chats on %s, waited too long %s: %s",
+    (rowMounted, shares, chatsOn, waitedTooLong, outcome) => {
+      expect(invitationOutcome({ progress: { rowMounted, shares }, chatsOn, waitedTooLong })).toBe(
+        outcome,
+      );
     },
   );
 

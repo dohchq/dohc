@@ -16,7 +16,12 @@ import {
   transactionalCollectionTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
-import { makeBridge, renderShell, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
+import {
+  SYNC_STATUS,
+  makeBridge,
+  renderShell,
+  storedStateWithTabs,
+} from "./DesktopWorkspaceShell.testHarness";
 
 const requested = vi.hoisted(() => ({ path: "", seedInvalidApp: false }));
 vi.mock("./workbench/workbenchState", async (importOriginal) => {
@@ -188,6 +193,29 @@ describe("shell tab surfaces", () => {
       expect(view.getAttribute(key)).toBe(value);
     for (const other of new Set(cases.map((test) => test.surface))) {
       if (other !== surface) expect(shown(other)).toBeNull();
+    }
+  });
+
+  // Direct messages live on the account's server, not in the workspace's
+  // recording, so only the workspace's own chats close with it.
+  it.each([
+    { path: chatTabPath({ kind: "dm", id: "person one" }), surface: "chats-view" },
+    { path: chatTabPath({ kind: "new" }), surface: "chats-view" },
+    { path: chatTabPath({ kind: "channel", id: "team/one" }), surface: "chats-page-off" },
+    { path: CHATS_TAB_PATH, surface: "chats-page-off" },
+  ])("opens $path on $surface while history recording is off", async ({ path, surface }) => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const status = { ...SYNC_STATUS, historyRecordingUnavailable: true };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    requested.path = path;
+    fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    expect(await pane.findByTestId(surface)).toBeTruthy();
+    for (const other of ["chats-view", "chats-page-off"]) {
+      if (other !== surface) expect(pane.queryByTestId(other)).toBeNull();
     }
   });
 

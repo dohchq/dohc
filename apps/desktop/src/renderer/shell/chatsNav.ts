@@ -6,7 +6,7 @@ function chatsDestinationKey(nav: ChatsNav | null): string {
   if (!nav) return "channels";
   if (nav.level === "channel") return `channel:${nav.channel.id}`;
   if (nav.level === "thread") return `thread:${nav.thread.id}`;
-  if (nav.level === "dm") return `dm:${nav.dm.channelId}`;
+  if (nav.level === "direct") return `direct:${nav.conversationId}`;
   return nav.level;
 }
 
@@ -26,7 +26,9 @@ export function chatsNavigationRequiresRemount(current: ChatsNav | null, next: C
   // the same backlink twice remains useful after the user has scrolled away).
   // Naming a channel's chat lane is a command too.
   if (next.level === "channel") return Boolean(next.focusMessageId || next.lane);
-  return (next.level === "thread" || next.level === "dm") && Boolean(next.focusMessageId);
+  if (next.level === "thread") return Boolean(next.focusMessageId);
+  // New message from a member's row names who to message.
+  return next.level === "direct-new" && next.memberId !== undefined;
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.
@@ -39,14 +41,14 @@ export function chatEditorTitle(nav: ChatsNav | null, agents: readonly SettingsA
       ? agentChatIdentity(nav.channel, agents).label
       : nav.channel.name;
   }
-  if (nav.level === "dm") return nav.dm.peerLabel;
-  return nav.level === "dm-new" ? "New message" : "Chats";
+  if (nav.level === "direct") return nav.title ?? "Direct message";
+  return nav.level === "direct-new" ? "New message" : "Chats";
 }
 
 export function chatEditorPath(nav: ChatsNav): string {
   if (nav.level === "channel" || nav.level === "thread") {
     return chatTabPath({ kind: "channel", id: nav.channel.id });
   }
-  if (nav.level === "dm") return chatTabPath({ kind: "dm", id: nav.dm.channelId });
-  return chatTabPath({ kind: nav.level === "dm-new" ? "new" : "home" });
+  if (nav.level === "direct") return chatTabPath({ kind: "dm", id: nav.conversationId });
+  return chatTabPath({ kind: nav.level === "direct-new" ? "new" : "home" });
 }

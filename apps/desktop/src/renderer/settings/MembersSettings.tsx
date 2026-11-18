@@ -22,7 +22,6 @@ import {
   UserMinus,
   UserX,
 } from "lucide-react";
-import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import {
   memberMay,
   type MemberLevel,
@@ -167,6 +166,8 @@ export function MembersSettings(props: {
   onOpenSync: () => void;
   onError?: ReportError;
   onClearError?: (identity: string) => void;
+  /** Opens New message in Chats with this member chosen. */
+  onMessage?: (memberId: string) => void;
 }) {
   const { workspaceId } = props;
   const gate = membersGate(props.cloud, props.joined);
@@ -315,6 +316,7 @@ export function MembersSettings(props: {
           onRetry={() => setAttempt((count) => count + 1)}
           onOpenSync={props.onOpenSync}
           run={run}
+          {...(props.onMessage ? { onMessage: props.onMessage } : {})}
         />
       </MembersGateView>
     </div>
@@ -407,6 +409,7 @@ export function MembersLoadView(props: {
   onRetry: () => void;
   onOpenSync: () => void;
   run: (request: MembersRequest) => Promise<boolean>;
+  onMessage?: (memberId: string) => void;
 }) {
   return (
     <>
@@ -458,7 +461,13 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
       );
     case "ready":
       return (
-        <MembersPage view={load.view} running={props.running} ended={props.ended} run={props.run} />
+        <MembersPage
+          view={load.view}
+          running={props.running}
+          ended={props.ended}
+          run={props.run}
+          onMessage={props.onMessage}
+        />
       );
   }
 }
@@ -541,8 +550,9 @@ export function MembersPage(props: {
   running: MembersRequest | null;
   ended?: boolean | undefined;
   run: (request: MembersRequest) => Promise<boolean>;
+  onMessage?: (memberId: string) => void;
 }) {
-  const { view, running, run } = props;
+  const { view, running, run, onMessage } = props;
   const role = view.viewer.role;
   const manages = role !== "member";
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -588,7 +598,13 @@ export function MembersPage(props: {
       : (view.inviteLink?.enabled ?? false);
 
   const rowMenu = (person: WorkspacePerson): MoreMenuItem[] => {
-    if (person.memberId === view.viewer.memberId || person.role === "owner") return [];
+    if (person.memberId === view.viewer.memberId) return [];
+    // Anyone active can be messaged, the owner too.
+    const message: MoreMenuItem[] =
+      onMessage && person.state === "active" && !props.ended
+        ? [{ label: "Message", onSelect: () => onMessage(person.memberId) }]
+        : [];
+    if (person.role === "owner") return message;
     if (person.state === "invited") {
       return memberMay(role, "remove", person.role)
         ? [
@@ -601,7 +617,7 @@ export function MembersPage(props: {
         : [];
     }
     if (person.state !== "active") return [];
-    const items: MoreMenuItem[] = [];
+    const items: MoreMenuItem[] = [...message];
     if (memberMay(role, "role")) {
       items.push(
         person.role === "admin"
@@ -1173,7 +1189,7 @@ function PersonRow(props: {
           name={title}
           kind="human"
           size="row"
-          presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+          presentation={relayPresentation(person.paletteSlot, self)}
           className={removed ? "opacity-60" : undefined}
         />
       )}
