@@ -2727,6 +2727,12 @@ describe("chatDispatchService", () => {
     });
     expect(fixture.killCalls).toContainEqual({ pid: -call.process.pid!, signal: "SIGTERM" });
     call.process.emitExit(null, "SIGTERM");
+
+    // A quit right after the runner exits still records the run's end.
+    await fixture.service.stop();
+    expect(await readdir(join(fixture.stateRoot, "run-logs"))).toContain(
+      `${call.options.env.DOHC_RUN_ID}.log.ended`,
+    );
   });
 
   describe("in a workspace in Restricted Mode", () => {
