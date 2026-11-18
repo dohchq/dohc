@@ -7,6 +7,7 @@ import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
+import { recordAccountName } from "./storage/accountNames";
 import type { StorageContext } from "./storage/context";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -755,6 +756,26 @@ describe("a member's Chats in a browser", () => {
     const pushed = readPushMessage(context, Number(row!.relay_seq))!;
     expect(pushMessageAccess(context, pushed, "ana")?.place).not.toContain("@[hidden");
     expect(pushMessageAccess(context, pushed, OWNER)?.place).toContain("@[hidden]");
+  });
+
+  it("withholds a link to a folder the member can't see from their Notice's title and body", async () => {
+    const { h, storage } = await seed();
+    await member(h, storage, "ana");
+    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    recordAccountName(storage as unknown as StorageContext, "ana", "Ana");
+    await ownerAppend(h, [
+      channel("wire-notice", "Team @[hidden]"),
+      thread("t-notice", "wire-notice"),
+      message("msg-notice", "t-notice", "@Ana see @[hidden] and @[docs/plan.md]"),
+    ]);
+    const response = await h(request("ana", "/sync/notices"));
+    expect(response.status, await response.clone().text()).toBe(200);
+    const { notices } = (await response.json()) as { notices: { title: string }[] };
+    expect(notices.find((row) => row.title.includes("mentioned you"))).toMatchObject({
+      title: expect.stringContaining("#Team (a file not shared here)"),
+      body: "@Ana see (a file not shared here) and @[docs/plan.md]",
+    });
   });
 
   it("withholds a Group message's link to a folder the member can't see", async () => {

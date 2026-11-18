@@ -100,6 +100,8 @@ export interface ChatMessageAccess {
   dm: boolean;
   /** The share the recipient reads the message through, or null for the owner. */
   shareId: string | null;
+  /** The message's body as that share serves it. Absent for the owner, who reads it whole. */
+  body?: string;
 }
 
 // The channel's name, or the name of the file the thread is on. Null when
@@ -167,16 +169,15 @@ export function pushMessageAccess(
       shareId: String(row.share_id),
       action: "read",
     });
-    if (
-      !authority.ok ||
-      !filterOpForShare(
-        authority.effectiveSelector,
-        "chat.message.append",
-        message.payloadJson,
-        resolver,
-      ).allowed
-    )
-      continue;
+    if (!authority.ok) continue;
+    const served = filterOpForShare(
+      authority.effectiveSelector,
+      "chat.message.append",
+      message.payloadJson,
+      resolver,
+    );
+    if (!served.allowed) continue;
+    const body = (served.payload as { body?: unknown } | undefined)?.body;
     const found =
       Number(row.membership) === 1
         ? chatPlace(storage, message, resolver, fileSideOf(authority.effectiveSelector))
@@ -195,6 +196,7 @@ export function pushMessageAccess(
       channel: found?.channel ?? Boolean(channel),
       dm,
       shareId: authority.share.shareId,
+      ...(typeof body === "string" ? { body } : {}),
     };
   }
   return null;

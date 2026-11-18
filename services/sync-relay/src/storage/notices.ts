@@ -556,9 +556,9 @@ export function noticeChatMessage(storage: StorageContext, input: NoticeChatMess
   );
   const lead = `${senderLabel} ${input.reason === "mention" ? "mentioned you in" : "replied in"} `;
   const place = access.channel ? `#${access.place}` : access.place;
-  const body = message.body.isWellFormed()
-    ? message.body.replace(CHAT_NOTICE_BODY_REMOVALS, " ").trim()
-    : "";
+  // A recipient reading through a share sees the body that share serves.
+  const text = access.body ?? message.body;
+  const body = text.isWellFormed() ? text.replace(CHAT_NOTICE_BODY_REMOVALS, " ").trim() : "";
   storage.db.exec("SAVEPOINT chat_message_notice");
   try {
     sweepExpiredNotices(storage, recipientUserId, nowMs);
