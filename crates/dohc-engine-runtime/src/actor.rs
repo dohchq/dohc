@@ -384,7 +384,7 @@ impl WorkspaceActor {
         )
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn spawn_passive(
         db_path: PathBuf,
         identity: EngineDbIdentity,
