@@ -6560,7 +6560,7 @@ function savedCollectionsList(
     );
   return {
     read: async () => (await list()).read(),
-    write: async (value) => (await list()).write(value),
+    update: async (change) => (await list()).update(change),
   };
 }
 // Signed out, a syncing workspace's Collections as the account signed in

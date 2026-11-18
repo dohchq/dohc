@@ -16,6 +16,8 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import type { SavedCollections } from "./collectionsHome";
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./ownerDatasetCopyRegistry";
 const mocks = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("./ownerDatasetCopy", () => ({ createOwnerDatasetCopy: mocks.open }));
@@ -407,7 +409,7 @@ it("removes every other account's copies when one signs in while the record cann
 it("gives a signed-out list read nothing once another account has signed in during it", async () => {
   const f = await fixture();
   const input = { ...f.input, origin: "https://relay" };
-  await f.registry.savedList(input).write([]);
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
   await f.registry.credentialsChanged(null);
   const reached = deferred<void>(),
     release = deferred<void>();
@@ -427,7 +429,7 @@ it("leaves no list a save was writing when a different account signed in", async
     reached: reached.resolve,
     until: release.promise,
   };
-  const saving = f.registry.savedList(f.input).write([]);
+  const saving = f.registry.savedList(f.input).update(() => ({ datasets: [], through: null }));
   // The save has checked its account and is about to make its folder.
   await reached.promise;
   await f.registry.credentialsChanged(other, "https://relay");
@@ -449,7 +451,7 @@ it.each([
 ])("keeps the signed-out account's saved list when %s during a save", async (_, interrupt) => {
   const f = await fixture();
   const input = { ...f.input, origin: "https://relay" };
-  await f.registry.savedList(input).write([]);
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
   await f.registry.credentialsChanged(null);
   const reached = deferred<void>(),
     release = deferred<void>();
@@ -458,13 +460,34 @@ it.each([
     reached: reached.resolve,
     until: release.promise,
   };
-  const saving = f.registry.savedList(input).write([]);
+  const saving = f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
   await reached.promise;
   await interrupt(f.registry);
   release.resolve();
   await saving.catch(() => undefined);
   // Neither replaced the account, whose list still reads offline and after a restart.
   expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toHaveLength(1);
+});
+it("keeps both of two changes made to a saved list at once", async () => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).update(() => ({ datasets: [], through: null }));
+  // Each change reads the list, adds to it, and writes it, as two pages read at once do.
+  const add = (datasetId: string) =>
+    f.registry.savedList(input).update((value) => {
+      const saved = value as SavedCollections;
+      return { ...saved, datasets: [...saved.datasets, { datasetId } as DatasetDescription] };
+    });
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.hold = { name: "list.json", reached: reached.resolve, until: release.promise };
+  const first = add("first");
+  await reached.promise;
+  const second = add("second");
+  release.resolve();
+  await Promise.all([first, second]);
+  const saved = (await f.registry.savedList(input).read()) as SavedCollections;
+  expect(saved.datasets.map((dataset) => dataset.datasetId).sort()).toEqual(["first", "second"]);
 });
 it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),

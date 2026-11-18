@@ -20,7 +20,29 @@ export function collectionsServer(
 /** The last Collections list this computer read from the server, for reading offline. */
 export interface SavedCollectionsList {
   read(): Promise<unknown>;
-  write(value: DatasetDescription[]): Promise<void>;
+  /**
+   * Saves what `change` makes of the saved list, given undefined for none it can read.
+   * Undefined keeps the list as it is. Changes run one at a time.
+   */
+  update(change: (value: unknown) => SavedCollections | undefined): Promise<void>;
+}
+/**
+ * The Collections a list saved, in order. `through`: the last one it holds
+ * every Collection up to, or null when it holds them all.
+ */
+export interface SavedCollections {
+  datasets: DatasetDescription[];
+  through: string | null;
+}
+function parseSaved(value: unknown): SavedCollections | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { datasets, through } = value as Record<string, unknown>;
+  if (!Array.isArray(datasets) || (through !== null && typeof through !== "string")) return null;
+  try {
+    return { datasets: datasets.map((item) => parseDatasetDescription(item)), through };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -83,46 +105,49 @@ export function createServerHomeData(input: {
   saved: SavedCollectionsList;
   changed?(): void;
 }): OwnerDatasetData {
-  const savedDatasets = async (): Promise<DatasetDescription[] | null> => {
-    const value = await input.saved.read().catch(() => null);
-    if (!Array.isArray(value)) return null;
-    try {
-      return value.map((item) => parseDatasetDescription(item));
-    } catch {
-      return null;
-    }
-  };
+  const savedDatasets = async () => parseSaved(await input.saved.read().catch(() => null));
   // The saved list takes each page in place of what it held over the same range.
-  const remember = async (
-    after: string | undefined,
-    page: Awaited<ReturnType<typeof input.list>>,
-  ) => {
-    const last = page.nextCursor === null ? null : page.datasets.at(-1)?.datasetId;
-    if (last === undefined) return;
-    const kept = ((await savedDatasets()) ?? []).filter(
-      (dataset) =>
-        dataset.datasetId <= (after ?? "") || (last !== null && dataset.datasetId > last),
-    );
-    await input.saved.write(
-      [...kept, ...page.datasets].sort((a, b) => (a.datasetId < b.datasetId ? -1 : 1)),
-    );
-  };
+  // A page past the Collections it holds every one of would leave a gap, so it is not saved.
+  const remember = (after: string | undefined, page: Awaited<ReturnType<typeof input.list>>) =>
+    input.saved.update((value) => {
+      const last = page.nextCursor === null ? null : page.datasets.at(-1)?.datasetId;
+      if (last === undefined) return undefined;
+      const from = after ?? "",
+        saved = parseSaved(value) ?? { datasets: [], through: "" };
+      if (saved.through !== null && from > saved.through) return undefined;
+      const kept = saved.datasets.filter(
+        (dataset) => dataset.datasetId <= from || (last !== null && dataset.datasetId > last),
+      );
+      return {
+        datasets: [...kept, ...page.datasets].sort((a, b) => (a.datasetId < b.datasetId ? -1 : 1)),
+        through:
+          last === null || saved.through === null
+            ? null
+            : last > saved.through
+              ? last
+              : saved.through,
+      };
+    });
   return routeEachDataset(input.copy, async (page) => {
     const shown = (datasets: DatasetDescription[]) =>
       page.includeArchived ? datasets : datasets.filter((dataset) => !dataset.archived);
     // Archived ones too, so the saved list serves either view.
     const ask = () => input.list({ ...page, includeArchived: true });
-    const saved = await savedDatasets();
-    if (saved) {
+    const saved = await savedDatasets(),
+      limit = page.limit ?? 50,
+      rest = saved?.datasets.filter((dataset) => dataset.datasetId > (page.after ?? "")) ?? [];
+    // The saved list answers a page it holds all of: the end of a whole list, or a full page.
+    if (saved && (saved.through === null || rest.length >= limit)) {
       void (async () => {
         await remember(page.after, await ask());
         if (JSON.stringify(await savedDatasets()) !== JSON.stringify(saved)) input.changed?.();
       })().catch(() => undefined);
-      const limit = page.limit ?? 50,
-        rest = saved.filter((dataset) => dataset.datasetId > (page.after ?? ""));
       return {
         datasets: shown(rest.slice(0, limit)),
-        nextCursor: rest.length > limit ? rest[limit - 1]!.datasetId : null,
+        nextCursor:
+          rest.length > limit || (saved.through !== null && rest.length === limit)
+            ? rest[limit - 1]!.datasetId
+            : null,
       };
     }
     let answer: Awaited<ReturnType<typeof input.list>>;

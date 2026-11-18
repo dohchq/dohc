@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { APP_BACKEND_CATCH_UP_HEADER } from "@dohc/security-contract/app-backend";
-import { collectionsServer } from "./collectionsHome";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { collectionsServer, createServerHomeData } from "./collectionsHome";
 import { id, startTestRelay, unanswered } from "./serverCollectionsTestRelay";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -227,6 +228,57 @@ it("brings an open Collection up to date by itself: another computer's change, t
   await changed;
   expect(await computer.open()).toMatchObject({ copy: { offline: false } });
 }, 60_000);
+
+// A server with one Collection more than a page holds, and a list saved in memory.
+function fiftyOneCollections() {
+  const all: DatasetDescription[] = Array.from({ length: 51 }, (_, n) => ({
+    datasetId: `00000000-0000-4000-8000-${String(n + 1).padStart(12, "0")}`,
+    name: `Collection ${n + 1}`,
+    revision: 1,
+    revisionSha256: "a".repeat(64),
+    tables: [],
+    operations: [],
+  }));
+  let kept: unknown;
+  const data = createServerHomeData({
+    host: "relay.test",
+    list: async ({ after, limit = 50 }) => {
+      const rest = all.filter((dataset) => dataset.datasetId > (after ?? ""));
+      return {
+        datasets: rest.slice(0, limit),
+        nextCursor: rest.length > limit ? rest[limit - 1]!.datasetId : null,
+      };
+    },
+    copy: () => Promise.reject(Error("No Collection opens here.")),
+    saved: {
+      read: async () => kept ?? Promise.reject(Error("Nothing saved.")),
+      update: async (change) => {
+        kept = change(kept) ?? kept;
+      },
+    },
+  });
+  const listed = async () => {
+    const ids: string[] = [];
+    for (let after: string | null | undefined; after !== null;) {
+      const page = await data.list({ limit: 50, ...(after ? { after } : {}) });
+      ids.push(...page.datasets.map((dataset) => dataset.datasetId));
+      after = page.nextCursor;
+    }
+    return ids;
+  };
+  return { ids: all.map((dataset) => dataset.datasetId), data, listed };
+}
+it("lists every Collection past the first page from the list it saved", async () => {
+  const { ids, data, listed } = fiftyOneCollections();
+  // The first visit reads the first page, and the list is saved.
+  expect((await data.list({ limit: 50 })).nextCursor).toBe(ids[49]);
+  // A later visit answers from the saved list, and still reaches the last Collection.
+  expect(await listed()).toEqual(ids);
+});
+it("shows the next page at once when the list saved only the first", async () => {
+  const { ids, listed } = fiftyOneCollections();
+  expect(await listed()).toEqual(ids);
+});
 
 it("shows a Collection another computer created once the list is brought up to date", async () => {
   const relay = await startTestRelay();
