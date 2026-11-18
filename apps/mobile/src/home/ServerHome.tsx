@@ -92,20 +92,36 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
     [router, toggle],
   );
 
-  // The workspace's apps read each time Home shows, and after an approval or a revoke.
+  // The workspace's apps and Collections read each time Home shows, and its apps after an approval or a revoke.
+  // Collections show only when there is one; a failed read is a toast and a Notices row.
   const theme = useTheme();
-  const { apps } = useAccount();
+  const { apps, collections } = useAccount();
   const appsState = useSyncExternalStore(
     apps?.subscribe ?? nothing,
     useCallback(() => apps?.state() ?? NO_APPS, [apps]),
+  );
+  const collectionsState = useSyncExternalStore(
+    collections?.subscribe ?? nothing,
+    useCallback(() => collections?.state() ?? NO_COLLECTIONS, [collections]),
   );
   const focused = useIsFocused();
   useEffect(() => {
     if (focused) void apps?.refresh();
   }, [focused, apps]);
+  useEffect(() => {
+    if (focused) void collections?.refresh();
+  }, [focused, collections]);
   const retryApps = useCallback(() => void apps?.refresh(), [apps]);
   const appsFailed = appWords.appsFailed(workspace);
   useFailureNotice(`read:${workspaceId}:apps`, appsFailed, appsState, retryApps);
+  const retryCollections = useCallback(() => void collections?.refresh(), [collections]);
+  const collectionsFailed = collectionWords.collectionsFailed(workspace);
+  useFailureNotice(
+    `read:${workspaceId}:collections`,
+    collectionsFailed,
+    collectionsState,
+    retryCollections,
+  );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
   return (
@@ -188,51 +204,18 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           );
         })
       )}
-      <Collections workspaceId={workspaceId} workspace={workspace} />
-    </>
-  );
-}
-
-/**
- * The workspace's transactional Collections, read each time Home shows, as its apps are. The section shows only once
- * the list has one; a failed read is a toast and a Notices row.
- */
-function Collections({ workspaceId, workspace }: { workspaceId: string; workspace: string }) {
-  const theme = useTheme();
-  const router = useRouter();
-  const { collections } = useAccount();
-  const [folded, setFolded] = useState(false);
-  const state = useSyncExternalStore(
-    collections?.subscribe ?? nothing,
-    useCallback(() => collections?.state() ?? NO_COLLECTIONS, [collections]),
-  );
-  const focused = useIsFocused();
-  useEffect(() => {
-    if (focused) void collections?.refresh();
-  }, [focused, collections]);
-  const retry = useCallback(() => void collections?.refresh(), [collections]);
-  useFailureNotice(
-    `read:${workspaceId}:collections`,
-    collectionWords.collectionsFailed(workspace),
-    state,
-    retry,
-  );
-  if (!state.collections?.length) return null;
-  return (
-    <>
-      <SectionHeader
-        title={collectionWords.collections}
-        collapsed={folded}
-        unread={false}
-        first={false}
-        onToggle={() => {
-          void Haptics.selectionAsync();
-          setFolded((value) => !value);
-        }}
-      />
-      {folded
+      {collectionsState.collections?.length ? (
+        <SectionHeader
+          title={collectionWords.collections}
+          collapsed={collapsed.has("collections")}
+          unread={false}
+          first={false}
+          onToggle={() => toggle(setCollapsed, "collections")}
+        />
+      ) : null}
+      {collapsed.has("collections")
         ? null
-        : state.collections.map((collection) => (
+        : collectionsState.collections?.map((collection) => (
             <Pressable
               key={collection.datasetId}
               onPress={() =>

@@ -36,7 +36,10 @@ const DATASET = id(1),
   NOTES = id(9),
   TEXT = id(10),
   NOTE_KEY = id(11),
-  ADD_NOTE = id(12);
+  ADD_NOTE = id(12),
+  EMAIL = id(13),
+  RECEIPT = id(14),
+  OTHER = id(15);
 const definition: DatasetDefinition = {
   formatVersion: 1,
   datasetId: DATASET,
@@ -64,6 +67,23 @@ const definition: DatasetDefinition = {
           name: "Paid",
           sqlColumn: "paid",
           type: "checkbox",
+          required: false,
+          unique: false,
+        },
+        // The read leaves it out.
+        {
+          fieldId: EMAIL,
+          name: "Email",
+          sqlColumn: "email",
+          type: "text",
+          required: false,
+          unique: false,
+        },
+        {
+          fieldId: RECEIPT,
+          name: "Receipt",
+          sqlColumn: "receipt",
+          type: "attachment",
           required: false,
           unique: false,
         },
@@ -104,7 +124,7 @@ const definition: DatasetDefinition = {
       kind: "create",
       access: "owner",
       readOnly: false,
-      fieldIds: [KEY, NAME, PAID],
+      fieldIds: [KEY, NAME, PAID, EMAIL, RECEIPT],
     },
     {
       operationId: READ,
@@ -114,7 +134,7 @@ const definition: DatasetDefinition = {
       kind: "read",
       access: "owner",
       readOnly: true,
-      fieldIds: [KEY, NAME, PAID],
+      fieldIds: [KEY, NAME, PAID, RECEIPT],
     },
     // Notes take records but have no read.
     {
@@ -129,7 +149,7 @@ const definition: DatasetDefinition = {
     },
   ],
 };
-const schemaSql = `CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,paid INTEGER,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+const schemaSql = `CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,paid INTEGER,email TEXT,receipt TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
 CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,text TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
 const operationSource = generateDatasetOperations(definition);
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
@@ -191,7 +211,14 @@ async function phone() {
       revision: 1,
       revisionSha256: revision.revisionSha256,
       operationId: CREATE,
-      input: { values: { [KEY]: key, [NAME]: `Person ${key}`, [PAID]: key === "r00" } },
+      input: {
+        values: {
+          [KEY]: key,
+          [NAME]: `Person ${key}`,
+          [PAID]: key === "r00",
+          [EMAIL]: `${key}@example.com`,
+        },
+      },
       idempotencyKey: key,
     });
   const storage = base.storage as SyncRelayStorage;
@@ -258,7 +285,7 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
   expect(await f.op("collections", {})).toEqual(
     ok({ collections: [{ datasetId: DATASET, name: "Registrations" }], nextCursor: null }),
   );
-  // Names, IDs, types and the primary field; never a button, a column, or an operation.
+  // Names, IDs, types and the primary field of what each table's read gives; never a button, a column, or an operation.
   expect(await f.op("collection", { datasetId: DATASET })).toEqual(
     ok({
       datasetId: DATASET,
@@ -272,17 +299,10 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
             { fieldId: KEY, name: "ID", type: "text" },
             { fieldId: NAME, name: "Name", type: "text" },
             { fieldId: PAID, name: "Paid", type: "checkbox" },
+            { fieldId: RECEIPT, name: "Receipt", type: "attachment" },
           ],
         },
-        {
-          tableId: NOTES,
-          name: "Notes",
-          primaryFieldId: NOTE_KEY,
-          fields: [
-            { fieldId: NOTE_KEY, name: "ID", type: "text" },
-            { fieldId: TEXT, name: "Text", type: "text" },
-          ],
-        },
+        { tableId: NOTES, name: "Notes", primaryFieldId: null, fields: [] },
       ],
     }),
   );
@@ -297,11 +317,48 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
   expect((first.body.result as { rows: unknown[] }).rows[0]).toEqual({
     id: "r00",
     version: 1,
-    values: { [KEY]: "r00", [NAME]: "Person r00", [PAID]: true },
+    values: { [KEY]: "r00", [NAME]: "Person r00", [PAID]: true, [RECEIPT]: null },
   });
   const next = await f.records({ id: "r49", value: "r49" });
   expect(rowKeys(next)).toEqual(["r50"]);
   expect(next.body.result).toMatchObject({ status: "ready", nextCursor: null });
+});
+
+it("names a page's attached files, but not one still waiting to attach or another Collection's", async () => {
+  const f = await phone();
+  const png = [137, 80, 78, 71, 13, 10, 26, 10];
+  const files = ["kept.png", "pending.png", "moved.png"].map(
+    (name, n) =>
+      f.host.ownerUpload(owner, {
+        ...scope,
+        revision: 1,
+        revisionSha256: revision.revisionSha256,
+        idempotencyKey: `upload-${name}`,
+        name,
+        contentType: "image/png",
+        bytesBase64: Buffer.from([...png, n]).toString("base64"),
+      }).file.fileId,
+  );
+  for (const [n, fileId] of files.entries())
+    await f.host.invoke(owner, {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: CREATE,
+      input: { values: { [KEY]: `f${n}`, [NAME]: `File ${n}`, [RECEIPT]: fileId } },
+      idempotencyKey: `f${n}`,
+    });
+  const [kept, pending, moved] = files as [string, string, string];
+  // As if `pending` hadn't attached yet, and `moved` were another Collection's.
+  const db = f.storage.db;
+  db.prepare("UPDATE sync_relay_dataset_files SET attached_revision=NULL WHERE file_id=?").run(
+    pending,
+  );
+  db.prepare("INSERT INTO sync_relay_dataset_usage VALUES ('w',?,0)").run(OTHER);
+  db.prepare("UPDATE sync_relay_dataset_files SET dataset_id=? WHERE file_id=?").run(OTHER, moved);
+  const answer = await f.records();
+  expect(rowKeys(answer).slice(0, 3)).toEqual(["f0", "f1", "f2"]);
+  expect((answer.body.result as { files: unknown }).files).toEqual({ [kept]: "kept.png" });
 });
 
 it("answers a table with no read with a refusal the phone can show", async () => {
@@ -340,6 +397,9 @@ it("leaves out an archived Collection, and one whose dataset.json is hidden or g
      VALUES ('w','dataset',?,'moment-hidden','main','a/.env/dataset.json',?,'text',?,1)`,
   ).run(seq, sha, Buffer.byteLength(collectionFile.text));
   await absent(hidden);
+  // A file naming no Collection, left where the moved one was, doesn't stand in for it.
+  pushFile(hidden.storage, "stub", null, { path: collectionFile.path, text: "{}" });
+  await absent(hidden);
 
   const gone = await phone();
   pushFile(gone.storage, "dataset", collectionFile, null);
@@ -365,8 +425,8 @@ it("refuses another account, Show on phone off, a revoked sign-in and a fenced a
   expect(await f.records()).toEqual(notFound);
 });
 
-it("refuses the answer when Show on phone turns off, the sign-in is revoked, or the account is fenced during a read", async () => {
-  for (const change of ["hidden", "revoked", "fenced"] as const) {
+it("refuses the answer when Show on phone turns off, the sign-in is revoked, the account is fenced, or the Collection is archived during a read", async () => {
+  for (const change of ["hidden", "revoked", "fenced", "archived"] as const) {
     const f = await phone();
     let reads = 0;
     // After the host has read the records, before the relay answers.
@@ -374,6 +434,7 @@ it("refuses the answer when Show on phone turns off, the sign-in is revoked, or 
       if (++reads !== 2) return;
       if (change === "hidden") f.showOnPhone(false);
       else if (change === "revoked") revoked.add("phone-1");
+      else if (change === "archived") f.host.archiveDataset(owner, scope);
       else {
         initializeAccountDeletion(f.storage, "k".repeat(32));
         fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");

@@ -17,9 +17,12 @@ import {
   type WorkspaceApps,
 } from "../apps/appStore";
 import { canOpenApps } from "../apps/canOpenApps";
-import { createCollectionStores, type WorkspaceCollections } from "../collections/collectionStore";
+import {
+  createWorkspaceCollections,
+  type WorkspaceCollections,
+} from "../collections/collectionStore";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
-import { createLivePages, type LivePages } from "../pages/pageLive";
+import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
@@ -63,7 +66,7 @@ interface AccountValue {
   /** The open workspace's transactional Collections, read into memory only. */
   readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
-  readonly livePages: LivePages;
+  readonly livePages: ScopedEnds;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -102,8 +105,8 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // a workspace switch and Show on phone off.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
-  const [livePages] = useState(createLivePages);
-  const [collectionStores] = useState(createCollectionStores);
+  const [livePages] = useState(createScopedEnds);
+  const [collectionStores] = useState(createScopedEnds);
   const [teardown] = useState(() => appTeardown(runner, livePages, collectionStores));
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
@@ -176,7 +179,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => apps?.stop(), [apps]);
   const collections = useMemo(
     () =>
-      signIn && currentWorkspaceId ? collectionStores.create(signIn, currentWorkspaceId) : null,
+      signIn && currentWorkspaceId
+        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores)
+        : null,
     [signIn, currentWorkspaceId, collectionStores],
   );
   useEffect(() => () => collections?.stop(), [collections]);

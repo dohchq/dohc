@@ -19,17 +19,16 @@ import { accountIsFenced } from "./storage/accountDeletion";
 import { collectionFilePaths } from "./storage/collectionFilePresence";
 import type { StorageContext } from "./storage/context";
 
-// The phone reads its account's transactional Collections: their names, one Collection's tables and fields, and pages
-// of one table's records, through the table's own read operation, as the desktop reads them. It only reads. The account
-// route has checked the sign-in, its fence, the owner and Show on phone. A Collection that is archived, still
-// importing, or whose dataset.json is missing or under a hidden path answers as one that doesn't exist.
+// The phone reads its account's transactional Collections through each table's own read operation, as the desktop
+// does. It only reads. The account route has checked the sign-in, its fence, the owner and Show on phone. A Collection
+// that is archived, still importing, or whose dataset.json is missing or under a hidden path answers as one that
+// doesn't exist.
 
-/** Records a page holds, as the desktop asks for them. */
 export const PHONE_COLLECTION_PAGE = 50;
 
 const OPERATIONS = new Set(["collections", "collection", "collectionRecords"]);
 
-/** The phone's Collection operations. They read the relay's dataset host, so they need no server copy. */
+/** They read the relay's dataset host, so they need no server copy. */
 export function isPhoneCollectionOperation(name: string): boolean {
   return OPERATIONS.has(name);
 }
@@ -101,11 +100,18 @@ export function createPhoneCollections(options: {
     datasetId: string,
   ): DatasetDescription {
     if (!visible(workspaceId, datasetId)) throw notFound();
-    const description = host.describe(auth, { workspaceId, datasetId });
+    // The owner's authority, so an archived one is described, and answers as missing, rather than refused.
+    const description = host.describe(auth, { workspaceId, datasetId, includeArchived: true });
     if (description.archived) throw notFound();
     return description;
   }
-  // Attached files' names, by file ID, for the values a page shows. A file still waiting to attach has none.
+  // The desktop's choice: the table's first operation that only reads.
+  const readOperation = (description: DatasetDescription, tableId: string) =>
+    description.operations.find(
+      (operation) =>
+        operation.tableId === tableId && operation.kind === "read" && operation.readOnly,
+    );
+  // A file still waiting to attach has no name.
   function fileNames(workspaceId: string, datasetId: string, fileIds: ReadonlySet<string>) {
     const names: Record<string, string> = {};
     const read = storage.db.prepare(
@@ -156,13 +162,15 @@ export function createPhoneCollections(options: {
     if (!host) throw notFound();
     if (operation === "collection") {
       const datasetId = id(args(input.args, ["datasetId"]).datasetId);
-      const { name, tables } = describe(host, auth, workspaceId, datasetId);
+      const description = describe(host, auth, workspaceId, datasetId);
       return {
         datasetId,
-        name,
-        tables: tables.map((table) => {
+        name: description.name,
+        tables: description.tables.map((table) => {
+          // Only what the read gives, so a field it leaves out never shows as empty or unchecked.
+          const read = readOperation(description, table.tableId);
           const fields = table.fields.flatMap((field) =>
-            field.type === "button" || field.generated
+            field.type === "button" || field.generated || !read?.fieldIds.includes(field.fieldId)
               ? []
               : [
                   {
@@ -191,11 +199,7 @@ export function createPhoneCollections(options: {
     const description = describe(host, auth, workspaceId, datasetId);
     const table = description.tables.find((table) => table.tableId === tableId);
     if (!table) throw notFound();
-    // The desktop's choice: the table's first operation that only reads.
-    const read = description.operations.find(
-      (operation) =>
-        operation.tableId === tableId && operation.kind === "read" && operation.readOnly,
-    );
+    const read = readOperation(description, tableId);
     if (!read) return { status: "refused", reason: "no-read" };
     const { result } = await host.invoke(auth, {
       workspaceId,
@@ -208,13 +212,15 @@ export function createPhoneCollections(options: {
       signal: input.signal,
     });
     await authorize();
+    // Nothing awaits between these checks and the answer.
     holds(userId, workspaceId);
-    if (!visible(workspaceId, datasetId)) throw notFound();
+    describe(host, auth, workspaceId, datasetId);
     if (
       !result ||
       typeof result !== "object" ||
       Array.isArray(result) ||
       !Array.isArray(result.rows) ||
+      result.rows.length > PHONE_COLLECTION_PAGE ||
       !Object.hasOwn(result, "nextCursor")
     )
       throw relayError("conflict", "This Collection's read gave an answer dohc can't show.");

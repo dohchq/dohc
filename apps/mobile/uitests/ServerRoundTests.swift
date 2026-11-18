@@ -261,6 +261,9 @@ final class ServerRoundTests: XCTestCase {
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
-    XCTAssertTrue(containing(app, value).waitForExistence(timeout: 10), "The record should show \(value)")
+    // In a field of the record's own screen, not the row it was opened from.
+    let field = app.otherElements.matching(identifier: "record-field")
+      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
   }
 }

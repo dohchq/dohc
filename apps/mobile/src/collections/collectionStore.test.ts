@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { appTeardown } from "../apps/appStore";
+import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
 import { deferred, memoryStore, testServer, type Answer, type Call } from "../server/testServer";
-import { createCollectionStores } from "./collectionStore";
+import { createWorkspaceCollections, type WorkspaceCollections } from "./collectionStore";
 
 const D = "00000000-0000-4000-8000-000000000001";
 const OPS = "/sync/ws-1/ops";
@@ -40,10 +41,35 @@ async function sent(server: ReturnType<typeof testServer>, count: number) {
 
 function setup(isCurrent = () => true) {
   const server = testServer();
-  const stores = createCollectionStores();
-  const collections = stores.create(signedIn(server, isCurrent), "ws-1");
+  const stores = createScopedEnds();
+  const collections = createWorkspaceCollections(signedIn(server, isCurrent), "ws-1", stores);
   server.on("POST", `${OPS}/collection`, description);
   return { server, stores, collections };
+}
+
+/** A signed-in account whose Sign out runs `hook` after the teardown, and its workspace's store, open on `D`. */
+async function signedInStore(
+  hook: (leave: () => Promise<void>, collections: WorkspaceCollections) => Promise<void>,
+) {
+  const server = testServer();
+  const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
+  const stores = createScopedEnds();
+  const teardown = appTeardown(stores);
+  let collections: WorkspaceCollections | undefined;
+  const account = createAccount({
+    store: memoryStore(stored).store,
+    fetch: server.fetch,
+    onSignOut: teardown.signOut((leave) => hook(leave, collections!)),
+  });
+  teardown.follow(account);
+  await account.restore();
+  const state = account.state();
+  if (state.status !== "signed-in") throw Error("not signed in");
+  collections = createWorkspaceCollections(state.signIn, "ws-1", stores);
+  server.on("POST", `${OPS}/collection`, description);
+  pages(server);
+  await collections.open(D);
+  return { server, account, collections };
 }
 
 /** Answers the first page, then the page after `a1`, by the cursor each request sends. */
@@ -110,11 +136,42 @@ describe("a Collection's records", () => {
     const sent = server.calls.length;
     await collections.more();
     expect(server.calls.length).toBe(sent);
-    expect(collections.record(D, "t-people", "a2")).toEqual({
-      id: "a2",
-      values: { "f-name": "a2" },
+  });
+
+  it("keeps an opened record through a refresh whose first page lacks it, and shows why a refresh failed", async () => {
+    const { server, collections } = setup();
+    pages(server);
+    await collections.open(D);
+    await collections.more();
+    const a2 = collections.view()!.rows[2]!;
+    collections.openRecord(a2);
+    // A return to the foreground reads the first page again, which doesn't have it.
+    await collections.reload();
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    expect(collections.view()?.opened).toEqual({ tableId: "t-people", record: a2, files: {} });
+    // One that has it takes its new values.
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      ok({
+        status: "ready",
+        rows: [{ id: "a2", version: 2, values: { "f-name": "A2" } }],
+        nextCursor: null,
+        files: { f: "x.png" },
+      }),
+    );
+    await collections.reload();
+    expect(collections.view()?.opened).toEqual({
+      tableId: "t-people",
+      record: { id: "a2", values: { "f-name": "A2" } },
+      files: { f: "x.png" },
     });
-    expect(collections.record(D, "t-notes", "a2")).toBeNull();
+    server.on("POST", `${OPS}/collection`, "offline");
+    await collections.reload();
+    expect(collections.view()).toMatchObject({
+      problem: { cause: "offline", more: false },
+      opened: { record: { id: "a2" } },
+    });
   });
 
   it("keeps the records while it reads again, then replaces them from the first page", async () => {
@@ -164,13 +221,16 @@ describe("a Collection's records", () => {
     const { server, collections } = setup();
     server.on("POST", `${OPS}/collection`, { status: 404 });
     await collections.open(D);
-    expect(collections.view()).toMatchObject({ description: null, problem: "refused" });
+    expect(collections.view()).toMatchObject({
+      description: null,
+      problem: { cause: "refused", more: false },
+    });
     server.on("POST", `${OPS}/collection`, description);
     pages(server);
     await collections.reload();
     server.on("POST", `${OPS}/collectionRecords`, "offline");
     await collections.more();
-    expect(collections.view()).toMatchObject({ problem: "offline", moreFailed: true });
+    expect(collections.view()).toMatchObject({ problem: { cause: "offline", more: true } });
     expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
   });
 
@@ -206,27 +266,11 @@ describe("teardown", () => {
 
   it("drops what it read before Sign out's delete, and at a 401", async () => {
     for (const end of ["sign-out", "401"] as const) {
-      const server = testServer();
-      const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
-      const stores = createCollectionStores();
-      const teardown = appTeardown(stores);
       let atDelete: unknown = "not run";
-      const account = createAccount({
-        store: memoryStore(stored).store,
-        fetch: server.fetch,
-        onSignOut: teardown.signOut(async (leave) => {
-          atDelete = collections.view();
-          await leave();
-        }),
+      const { server, account, collections } = await signedInStore(async (leave, collections) => {
+        atDelete = collections.view();
+        await leave();
       });
-      teardown.follow(account);
-      await account.restore();
-      const state = account.state();
-      if (state.status !== "signed-in") throw Error("not signed in");
-      const collections = stores.create(state.signIn, "ws-1");
-      server.on("POST", `${OPS}/collection`, description);
-      pages(server);
-      await collections.open(D);
       expect(names(collections.view()?.rows), end).toEqual(["a0", "a1"]);
       if (end === "sign-out") {
         await account.signOut();
@@ -238,6 +282,35 @@ describe("teardown", () => {
       expect(account.state().status, end).toBe("signed-out");
       expect(collections.view(), end).toBeNull();
     }
+  });
+
+  it("reads the same workspace again after a Sign out whose delete failed", async () => {
+    let atDelete: unknown = "not run";
+    const { server, account, collections } = await signedInStore(async (_leave, collections) => {
+      atDelete = collections.view();
+      throw new Error("not deleted");
+    });
+    await expect(account.signOut()).rejects.toThrow("not deleted");
+    expect(atDelete).toBeNull();
+    expect(account.state().status).toBe("signed-in");
+    server.on(
+      "POST",
+      `${OPS}/collections`,
+      ok({ collections: [{ datasetId: D, name: "Registrations" }], nextCursor: null }),
+    );
+    await collections.refresh();
+    expect(collections.state().collections).toEqual([{ datasetId: D, name: "Registrations" }]);
+    await collections.open(D);
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+  });
+
+  it("reads nothing more once it has stopped", async () => {
+    const { server, collections } = setup();
+    collections.stop();
+    await collections.refresh();
+    await collections.open(D);
+    expect(server.calls).toEqual([]);
+    expect(collections.view()).toBeNull();
   });
 
   it("ends only the workspace that hides", async () => {

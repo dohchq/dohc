@@ -21,7 +21,6 @@ import type {
   CollectionField,
   CollectionRecord,
   CollectionTable,
-  RecordId,
 } from "../server/phoneCollections";
 import { useTheme } from "../theme";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
@@ -81,30 +80,26 @@ function Records({
   const table = description?.tables.find((table) => table.tableId === view?.tableId);
   const open = useCallback(
     (record: CollectionRecord) => {
-      if (table)
-        router.push({
-          pathname: "/collection-record",
-          params: { dataset: datasetId, table: table.tableId, id: JSON.stringify(record.id) },
-        });
+      collections.openRecord(record);
+      router.push("/collection-record");
     },
-    [router, datasetId, table],
+    [router, collections],
   );
 
   const title = <Stack.Screen options={{ title: description?.name ?? "" }} />;
   if (!view || !description)
-    return view?.problem ? (
+    return (
       <>
         {title}
-        <ScreenFailure
-          text={collectionWords.collectionFailed}
-          cause={problemText(view.problem)}
-          onRetry={reload}
-        />
-      </>
-    ) : (
-      <>
-        {title}
-        <HoldRow />
+        {view?.problem ? (
+          <ScreenFailure
+            text={collectionWords.collectionFailed}
+            cause={problemText(view.problem.cause)}
+            onRetry={reload}
+          />
+        ) : (
+          <HoldRow />
+        )}
       </>
     );
 
@@ -146,8 +141,8 @@ function Records({
           <ProblemLine
             text={`${
               table ? collectionWords.recordsFailed(table.name) : collectionWords.collectionFailed
-            } ${problemText(view.problem)}`}
-            onRetry={view.moreFailed ? more : reload}
+            } ${problemText(view.problem.cause)}`}
+            onRetry={view.problem.more ? more : reload}
           />
         </View>
       ) : null}
@@ -200,10 +195,10 @@ const RecordRow = memo(function RecordRow(props: {
     String(record.id);
   const details = table.fields
     .filter((field) => field !== lead)
-    .slice(0, 2)
     .flatMap(
       (field) => rowText(shownValue(field, record.values[field.fieldId], files), field.name) ?? [],
-    );
+    )
+    .slice(0, 2);
   return (
     <Pressable
       onPress={() => props.onPress(record)}
@@ -223,28 +218,22 @@ const RecordRow = memo(function RecordRow(props: {
   );
 });
 
+/** The record opened from the list, which stays while a refresh of the list reads pages without it. */
 export function RecordScreen() {
   const theme = useTheme();
-  const params = useLocalSearchParams<{ dataset?: string; table?: string; id?: string }>();
+  const problemText = useProblemText();
   const { collections } = useAccount();
   const view = useSyncExternalStore(
     collections?.subscribe ?? nothing,
     useCallback(() => collections?.view() ?? null, [collections]),
   );
-  let id: RecordId | null = null;
-  try {
-    const parsed: unknown = JSON.parse(params.id ?? "");
-    if (typeof parsed === "string" || typeof parsed === "number") id = parsed;
-  } catch {}
-  const record =
-    collections && params.dataset && params.table && id !== null
-      ? collections.record(params.dataset, params.table, id)
-      : null;
-  const table = view?.description?.tables.find((table) => table.tableId === params.table);
-  if (!view || !record || !table) return <ScreenFailure text={collectionWords.recordMissing} />;
+  const opened = view?.opened;
+  const table = view?.description?.tables.find((table) => table.tableId === opened?.tableId);
+  if (!view || !opened || !table) return <ScreenFailure text={collectionWords.recordMissing} />;
+  const { record, files } = opened;
   const lead = leadField(table);
   const title =
-    (lead && rowText(shownValue(lead, record.values[lead.fieldId], view.files), lead.name)) ??
+    (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
     String(record.id);
   return (
     <ScrollView
@@ -253,10 +242,16 @@ export function RecordScreen() {
       contentContainerStyle={styles.record}
     >
       <Stack.Screen options={{ title }} />
+      {view.problem ? (
+        <ProblemLine
+          text={`${collectionWords.recordsFailed(table.name)} ${problemText(view.problem.cause)}`}
+          onRetry={() => void (view.problem?.more ? collections?.more() : collections?.reload())}
+        />
+      ) : null}
       {table.fields.map((field) => (
-        <View key={field.fieldId} style={styles.field}>
+        <View key={field.fieldId} style={styles.field} testID="record-field">
           <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
-          <FieldValue field={field} record={record} files={view.files} />
+          <FieldValue field={field} record={record} files={files} />
         </View>
       ))}
     </ScrollView>
@@ -287,13 +282,13 @@ function FieldValue(props: {
     const allowed = outsideLink(shown.url, origin);
     if (allowed)
       return (
-        <Text
-          style={[styles.value, styles.link, { color: theme.accent }]}
+        <Pressable
+          style={styles.linkTarget}
           onPress={() => offerLink(allowed)}
           accessibilityRole="link"
         >
-          {shown.url}
-        </Text>
+          <Text style={[styles.value, styles.link, { color: theme.accent }]}>{shown.url}</Text>
+        </Pressable>
       );
     return (
       <Text style={[styles.value, { color: theme.ink }]} selectable>
@@ -332,5 +327,6 @@ const styles = StyleSheet.create({
   field: { gap: 4, paddingVertical: 10 },
   label: { fontSize: 13 },
   value: { fontSize: 17, lineHeight: 22 },
+  linkTarget: { minHeight: 44, justifyContent: "center" },
   link: { textDecorationLine: "underline" },
 });

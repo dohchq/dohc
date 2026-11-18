@@ -1,8 +1,7 @@
-import { each, isFields, okAnswer, segment, text } from "./api";
-import { ServerError, type ServerClient } from "./client";
+import { accountOperations, each, isFields, text } from "./api";
+import type { ServerClient } from "./client";
 
-// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts), each answer
-// checked before the phone uses it. They only read.
+// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts). They only read.
 
 export type CollectionFieldType =
   | "text"
@@ -38,7 +37,6 @@ export interface CollectionDescription extends PhoneCollection {
   readonly tables: readonly CollectionTable[];
 }
 
-/** What a field holds, as JSON. */
 export type RecordValue =
   | null
   | boolean
@@ -82,7 +80,6 @@ const TYPES: ReadonlySet<string> = new Set<CollectionFieldType>([
   "relation",
   "attachment",
 ]);
-/** The most records a page holds. */
 const PAGE = 50;
 /** A list read gives up past this many pages, as failed. */
 const LIST_PAGES = 200;
@@ -169,44 +166,10 @@ export function collectionOperations(
   workspaceId: string,
   signal: AbortSignal,
 ) {
-  const run = <T>(name: string, args: object, read: (result: unknown) => T | null): Promise<T> =>
-    client.send(
-      "POST",
-      `/sync/${segment(workspaceId)}/ops/${name}`,
-      (body) => {
-        const answer = okAnswer(body);
-        return answer ? read(answer.result) : null;
-      },
-      args,
-      { signal },
-    );
-
+  const { run, all } = accountOperations(client, workspaceId, signal);
   return {
-    /** Every Collection the phone can read. A cursor seen before, or more than LIST_PAGES pages, fails the read. */
-    async list(): Promise<readonly PhoneCollection[]> {
-      const collections: PhoneCollection[] = [];
-      const seen = new Set<string>();
-      let cursor: string | null = null;
-      for (let page = 0; page < LIST_PAGES; page++) {
-        const answer: { collections: PhoneCollection[]; next: string | null } = await run(
-          "collections",
-          cursor === null ? {} : { cursor },
-          (result) => {
-            const listed = isFields(result) ? each(result.collections, readCollection) : null;
-            const next = isFields(result) ? result.nextCursor : undefined;
-            return listed && (next === null || text(next, 64))
-              ? { collections: listed, next }
-              : null;
-          },
-        );
-        collections.push(...answer.collections);
-        if (answer.next === null) return collections;
-        if (seen.has(answer.next)) break;
-        seen.add(answer.next);
-        cursor = answer.next;
-      }
-      throw new ServerError("invalid");
-    },
+    list: (): Promise<readonly PhoneCollection[]> =>
+      all("collections", LIST_PAGES, readCollection, (next) => text(next, 64)),
 
     describe: (datasetId: string) =>
       run("collection", { datasetId }, (result) => readDescription(result, datasetId)),
