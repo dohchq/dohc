@@ -25,6 +25,8 @@ const files = vi.hoisted(() => ({
   unreadable: new Set<string>(),
   // Holds the next read of a file whose name ends so, until the test lets it go.
   hold: null as { name: string; reached(): void; until: Promise<void> } | null,
+  // Holds the next folder made inside this one, until the test lets it go.
+  holdFolderIn: null as { parent: string; reached(): void; until: Promise<void> } | null,
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -42,6 +44,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return text;
     }) as typeof actual.readFile,
+    mkdir: (async (...args: Parameters<typeof actual.mkdir>) => {
+      const hold = files.holdFolderIn;
+      if (hold && basename(dirname(String(args[0]))) === hold.parent) {
+        files.holdFolderIn = null;
+        hold.reached();
+        await hold.until;
+      }
+      return actual.mkdir(...args);
+    }) as typeof actual.mkdir,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       if (files.busy.has(String(args[0]))) {
         throw Object.assign(
@@ -391,6 +402,23 @@ it("gives a signed-out list read nothing once another account has signed in duri
   await f.registry.credentialsChanged(other, "https://relay");
   release.resolve();
   await expect(reading).rejects.toThrow(/owner changed/);
+});
+it("leaves no list a save was writing when a different account signed in", async () => {
+  const f = await fixture();
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.holdFolderIn = {
+    parent: "dataset-copies",
+    reached: reached.resolve,
+    until: release.promise,
+  };
+  const saving = f.registry.savedList(f.input).write([]);
+  // The save has checked its account and is about to make its folder.
+  await reached.promise;
+  await f.registry.credentialsChanged(other, "https://relay");
+  release.resolve();
+  await expect(saving).rejects.toThrow(/owner changed/);
+  expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toEqual([]);
 });
 it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),
