@@ -499,15 +499,15 @@ export function withReplicaCurrentView<T>(
       if (!authorized.ok) return { status: "denied" };
       const selector = fileSideOf(authorized.effectiveSelector);
       if (!selector) return { status: "denied" };
-      if (
-        authority?.history &&
-        !isWorkspaceSelector(authorized.effectiveSelector) &&
-        (!("access" in selector) || selector.access !== "edit")
-      )
-        return { status: "denied" };
       const member = isWorkspaceSelector(authorized.effectiveSelector)
         ? authorized.effectiveSelector.reach
         : undefined;
+      // History needs Edit. A member's is judged again at each pin's path.
+      if (
+        authority?.history &&
+        !(member ? member.hasLevel("edit") : "access" in selector && selector.access === "edit")
+      )
+        return { status: "denied" };
       if (input.principal.kind === "link") {
         const session = input.principal.requireSession();
         if (session.grantId !== input.grantId || session.generation !== input.generation)
