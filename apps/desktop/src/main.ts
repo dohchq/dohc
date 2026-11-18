@@ -1377,12 +1377,30 @@ function notifyCloudSessionChangedWithKey(
   sessionKey: string | null,
   phase: "changing" | "ready",
 ): void {
-  // Until the session is ready, no Collection opens signed out, so a page or
-  // agent never reads the last account's copy while another signs in.
-  ownerDatasetCopies.sessionChanging(phase === "changing");
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.cloudSessionChanged, { sessionKey, phase });
   }
+}
+// One session change, from its "changing" broadcast to its own "ready". Until
+// that ready, no Collection opens signed out, so a page or agent never reads
+// the last account's copy while another signs in. A ready from another session
+// event lifts nothing. `sessionKey`: the incoming session's, when known.
+function cloudSessionChange(sessionKey?: () => string | null): {
+  notifySessionChanging(): void;
+  notifyCloudSessionChanged(): void;
+} {
+  let end: (() => void) | undefined;
+  return {
+    notifySessionChanging: () => {
+      end ??= ownerDatasetCopies.sessionChange();
+      if (sessionKey) notifyCloudSessionChangedWithKey(sessionKey(), "changing");
+      else notifyCloudSessionChanged("changing");
+    },
+    notifyCloudSessionChanged: () => {
+      end?.();
+      notifyCloudSessionChanged("ready");
+    },
+  };
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
@@ -1498,8 +1516,7 @@ const personalAgentRoster = createPersonalAgentRoster({
           requestCredentials: credentials,
           currentCredentials: cachedCredentials,
           clearCachedCredentials: () => clearCachedCredentials(),
-          notifySessionChanging: () => notifyCloudSessionChanged("changing"),
-          notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+          ...cloudSessionChange(),
           invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
         });
       },
@@ -1733,8 +1750,7 @@ function chatWakeSession(
         requestCredentials: credentials,
         currentCredentials: cachedCredentials,
         clearCachedCredentials: () => clearCachedCredentials(),
-        notifySessionChanging: () => notifyCloudSessionChanged("changing"),
-        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+        ...cloudSessionChange(),
         invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
       }).catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
     },
@@ -1894,8 +1910,7 @@ const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
       requestCredentials,
       currentCredentials: cachedCredentials,
       clearCachedCredentials: () => clearCachedCredentials(),
-      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
-      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      ...cloudSessionChange(),
       invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
     }),
   publishStatus: publishShareHandoffStatus,
@@ -2047,8 +2062,7 @@ async function relayShareResponseWithCredentials(
       requestCredentials: credentials,
       currentCredentials: cachedCredentials,
       clearCachedCredentials: () => clearCachedCredentials(),
-      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
-      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      ...cloudSessionChange(),
       invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
     });
   }
@@ -2122,8 +2136,7 @@ async function relayShareJsonWithCredentials<T>(
       requestCredentials: credentials,
       currentCredentials: cachedCredentials,
       clearCachedCredentials: () => clearCachedCredentials(),
-      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
-      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      ...cloudSessionChange(),
       invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
     });
     throw new RelaySessionError("Your server session expired. Sign in again, then retry.", {
@@ -9155,7 +9168,7 @@ function registerIpcHandlers(): void {
     syncPauseFor: (workspace) => syncPauseFor(workspace, localInstallationId()),
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged,
-    notifyCloudSessionChangedWithKey,
+    cloudSessionChange,
     notifyRenderer,
     findWorkspace,
     engineDaemonStartup: () => desktopEngine.startup,
