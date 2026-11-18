@@ -1074,16 +1074,48 @@ describe("registered relay share handlers", () => {
             documents: [
               { path: "live.md", objectId: "live", status: "ready" },
               { path: "other.md", objectId: "other", status: "ready" },
+              {
+                path: "diverged.md",
+                objectId: "diverged",
+                status: "unavailable",
+                reason: "session-host-diverged",
+              },
+              {
+                path: "gone.md",
+                objectId: "gone",
+                status: "unavailable",
+                reason: "session-host-diverged",
+              },
             ],
           },
     );
-    h.ownerLivePauses.mockReturnValue([{ objectId: "live" }]);
+    h.ownerLivePauses.mockReturnValue([
+      { objectId: "live", cause: "refused" },
+      { objectId: "diverged", cause: "failing" },
+      { objectId: "gone", cause: "ended" },
+    ]);
     await expect(
       h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, { workspaceId }),
     ).resolves.toEqual({
       documents: [
         { path: "live.md", objectId: "live", status: "paused", canResume: true },
         { path: "other.md", objectId: "other", status: "ready", canResume: false },
+        // Resume would start it, and the server's copy no longer matches.
+        {
+          path: "diverged.md",
+          objectId: "diverged",
+          status: "paused",
+          reason: "session-host-diverged",
+          canResume: false,
+        },
+        // Resume only ends the pause.
+        {
+          path: "gone.md",
+          objectId: "gone",
+          status: "paused",
+          reason: "session-host-diverged",
+          canResume: true,
+        },
       ],
       nextCursor: null,
     });

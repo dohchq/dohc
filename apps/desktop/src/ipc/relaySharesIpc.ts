@@ -159,7 +159,9 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
     path: string,
   ): Promise<"refused" | "failing" | "ended" | null>;
   /** The notes the server paused, as this computer last settled them. */
-  ownerLivePauses?(workspace: Workspace): readonly { objectId: string }[];
+  ownerLivePauses?(
+    workspace: Workspace,
+  ): readonly { objectId: string; cause: "refused" | "failing" | "ended" }[];
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
@@ -914,15 +916,17 @@ export function createOwnerLiveDocumentActions<
           const deferred = localStops.find(
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
-          if (deferred)
-            Object.assign(row, {
-              deferredStop: deferred,
-              canResume:
-                row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld",
-            });
+          const startable =
+            row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld";
+          if (deferred) Object.assign(row, { deferredStop: deferred, canResume: startable });
           // A note the server paused stays enrolled until Resume ends its pause.
-          if (pauses.some((pause) => pause.objectId === row.objectId))
-            Object.assign(row, { status: "paused", canResume: true });
+          // Resume of an ended pause starts nothing, so only it ignores the server's copy.
+          const pause = pauses.find((candidate) => candidate.objectId === row.objectId);
+          if (pause)
+            Object.assign(row, {
+              status: "paused",
+              canResume: pause.cause === "ended" || startable,
+            });
           // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
           const kept = quarantines.filter(
             (candidate) => candidate.objectId === row.objectId && !candidate.saveOnly,
