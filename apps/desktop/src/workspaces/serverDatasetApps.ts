@@ -35,7 +35,7 @@ export interface ServerCollectionsTransport {
     candidate: AppPublicationCandidate,
     signal: AbortSignal,
   ): Promise<{ publicationId: string; authorityRevision: number }>;
-  withdraw(datasetId: string, publicationId: string): Promise<void>;
+  withdraw(datasetId: string, publicationId: string, signal?: AbortSignal): Promise<void>;
   /** One of the app's requests, which the server runs as the app. */
   request(
     publicationId: string,
@@ -81,8 +81,8 @@ export function createServerCollectionsTransport(
         throw new Error("The server answered the app approval unexpectedly.");
       return { publicationId, authorityRevision };
     },
-    async withdraw(datasetId, publicationId) {
-      await post(binding(datasetId), { publicationId, enabled: false });
+    async withdraw(datasetId, publicationId, signal) {
+      await post(binding(datasetId), { publicationId, enabled: false }, signal);
     },
     request: (publicationId, action, body, signal) =>
       post(
@@ -122,7 +122,7 @@ export function createServerDatasetApps(options: {
   server: Pick<ServerCollectionsTransport, "approve" | "withdraw" | "request">;
   /** Aborts when the workspace closes. */
   lifetime: AbortSignal;
-}): ReturnType<typeof createLocalDatasetApps> {
+}): ReturnType<typeof createLocalDatasetApps> & { close(): Promise<void> } {
   // The server's approval revision for each app this computer approved, once the server has it.
   const approvals = new Map<string, Promise<number>>();
   const declared = (row: LocalAppRow) => {
@@ -130,24 +130,64 @@ export function createServerDatasetApps(options: {
     if (capability?.kind !== "dataset") throw new Error("Invalid app approval.");
     return capability;
   };
-  // Every approval of each app still on its way. An approval that arrives after a withdrawal approves the app
-  // again, so a withdrawal waits for all of them.
-  const approving = new Map<string, Promise<unknown>>();
-  const approve = (
+  // Each app's approvals and withdrawal on their way to the server. The server keeps whichever reaches it last, so
+  // an approval and a withdrawal of the same app never go at once:
+  // - `approving` holds each approval until the server has answered it and this computer has committed it or given
+  //   it up. A withdrawal goes once none is left, and only if this computer has not approved the app again.
+  // - `sending` is the withdrawal on its way. An approval goes once the server has answered it.
+  // - While `withdrawing`, a withdrawal that failed waits to go again; `wake` sends it at once.
+  interface ServerWork {
+    approving: Set<Promise<unknown>>;
+    sending?: Promise<void>;
+    withdrawing?: boolean;
+    wake?: AbortController;
+  }
+  const work = new Map<string, ServerWork>();
+  const workOf = (publicationId: string) => {
+    let found = work.get(publicationId);
+    if (!found) work.set(publicationId, (found = { approving: new Set() }));
+    return found;
+  };
+  const done = (publicationId: string, found: ServerWork) => {
+    if (!found.approving.size && !found.withdrawing) work.delete(publicationId);
+  };
+  // Everything still on its way, which closing waits for once the lifetime has stopped it.
+  const owned = new Set<Promise<unknown>>();
+  const own = (task: Promise<unknown>) => {
+    owned.add(task);
+    void task.then(() => owned.delete(task));
+  };
+  const approve = <T>(
     publicationId: string,
     candidate: AppPublicationCandidate,
     signal: AbortSignal,
-  ) => {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    // A request already sent can still reach the server after its caller stops waiting, so the approval waits for
-    // the server's answer, and a withdrawal that waits for it reaches the server after it.
-    const sent = options.server.approve(candidate, options.lifetime);
-    const settled = Promise.allSettled([approving.get(publicationId), sent]);
-    approving.set(publicationId, settled);
-    void settled.then(() => {
-      if (approving.get(publicationId) === settled) approving.delete(publicationId);
+    then: (approved: { publicationId: string; authorityRevision: number }) => T,
+  ): Promise<T> => {
+    const found = workOf(publicationId);
+    let sent: Promise<unknown> | undefined;
+    const result = (async () => {
+      const stop = AbortSignal.any([signal, options.lifetime]);
+      while (found.sending) await until(found.sending, stop);
+      stop.throwIfAborted();
+      // A request already sent can still reach the server after its caller stops waiting, so it goes for the
+      // workspace's lifetime, and counts as on its way until the server answers.
+      const request = options.server.approve(candidate, options.lifetime);
+      sent = request;
+      return then(await until(request, signal));
+    })();
+    const finished = result
+      .then(
+        () => sent,
+        () => sent,
+      )
+      .catch(() => undefined);
+    found.approving.add(finished);
+    own(finished);
+    void finished.then(() => {
+      found.approving.delete(finished);
+      done(publicationId, found);
     });
-    return until(sent, signal);
+    return result;
   };
   function current(id: string, expected?: number) {
     const row = options.store.row(id, expected);
@@ -161,10 +201,12 @@ export function createServerDatasetApps(options: {
         row.publicationId,
         row.candidate,
         signal ?? new AbortController().signal,
-      ).then((approved) => {
-        if (approved.publicationId !== row.publicationId) throw new Error("Invalid app approval.");
-        return approved.authorityRevision;
-      });
+        (approved) => {
+          if (approved.publicationId !== row.publicationId)
+            throw new Error("Invalid app approval.");
+          return approved.authorityRevision;
+        },
+      );
       approvals.set(row.publicationId, revision);
       revision.catch(() => {
         if (approvals.get(row.publicationId) === revision) approvals.delete(row.publicationId);
@@ -182,22 +224,41 @@ export function createServerDatasetApps(options: {
   };
   // A withdrawal that cannot reach the server goes again while the workspace is open, until the server takes it
   // or this computer approves the app again.
-  const withdraw = async (row: LocalAppRow) => {
+  const withdraw = (row: LocalAppRow) => {
     approvals.delete(row.publicationId);
-    while (!options.lifetime.aborted) {
-      await approving.get(row.publicationId);
-      if (options.lifetime.aborted || approvedHere(row.publicationId)) return;
-      try {
-        await options.server.withdraw(row.resourceId, row.publicationId);
-        return;
-      } catch (error) {
-        // The server holds no such app or Collection.
-        if (isDatasetServerNotFound(error)) return;
-      }
-      await delay(WITHDRAWAL_RETRY_MS, undefined, { signal: options.lifetime }).catch(
-        () => undefined,
-      );
+    const found = workOf(row.publicationId);
+    if (found.withdrawing) {
+      found.wake?.abort();
+      return;
     }
+    found.withdrawing = true;
+    const lifetime = options.lifetime;
+    own(
+      (async () => {
+        while (!lifetime.aborted) {
+          while (found.approving.size) await Promise.all(found.approving);
+          if (lifetime.aborted || approvedHere(row.publicationId)) break;
+          const request = options.server.withdraw(row.resourceId, row.publicationId, lifetime);
+          const clear = () => {
+            found.sending = undefined;
+          };
+          found.sending = request.then(clear, clear);
+          try {
+            await request;
+            break;
+          } catch (error) {
+            // The server holds no such app or Collection.
+            if (isDatasetServerNotFound(error)) break;
+          }
+          found.wake = new AbortController();
+          await delay(WITHDRAWAL_RETRY_MS, undefined, {
+            signal: AbortSignal.any([lifetime, found.wake.signal]),
+          }).catch(() => undefined);
+        }
+        found.withdrawing = false;
+        done(row.publicationId, found);
+      })(),
+    );
   };
   async function send(
     publicationId: string,
@@ -246,27 +307,33 @@ export function createServerDatasetApps(options: {
       const publicationId = hash(
         JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]),
       );
-      const approved = await approve(publicationId, candidate, signal);
-      if (approved.publicationId !== publicationId) throw new Error("Invalid app approval.");
-      approvals.set(publicationId, Promise.resolve(approved.authorityRevision));
-      return options.store.activate(
-        {
-          kind: "dataset",
-          resourceId: capability.datasetId,
-          publicationId,
-          prepared,
-          agent,
-        },
-        signal,
-        (existing, _displaced, commit) => {
-          commit();
-          if (existing && existing.publicationId !== publicationId) void withdraw(existing);
-        },
-      );
+      // A withdrawal of this app waits until this computer has committed the approval or given it up.
+      return approve(publicationId, candidate, signal, (approved) => {
+        if (approved.publicationId !== publicationId) throw new Error("Invalid app approval.");
+        approvals.set(publicationId, Promise.resolve(approved.authorityRevision));
+        return options.store.activate(
+          {
+            kind: "dataset",
+            resourceId: capability.datasetId,
+            publicationId,
+            prepared,
+            agent,
+          },
+          signal,
+          (existing, _displaced, commit) => {
+            commit();
+            if (existing && existing.publicationId !== publicationId) withdraw(existing);
+          },
+        );
+      });
     },
     withdrawBinding(value: LocalAppRow, commit: () => void) {
       commit();
-      void withdraw(value);
+      withdraw(value);
+    },
+    /** Waits for the work on its way to the server, once the lifetime has stopped it. */
+    async close() {
+      while (owned.size) await Promise.all(owned);
     },
     describe(value: LocalAppRow) {
       let active = false;
