@@ -266,4 +266,59 @@ final class ServerRoundTests: XCTestCase {
       .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
   }
+
+  // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
+  // name differs by round, so the test takes the first name the menu offers for "@", types its first letters, and taps
+  // its row. The tap must make the text exactly "Can @<handle> " and keep the keyboard up. The message must then show
+  // with exactly that text as the server's copy, and the round checks the server has the line it prints.
+  @MainActor
+  func test10_mentionsSomeone() throws {
+    let app = XCUIApplication()
+    app.launch()
+    tab(app, "Chats")
+    let planning = app.buttons["Planning"]
+    XCTAssertTrue(planning.waitForExistence(timeout: 30), "Chats should show the group Planning")
+    planning.tap()
+    let field = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "Message ")).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 30), "Planning should show the composer")
+    field.tap()
+    field.typeText("Can @")
+    let rows = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@ OR label ENDSWITH %@", ", person", ", agent"))
+    XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 30), "Typing @ should offer who Planning can mention")
+    let label = rows.firstMatch.label
+    let comma = try XCTUnwrap(label.range(of: ", ", options: .backwards), "A row's label should end in its kind")
+    let name = String(label[..<comma.lowerBound])
+    field.typeText(String(name.prefix(2)))
+    let row = app.buttons[label]
+    XCTAssertTrue(row.waitForExistence(timeout: 10), "\(name) should still match its first letters")
+    row.tap()
+    // The handle `handleForName` makes of a plain name (packages/workspace-contracts/src/chatMentions.ts).
+    let allowed = CharacterSet.letters.union(.decimalDigits).union(.nonBaseCharacters).union(CharacterSet(charactersIn: "._-"))
+    let handle = String(String.UnicodeScalarView(name.unicodeScalars.filter { allowed.contains($0) }))
+      .trimmingCharacters(in: CharacterSet(charactersIn: "._-"))
+    XCTAssertFalse(handle.isEmpty, "\(name) should have a handle")
+    let completed = NSPredicate(format: "value == %@", "Can @\(handle) ")
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: completed, evaluatedWith: field)], timeout: 10), .completed,
+                   "The row should make the text \"Can @\(handle) \", not \(String(describing: field.value))")
+    XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should stay up after the tap")
+    let tail = "join us? \(UUID().uuidString.prefix(8))"
+    field.typeText(tail)
+    let body = "Can @\(handle) \(tail)"
+    XCTAssertEqual(field.value as? String, body, "Typing should go on after the mention")
+    app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
+    let sent = app.staticTexts.matching(NSPredicate(format: "label == %@", body)).firstMatch
+    XCTAssertTrue(sent.waitForExistence(timeout: 60), "Planning should show the message exactly as sent: \(body)")
+    // Only the server's copy of a message has Add reaction, right under its text; a copy still on the phone, waiting,
+    // withheld or refused, has none. The round then checks the server has the line printed below.
+    let reactable = NSPredicate { _, _ in
+      guard sent.exists, sent.label == body else { return false }
+      let text = sent.frame
+      return app.buttons.matching(NSPredicate(format: "label == %@", "Add reaction")).allElementsBoundByIndex.contains {
+        $0.frame.minY >= text.maxY && $0.frame.minY - text.maxY < 120
+      }
+    }
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: reactable, evaluatedWith: app)], timeout: 60), .completed,
+                   "The server should have the message exactly as sent: \(body)")
+    say("DOHC_MENTION_SENT \(body)")
+  }
 }
