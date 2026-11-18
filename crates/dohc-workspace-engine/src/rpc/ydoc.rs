@@ -1859,6 +1859,8 @@ impl EngineService {
         // its first_update_pending transition) is still running — a second
         // recordUpdate would otherwise read the stale flag and refuse
         // seed-onto-existing-lineage after the first write committed.
+        // [diag-gap] Throwaway timing logs for one test run; never merged.
+        let diag_start = std::time::Instant::now();
         let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
@@ -1866,6 +1868,12 @@ impl EngineService {
             }
             serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
+        if diag_start.elapsed().as_millis() >= 200 {
+            eprintln!(
+                "[diag-gap] recordUpdate waited {}ms for the session serial",
+                diag_start.elapsed().as_millis()
+            );
+        }
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         // A resync moves the session to a replacement claim before its reply
         // reaches the client. An edit made on the earlier claim's document
@@ -1950,12 +1958,27 @@ impl EngineService {
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
             let token = cancellation.token();
+            let diag_reserve = std::time::Instant::now();
             let reservation = self.reserve_owner_delivery(&cancellation).await?;
+            if diag_reserve.elapsed().as_millis() >= 200 {
+                eprintln!(
+                    "[diag-gap] recordUpdate waited {}ms for owner admission",
+                    diag_reserve.elapsed().as_millis()
+                );
+            }
+            let diag_append = std::time::Instant::now();
             let append = tokio::spawn(async move {
                 let _serial = serial;
-                actor
+                let appended = actor
                     .owner_ydoc_append_draft(workspace, input, token, reservation)
-                    .await
+                    .await;
+                if diag_append.elapsed().as_millis() >= 200 {
+                    eprintln!(
+                        "[diag-gap] recordUpdate owner append took {}ms",
+                        diag_append.elapsed().as_millis()
+                    );
+                }
+                appended
             })
             .await
             .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc record task failed"))?

@@ -245,7 +245,13 @@ export async function runNativeOwnerDeliveryPass(
       }
       if (outboxId !== null) {
         drainer ??= new OwnerYDocOutboxDrainer(outbox, outboxId, delivery, options.refusals, true);
+        const diagStart = Date.now();
         const result = await drainer.drainOnce();
+        const diagMs = Date.now() - diagStart;
+        if (diagMs >= 200 || result !== "acknowledged")
+          console.error(
+            `[diag-gap] ${new Date().toISOString()} lasting drain ${document.binding.currentPath} ${result} after ${diagMs}ms`,
+          );
         check();
         if (result === "acknowledged") {
           lasting.acknowledged();
@@ -276,6 +282,9 @@ export async function runNativeOwnerDeliveryPass(
       try {
         await lasting.landed(seen, AbortSignal.any([signal, route.closed]));
       } catch (error) {
+        console.error(
+          `[diag-gap] ${new Date().toISOString()} lasting wait ended ${document.binding.currentPath} aborted=${signal.aborted} routeClosed=${route.closed.aborted}`,
+        );
         if (signal.aborted || !route.closed.aborted) throw error;
         return "retry";
       }

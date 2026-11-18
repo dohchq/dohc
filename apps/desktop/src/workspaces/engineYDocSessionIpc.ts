@@ -242,6 +242,9 @@ interface Arrival {
   readonly source: string;
 }
 
+// [diag-gap] Throwaway timing logs for one test run; never merged.
+let diagLastUpdateLog = 0;
+
 /**
  * The person behind each renderer update: main's account when the update
  * first arrived. An update is its document, request id, and bytes, so a retry
@@ -1154,6 +1157,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         return { accepted: true };
       },
     );
+    const diagNow = Date.now();
+    const diagAccepted = applied.kind !== "refused" && applied.value.accepted;
+    if (!diagAccepted || diagNow - diagLastUpdateLog >= 1000) {
+      diagLastUpdateLog = diagNow;
+      console.error(
+        `[diag-gap] ${new Date(diagNow).toISOString()} editor update received session=${input.sessionId} seq=${input.seq} bytes=${input.update.byteLength} ${applied.kind === "refused" ? `refused ${applied.reason}` : applied.value.accepted ? "accepted" : `not accepted ${applied.value.reason}`}`,
+      );
+    }
     if (applied.kind === "refused") {
       return ApplyEngineYDocUpdateResult.parse({
         accepted: false,

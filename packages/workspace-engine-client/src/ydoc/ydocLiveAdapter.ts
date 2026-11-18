@@ -36,6 +36,11 @@ import {
   type YdocOwnerDraft,
 } from "./ydocWireContract";
 
+// [diag-gap] Throwaway timing logs for one test run; never merged.
+function diagGap(message: string): void {
+  console.error(`[diag-gap] ${new Date().toISOString()} ${message}`);
+}
+
 const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol("dohc.workspaceEngineClient.localEditorOrigin");
 const ORIGINAL_REPLAY_ORIGIN = Symbol("dohc.workspaceEngineClient.originalReplayOrigin");
 
@@ -838,7 +843,13 @@ export class YdocAdapterSession {
     }
     this.pendingRecords.add(record);
     this.pendingRecordBytes += retainedBytes;
+    const diagQueued = Date.now();
     const operation = this.recordChain.then(async () => {
+      const diagWaited = Date.now() - diagQueued;
+      if (diagWaited >= 200)
+        diagGap(
+          `record ${this.sessionId} waited ${diagWaited}ms on the record chain pending=${this.pendingRecords.size}`,
+        );
       this.assertRecordable();
       if (record.refusal !== undefined) throw record.refusal;
       try {
@@ -974,6 +985,14 @@ export class YdocAdapterSession {
       ...(record.seed ? { seed: true } : {}),
     };
     let result: YdocRecordUpdateResult;
+    const diagStart = Date.now();
+    const diagSlow = setTimeout(
+      () =>
+        diagGap(
+          `record ${this.sessionId} key=${record.idempotencyKey} no answer after 1000ms pending=${this.pendingRecords.size}`,
+        ),
+      1000,
+    );
     try {
       result = decodeYdocResult(
         YDOC_METHOD.recordUpdate,
@@ -981,7 +1000,17 @@ export class YdocAdapterSession {
           idempotencyKey: record.idempotencyKey,
         }),
       );
+      clearTimeout(diagSlow);
+      const diagMs = Date.now() - diagStart;
+      if (diagMs >= 200)
+        diagGap(
+          `record ${this.sessionId} key=${record.idempotencyKey} answered after ${diagMs}ms lane=${"ownerDraft" in result ? "owner-outbox" : "journal"}`,
+        );
     } catch (error) {
+      clearTimeout(diagSlow);
+      diagGap(
+        `record ${this.sessionId} key=${record.idempotencyKey} failed after ${Date.now() - diagStart}ms code=${String((error as { code?: unknown } | null)?.code)} message=${error instanceof Error ? error.message : String(error)}`,
+      );
       if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
         // Retire causal dependents before replacement so observers can retain
         // a recovery copy. Independent clients keep their queued writes.
@@ -1355,13 +1384,20 @@ export class YdocAdapterSession {
    * that the file never took.
    */
   async leaveLiveEditing<T>(leave: (unsent: Uint8Array) => Promise<T>): Promise<T> {
+    const diagCalled = Date.now();
+    diagGap(`leave ${this.sessionId} called pending=${this.pendingRecords.size}`);
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
       let left: T;
       try {
-        left = await leave(
-          Y.encodeStateAsUpdate(this.activeDoc, Y.encodeStateVector(this.acknowledgedDoc)),
+        const diagUnsent = Y.encodeStateAsUpdate(
+          this.activeDoc,
+          Y.encodeStateVector(this.acknowledgedDoc),
         );
+        diagGap(
+          `leave ${this.sessionId} entered after ${Date.now() - diagCalled}ms unsent=${diagUnsent.byteLength}B pending=${this.pendingRecords.size}`,
+        );
+        left = await leave(diagUnsent);
       } catch (error) {
         // Live editing can end before an answer that fails.
         await this.requestResyncState();

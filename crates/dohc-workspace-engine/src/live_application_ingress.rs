@@ -323,24 +323,47 @@ impl OwnerAdmission {
         has_deadline: bool,
     ) -> Result<Arc<dyn Send + Sync>, WireError> {
         let refused = || WireError::new(ErrorCode::Overloaded, "live-settlement-capacity");
+        // [diag-gap] Throwaway timing logs for one test run; never merged.
+        let diag_start = std::time::Instant::now();
         let wait = async {
             let _turn = tokio::select! {
                 biased;
                 () = cancelled.cancelled() => return Err(refused()),
                 turn = self.turn.lock() => turn,
             };
+            let diag_turn = diag_start.elapsed();
+            if diag_turn.as_millis() >= 200 {
+                eprintln!(
+                    "[diag-gap] owner admission turn waited {}ms available={} wanted={}",
+                    diag_turn.as_millis(),
+                    self.budget.available_permits(),
+                    self.bytes
+                );
+            }
             loop {
                 let released = self.released.notified();
                 tokio::pin!(released);
                 // Registered before the attempt, so a release between them still wakes this call.
                 released.as_mut().enable();
                 if let Ok(bytes) = self.budget.clone().try_acquire_many_owned(self.bytes) {
+                    if diag_start.elapsed().as_millis() >= 200 {
+                        eprintln!(
+                            "[diag-gap] owner admission granted after {}ms available={}",
+                            diag_start.elapsed().as_millis(),
+                            self.budget.available_permits()
+                        );
+                    }
                     return Ok(Arc::new(Reservation {
                         bytes: Some(bytes),
                         slot: None,
                         released: self.released.clone(),
                     }) as Arc<dyn Send + Sync>);
                 }
+                eprintln!(
+                    "[diag-gap] owner admission waits for room available={} wanted={}",
+                    self.budget.available_permits(),
+                    self.bytes
+                );
                 tokio::select! {
                     biased;
                     () = cancelled.cancelled() => return Err(refused()),

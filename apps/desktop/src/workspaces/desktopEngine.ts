@@ -1056,6 +1056,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       const resumes = ownerLivePauseResumes.get(workspaceId) ?? 0;
                       const pauses = await session.livePauses(signal);
                       check();
+                      const diagSettle = Date.now();
+                      if (pauses.length > 0)
+                        console.error(
+                          `[diag-gap] ${new Date().toISOString()} live pauses read: ${pauses.length}`,
+                        );
                       const { existsInWorkspace } = await import("./ownerLiveRecoveryCopy");
                       await sessions.run(operation.workspace, async (binding) => {
                         const client = daemon.currentClient();
@@ -1101,6 +1106,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                           ownerLivePauses.set(workspaceId, settled);
                           notifyRenderer({ workspaceId });
                         }
+                        if (pauses.length > 0)
+                          console.error(
+                            `[diag-gap] ${new Date().toISOString()} live pauses settled after ${Date.now() - diagSettle}ms`,
+                          );
                       });
                     } catch (error) {
                       check();
