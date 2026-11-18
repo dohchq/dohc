@@ -1210,7 +1210,7 @@ const CHAT_VERBS = {
       "Delete a message in a Group or a file's Comments: your own, or any as the owner or an admin.",
     operands: "<message>",
     notes: [
-      "The message shows as deleted everywhere it syncs. People who already read it may keep a copy.",
+      "This can't be undone. The message shows as deleted everywhere it syncs. People who already read it may keep a copy.",
       "It needs a workspace that syncs and a connection.",
     ],
     parse: ({ operands }) => {
