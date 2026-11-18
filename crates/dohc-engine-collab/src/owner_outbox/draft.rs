@@ -3840,11 +3840,11 @@ mod tests {
         cache: &mut crate::WriterDocCache,
         observed: &ObservedOwnerBinding,
         checkpoint: &[u8],
-    ) {
+    ) -> Vec<u8> {
         let collaborator = Ydoc::wire();
         collaborator.apply(checkpoint).unwrap();
         let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
-        put_committed_row(store, cache, &observed.binding, 5, row).unwrap();
+        put_committed_row(store, cache, &observed.binding, 5, row.clone()).unwrap();
         let shown = open_draft_cached(store, cache, &observed.binding, 1).unwrap();
         let owner = Ydoc::wire();
         owner.apply(&shown.initial_update).unwrap();
@@ -3862,6 +3862,7 @@ mod tests {
             )
             .unwrap();
         }
+        row
     }
 
     fn pause_input(observed: &ObservedOwnerBinding) -> super::super::release::OwnerPauseInput {
@@ -3901,13 +3902,13 @@ mod tests {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
         let mut cache = crate::WriterDocCache::default();
-        held_note(&mut store, &mut cache, &observed, &checkpoint);
+        let row = held_note(&mut store, &mut cache, &observed, &checkpoint);
         // The room took a collaborator's row and another after it; the relay
         // paused before any save held them, and a restart lost the one this
         // computer had.
         let room = Ydoc::wire();
         room.apply(&checkpoint).unwrap();
-        room.richdoc_append_paragraph("Committed by a collaborator");
+        room.apply(&row).unwrap();
         room.richdoc_append_paragraph("Only in the room");
         let mut cache = crate::WriterDocCache::default();
         let mut input = pause_input(&observed);
