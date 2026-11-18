@@ -94,10 +94,10 @@ export function datasetReferenceReadContainsRecord(
   });
 }
 
-/** The existing relay connection owns every authoritative dataset transaction. */
 /** What an app's row on the server holds besides the app itself, counted as a binding's is. */
 const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
 
+/** The existing relay connection owns every authoritative dataset transaction. */
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const { storage, limits, publicEditRelease } = options,
     nowMs = options.nowMs ?? Date.now;
@@ -140,20 +140,18 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     const marker = "local-dataset-app-storage-v1";
     if (storage.db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker))
       return;
+    const collection = storage.db.prepare(
+      "UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?",
+    );
+    const workspace = storage.db.prepare(
+      "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
+    );
     for (const row of storage.db
       .prepare("SELECT workspace_id,dataset_id,app_id,candidate FROM sync_relay_local_dataset_apps")
       .all()) {
       const bytes = localAppBytes(String(row.app_id)) + Buffer.byteLength(String(row.candidate));
-      storage.db
-        .prepare(
-          "UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?",
-        )
-        .run(bytes, row.workspace_id, row.dataset_id);
-      storage.db
-        .prepare(
-          "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
-        )
-        .run(bytes, row.workspace_id);
+      collection.run(bytes, row.workspace_id, row.dataset_id);
+      workspace.run(bytes, row.workspace_id);
     }
     storage.db
       .prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
