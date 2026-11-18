@@ -11,6 +11,7 @@ import {
 import type { StorageContext } from "./context";
 import { deleteSavedLiveRoomEdits, initializeRoomMigration } from "./liveRoomEdits";
 import { documentParams } from "./liveUpdateJournal";
+import { openServiceActivationRetirement } from "./serviceActivationRetirement";
 import type { SqliteDb } from "./types";
 
 // A paused note: its room saved nothing more, and its unsaved edits are in a copy kept here until
@@ -114,6 +115,14 @@ export function pauseLiveRoom(
         sha256(input.copy),
         footprint(named, input.copy.byteLength),
       );
+    // As an owner's Pause does, a pause of the current lineage retires the service host's activation,
+    // so the host takes none of the owner's edits into the paused note until Resume.
+    const current = storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'",
+      )
+      .get(...documentParams(document));
+    if (current) openServiceActivationRetirement(storage, document, input.pausedAtMs);
   });
   return pauseId;
 }

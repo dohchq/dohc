@@ -13,6 +13,8 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage } from "./storage";
+import type { StorageContext } from "./storage/context";
+import { liveRoomPaused } from "./storage/liveRoomPauses";
 import type { SessionHostBlock } from "./linkRefusal";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
@@ -112,13 +114,14 @@ export function selectHostedDocuments(
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused by its owner or its live room, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const departs = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
     !covered ||
     row.ownerStop !== null ||
-    storage.serviceActivationRetirement(row) !== null;
+    storage.serviceActivationRetirement(row) !== null ||
+    liveRoomPaused(storage as StorageContext, row);
   const page = storage.listUndrainedServiceHostEnrollments(cursor);
   const targets: ServiceHostEnrollment[] = [],
     departing: ServiceHostEnrollment[] = [],
