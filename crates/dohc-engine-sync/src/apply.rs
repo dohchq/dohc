@@ -334,7 +334,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     return Err(SyncError::CoordinateDiverged);
                 }
                 advance_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, acked)?;
-                return redelivered(tx, envelope, None);
+                return redelivered(tx, envelope, Some(row));
             }
             if envelope.origin_seq != expected
                 && !crate::deferred::passes_held_work(tx, envelope, acked)?
