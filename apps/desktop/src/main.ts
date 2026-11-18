@@ -120,6 +120,7 @@ import { readServerDataset } from "./automations/serverDataset";
 import {
   collectionPlace,
   createBackgroundDatasetRouter,
+  createAttachmentCollectionsSendUp,
   createCollectionsSendUp,
   sendCollectionsUp,
   finishedTransfer,
@@ -4948,20 +4949,14 @@ function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath
 // store opens. A Collection that didn't arrive says why when it is opened, and
 // opening it tries again.
 function collectionsSendUpFor(binding: WorkspaceAuthorityBinding<RegistryEntry>) {
-  const workspace = () => {
-    const entry = findWorkspace(binding.workspaceId);
-    if (!entry) throw new Error("This workspace is no longer available.");
-    return entry;
-  };
-  return createCollectionsSendUp({
-    open: async () =>
-      (await localDatasetStoreExists(workspace().rootPath))
-        ? localDatasetHostFor(workspace(), new AbortController().signal)
-        : null,
-    session: () => ({
-      ...transferSession(workspace(), new AbortController().signal),
-      server: () => remoteForWorkspace(workspace(), { allowPaused: true }),
-    }),
+  return createAttachmentCollectionsSendUp<RegistryEntry>(binding, {
+    findWorkspace,
+    retirementSignal: (workspaceId, attachmentId) =>
+      workspaceAuthorities.attachmentRetirementSignal(workspaceId, attachmentId),
+    storeExists: localDatasetStoreExists,
+    localHost: localDatasetHostFor,
+    transferSession,
+    server: (workspace) => remoteForWorkspace(workspace, { allowPaused: true }),
     reported: (unsent) => {
       for (const [datasetId, error] of unsent)
         console.warn(
