@@ -51,9 +51,9 @@ use dohc_engine_domain::{
     FileMergePlan, MergeTextFileFromVersion, compare_text_file_versions_in_db, plan_file_merge,
 };
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, ReachBefore, RuleFileOrder, RuleFileStep, access_rule_folder,
-    is_access_rule_path, is_rule_of, level_for_email, parse_access_rule, rule_change_narrows,
-    rule_file_order_is_safe, safe_rule_file_order,
+    ACCESS_RULE_FILE, AccessRule, ReachBefore, RuleFileOrder, RuleFileStep, RuleOrderWork,
+    access_rule_folder, is_access_rule_path, is_rule_of, level_for_email, parse_access_rule,
+    rule_change_narrows, rule_file_order_is_safe, safe_rule_file_order,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -2556,14 +2556,16 @@ fn version_rule_bytes(
     })
 }
 
-/// The rule files `version` holds at or under `folder`. The workspace's own
-/// rule reads every path.
+/// The rule files `version` holds at or under `folder`, taking one unit of
+/// `work` for each path read. The workspace's own rule reads every path.
+/// `None` when the work runs out first.
 fn rule_paths_under(
     conn: &Connection,
     workspace: &str,
     version: &str,
     folder: &str,
-) -> Result<Vec<String>, RuntimeError> {
+    work: &mut RuleOrderWork,
+) -> Result<Option<Vec<String>>, RuntimeError> {
     let (low, high) = folder_range(folder);
     let mut scan = conn
         .prepare_cached(
@@ -2579,11 +2581,30 @@ fn rule_paths_under(
     let mut rules = Vec::new();
     for path in paths {
         let path = path.map_err(StorageError::corrupt_public)?;
+        if work.take(1).is_none() {
+            return Ok(None);
+        }
         if is_access_rule_path(&path) {
             rules.push(path);
         }
     }
-    Ok(rules)
+    Ok(Some(rules))
+}
+
+/// The rule files `version` holds in exactly `folder`, taking `work` for
+/// the look and for each one found. `None` when the work runs out first.
+fn charged_rule_paths(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    folder: &str,
+    work: &mut RuleOrderWork,
+) -> Result<Option<Vec<String>>, RuntimeError> {
+    if work.take(1).is_none() {
+        return Ok(None);
+    }
+    let rules = committed_rule_paths(conn, workspace, version, folder)?;
+    Ok(work.take(rules.len()).map(|()| rules))
 }
 
 /// What a merge's rule changes would do to the target as the store holds it
@@ -2598,15 +2619,22 @@ struct RuleMergeSteps {
     folded: BTreeSet<String>,
 }
 
+/// Reading the store takes from `work`, which ordering goes on to use: each
+/// path read, each rule compared or planned by its text, and each rule kept.
+/// `None` when the work runs out first.
 fn rule_merge_steps(
     conn: &Connection,
     workspace: &str,
     source: &str,
     target: &str,
     paths: &[String],
-) -> Result<RuleMergeSteps, RuntimeError> {
+    work: &mut RuleOrderWork,
+) -> Result<Option<RuleMergeSteps>, RuntimeError> {
     let mut steps = Vec::new();
     for path in paths {
+        if work.take(1).is_none() {
+            return Ok(None);
+        }
         let comparison = compare_text_file_versions_in_db(
             conn,
             &CompareTextFileVersions {
@@ -2616,6 +2644,16 @@ fn rule_merge_steps(
                 path: path.clone(),
             },
         )?;
+        // The plan reads and may merge each side's text.
+        let text: usize = [&comparison.base, &comparison.current, &comparison.incoming]
+            .into_iter()
+            .flatten()
+            .filter(|side| !side.binary)
+            .map(|side| side.snapshot.text.len())
+            .sum();
+        if work.take_bytes(text).is_none() {
+            return Ok(None);
+        }
         let bytes = match plan_file_merge(&comparison) {
             FileMergePlan::WriteText(text) => Some(text.into_bytes()),
             FileMergePlan::WriteBinary => Some(UNREADABLE_RULE.to_vec()),
@@ -2624,7 +2662,11 @@ fn rule_merge_steps(
         };
         steps.push((path.clone(), bytes));
     }
-    let (folded, spellings) = folded_folders(conn, workspace, &steps, [target, source])?;
+    let Some((folded, spellings)) =
+        folded_folders(conn, workspace, &steps, [target, source], work)?
+    else {
+        return Ok(None);
+    };
     // Reach changes only at and under a changed folder, and there it also
     // depends on the rules above.
     let folders: BTreeSet<&str> = steps
@@ -2633,28 +2675,40 @@ fn rule_merge_steps(
         .collect();
     let mut paths = BTreeSet::new();
     for folder in folders {
-        paths.extend(rule_paths_under(conn, workspace, target, folder)?);
+        let Some(under) = rule_paths_under(conn, workspace, target, folder, work)? else {
+            return Ok(None);
+        };
+        paths.extend(under);
         let mut above = folder;
         while !above.is_empty() {
             above = above.rsplit_once('/').map_or("", |(parent, _)| parent);
-            paths.extend(committed_rule_paths(conn, workspace, target, above)?);
+            let Some(rules) = charged_rule_paths(conn, workspace, target, above, work)? else {
+                return Ok(None);
+            };
+            paths.extend(rules);
         }
     }
     // A respelling is judged against the rules in every spelling.
     for spelling in &spellings {
-        paths.extend(committed_rule_paths(conn, workspace, target, spelling)?);
+        let Some(rules) = charged_rule_paths(conn, workspace, target, spelling, work)? else {
+            return Ok(None);
+        };
+        paths.extend(rules);
     }
     let mut before = BTreeMap::new();
     for path in paths {
         if let Some(bytes) = version_rule_bytes(conn, workspace, target, &path)? {
+            if work.take_bytes(bytes.len()).is_none() {
+                return Ok(None);
+            }
             before.insert(path, bytes);
         }
     }
-    Ok(RuleMergeSteps {
+    Ok(Some(RuleMergeSteps {
         before,
         steps,
         folded,
-    })
+    }))
 }
 
 impl RuleMergeSteps {
@@ -2669,37 +2723,40 @@ impl RuleMergeSteps {
     }
 }
 
+/// The steps in folded folders, and every spelling of those folders.
+type FoldedFolders = (BTreeSet<String>, BTreeSet<String>);
+
 /// The steps in a folder whose name folds together with another folder's
 /// that `versions` hold a path in, or that another step names, and every
 /// spelling of those folders. One step alone passes through no state between
-/// before and after, so it needs no order.
+/// before and after, so it needs no order. `None` when the work runs out
+/// first.
+///
+/// A name can fold to another depth: NFKC reads `a／x` as `a/x` and `℅` as
+/// `c/o`, and a top folder whose name folds to nothing, such as `．`, as the
+/// root. So the key of every folder each path is in is compared, whatever
+/// its depth, and the root is a spelling of the empty key.
 fn folded_folders(
     conn: &Connection,
     workspace: &str,
     steps: &[(String, Option<Vec<u8>>)],
     versions: [&str; 2],
-) -> Result<(BTreeSet<String>, BTreeSet<String>), RuntimeError> {
+    work: &mut RuleOrderWork,
+) -> Result<Option<FoldedFolders>, RuntimeError> {
     if steps.len() < 2 {
-        return Ok(Default::default());
+        return Ok(Some(Default::default()));
     }
     let mut spellings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (path, _) in steps {
         let folder = access_rule_folder(path);
-        if !folder.is_empty() {
-            spellings
-                .entry(path_collision_key(folder))
-                .or_default()
-                .insert(folder.to_owned());
-        }
+        spellings
+            .entry(path_collision_key(folder))
+            .or_default()
+            .insert(folder.to_owned());
     }
-    if spellings.is_empty() {
-        return Ok(Default::default());
+    if let Some(names) = spellings.get_mut("") {
+        names.insert(String::new());
     }
-    let depths: BTreeSet<usize> = spellings
-        .values()
-        .flatten()
-        .map(|folder| folder.split('/').count())
-        .collect();
     let mut scan = conn
         .prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2")
         .map_err(StorageError::corrupt_public)?;
@@ -2710,14 +2767,21 @@ fn folded_folders(
             .map_err(StorageError::corrupt_public)?;
         for path in paths {
             let path = path.map_err(StorageError::corrupt_public)?;
-            for &depth in &depths {
-                let Some((slash, _)) = path.match_indices('/').nth(depth - 1) else {
-                    continue;
-                };
-                let folder = &path[..slash];
-                if !seen.insert(folder.to_owned()) {
-                    continue;
+            if work.take(1).is_none() {
+                return Ok(None);
+            }
+            // Deepest first: a folder seen before had every folder above it
+            // seen too.
+            let mut folder = path.as_str();
+            while let Some((parent, _)) = folder.rsplit_once('/') {
+                folder = parent;
+                if seen.contains(folder) {
+                    break;
                 }
+                if work.take(1).is_none() {
+                    return Ok(None);
+                }
+                seen.insert(folder.to_owned());
                 if let Some(names) = spellings.get_mut(&path_collision_key(folder)) {
                     names.insert(folder.to_owned());
                 }
@@ -2732,15 +2796,17 @@ fn folded_folders(
             twins.extend(names.iter().cloned());
         }
     }
-    Ok((folded, twins))
+    Ok(Some((folded, twins)))
 }
 
-/// Every rule file either version holds.
+/// Every rule file either version holds, taking one unit of `work` for each
+/// path read. `None` when the work runs out first.
 fn version_rule_paths(
     conn: &Connection,
     workspace: &str,
     versions: [&str; 2],
-) -> Result<Vec<String>, RuntimeError> {
+    work: &mut RuleOrderWork,
+) -> Result<Option<Vec<String>>, RuntimeError> {
     let mut scan = conn
         .prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2")
         .map_err(StorageError::corrupt_public)?;
@@ -2751,12 +2817,15 @@ fn version_rule_paths(
             .map_err(StorageError::corrupt_public)?;
         for path in paths {
             let path = path.map_err(StorageError::corrupt_public)?;
+            if work.take(1).is_none() {
+                return Ok(None);
+            }
             if is_access_rule_path(&path) {
                 rules.insert(path);
             }
         }
     }
-    Ok(rules.into_iter().collect())
+    Ok(Some(rules.into_iter().collect()))
 }
 
 /// The order a merge from `source` into `target` makes its rule changes in,
@@ -2772,7 +2841,13 @@ fn merge_rule_order(
     deletes: &[String],
 ) -> Result<RuleMergeOrder, RuntimeError> {
     let paths: Vec<String> = writes.iter().chain(deletes).cloned().collect();
-    let merge = rule_merge_steps(conn, workspace, source, target, &paths)?;
+    let mut work = RuleOrderWork::default();
+    let Some(merge) = rule_merge_steps(conn, workspace, source, target, &paths, &mut work)? else {
+        return Ok(RuleMergeOrder::Refused {
+            reason: RuleMergeRefusal::TooMany,
+            rules: paths,
+        });
+    };
     let steps = merge.rule_steps();
     let (write_steps, delete_steps): (Vec<_>, Vec<_>) = steps
         .into_iter()
@@ -2794,7 +2869,13 @@ fn merge_rule_order(
             .collect(),
     };
     Ok(
-        match safe_rule_file_order(&merge.before, &write_steps, &delete_steps, &merge.folded) {
+        match safe_rule_file_order(
+            &merge.before,
+            &write_steps,
+            &delete_steps,
+            &merge.folded,
+            &mut work,
+        ) {
             RuleFileOrder::Safe { writes, deletes } => RuleMergeOrder::Ordered {
                 writes: paths(&write_steps, writes),
                 deletes: paths(&delete_steps, deletes),
@@ -2817,7 +2898,7 @@ fn merge_rule_order(
 /// them from the version and the target now, and making them in that order,
 /// one at a time, keeps everyone within what the target gives them before
 /// and after. The order comes from the caller, and Main or the version may
-/// have changed since it was planned.
+/// have changed since it was planned. Running out of work refuses too.
 pub(super) fn check_rule_merge_order(
     conn: &Connection,
     input: &MergeTextFileFromVersion,
@@ -2828,8 +2909,13 @@ pub(super) fn check_rule_merge_order(
         input.source_version_id.as_str(),
         input.target_version_id.as_str(),
     );
-    let rules = version_rule_paths(conn, workspace, [target, source])?;
-    let merge = rule_merge_steps(conn, workspace, source, target, &rules)?;
+    let mut work = RuleOrderWork::default();
+    let Some(rules) = version_rule_paths(conn, workspace, [target, source], &mut work)? else {
+        return Err(RuntimeError::RuleMergeOrderChanged);
+    };
+    let Some(merge) = rule_merge_steps(conn, workspace, source, target, &rules, &mut work)? else {
+        return Err(RuntimeError::RuleMergeOrderChanged);
+    };
     let place: HashMap<&str, usize> = order
         .iter()
         .enumerate()
@@ -2845,7 +2931,7 @@ pub(super) fn check_rule_merge_order(
     }
     steps.sort_by_key(|(index, _)| *index);
     let steps: Vec<RuleFileStep<'_>> = steps.into_iter().map(|(_, step)| step).collect();
-    if rule_file_order_is_safe(&merge.before, &steps, &merge.folded) {
+    if rule_file_order_is_safe(&merge.before, &steps, &merge.folded, &mut work) {
         Ok(())
     } else {
         Err(RuntimeError::RuleMergeOrderChanged)

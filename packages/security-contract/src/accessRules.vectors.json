@@ -69,11 +69,17 @@
     {"name":"an unreadable twin hides","rules":{"team":null,"Team":"members: view\n"},"folder":"Team","email":null,"level":null},
     {"name":"a twin that leaves a person out hides from them","rules":{"team":"people:\n  p@example.com: view\n","Team":"members: edit\n"},"folder":"Team","email":"q@example.com","level":null},
     {"name":"a twin in another Unicode form hides","rules":{"caf\u00e9":"people:\n","cafe\u0301":"members: view\n"},"folder":"cafe\u0301","email":null,"level":null},
-    {"name":"a twin in another Unicode form never widens","rules":{"caf\u00e9":"members: edit\n","cafe\u0301":"members: view\n"},"folder":"cafe\u0301","email":null,"level":"view"}
+    {"name":"a twin in another Unicode form never widens","rules":{"caf\u00e9":"members: edit\n","cafe\u0301":"members: view\n"},"folder":"cafe\u0301","email":null,"level":"view"},
+    {"name":"a twin whose name folds to another depth hides","rules":{"a\uff0fx":"people:\n","a/x":"members: edit\n","a/x/sub":"members: edit\n"},"folder":"a/x/sub","email":null,"level":null},
+    {"name":"a twin whose name folds to two folders hides them","rules":{"\u2105":"people:\n","c/o":"members: edit\n"},"folder":"c/o/sub","email":null,"level":null},
+    {"name":"a twin at another depth never widens","rules":{"a\uff0fx":"members: edit\n","a/x":"members: view\n"},"folder":"a/x/sub","email":null,"level":"view"},
+    {"name":"a folder whose name folds to nothing is a twin of the root","rules":{"\uff0e":"people:\n"},"folder":"notes","email":null,"level":null}
   ],
   "ruleFiles": [
     {"name":"two rule files in one folder are one unreadable rule","files":{"team/access.yaml":"members: edit\n","team/Access.yaml":"members: edit\n"},"folder":"team","email":null,"level":null},
     {"name":"a rule file named in another case is its folder's rule","files":{"team/ACCESS.yaml":"members: view\n"},"folder":"team/sub","email":null,"level":"view"},
-    {"name":"a rule file in a twin folder is that twin's rule","files":{"caf\u00e9/access.yaml":"people:\n","cafe\u0301/access.yaml":"members: view\n"},"folder":"cafe\u0301","email":null,"level":null}
+    {"name":"a rule file in a twin folder is that twin's rule","files":{"caf\u00e9/access.yaml":"people:\n","cafe\u0301/access.yaml":"members: view\n"},"folder":"cafe\u0301","email":null,"level":null},
+    {"name":"a rule file in a folder whose name folds to another depth is a twin's rule","files":{"a\uff0fx/access.yaml":"people:\n","a/x/sub/access.yaml":"members: edit\n"},"folder":"a/x/sub","email":null,"level":null},
+    {"name":"a rule file in a folder whose name folds to nothing is the root's twin","files":{"\uff0e/access.yaml":"people:\n"},"folder":"notes","email":null,"level":null}
   ]
 }

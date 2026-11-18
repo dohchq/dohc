@@ -4532,3 +4532,66 @@ fn a_rule_merge_refuses_an_order_that_leaves_out_a_rule_change() {
     );
     merge_judged(&f, "feature", order, &["team/private"]);
 }
+
+/// Sol's case from review, and two like it: NFKC reads U+FF0F FULLWIDTH
+/// SOLIDUS as `/` and U+2105 CARE OF as `c/o`, so one folder folds together
+/// with two. A segment that folds to nothing, such as U+FF0E FULLWIDTH FULL
+/// STOP, folds a top folder together with the root. While the twin's rule
+/// leaves members out, the relay hides the other spelling's subtree too, so
+/// writing the twin's new rule first shows `sub` at Edit, where members had
+/// nothing before and View after. The order and the merge both refuse.
+#[test]
+fn a_rule_change_in_a_folder_whose_name_folds_to_another_depth_is_refused() {
+    let inside = |folder: &str, name: &str| {
+        if folder.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{folder}/{name}")
+        }
+    };
+    for (twin, spelled) in [("a\u{ff0f}x", "a/x"), ("\u{2105}", "c/o"), ("\u{ff0e}", "")] {
+        assert_eq!(
+            dohc_engine_files::floor::path_collision_key(twin),
+            dohc_engine_files::floor::path_collision_key(spelled)
+        );
+        let f = Fixture::new();
+        let (twin_rule, sub) = (inside(twin, "access.yaml"), inside(spelled, "sub"));
+        let sub_rule = inside(&sub, "access.yaml");
+        f.versioned_write(write(&twin_rule, "people:\n", "m-twin"))
+            .unwrap();
+        f.versioned_write(write(&inside(spelled, "access.yaml"), EDIT, "m-spelled"))
+            .unwrap();
+        f.versioned_write(write(&sub_rule, EDIT, "m-sub")).unwrap();
+        f.versioned_write(write(&inside(&sub, "secret.md"), "secret", "m-secret"))
+            .unwrap();
+        create_version(&f, "feature");
+        version_write(&f, "feature", &twin_rule, VIEW, "v-twin");
+        version_write(&f, "feature", &sub_rule, VIEW, "v-sub");
+        let rules = [twin_rule.as_str(), sub_rule.as_str()];
+        assert_eq!(
+            rule_order(&f, "feature", &rules, &[]),
+            RuleMergeOrder::Refused {
+                reason: RuleMergeRefusal::FoldedNames,
+                rules: owned(&rules[..1]),
+            },
+            "{twin}"
+        );
+        let journal = f.journal();
+        let refused = merge_rule(&f, "feature", &owned(&rules), 50);
+        assert!(
+            matches!(refused, Err(RuntimeError::RuleMergeOrderChanged)),
+            "{twin}: {refused:?}"
+        );
+        assert_eq!(f.journal(), journal, "{twin}");
+        // The relay shows the widening that first write would make.
+        let before = main_rules(&f);
+        let mut between = before.clone();
+        between.insert(twin_rule.clone(), VIEW.to_owned());
+        let mut after = between.clone();
+        after.insert(sub_rule.clone(), VIEW.to_owned());
+        assert!(
+            relay_reach::widening(&before, &between, &after, &[&sub]).is_some(),
+            "{twin}"
+        );
+    }
+}

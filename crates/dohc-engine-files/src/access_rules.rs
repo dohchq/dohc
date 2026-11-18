@@ -445,6 +445,9 @@ pub enum RuleFileStep<'a> {
 }
 
 fn parsed(bytes: &[u8]) -> Option<AccessRule> {
+    if bytes.len() > ACCESS_RULE_MAX_BYTES {
+        return None;
+    }
     std::str::from_utf8(bytes).ok().and_then(parse_access_rule)
 }
 
@@ -471,20 +474,36 @@ impl<'a> Step<'a> {
 }
 
 /// How much work ordering a merge's rule changes may take, over everything
-/// it prepares, keeps and judges, before it stops. A unit is about one reach
-/// judgement or one entry kept. It runs on the engine's write thread.
+/// it reads, prepares, keeps and judges, before it stops. A unit is about one
+/// reach judgement, one entry kept, one path read or [`RULE_BYTES_PER_WORK`]
+/// bytes of a rule. It runs on the engine's write thread.
 const RULE_ORDER_WORK: usize = 2_000_000;
 
-/// The work left. Each part of ordering takes its share before it allocates
-/// or walks, so the whole of it stops at the limit.
-struct Work(usize);
+/// How many bytes of a rule file one unit of [`RuleOrderWork`] reads.
+pub const RULE_BYTES_PER_WORK: usize = 64;
 
-impl Work {
+/// The work left for ordering one merge's rule changes, or for checking one
+/// order, from reading the store to the last judgement. Each part takes its
+/// share before it allocates or walks, so the whole of it stops at the limit.
+pub struct RuleOrderWork(usize);
+
+impl Default for RuleOrderWork {
+    fn default() -> Self {
+        Self(RULE_ORDER_WORK)
+    }
+}
+
+impl RuleOrderWork {
     /// `None`, leaving nothing, when `cost` is more than is left.
-    fn take(&mut self, cost: usize) -> Option<()> {
+    pub fn take(&mut self, cost: usize) -> Option<()> {
         let left = self.0.checked_sub(cost);
         self.0 = left.unwrap_or(0);
         left.map(drop)
+    }
+
+    /// The work of reading a rule file of `bytes` bytes.
+    pub fn take_bytes(&mut self, bytes: usize) -> Option<()> {
+        self.take(1 + bytes / RULE_BYTES_PER_WORK)
     }
 }
 
@@ -516,7 +535,7 @@ impl<'a> Change<'a> {
         start: RuleFiles<'a>,
         steps: &[Step<'a>],
         active: &[usize],
-        work: &mut Work,
+        work: &mut RuleOrderWork,
     ) -> Option<Self> {
         work.take(start.len() + active.len())?;
         let mut end = start.clone();
@@ -645,7 +664,7 @@ enum Found {
 struct Search<'c, 'a> {
     change: &'c Change<'a>,
     steps: &'c [Step<'a>],
-    work: &'c mut Work,
+    work: &'c mut RuleOrderWork,
 }
 
 impl<'a> Search<'_, 'a> {
@@ -727,7 +746,7 @@ impl<'a> Search<'_, 'a> {
 fn independent_groups(
     steps: &[Step<'_>],
     active: &[usize],
-    work: &mut Work,
+    work: &mut RuleOrderWork,
 ) -> Option<Vec<Vec<usize>>> {
     fn root(parent: &mut [usize], mut index: usize) -> usize {
         while parent[index] != index {
@@ -844,34 +863,49 @@ fn respelled_apart(
     .then_some((respelled, rest))
 }
 
-/// The work of reading each step's folder names and the rules before.
+/// The work of reading each step's folder names and the rules before, and of
+/// telling whether the steps only respell their folders: each folder's key,
+/// once to group it and once to keep it apart, and each rule compared with
+/// the next.
 fn reading_work(start: &RuleFiles<'_>, steps: &[Step<'_>]) -> usize {
-    start.len()
+    let rule = |rule: Option<&AccessRule>| 1 + rule.map_or(0, |rule| rule.people.len());
+    start
+        .iter()
+        .map(|(path, &kept)| depth(access_rule_folder(path)) + 1 + rule(kept))
+        .sum::<usize>()
         + steps
             .iter()
-            .map(|step| depth(step.folder) + 1)
+            .map(|step| 2 * (depth(step.folder) + 1) + step.rule.map_or(1, rule))
             .sum::<usize>()
 }
 
-/// Reads each rule once, and hands `run` the rules before the change and
-/// each step with its rule.
+/// Reads each rule once, taking the work of parsing it and of keeping its
+/// people before keeping it, and hands `run` the rules before the change and
+/// each step with its rule. `None` when the work runs out first.
 fn with_steps<T>(
     before: &BTreeMap<String, Vec<u8>>,
     steps: &[RuleFileStep<'_>],
-    run: impl for<'a> FnOnce(RuleFiles<'a>, Vec<Step<'a>>) -> T,
-) -> T {
-    let before: Vec<(&str, Option<AccessRule>)> = before
-        .iter()
-        .map(|(path, bytes)| (path.as_str(), parsed(bytes)))
-        .collect();
-    let written: Vec<Option<AccessRule>> = steps
-        .iter()
-        .map(|step| match step {
-            RuleFileStep::Write(_, bytes) => parsed(bytes),
+    work: &mut RuleOrderWork,
+    run: impl for<'a> FnOnce(RuleFiles<'a>, Vec<Step<'a>>, &mut RuleOrderWork) -> T,
+) -> Option<T> {
+    let mut read = |bytes: &[u8]| -> Option<Option<AccessRule>> {
+        work.take_bytes(bytes.len().min(ACCESS_RULE_MAX_BYTES))?;
+        let rule = parsed(bytes);
+        work.take(rule.as_ref().map_or(0, |rule| rule.people.len()))?;
+        Some(rule)
+    };
+    let mut kept = Vec::with_capacity(before.len());
+    for (path, bytes) in before {
+        kept.push((path.as_str(), read(bytes)?));
+    }
+    let mut written = Vec::with_capacity(steps.len());
+    for step in steps {
+        written.push(match step {
+            RuleFileStep::Write(_, bytes) => read(bytes)?,
             RuleFileStep::Delete(_) => None,
-        })
-        .collect();
-    let start = before
+        });
+    }
+    let start = kept
         .iter()
         .map(|(path, rule)| (*path, rule.as_ref()))
         .collect();
@@ -891,7 +925,7 @@ fn with_steps<T>(
             },
         })
         .collect();
-    run(start, steps)
+    Some(run(start, steps, work))
 }
 
 /// An order for writing, then deleting, many rule files one at a time, in
@@ -904,22 +938,15 @@ fn with_steps<T>(
 /// Steps in folders apart from each other are ordered apart, so unrelated
 /// rules neither share nor use up one search. `folded` names the steps in
 /// folders whose names fold together with another folder's: they may only
-/// respell those folders, apart from every other step.
+/// respell those folders, apart from every other step. Reading, preparing
+/// and searching all take from `work`, which reading the store may already
+/// have used.
 pub fn safe_rule_file_order(
     before: &BTreeMap<String, Vec<u8>>,
     writes: &[RuleFileStep<'_>],
     deletes: &[RuleFileStep<'_>],
     folded: &BTreeSet<String>,
-) -> RuleFileOrder {
-    safe_rule_file_order_within(before, writes, deletes, folded, RULE_ORDER_WORK)
-}
-
-fn safe_rule_file_order_within(
-    before: &BTreeMap<String, Vec<u8>>,
-    writes: &[RuleFileStep<'_>],
-    deletes: &[RuleFileStep<'_>],
-    folded: &BTreeSet<String>,
-    work: usize,
+    work: &mut RuleOrderWork,
 ) -> RuleFileOrder {
     // One step goes straight from before to after.
     if writes.len() + deletes.len() < 2 {
@@ -940,34 +967,34 @@ fn safe_rule_file_order_within(
                 .collect(),
         )
     };
-    with_steps(before, &all, |start, steps| {
-        let mut work = Work(work);
-        let too_many = |group: &[usize]| {
-            let (writes, deletes) = split(group);
-            RuleFileOrder::TooMany { writes, deletes }
-        };
-        let everything: Vec<usize> = (0..steps.len()).collect();
+    let too_many = |group: &[usize]| {
+        let (writes, deletes) = split(group);
+        RuleFileOrder::TooMany { writes, deletes }
+    };
+    let everything: Vec<usize> = (0..all.len()).collect();
+    let found = with_steps(before, &all, work, |start, steps, work| {
         if work.take(reading_work(&start, &steps)).is_none() {
             return too_many(&everything);
         }
         let Some((respelled, rest)) = respelled_apart(&start, &steps, folded) else {
             let folded: Vec<usize> = everything
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|&step| folded.contains(steps[step].path))
                 .collect();
             let (writes, deletes) = split(&folded);
             return RuleFileOrder::Folded { writes, deletes };
         };
-        let Some(groups) = independent_groups(&steps, &rest, &mut work) else {
+        let Some(groups) = independent_groups(&steps, &rest, work) else {
             return too_many(&rest);
         };
-        let Some(change) = Change::new(start, &steps, &rest, &mut work) else {
+        let Some(change) = Change::new(start, &steps, &rest, work) else {
             return too_many(&rest);
         };
         let mut search = Search {
             change: &change,
             steps: &steps,
-            work: &mut work,
+            work,
         };
         // Respelled folders are apart from every other step, so their writes
         // and deletes go around the others' unchanged.
@@ -1009,23 +1036,24 @@ fn safe_rule_file_order_within(
             writes: write_order,
             deletes: delete_order,
         }
-    })
+    });
+    found.unwrap_or_else(|| too_many(&everything))
 }
 
 /// Whether making `steps` one at a time, in this order, from `before`, keeps
 /// everyone within what the rules before and after give them after each one.
-/// `before` and `folded` are as [`safe_rule_file_order`] takes them. It is
-/// `false` too when checking would take more work than ordering may.
+/// `before`, `folded` and `work` are as [`safe_rule_file_order`] takes them.
+/// It is `false` too when the work runs out first.
 pub fn rule_file_order_is_safe(
     before: &BTreeMap<String, Vec<u8>>,
     steps: &[RuleFileStep<'_>],
     folded: &BTreeSet<String>,
+    work: &mut RuleOrderWork,
 ) -> bool {
     if steps.len() < 2 {
         return true;
     }
-    with_steps(before, steps, |start, steps| {
-        let mut work = Work(RULE_ORDER_WORK);
+    with_steps(before, steps, work, |start, steps, work| {
         if work.take(reading_work(&start, &steps)).is_none() {
             return false;
         }
@@ -1039,7 +1067,7 @@ pub fn rule_file_order_is_safe(
         if given != respelled {
             return false;
         }
-        let Some(change) = Change::new(start, &steps, &rest, &mut work) else {
+        let Some(change) = Change::new(start, &steps, &rest, work) else {
             return false;
         };
         if work.take(change.start.len()).is_none() {
@@ -1053,6 +1081,7 @@ pub fn rule_file_order_is_safe(
             }
         })
     })
+    .unwrap_or(false)
 }
 
 /// The relay's `folderLevel` (`packages/security-contract/src/accessRules.ts`),
@@ -1572,7 +1601,13 @@ mod tests {
             .iter()
             .map(|(path, text)| RuleFileStep::Write(path, text.as_bytes()))
             .collect();
-        safe_rule_file_order(before, &steps, &[], &BTreeSet::new())
+        safe_rule_file_order(
+            before,
+            &steps,
+            &[],
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default(),
+        )
     }
 
     fn safe_writes(order: RuleFileOrder) -> Vec<usize> {
@@ -1675,7 +1710,13 @@ mod tests {
         let write = [RuleFileStep::Write("team/access.yaml", b"members: view\n")];
         let delete = [RuleFileStep::Delete("team/private/access.yaml")];
         assert_eq!(
-            safe_rule_file_order(&before, &write, &delete, &BTreeSet::new()),
+            safe_rule_file_order(
+                &before,
+                &write,
+                &delete,
+                &BTreeSet::new(),
+                &mut RuleOrderWork::default()
+            ),
             RuleFileOrder::Safe {
                 writes: vec![0],
                 deletes: vec![0]
@@ -1735,14 +1776,21 @@ mod tests {
         assert!(!rule_file_order_is_safe(
             &before,
             &[outer, inner],
-            &BTreeSet::new()
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default()
         ));
         assert!(rule_file_order_is_safe(
             &before,
             &[inner, outer],
-            &BTreeSet::new()
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default()
         ));
-        assert!(rule_file_order_is_safe(&before, &[], &BTreeSet::new()));
+        assert!(rule_file_order_is_safe(
+            &before,
+            &[],
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default()
+        ));
     }
 
     /// Rule files by path for the relay's reach, with every write and
@@ -1801,7 +1849,13 @@ mod tests {
             .map(rule_step)
             .collect();
         let folded = folded.iter().map(|path| (*path).to_owned()).collect();
-        safe_rule_file_order(before, &writes, &deletes, &folded)
+        safe_rule_file_order(
+            before,
+            &writes,
+            &deletes,
+            &folded,
+            &mut RuleOrderWork::default(),
+        )
     }
 
     /// `steps`, every write before every delete, in the planned order.
@@ -1825,7 +1879,7 @@ mod tests {
     ) -> bool {
         let steps: Vec<_> = steps.iter().map(rule_step).collect();
         let folded = folded.iter().map(|path| (*path).to_owned()).collect();
-        rule_file_order_is_safe(before, &steps, &folded)
+        rule_file_order_is_safe(before, &steps, &folded, &mut RuleOrderWork::default())
     }
 
     const SPELLINGS: &[&str] = &[
@@ -2173,17 +2227,86 @@ mod tests {
             RuleFileStep::Write("access.yaml", b"members: comment\n"),
             RuleFileStep::Write("new/access.yaml", b"members: view\n"),
         ];
+        // Reading has its own share, so this measures preparing alone.
         let prepared = |work: usize| {
-            with_steps(&before, &steps, |start, steps| {
-                Change::new(start, &steps, &[0, 1], &mut Work(work))
-                    .map(|change| change.bounds.len())
-            })
+            with_steps(
+                &before,
+                &steps,
+                &mut RuleOrderWork::default(),
+                |start, steps, _| {
+                    Change::new(start, &steps, &[0, 1], &mut RuleOrderWork(work))
+                        .map(|change| change.bounds.len())
+                },
+            )
+            .flatten()
         };
         assert_eq!(prepared(10_000), None);
         assert!(prepared(RULE_ORDER_WORK).is_some_and(|bounds| bounds > 10_000));
         assert!(matches!(
-            safe_rule_file_order_within(&before, &steps, &[], &BTreeSet::new(), 10_000),
+            safe_rule_file_order(
+                &before,
+                &steps,
+                &[],
+                &BTreeSet::new(),
+                &mut RuleOrderWork(10_000)
+            ),
             RuleFileOrder::TooMany { writes, .. } if writes == [0, 1]
+        ));
+    }
+
+    /// Sol's case from review, smaller: 64 folders respelled from `Team{i}`
+    /// to `team{i}`, each rule naming 1,000 people. Reading the rules takes
+    /// its work before it keeps each one, and telling whether the steps only
+    /// respell takes its work before it groups and compares them, so either
+    /// runs out before anything larger is kept.
+    #[test]
+    fn reading_and_respelling_charge_their_work_before_they_keep_anything() {
+        let texts: Vec<(String, String, String)> = (0..64)
+            .map(|index| {
+                (
+                    format!("Team{index}/access.yaml"),
+                    format!("team{index}/access.yaml"),
+                    named_people(&format!("t{index}-"), 1_000),
+                )
+            })
+            .collect();
+        let before = rule_files(
+            &texts
+                .iter()
+                .map(|(old, _, text)| (old.as_str(), text.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let steps: Vec<(&str, Option<&str>)> = texts
+            .iter()
+            .map(|(_, new, text)| (new.as_str(), Some(text.as_str())))
+            .chain(texts.iter().map(|(old, _, _)| (old.as_str(), None)))
+            .collect();
+        let folded: BTreeSet<String> = steps.iter().map(|(path, _)| (*path).to_owned()).collect();
+        let rule_steps: Vec<RuleFileStep<'_>> = steps.iter().map(rule_step).collect();
+        let (writes, deletes) = rule_steps.split_at(texts.len());
+        let order = |work: &mut RuleOrderWork| {
+            safe_rule_file_order(&before, writes, deletes, &folded, work)
+        };
+        let mut all = RuleOrderWork::default();
+        assert!(matches!(order(&mut all), RuleFileOrder::Safe { .. }));
+        let ordering = RULE_ORDER_WORK - all.0;
+        // Reading the 128 rules takes their bytes and their 128,000 people.
+        let mut read = RuleOrderWork::default();
+        with_steps(&before, &rule_steps, &mut read, |_, _, _| ()).expect("read");
+        let reading = RULE_ORDER_WORK - read.0;
+        assert!(reading > 128_000, "{reading}");
+        let mut short = RuleOrderWork(reading - 1);
+        assert!(with_steps(&before, &rule_steps, &mut short, |_, _, _| ()).is_none());
+        assert!(matches!(
+            order(&mut RuleOrderWork(reading - 1)),
+            RuleFileOrder::TooMany { writes, deletes } if writes.len() == 64 && deletes.len() == 64
+        ));
+        // Grouping the steps and comparing every rule's people takes about
+        // as much again, before any of it is kept.
+        assert!(ordering - reading > 128_000, "{ordering} after {reading}");
+        assert!(matches!(
+            order(&mut RuleOrderWork(ordering - 1)),
+            RuleFileOrder::TooMany { .. }
         ));
     }
 
@@ -2220,13 +2343,19 @@ mod tests {
             RuleFileStep::Write("access.yaml", b"members: view\n"),
         ];
         let started = std::time::Instant::now();
-        assert!(!rule_file_order_is_safe(&before, &steps, &BTreeSet::new()));
+        assert!(!rule_file_order_is_safe(
+            &before,
+            &steps,
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default()
+        ));
         eprintln!("64 nested folders of 1,000 people: {:?}", started.elapsed());
         // One step alone needs no order, so it is never refused.
         assert!(rule_file_order_is_safe(
             &before,
             &steps[1..],
-            &BTreeSet::new()
+            &BTreeSet::new(),
+            &mut RuleOrderWork::default()
         ));
     }
 
