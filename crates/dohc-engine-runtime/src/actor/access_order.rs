@@ -2662,6 +2662,15 @@ fn rule_merge_steps(
         };
         steps.push((path.clone(), bytes));
     }
+    // One step goes straight from before to after, so neither the planner
+    // nor the writer's check reads the rules around it.
+    if steps.len() < 2 {
+        return Ok(Some(RuleMergeSteps {
+            before: BTreeMap::new(),
+            steps,
+            folded: BTreeSet::new(),
+        }));
+    }
     let Some((folded, spellings)) =
         folded_folders(conn, workspace, &steps, [target, source], work)?
     else {
@@ -2728,9 +2737,7 @@ type FoldedFolders = (BTreeSet<String>, BTreeSet<String>);
 
 /// The steps in a folder whose name folds together with another folder's
 /// that `versions` hold a path in, or that another step names, and every
-/// spelling of those folders. One step alone passes through no state between
-/// before and after, so it needs no order. `None` when the work runs out
-/// first.
+/// spelling of those folders. `None` when the work runs out first.
 ///
 /// A name can fold to another depth: NFKC reads `a／x` as `a/x` and `℅` as
 /// `c/o`, and a top folder whose name folds to nothing, such as `．`, as the
@@ -2743,9 +2750,6 @@ fn folded_folders(
     versions: [&str; 2],
     work: &mut RuleOrderWork,
 ) -> Result<Option<FoldedFolders>, RuntimeError> {
-    if steps.len() < 2 {
-        return Ok(Some(Default::default()));
-    }
     let mut spellings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (path, _) in steps {
         let folder = access_rule_folder(path);
@@ -3679,5 +3683,84 @@ mod tests {
         let disk = read_disk_rule(root, "").expect("read");
         assert_eq!(disk.keys().collect::<Vec<_>>(), ["Access.YAML"]);
         assert!(read_disk_rule(root, "missing").expect("read").is_empty());
+    }
+
+    /// Opus's case from review: one rule change passes through no state
+    /// between before and after, so its merge reads none of the paths under
+    /// its folder, however many the version holds.
+    #[test]
+    fn a_one_rule_merge_reads_no_path_under_its_folder() {
+        use dohc_engine_domain::{CreateNamedVersion, VersionedTextStore, WriteText};
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut versioned = VersionedTextStore::new(&mut store);
+        versioned
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let mut write = |version: &str, path: String, text: &str| {
+            let input = WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: version.to_owned(),
+                object_id: format!("object-{path}"),
+                moment_id: format!("m-{version}-{path}"),
+                path,
+                text: text.to_owned(),
+                metadata_origin: "cli".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            };
+            drop(versioned.write_text(&input, &NoFaults).unwrap());
+        };
+        write("main", "access.yaml".to_owned(), "members: edit\n");
+        for index in 0..100 {
+            write("main", format!("notes/{index}.md"), "note");
+        }
+        versioned
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws".to_owned(),
+                    new_version_id: "feature".to_owned(),
+                    name: "feature".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    now_ms: 11,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let input = WriteText {
+            workspace_id: "ws".to_owned(),
+            version_id: "feature".to_owned(),
+            object_id: "object-access.yaml".to_owned(),
+            moment_id: "m-feature-root".to_owned(),
+            path: "access.yaml".to_owned(),
+            text: "members: view\n".to_owned(),
+            metadata_origin: "cli".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 12,
+            request_id: None,
+        };
+        drop(versioned.write_text(&input, &NoFaults).unwrap());
+        let conn = Connection::open(&db).unwrap();
+        // Fewer units than the paths under the root.
+        let mut work = RuleOrderWork::limited(50);
+        let merge = rule_merge_steps(
+            &conn,
+            "ws",
+            "feature",
+            "main",
+            &["access.yaml".to_owned()],
+            &mut work,
+        )
+        .unwrap()
+        .expect("within 50 units");
+        assert_eq!(merge.steps.len(), 1);
+        assert!(merge.before.is_empty());
     }
 }
