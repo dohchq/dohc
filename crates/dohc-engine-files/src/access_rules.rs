@@ -207,6 +207,11 @@ pub fn parse_access_rule(text: &str) -> Option<AccessRule> {
             Some(line) => line.strip_suffix('\r').unwrap_or(line),
             None => raw,
         };
+        // YAML ends a line at a lone CR too. Reading on would let a comment
+        // hide the line after it, so a rule with one is unreadable.
+        if raw.contains('\r') {
+            return None;
+        }
         let Line::Entry { indent, key, value } = read_line(raw)? else {
             continue;
         };
