@@ -496,6 +496,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   const runReservations = new Set<string>();
   const selfTests = new Map<string, SelfTestState>();
   const selfTestReservations = new Set<string>();
+  // End records of self-tests whose runner has exited. stop() waits for them.
+  const selfTestEnds = new Set<Promise<void>>();
   const budgetBypassThreads = new Set<string>();
   // What this run of dohc told each restricted workspace's person: the
   // notice that Restricted Mode holds a request, and main's dialog on their
@@ -2229,7 +2231,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             // so its exit is what lets held requests start.
             const forget = () => {
               if (selfTests.get(workspaceId) !== test) return;
-              void markRunLogEnded(logPath, nowMs()).catch(reportError);
+              const ended = markRunLogEnded(logPath, nowMs())
+                .catch(reportError)
+                .finally(() => selfTestEnds.delete(ended));
+              selfTestEnds.add(ended);
               selfTests.delete(workspaceId);
               if (!selfTestReservations.has(workspaceId) && !stopped) {
                 void scanWorkspace(workspaceId).catch(reportError);
@@ -2466,7 +2471,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     pendingNoReplyChecks.clear();
     pendingPreRunFailures.clear();
     await Promise.all(quitTerminations);
-    await Promise.all(selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)));
+    await Promise.all([
+      ...selfTestEnds,
+      ...selfTestLogs.map((log) => markRunLogEnded(log, nowMs()).catch(reportError)),
+    ]);
     await Promise.all([
       ...runWorkspacesToRelease.map(async (live) => {
         try {
