@@ -975,6 +975,28 @@ const RICHDOC_PROJECTION_CASES = [
           tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
           tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
           tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
+          // A backtick or backslash in the text moves where both writers
+          // find the code spans that keep a spelled break. Their written
+          // form is a known gap, not the wanted output: a cell writes its
+          // text's backticks and backslashes unescaped.
+          tableRow([
+            tableCell("tableCell", [xmlText("a ` <br> b "), xmlText("x", { code: {} })]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [
+              xmlText("\\"),
+              xmlText("a", { code: {} }),
+              xmlText("<br>"),
+              xmlText("b", { code: {} }),
+            ]),
+          ]),
+          // Each block of a cell finds its own code spans.
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("`"),
+              paragraph([xmlText("<br>"), xmlText("x", { code: {} })]),
+            ]),
+          ]),
           tableRow([
             xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
               table([tableRow([tableCell("tableHeader", "a|b")])]),

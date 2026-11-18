@@ -7870,7 +7870,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                     raw.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
                 }
                 let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
-                raw.push_str(&rendered)?;
+                // Per block, as Tiptap renders a cell, so a backtick in one
+                // block doesn't open a code span in the next.
+                raw.push_str(&write_table_cell_breaks(&rendered))?;
             }
             let text = collapse_js_whitespace(&table_cell_line_breaks(
                 &prepare_rendered_table_cell(&raw.into_string())?,
@@ -7994,13 +7996,65 @@ fn render_table_cell_block(
     )
 }
 
+/// Writes a break spelled in a cell's text as `<br>`, as the TypeScript
+/// writer does. A code span keeps its text as written, so a break spelled
+/// there stays. Both writers find code spans by the same rule, which doesn't
+/// skip link addresses, autolinks or raw HTML: a backtick in one of them can
+/// pair with a later code span's.
+fn write_table_cell_breaks(markdown: &str) -> String {
+    let spelled = |text: &str| {
+        text.replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+            .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+    };
+    let bytes = markdown.as_bytes();
+    let mut output = String::with_capacity(markdown.len());
+    let (mut plain, mut at) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'`' => {
+                let opened = at;
+                while bytes.get(at) == Some(&b'`') {
+                    at += 1;
+                }
+                if let Some(close) = closing_backtick_run(bytes, at, at - opened) {
+                    output.push_str(&spelled(&markdown[plain..opened]));
+                    output.push_str(&markdown[opened..close]);
+                    at = close;
+                    plain = close;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    output.push_str(&spelled(&markdown[plain..]));
+    output
+}
+
+/// The end of the first run of exactly `length` backticks from `from`, which
+/// closes a code span.
+fn closing_backtick_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
+    let mut at = from;
+    while at < bytes.len() {
+        if bytes[at] != b'`' {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while bytes.get(at) == Some(&b'`') {
+            at += 1;
+        }
+        if at - start == length {
+            return Some(at);
+        }
+    }
+    None
+}
+
 fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
-    let normalized = markdown
-        .replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
-        .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
     let mut output = ProjectionBuffer::new();
     let mut preceding_backslashes = 0usize;
-    for character in normalized.chars() {
+    for character in markdown.chars() {
         if character == '|' && preceding_backslashes % 2 == 0 {
             output.push('\\')?;
         }

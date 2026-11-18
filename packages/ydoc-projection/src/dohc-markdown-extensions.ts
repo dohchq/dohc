@@ -1320,15 +1320,57 @@ export function writingTableCellTokens<T>(write: (markdown: string) => string, r
 
 // Raw inline HTML is the canonical representation of cell block boundaries.
 // The importer represents those tags as text, so normalize them before the
-// table renderer measures the cell again.
+// table renderer measures the cell again. A code span keeps its text as
+// written, so a break spelled there stays. The engine's writer finds code
+// spans by the same rule, which doesn't skip link addresses, autolinks or raw
+// HTML: a backtick in one of them can pair with a later code span's.
 function writeTableCellBreaks(markdown: string): string {
-  return markdown
-    .replaceAll("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
-    .replaceAll("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+  const spelled = (text: string) =>
+    text
+      .replaceAll("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+      .replaceAll("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+  let output = "";
+  let plain = 0;
+  let at = 0;
+  while (at < markdown.length) {
+    if (markdown[at] === "\\") {
+      at += 2;
+      continue;
+    }
+    if (markdown[at] !== "`") {
+      at++;
+      continue;
+    }
+    const opened = at;
+    while (markdown[at] === "`") at++;
+    const close = closingBacktickRun(markdown, at, at - opened);
+    if (close === -1) continue;
+    output += spelled(markdown.slice(plain, opened)) + markdown.slice(opened, close);
+    at = plain = close;
+  }
+  return output + spelled(markdown.slice(plain));
+}
+
+// The end of the first run of exactly `length` backticks from `from`, which
+// closes a code span, or -1.
+function closingBacktickRun(markdown: string, from: number, length: number): number {
+  let at = from;
+  while (at < markdown.length) {
+    if (markdown[at] !== "`") {
+      at++;
+      continue;
+    }
+    const start = at;
+    while (markdown[at] === "`") at++;
+    if (at - start === length) return at;
+  }
+  return -1;
 }
 
 function prepareRenderedTableCell(markdown: string): string {
-  markdown = writeTableCellBreaks(markdown);
+  // Tokens hide the text's backticks and backslashes, so a cell that holds
+  // tokens finds its code spans once they are written, as the engine does.
+  if (!writeTableCellTokens) markdown = writeTableCellBreaks(markdown);
   let output = "";
   let precedingBackslashes = 0;
 
