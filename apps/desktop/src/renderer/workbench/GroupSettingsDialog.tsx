@@ -13,6 +13,25 @@ type MemberLevel = "view" | "comment" | "edit";
 /** A Group's access as the relay lists it, or "no-members" when no one else is in the workspace. */
 export type GroupAccess = { level: GroupRuleLevel | null; memberLevel: MemberLevel } | "no-members";
 
+type MembersList = {
+  memberLevel: MemberLevel;
+  people: ReadonlyArray<{ role: string; state: string }>;
+  groupRules: ReadonlyArray<{ channelWireId: string; level: GroupRuleLevel }> | null;
+};
+
+/** Whether anyone but the owner is in the workspace, invited or joined. */
+export const othersInWorkspace = (list: Pick<MembersList, "people">) =>
+  list.people.some((person) => person.role !== "owner" && person.state !== "removed");
+
+/** A Group's access from the Members list. Until someone else is in the workspace, no rule hides it from anyone. */
+export function groupAccessFrom(list: MembersList, wireId: string): GroupAccess {
+  if (list.groupRules === null || !othersInWorkspace(list)) return "no-members";
+  return {
+    level: list.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null,
+    memberLevel: list.memberLevel,
+  };
+}
+
 const OPTIONS = [
   { value: "comment", label: "Can post" },
   { value: "view", label: "View only" },

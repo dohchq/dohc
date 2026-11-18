@@ -22,7 +22,12 @@ import { neutralPresentation } from "./actorPresentation";
 import { showChat } from "./chatsOnScreen";
 import { NewGroupDialog, type GroupType, type NewGroupAccess } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
-import { GroupSettingsDialog, type GroupAccess } from "./GroupSettingsDialog";
+import {
+  GroupSettingsDialog,
+  groupAccessFrom,
+  othersInWorkspace,
+  type GroupAccess,
+} from "./GroupSettingsDialog";
 import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import { emailKey, isEmail } from "./memberPicker";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
@@ -1542,15 +1547,11 @@ export function ChatsView(props: {
   );
 
   // A Group's access, from the Members list the relay answers this account.
-  // No list, as before anyone is invited, means only the owner is here.
+  // Until someone else is in the workspace, there is no one for a rule to hide from.
   const loadGroupAccess = useCallback(
     async (wireId: string): Promise<GroupAccess> => {
       const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
-      if (result.status !== "ready" || result.view.groupRules === null) return "no-members";
-      return {
-        level: result.view.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null,
-        memberLevel: result.view.memberLevel,
-      };
+      return result.status === "ready" ? groupAccessFrom(result.view, wireId) : "no-members";
     },
     [workspaceId],
   );
@@ -1561,10 +1562,7 @@ export function ChatsView(props: {
     try {
       const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
       if (result.status !== "ready" || result.view.groupRules === null) return null;
-      const others = result.view.people.some(
-        (person) => person.role !== "owner" && person.state !== "removed",
-      );
-      return others ? { memberLevel: result.view.memberLevel } : null;
+      return othersInWorkspace(result.view) ? { memberLevel: result.view.memberLevel } : null;
     } catch (cause) {
       return refusalCode(cause) === WORKSPACE_NOT_SYNCED ? null : "offline";
     }

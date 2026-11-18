@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GroupSettingsDialog, type GroupAccess } from "./GroupSettingsDialog";
+import { GroupSettingsDialog, groupAccessFrom, type GroupAccess } from "./GroupSettingsDialog";
 
 afterEach(cleanup);
 
@@ -100,5 +100,39 @@ describe("GroupSettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Plans" }));
     expect(onOpenFolder).toHaveBeenCalledWith("Team/Plans");
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("groupAccessFrom", () => {
+  const owner = { role: "owner", state: "active" };
+  const rules = [{ channelWireId: "g1", level: "none" as const }];
+
+  // The relay answers the owner an empty rule list before anyone is invited.
+  it("says only you are here until someone else is in the workspace", () => {
+    expect(groupAccessFrom({ memberLevel: "comment", people: [owner], groupRules: [] }, "g1")).toBe(
+      "no-members",
+    );
+    expect(
+      groupAccessFrom(
+        {
+          memberLevel: "comment",
+          people: [owner, { role: "member", state: "removed" }],
+          groupRules: rules,
+        },
+        "g1",
+      ),
+    ).toBe("no-members");
+  });
+
+  it("reads the Group's rule once someone else is invited", () => {
+    const people = [owner, { role: "member", state: "invited" }];
+    expect(groupAccessFrom({ memberLevel: "comment", people, groupRules: rules }, "g1")).toEqual({
+      level: "none",
+      memberLevel: "comment",
+    });
+    expect(groupAccessFrom({ memberLevel: "view", people, groupRules: rules }, "g2")).toEqual({
+      level: null,
+      memberLevel: "view",
+    });
   });
 });
