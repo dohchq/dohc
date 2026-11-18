@@ -21,6 +21,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import {
   DIRECT_SIGNED_OUT,
+  DIRECT_START_INACTIVE_MESSAGE,
   readError,
   refusalCode,
   WORKSPACE_NOT_SYNCED,
@@ -1089,13 +1090,20 @@ function NewMessageForAccount(props: NewMessageProps) {
           reporting.current.onClearError?.(sendIdentity);
           return;
         }
+        const message = ipcErrorMessage(cause, "dohc could not send your message.");
         reportDirect(
           reporting.current,
-          ipcErrorMessage(cause, "dohc could not send your message."),
+          message,
           cause,
           () => void start(sender, memberId, body, messageId, to),
           undefined,
-          { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
+          {
+            identity: sendIdentity,
+            title:
+              message === DIRECT_START_INACTIVE_MESSAGE
+                ? `Your message to ${to} may not have been sent`
+                : `Your message to ${to} wasn't sent`,
+          },
         );
       } finally {
         sendingRef.current = false;

@@ -12,6 +12,7 @@ import {
   type DirectResolution,
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
+import { DIRECT_START_INACTIVE_MESSAGE } from "./errorWords";
 import type { OperationTable } from "./operationTable";
 
 // Direct messages belong to the signed-in account on its server, not to a
@@ -23,10 +24,6 @@ import type { OperationTable } from "./operationTable";
 
 export const DIRECT_INACTIVE_MESSAGE =
   "This message was not sent because this window changed workspaces.";
-// The window can change workspaces after the send leaves, so the send may have arrived.
-// Sending it again is safe: the server takes the same message id and words once.
-export const DIRECT_START_INACTIVE_MESSAGE =
-  "This window changed workspaces, so the message may not have been sent. Check the conversation in Chats before sending it again.";
 
 // The contract's own checks, so the window and the relay agree on every limit.
 const id = z.string().refine(isDirectId, "invalid id");

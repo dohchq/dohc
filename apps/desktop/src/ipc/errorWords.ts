@@ -456,6 +456,12 @@ export const DIRECT_FINAL = "direct-final";
 export const DIRECT_RETRY = "direct-retry";
 /** A direct message's failure because nobody is signed in. A view that already says so needs no notice. */
 export const DIRECT_SIGNED_OUT = "direct-signed-out";
+/**
+ * A first message whose window changed workspaces. The change can come after the send left, so it may have
+ * arrived. Sending it again is safe: the server takes the same message id and words once.
+ */
+export const DIRECT_START_INACTIVE_MESSAGE =
+  "This window changed workspaces, so the message may not have been sent. Check the conversation in Chats before sending it again.";
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);

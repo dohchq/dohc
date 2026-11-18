@@ -8,6 +8,7 @@ import { bridgeMock, emitCloudSessionChanged, renderView } from "./ChatsView.tes
 import { chatTabPath } from "./workbenchState";
 import { directStore } from "./directConversations";
 import { initWindowFocus } from "../windowFocus";
+import { DIRECT_START_INACTIVE_MESSAGE } from "../../ipc/errorWords";
 
 // Direct messages live on the account's server, so every workspace lists the
 // same People. Each conversation is between two people. Nothing is kept on
@@ -891,6 +892,23 @@ describe("ChatsView direct messages", () => {
     await act(async () => (tryAgain as () => void)());
     expect(bridgeMock.directStart.mock.calls[1]![0]).toMatchObject({ body: "First" });
     expect(directStore().draft("new")).toBe("Second");
+  });
+
+  it("says a first message may not have been sent when its window changed workspaces while it sent", async () => {
+    const user = userEvent.setup();
+    signedIn([]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
+    bridgeMock.directStart.mockRejectedValueOnce(new Error(DIRECT_START_INACTIVE_MESSAGE));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
+    await user.type(screen.getByTestId("chats-dm-new-composer"), "First{Enter}");
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    const call = onError.mock.calls.at(-1)!;
+    expect(call[0]).toBe(DIRECT_START_INACTIVE_MESSAGE);
+    expect(call[4]).toMatchObject({ title: "Your message to Sam Rivera may not have been sent" });
   });
 
   it("starts a new message with one person picked from the workspace's members", async () => {
