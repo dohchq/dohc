@@ -103,8 +103,8 @@ const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
  * hosted replica, and departed ones under an obsolete identity, whose old
  * store is fenced, so they have none to leave. A document is hosted while an
  * active Edit grant covers it at its enrolled path, or an open or Resume asked
- * for it, and its owner has not paused or stopped it. `moved` holds moved
- * documents whose replica let them go.
+ * for it, its owner has not paused or stopped it, and its live room is not
+ * paused. `moved` holds moved and room-paused documents whose replica let them go.
  */
 export function selectHostedDocuments(
   storage: SyncRelayStorage,
@@ -114,7 +114,7 @@ export function selectHostedDocuments(
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused by its owner or its live room, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A release applies to the document: it was stopped, paused by its owner, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
   const released = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
@@ -205,8 +205,8 @@ export async function startSelfHostedLiveHost(options: {
   const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) =>
     JSON.stringify([row.workspaceId, row.objectId]);
-  // Moved documents whose replica let them go. Nothing releases one: its
-  // enrollment stays, so it is hosted again once it returns to its path.
+  // Moved or room-paused documents whose replica let them go. Nothing releases one: its
+  // enrollment stays, so it is hosted again once it returns to its path or its owner resumes it.
   const moved = new Set<string>();
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
