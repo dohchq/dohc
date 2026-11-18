@@ -10,6 +10,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { ChatsView as ProductionChatsView, type ChatPresenceCollaboration } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
@@ -18,9 +19,11 @@ type TestChatsViewProps = Parameters<typeof ProductionChatsView>[0];
 
 function ChatsView(props: TestChatsViewProps) {
   return (
-    <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionChatsView {...props} />
-    </ReactionStoreProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ReactionStoreProvider workspaceId={props.workspaceId}>
+        <ProductionChatsView {...props} />
+      </ReactionStoreProvider>
+    </WorkspaceSessionProvider>
   );
 }
 

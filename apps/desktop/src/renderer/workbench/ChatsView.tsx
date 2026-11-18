@@ -44,6 +44,7 @@ import {
   joinedChannelLabel,
   ComposerModeBar,
   ComposerNotice,
+  GroupAccessMark,
   AgentProblemLine,
   ArchivedLine,
   DispatchAnnouncement,
@@ -108,6 +109,8 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import {
   type ChatMessageListHandle,
   MentionText,
@@ -472,6 +475,10 @@ export function ChatsView(props: {
   // that write to the shell, which tells the persistent navigator to refetch.
   onThreadStarted?: () => void;
   threadRevision?: number;
+  // A Group's access rule changed here. The shell counts each change in
+  // groupAccessRevision, so every Chats reads the rules again for its marks.
+  onGroupAccessChanged?: () => void;
+  groupAccessRevision?: number;
   // The persistent panel navigator sets this while a Chats editor tab is
   // live: the page instance runs the same polls against the same store, so a
   // second poller doubles every chat read for nothing. Suspends the DM list
@@ -501,15 +508,18 @@ export function ChatsView(props: {
   const lockedLine =
     postingClosed ??
     (inJoinedWorkspace ? "Members post in Groups only." : "This group is read-only for you.");
-  // A Group whose own rule is View says so. One at the member level, View,
-  // says who posts.
+  // A Group at View, by its own rule or the member level, says who posts.
   const lockedLineFor = (channel: ChatChannelRecord) => {
-    if (postingClosed !== undefined || !channel.wireId || !groupLevels) return lockedLine;
-    const listed = groupLevels.groups.get(channel.wireId);
-    if (listed === "view") return "You can read this Group.";
-    if (listed === undefined && groupLevels.groupDefault === "view")
-      return "Only people who can comment post here.";
-    return lockedLine;
+    if (
+      postingClosed !== undefined ||
+      !channel.wireId ||
+      channel.wireId === GENERAL_CHANNEL_WIRE_ID ||
+      !groupLevels
+    )
+      return lockedLine;
+    return (groupLevels.groups.get(channel.wireId) ?? groupLevels.groupDefault) === "view"
+      ? `Only admins and the owner post in ${channel.name}.`
+      : lockedLine;
   };
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
@@ -1567,6 +1577,37 @@ export function ChatsView(props: {
       return refusalCode(cause) === WORKSPACE_NOT_SYNCED ? null : "offline";
     }
   }, [workspaceId]);
+  // The owner and admins see which Groups a rule limits, from the same
+  // Members list Group settings reads. Until it answers, no Group has a mark.
+  const groupRules = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `chats-group-rules:${workspaceId}:${createsGroups}`,
+    manual: !createsGroups,
+    load: async () => {
+      const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
+      return result.status === "ready" ? result.view : null;
+    },
+  });
+  const retryGroupRules = groupRules.retry;
+  const { onGroupAccessChanged } = props;
+  const groupAccessChanged = useCallback(() => {
+    if (onGroupAccessChanged) onGroupAccessChanged();
+    else void retryGroupRules();
+  }, [onGroupAccessChanged, retryGroupRules]);
+  const seenGroupAccessRevision = useRef(props.groupAccessRevision);
+  useEffect(() => {
+    if (seenGroupAccessRevision.current === props.groupAccessRevision) return;
+    seenGroupAccessRevision.current = props.groupAccessRevision;
+    if (createsGroups) void retryGroupRules();
+  }, [props.groupAccessRevision, retryGroupRules, createsGroups]);
+  const groupAccessMark = (channel: ChatChannelRecord, size?: number) => {
+    const view = groupRules.error ? null : groupRules.value;
+    if (!view || channel.kind !== "channel" || !channel.wireId) return null;
+    if (channel.wireId === GENERAL_CHANNEL_WIRE_ID) return null;
+    const access = groupAccessFrom(view, channel.wireId);
+    if (access === "no-members" || (access.level !== "view" && access.level !== "none"))
+      return null;
+    return <GroupAccessMark level={access.level} {...(size ? { size } : {})} />;
+  };
   const saveGroupAccess = useCallback(
     async (wireId: string, level: GroupRuleLevel | null): Promise<string | null> => {
       try {
@@ -1574,12 +1615,13 @@ export function ChatsView(props: {
           workspaceId,
           request: { action: "group", group: wireId, level },
         });
+        groupAccessChanged();
         return null;
       } catch (error) {
         return ipcErrorMessage(error, "dohc could not change this Group's access.");
       }
     },
-    [workspaceId],
+    [workspaceId, groupAccessChanged],
   );
 
   // Derived lookups: a channel matches a grant by its wire id. A key
@@ -3310,6 +3352,7 @@ export function ChatsView(props: {
           ...(input.purpose ? { purpose: input.purpose } : {}),
           ...(input.level ? { level: input.level } : {}),
         });
+        if (input.level) groupAccessChanged();
         if (token !== liveToken.current) return null;
         resetGroupForm();
         setOverview((current) =>
@@ -3364,7 +3407,7 @@ export function ChatsView(props: {
         return message;
       }
     },
-    [resetGroupForm, openConversation, workspaceId],
+    [resetGroupForm, openConversation, workspaceId, groupAccessChanged],
   );
   const closeGroupDialog = useCallback(() => {
     const failure = unreportedCreateFailure.current;
@@ -4227,7 +4270,10 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pt-2 sm:px-4"
           />
           {threadLocked ? (
-            <ComposerNotice testId="chats-readonly-note">
+            <ComposerNotice
+              testId="chats-readonly-note"
+              className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-3 sm:px-4"
+            >
               {threadJoined?.ended ? endedGroupNotice(threadJoined) : lockedLineFor(nav.channel)}
             </ComposerNotice>
           ) : (
@@ -4404,6 +4450,7 @@ export function ChatsView(props: {
           label={channelAgent ? channelAgent.label : nav.channel.name}
           testId="chats-channel"
           large={variant === "page"}
+          titleMark={groupAccessMark(nav.channel, variant === "page" ? 14 : 12)}
           onBack={variant === "panel" ? goBack : undefined}
           icon={
             channelAgent ? (
@@ -4585,6 +4632,9 @@ export function ChatsView(props: {
             workspaceId={workspaceId}
             channel={nav.channel}
             locked={channelLocked}
+            lockedLine={
+              channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLineFor(nav.channel)
+            }
             mentionCandidates={mentionCandidates}
             fileCandidates={channelFiles}
             loadFileHeadings={loadFileHeadings}
@@ -4665,14 +4715,11 @@ export function ChatsView(props: {
                 ) : channelLocked ? (
                   // Where the composer would be, so the reason is the first thing above the posts.
                   <div className="py-4">
-                    <p
-                      data-testid="chats-readonly-note"
-                      className="m-0 rounded-xl border border-line px-4 py-3 text-xs text-subtle"
-                    >
+                    <ComposerNotice testId="chats-readonly-note">
                       {channelJoined?.ended
                         ? endedGroupNotice(channelJoined)
                         : lockedLineFor(nav.channel)}
-                    </p>
+                    </ComposerNotice>
                   </div>
                 ) : null}
               </>
@@ -4825,6 +4872,7 @@ export function ChatsView(props: {
           icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
           label={channel.name}
           labelTestId="chats-channel-name"
+          mark={groupAccessMark(channel)}
           {...menuFor({
             key: channel.id,
             label: channel.name,

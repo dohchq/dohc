@@ -54,8 +54,8 @@ describe("ChatsView channels", () => {
     // A Group's own rule decides its composer: View only reads, and Can post
     // takes posts even from a member at View.
     it.each([
-      ["comment", "view", "You can read this Group."],
-      ["view", "view", "Only people who can comment post here."],
+      ["comment", "view", "Only admins and the owner post in Team."],
+      ["view", "view", "Only admins and the owner post in Team."],
       ["view", "comment", null],
     ] as const)(
       "at %s with the Group at %s, shows the composer only where the Group takes posts",
@@ -110,9 +110,11 @@ describe("ChatsView channels", () => {
       });
       await userEvent.click(await screen.findByTestId("chats-channel"));
       await userEvent.click(await screen.findByTestId("chats-thread"));
-      expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
-        "You can read this Group.",
-      );
+      const note = await screen.findByTestId("chats-readonly-note");
+      expect(note.textContent).toBe("Only admins and the owner post in Team.");
+      // In the reply composer's column, with the lock.
+      expect(note.className).toContain("max-w-[640px]");
+      expect(note.querySelector("svg.lucide-lock")).not.toBeNull();
       await waitFor(() =>
         expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
           workspaceId: "workspace-a",
@@ -769,5 +771,124 @@ describe("ChatsView panel navigator unread badges", () => {
     const members = screen.getAllByTestId("chats-share-member");
     expect(members).toHaveLength(2);
     expect(members.map((el) => el.textContent).join(" ")).toContain("bo@example.com");
+  });
+});
+
+describe("ChatsView Group access marks", () => {
+  const groups = [
+    channel({ id: "channel-hidden", name: "Hidden", wireId: "wire-hidden" }),
+    channel({ id: "channel-read", name: "Read", wireId: "wire-read" }),
+    channel({ id: "channel-open", name: "Open", wireId: "wire-open" }),
+  ];
+  function membersList(groupRules: Array<{ channelWireId: string; level: string }> | null) {
+    return {
+      status: "ready",
+      view: {
+        memberLevel: "comment",
+        people: [
+          { role: "owner", state: "active" },
+          { role: "member", state: "active" },
+        ],
+        groupRules,
+      },
+    };
+  }
+  const rules = [
+    { channelWireId: "wire-hidden", level: "none" },
+    { channelWireId: "wire-read", level: "view" },
+    { channelWireId: "wire-open", level: "comment" },
+  ];
+  const marks = () =>
+    Object.fromEntries(
+      screen.getAllByTestId("chats-channel").map((row) => {
+        const mark = row.querySelector("[data-testid='chats-group-access-mark']");
+        return [
+          row.querySelector("[data-testid='chats-channel-name']")?.textContent,
+          mark ? `${mark.getAttribute("data-level")}: ${mark.getAttribute("title")}` : null,
+        ];
+      }),
+    );
+
+  it.each([
+    ["the owner", {}],
+    ["an admin", { joinedWorkspace: { createsGroups: true } }],
+  ] as const)("shows %s which Groups a rule hides or makes read-only", async (_who, extra) => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockResolvedValue(membersList(rules));
+    renderView(vi.fn(), vi.fn(), extra);
+    await waitFor(() =>
+      expect(marks()).toEqual({
+        Hidden: "none: Hidden from members",
+        Read: "view: Members can read only",
+        Open: null,
+      }),
+    );
+    expect(screen.getByRole("button", { name: /Hidden.*Hidden from members/ })).toBeTruthy();
+  });
+
+  it("shows a member no marks and reads no rules", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockResolvedValue(membersList(rules));
+    renderView(vi.fn(), vi.fn(), { joinedWorkspace: { createsGroups: false } });
+    await screen.findAllByTestId("chats-channel");
+    await act(async () => {});
+    expect(screen.queryByTestId("chats-group-access-mark")).toBeNull();
+    expect(bridgeMock.workspaceMembers).not.toHaveBeenCalled();
+  });
+
+  it("shows no mark while the rules are unknown", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    const read = deferred<unknown>();
+    bridgeMock.workspaceMembers.mockReturnValueOnce(read.promise);
+    renderView();
+    await screen.findAllByTestId("chats-channel");
+    await act(async () => {});
+    expect(screen.queryByTestId("chats-group-access-mark")).toBeNull();
+    await act(async () => read.resolve(membersList(null)));
+    expect(screen.queryByTestId("chats-group-access-mark")).toBeNull();
+  });
+
+  it("marks a Group again once Group settings saves its rule", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    let saved = rules.filter((rule) => rule.channelWireId !== "wire-open");
+    bridgeMock.workspaceMembers.mockImplementation(
+      async (input: { request: { action: string; group?: string; level?: string } }) => {
+        if (input.request.action === "group") {
+          saved = [...saved, { channelWireId: input.request.group!, level: input.request.level! }];
+          return { status: "ready" };
+        }
+        return membersList(saved);
+      },
+    );
+    renderView(vi.fn(), vi.fn(), { joinedWorkspace: { createsGroups: true } });
+    await waitFor(() => expect(marks().Read).toBe("view: Members can read only"));
+    expect(marks().Open).toBeNull();
+    const open = screen.getAllByTestId("chats-channel").find((row) => row.textContent === "Open");
+    fireEvent.click(open!);
+    fireEvent.click(await screen.findByTestId("chats-group-settings"));
+    fireEvent.click(await screen.findByRole("radio", { name: "No access" }));
+    fireEvent.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("chats-channel-view")
+          .querySelector("[data-testid='chats-group-access-mark']")
+          ?.getAttribute("data-level"),
+      ).toBe("none"),
+    );
+  });
+
+  // The page tells the shell, and the shell tells the navigator.
+  it("reads the rules again when another Chats changes one", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+    bridgeMock.workspaceMembers.mockResolvedValueOnce(membersList([]));
+    bridgeMock.workspaceMembers.mockResolvedValueOnce(membersList(rules));
+    const { rerender } = renderView(vi.fn(), vi.fn(), { groupAccessRevision: 0 });
+    await screen.findAllByTestId("chats-channel");
+    await waitFor(() => expect(bridgeMock.workspaceMembers).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("chats-group-access-mark")).toBeNull();
+    rerender({ groupAccessRevision: 1 });
+    await waitFor(() => expect(marks().Hidden).toBe("none: Hidden from members"));
   });
 });

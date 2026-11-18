@@ -4620,6 +4620,11 @@ export function DesktopWorkspaceShell(props: {
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
   const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
+  // Each Chats reads the Group rules for its marks. A change in one counts here.
+  const [chatsGroupAccessRevision, onChatsGroupAccessChanged] = useReducer(
+    (revision: number) => revision + 1,
+    0,
+  );
   const saveDirectName = useCallback(
     (conversationId: string, account: string, name: string) => {
       mutateWb((state) => setDirectTabName(state, conversationId, account, name));
@@ -7477,6 +7482,8 @@ export function DesktopWorkspaceShell(props: {
     onOpenNavigator: openChatsNavigator,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,
+    onGroupAccessChanged: onChatsGroupAccessChanged,
+    groupAccessRevision: chatsGroupAccessRevision,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onShowFolder: showFolderInExplorer,
@@ -7518,6 +7525,8 @@ export function DesktopWorkspaceShell(props: {
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
     threadRevision: chatsThreadRevision,
+    onGroupAccessChanged: onChatsGroupAccessChanged,
+    groupAccessRevision: chatsGroupAccessRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,

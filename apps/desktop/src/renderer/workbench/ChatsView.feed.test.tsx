@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatsView as ProductionChatsView, type ChatsNav } from "./ChatsView";
 import { LinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import type { AboutNotices } from "./About";
 import type { AccessContext } from "./accessReason";
 import {
@@ -1333,7 +1334,13 @@ describe("Home and a file's chat share one reaction store", () => {
       .mockImplementationOnce(() => refused.promise);
     render(
       <ReactionStoreProvider workspaceId="workspace-a">
-        <ProductionChatsView workspaceId="workspace-a" onOpenFileChat={vi.fn()} onError={onError} />
+        <WorkspaceSessionProvider workspaceId="workspace-a">
+          <ProductionChatsView
+            workspaceId="workspace-a"
+            onOpenFileChat={vi.fn()}
+            onError={onError}
+          />
+        </WorkspaceSessionProvider>
         <div data-testid="file-chat">
           <LinkedChatsPanel
             workspaceId="workspace-a"

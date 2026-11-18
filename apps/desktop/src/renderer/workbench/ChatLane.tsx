@@ -76,6 +76,8 @@ export function ChatLane(props: {
   workspaceId: string;
   channel: ChatChannelRecord;
   locked: boolean;
+  // Why, in place of the composer, when locked.
+  lockedLine?: string;
   mentionCandidates: readonly MentionCandidate[];
   fileCandidates?: readonly FileMentionCandidate[];
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
@@ -1007,8 +1009,8 @@ export function ChatLane(props: {
       notice={props.notice}
       composer={(inset) =>
         props.locked ? (
-          <ComposerNotice testId="chats-lane-readonly">
-            This group is read-only for you.
+          <ComposerNotice testId="chats-lane-readonly" className="px-5 pb-4 pt-1">
+            {props.lockedLine ?? "This group is read-only for you."}
           </ComposerNotice>
         ) : (
           <MentionComposer
@@ -1041,8 +1043,8 @@ export function ChatLane(props: {
       }
       replyNotice={
         props.locked ? (
-          <ComposerNotice testId="chats-lane-thread-readonly">
-            This group is read-only for you.
+          <ComposerNotice testId="chats-lane-thread-readonly" className="px-4 pb-4 pt-1">
+            {props.lockedLine ?? "This group is read-only for you."}
           </ComposerNotice>
         ) : undefined
       }

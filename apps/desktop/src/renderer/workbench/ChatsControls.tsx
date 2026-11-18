@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, PowerOff, TriangleAlert } from "lucide-react";
+import { Archive, ArrowLeft, Eye, EyeOff, Lock, PowerOff, TriangleAlert } from "lucide-react";
 import type * as React from "react";
 import type { JoinedSharedChannelRow } from "../../ipc/bridgeContract";
 import type { AgentPresenceActivity } from "../../collab/agentPresence";
@@ -142,6 +142,8 @@ export function ChatHeader(props: {
   description?: React.ReactNode;
   trailing?: React.ReactNode;
   action?: React.ReactNode;
+  // Right after the title, such as a Group's access mark.
+  titleMark?: React.ReactNode;
   large?: boolean;
 }) {
   return (
@@ -168,6 +170,7 @@ export function ChatHeader(props: {
         >
           <WorkLinkText text={props.label} interactive testId={`${props.testId}-title`} />
         </span>
+        {props.titleMark}
         {props.description ? (
           <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
             {props.description}
@@ -240,15 +243,40 @@ export function dispatchAnnouncement(working: boolean, pendingCount: number): st
   return queued ? `Agent working, ${queued}` : "Agent working";
 }
 
-// The read-only / ended composer replacement: honest and quiet.
-export function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
+// Where a composer would be when this person can't post: the lock, and why.
+// No border, so it never reads as an empty field. `className` places it in
+// the composer's own column.
+export function ComposerNotice(props: {
+  testId: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
   return (
     <p
       data-testid={props.testId}
-      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+      className={`m-0 flex shrink-0 items-start gap-2 text-[12px] text-muted ${props.className ?? ""}`}
     >
-      {props.children}
+      <Lock size={12} aria-hidden className="mt-0.5 shrink-0" />
+      <span>{props.children}</span>
     </p>
+  );
+}
+
+// After a Group's name, for the owner and admins: a Group hidden from members,
+// or one they can only read. A Group at the member level has none.
+export function GroupAccessMark(props: { level: "view" | "none"; size?: number }) {
+  const words = props.level === "none" ? "Hidden from members" : "Members can read only";
+  const Icon = props.level === "none" ? EyeOff : Eye;
+  return (
+    <span
+      data-testid="chats-group-access-mark"
+      data-level={props.level}
+      title={words}
+      className="grid shrink-0 place-items-center self-center text-muted"
+    >
+      <Icon size={props.size ?? 12} aria-hidden />
+      <span className="sr-only">{words}</span>
+    </span>
   );
 }
 
