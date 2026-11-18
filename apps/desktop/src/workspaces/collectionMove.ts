@@ -164,13 +164,25 @@ export function createCollectionsSendUp(input: {
     // Each Collection the send took, settled once it arrives or with why it didn't.
     waits: ReadonlyMap<string, Promise<Failure>>;
     done: Promise<unknown>;
+    local: SendUpStore;
   } | null;
-  let current: { run: Promise<Started>; settled: boolean } | null = null;
-  async function begin(finish: () => void): Promise<Started> {
+  type SendUp = {
+    run: Promise<Started>;
+    settled: boolean;
+    looked: boolean;
+    // The running send this one waits for, until it begins.
+    before: SendUp | null;
+    started?: Started;
+  };
+  let current: SendUp | null = null;
+  async function begin(sendUp: SendUp): Promise<Started> {
+    sendUp.before = null;
+    const finish = () => (sendUp.settled = true);
     const local = await input.open();
     const ids = local
       ? local.keptDatasetIds().filter((id) => local.transferStatus(id)?.state !== "imported")
       : [];
+    sendUp.looked = true;
     if (!local || ids.length === 0) {
       finish();
       return null;
@@ -204,15 +216,28 @@ export function createCollectionsSendUp(input: {
         throw error;
       },
     );
-    return { waits, done };
+    sendUp.started = { waits, done, local };
+    return sendUp.started;
   }
+  // A send that hasn't looked at this computer's Collections yet takes this
+  // start too. One that has may miss a Collection kept since, so another
+  // send follows it.
   function start(): Promise<unknown> {
-    if (current && !current.settled) return current.run;
-    const sendUp: { run: Promise<Started>; settled: boolean } = {
+    if (current && !current.settled && !current.looked)
+      return current.run.then((started) => started?.done);
+    const running = current && !current.settled ? current : null;
+    const sendUp: SendUp = {
       run: Promise.resolve(null),
       settled: false,
+      looked: false,
+      before: running,
     };
-    sendUp.run = begin(() => (sendUp.settled = true));
+    sendUp.run = running
+      ? running.run
+          .then((started) => started?.done)
+          .catch(() => undefined)
+          .then(() => begin(sendUp))
+      : begin(sendUp);
     sendUp.run.catch(() => (sendUp.settled = true));
     current = sendUp;
     return sendUp.run.then((started) => started?.done);
@@ -220,10 +245,17 @@ export function createCollectionsSendUp(input: {
   async function sent(datasetId: string, signal: AbortSignal): Promise<void> {
     for (let attempt = 0; ; attempt += 1) {
       if (!current) return;
-      const started = await abortable(
-        current.run.catch(() => undefined),
-        signal,
-      );
+      // While a send waits for the running one, a Collection the running send
+      // took waits only for that send, and one that went up or that this
+      // computer never kept doesn't wait.
+      const running = current.before?.settled === false ? current.before.started : undefined;
+      if (running && !running.waits.has(datasetId) && needsNoSend(running.local, datasetId)) return;
+      const started = running?.waits.has(datasetId)
+        ? running
+        : await abortable(
+            current.run.catch(() => undefined),
+            signal,
+          );
       if (started === undefined) {
         // The send couldn't look at this computer's Collections, so this one may
         // still be here. Look once more. If that fails too, the read goes on to
@@ -246,6 +278,13 @@ export function createCollectionsSendUp(input: {
     }
   }
   return { start, sent };
+}
+
+function needsNoSend(local: SendUpStore, datasetId: string): boolean {
+  return (
+    local.transferStatus(datasetId)?.state === "imported" ||
+    !local.keptDatasetIds().includes(datasetId)
+  );
 }
 
 /**

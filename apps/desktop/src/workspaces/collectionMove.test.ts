@@ -423,3 +423,79 @@ it("stops an attachment's send when the workspace closes, and never sends the re
   expect(outcome).toBe("stopped");
   expect(reported).not.toHaveBeenCalled();
 });
+
+it("sends a Collection kept after a running send looked, once that send ends", async () => {
+  const kept = ["a"];
+  const asked: string[] = [];
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => [...kept],
+        transferStatus: () => null,
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () =>
+      ({
+        // Each Collection asks the server once; "a" waits until the test answers.
+        server: async () => {
+          asked.push(kept[asked.length]!);
+          if (asked.length === 1) await answered;
+          throw Error("The server refused.");
+        },
+        signal: new AbortController().signal,
+      }) as never,
+    reported() {},
+  });
+  void sendUp.start().catch(() => undefined);
+  await vi.waitFor(() => expect(asked).toEqual(["a"]));
+  // "b" is kept here after the running send read its list, as a Collection
+  // made just as the workspace starts syncing is.
+  kept.push("b");
+  void sendUp.start().catch(() => undefined);
+  const read = sendUp.sent("b", new AbortController().signal);
+  answer();
+  await expect(read).rejects.toThrow("The server refused.");
+  expect(asked).toContain("b");
+});
+
+it("lets reads of Collections a running send took or never needs go on while a later send waits for it", async () => {
+  const kept = ["a", "b", "gone"];
+  const looks = new Map<string, number>();
+  let stop!: (error: Error) => void;
+  const stuck = new Promise<never>((_resolve, reject) => (stop = reject));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => [...kept],
+        // "gone" went up before; "a" arrives as soon as the send reaches it;
+        // "b" waits for a server that doesn't answer.
+        transferStatus(datasetId: string) {
+          const seen = looks.get(datasetId) ?? 0;
+          looks.set(datasetId, seen + 1);
+          if (datasetId === "gone") return transfer("imported");
+          return datasetId === "a" && seen > 0 ? transfer("imported") : null;
+        },
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () => ({ server: () => stuck, signal: new AbortController().signal }) as never,
+    reported() {},
+  });
+  const done = sendUp.start();
+  await expect(sendUp.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  // "c" is kept after the running send looked, so another send waits for it.
+  kept.push("c");
+  const later = sendUp.start();
+  const read = new Set<string>();
+  for (const datasetId of ["a", "gone", "elsewhere"])
+    void sendUp.sent(datasetId, new AbortController().signal).then(() => read.add(datasetId));
+  await vi.waitFor(() => expect([...read].sort()).toEqual(["a", "elsewhere", "gone"]));
+  const c = sendUp.sent("c", new AbortController().signal);
+  stop(Error("stopped"));
+  await expect(c).rejects.toThrow("stopped");
+  await done;
+  await later;
+});

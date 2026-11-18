@@ -185,6 +185,11 @@ export interface LocalDatasetHostOptions {
    * runs the apps approved here over them. Null while this computer keeps them.
    */
   collectionsServer?(): ServerCollectionsTransport | null;
+  /**
+   * A Collection was made here although the workspace syncs now, as one made
+   * just as it starts syncing is. It needs a send to the server.
+   */
+  keptAfterSyncStarted?(): void;
   /** This attachment's workspace engine for document Collection apps. Throws while it is unavailable. */
   collectionEngine?(): LocalCollectionEngine;
   /** Who a local Collection app's response is made by. See localCollectionAuthor. */
@@ -988,6 +993,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
                 signal: signal(input.signal),
               });
           pending.delete(input.preparationId);
+          if (!server && options.collectionsServer?.()) options.keptAfterSyncStarted?.();
           return changed(approved);
         });
       },
