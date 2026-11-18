@@ -6,7 +6,6 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   effectiveShareSelector,
-  fileSideOf,
   isLiveEditShareSelector,
   isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
@@ -14,6 +13,7 @@ import {
   type AnyShareSelector,
 } from "../shareFilter";
 import { authorizeShareGrantAction } from "../shareAuthorization";
+import { workspaceFileWriteReach } from "../workspaceReach";
 import { readCurrentShareGrant } from "./currentShareGrant";
 import { getWorkspaceMembership, workspaceMemberGrantId } from "./workspaceMembers";
 import { parseWorkspaceId } from "../requestInputs";
@@ -905,9 +905,11 @@ function authorizeMemberOpen(
     throw notFound();
   return current.share.granterUserId;
 }
-/** Whether a member's workspace reach edits the path. */
+/** Whether a member's workspace reach edits the path. An admin reads rule files but writes none. */
 function memberEditsPath(selector: AnyShareSelector, path: string): boolean {
-  return isWorkspaceSelector(selector) && pathLevel(fileSideOf(selector)!, path) === "edit";
+  return (
+    isWorkspaceSelector(selector) && pathLevel(workspaceFileWriteReach(selector), path) === "edit"
+  );
 }
 function ensureInsideTransaction(
   storage: StorageContext,
