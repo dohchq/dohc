@@ -399,12 +399,15 @@ function ConversationForAccount(props: ConversationProps) {
     history.conversationId === conversationId
       ? history
       : ({ conversationId, status: "loading" } as const);
-  const request = useRef(0);
+  // The newest page and an older page are read apart, so loading earlier messages doesn't drop a newest read that fills a gap.
+  const newestRequest = useRef(0);
+  const olderRequest = useRef(0);
   const historyIdentity = `direct-history:${conversationId}`;
   // The history is read as the account the list names, once the list has read.
   const load = useCallback(
     async (before?: number) => {
       if (viewerId === null || scope === null) return;
+      const request = before === undefined ? newestRequest : olderRequest;
       const mine = ++request.current;
       if (before !== undefined) {
         setHistory((current) =>
@@ -440,7 +443,7 @@ function ConversationForAccount(props: ConversationProps) {
             status: "ready",
             messages,
             more: joined ? previous.more : page.more,
-            olderLoading: false,
+            olderLoading: before === undefined ? (previous?.olderLoading ?? false) : false,
           };
         });
       } catch (cause) {
@@ -454,7 +457,7 @@ function ConversationForAccount(props: ConversationProps) {
           });
         setHistory((current) =>
           current.conversationId === conversationId && current.status === "ready"
-            ? { ...current, olderLoading: false }
+            ? { ...current, olderLoading: before === undefined ? current.olderLoading : false }
             : { conversationId, status: "failed", message },
         );
       }
@@ -465,7 +468,8 @@ function ConversationForAccount(props: ConversationProps) {
   useEffect(() => {
     void load();
     return () => {
-      request.current += 1;
+      newestRequest.current += 1;
+      olderRequest.current += 1;
     };
   }, [load]);
   // The server says something new arrived, or a send skipped past a message: read the newest page again.

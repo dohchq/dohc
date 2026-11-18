@@ -461,6 +461,55 @@ describe("ChatsView direct messages", () => {
     });
   });
 
+  it("keeps reading the newest page when Show earlier messages loads while it is still reading", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation({ last: sent(3, "sam", "Sam 3"), unread: 0 })]);
+    let reread: (page: unknown) => void = () => {};
+    let newest = 0;
+    bridgeMock.directHistory.mockImplementation((input: { before?: number }) => {
+      if (input.before !== undefined)
+        return Promise.resolve({
+          conversationId: "conversation-sam",
+          messages: [sent(1, VIEWER, "Dinner Friday?")],
+          more: false,
+        });
+      newest += 1;
+      if (newest === 1)
+        return Promise.resolve({
+          conversationId: "conversation-sam",
+          messages: [sent(2, "sam", "Sam 2"), sent(3, "sam", "Sam 3")],
+          more: true,
+        });
+      return new Promise((resolve) => {
+        reread = resolve;
+      });
+    });
+    // Sam's message took seq 4 on the server before this send's answer came back.
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 5 });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
+    await user.type(await screen.findByTestId("chats-dm-composer"), "On my way{Enter}");
+    // The send skipped seq 4, so the view reads the newest page again.
+    await waitFor(() => expect(newest).toBe(2));
+    await user.click(within(view).getByTestId("chats-dm-older"));
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(4));
+    act(() =>
+      reread({
+        conversationId: "conversation-sam",
+        messages: [
+          sent(2, "sam", "Sam 2"),
+          sent(3, "sam", "Sam 3"),
+          sent(4, "sam", "Sam 4"),
+          sent(5, VIEWER, "On my way"),
+        ],
+        more: true,
+      }),
+    );
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(5));
+    expect(within(view).getByText("Sam 4")).toBeTruthy();
+  });
+
   it("reads the history again when a send skips past the other person's message, and marks nothing read past the gap", async () => {
     const user = userEvent.setup();
     let changed: () => void = () => {};
