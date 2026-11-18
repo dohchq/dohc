@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
-import { DIRECT_INACTIVE_MESSAGE } from "../ipc/directMessageOperations";
+import { DIRECT_INACTIVE_MESSAGE, directMessageOperations } from "../ipc/directMessageOperations";
+import { DIRECT_START_INACTIVE_MESSAGE } from "../ipc/errorWords";
+import { deferred } from "../testing/deferred";
+import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 import { ipcWireError, readError } from "../ipc/errorWords";
 import { CredentialSessionCache } from "./credentialSessionCache";
 import { createDirectMessages, DirectMessageError, directScope } from "./directMessages";
@@ -706,5 +709,50 @@ describe("direct messages for the signed-in account", () => {
     h.service.accountChanged();
     await expect.poll(() => h.service.listed(ANN_ACCOUNT)).toBeNull();
     stop();
+  });
+
+  it("says a first message may not have been sent when its window changes workspaces while the send is out", async () => {
+    const h = harness();
+    const answer = deferred<Response>();
+    let posted = 0;
+    h.routes.set("/sync/direct/send", () => {
+      posted += 1;
+      return answer.promise;
+    });
+    // Main runs directStart in the window's workspace operation, with the row's own words.
+    let current = true;
+    const attachmentId = Symbol("attachment");
+    const run = createRendererWorkspaceOperationRunner<
+      object,
+      { workspaceId: string; attachmentId: symbol; rootPath: string },
+      Record<string, never>,
+      { workspaceId: string; attachmentId: symbol; isCurrent(): boolean }
+    >({
+      currentSession: () => ({ workspaceId: "w", attachmentId, isCurrent: () => current }),
+      withPhysicalOperation: async (_workspaceId, work) =>
+        work({
+          workspace: { workspaceId: "w", attachmentId, rootPath: "C:/w" },
+          state: {},
+          signal: new AbortController().signal,
+          assertCurrent: () => {},
+        }),
+    });
+    const sending = run({}, "w", directMessageOperations.directStart.inactiveMessage, (operation) =>
+      h.service.send({
+        viewerId: "ann",
+        pick: {
+          person: { workspaceId: "w", memberId: "owner" },
+          admitted: { relayUrl: "https://relay.test", userId: "ann" },
+          assertCurrent: () => operation.assertCurrent(),
+        },
+        messageId: "m1",
+        body: "hi",
+      }),
+    );
+    await expect.poll(() => posted).toBe(1);
+    current = false;
+    answer.resolve(Response.json({ conversationId: "c1", seq: 1 }));
+    await expect(sending).rejects.toThrow(DIRECT_START_INACTIVE_MESSAGE);
+    expect(h.requests).toEqual(["POST /sync/direct/send"]);
   });
 });
