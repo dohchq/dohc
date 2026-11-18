@@ -21,7 +21,6 @@ import {
   chatMessageAppend,
   chatThreadCreate,
   closeTestStorages,
-  createShare,
   json,
   jsonBody,
   logOp,

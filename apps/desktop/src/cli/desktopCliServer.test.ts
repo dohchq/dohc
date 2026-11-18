@@ -445,6 +445,7 @@ describe("desktop CLI workspace context", () => {
     );
     expect(publish).toHaveBeenCalledOnce();
   });
+
   // A joined copy the engine closed for its access answers the CLI in words,
   // not with the engine's refusal code.
   it.each([
@@ -480,7 +481,6 @@ describe("desktop CLI workspace context", () => {
     await expect(f.create().openCliWorkspace(f.workspace)).rejects.toThrow(words);
     expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
   });
-
 
   it("stops showing history the workspace's current policy no longer tracks, to the CLI and the MCP", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-history-"));
