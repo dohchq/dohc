@@ -158,6 +158,8 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
     workspace: Workspace,
     path: string,
   ): Promise<"refused" | "failing" | "ended" | null>;
+  /** The notes the server paused, as this computer last settled them. */
+  ownerLivePauses?(workspace: Workspace): readonly { objectId: string }[];
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
@@ -906,6 +908,7 @@ export function createOwnerLiveDocumentActions<
         );
         // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
         const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
+        const pauses = dependencies.ownerLivePauses?.(operation.workspace) ?? [];
         for (const row of documents.values()) {
           // Each row speaks for the server's document, never for another that had or has its path.
           const deferred = localStops.find(
@@ -917,6 +920,9 @@ export function createOwnerLiveDocumentActions<
               canResume:
                 row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld",
             });
+          // A note the server paused stays enrolled until Resume ends its pause.
+          if (pauses.some((pause) => pause.objectId === row.objectId))
+            Object.assign(row, { status: "paused", canResume: true });
           // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
           const kept = quarantines.filter(
             (candidate) => candidate.objectId === row.objectId && !candidate.saveOnly,

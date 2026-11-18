@@ -9225,6 +9225,7 @@ function registerIpcHandlers(): void {
   > = {
     person: () => ({ kind: "person", personId: localInstallationId() }),
     resumeOwnerLivePause: (workspace, path) => desktopEngine.resumeOwnerLivePause(workspace, path),
+    ownerLivePauses: (workspace) => desktopEngine.ownerLivePauses(workspace.workspaceId),
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
