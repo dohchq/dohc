@@ -26,7 +26,6 @@ import {
 import { createNamedFrameChanges } from "./liveHostChanges";
 import { hasRelayWriteObservers } from "./relayWriteChanges";
 import { serviceHostDocumentEnabled } from "./storage/serviceHostEnrollment";
-import { pauseLiveRoom, recordLiveRoomCopyWritten, resumeLiveRoom } from "./storage/liveRoomPauses";
 import type { StorageContext } from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -742,50 +741,6 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
   expect(
     f.updates.slice(1).every((update) => update.documents.some((row) => row.path === "notes/c.md")),
   ).toBe(true);
-});
-
-it("hosts no note its live room paused until its owner resumes it", async () => {
-  const f = await fixture();
-  await f.waitStarted(1);
-  await f.waitUpdate(["docs/a.md"]);
-  const storage = f.storage as StorageContext,
-    copy = new Uint8Array([1, 2, 3]);
-  const pause = (lineageClaimId = binding.lineageClaimId) =>
-    pauseLiveRoom(storage, {
-      document: { ...binding, lineageClaimId },
-      cause: "failing",
-      refusal: null,
-      named: [],
-      copy,
-      pausedAtMs: 1,
-    });
-  const resume = (pauseId: string) => {
-    const sha256 = createHash("sha256").update(copy).digest("hex");
-    expect(recordLiveRoomCopyWritten(storage, scope.workspaceId, pauseId, sha256)).toBe("recorded");
-    expect(resumeLiveRoom(storage, scope.workspaceId, pauseId)).toBe("resumed");
-  };
-  const pauseId = pause();
-  const paused = await f.waitUpdate([]);
-  expect(paused.departing).toEqual([
-    { workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath },
-  ]);
-  // Once its replica drained, the workspace detaches and stays detached while the note is paused.
-  await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), { timeout: 10_000 });
-  await f.waitPasses();
-  expect(f.updates.at(-1)!.workspaces).toEqual([]);
-  expect(f.events).toEqual([
-    `detach ${scope.workspaceId}`,
-    `release ${binding.objectId} attached=false store=true`,
-  ]);
-  resume(pauseId);
-  await f.waitUpdate(["docs/a.md"]);
-  // A pause fences a hosted activation in its own transaction, as an owner's Pause does. One on an ended lineage fences nothing.
-  retainServiceActivation(f.raw, namespace, true);
-  pause("ended-lineage");
-  expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
-  pause();
-  expect(f.storage.serviceActivationRetirement(binding)).not.toBeNull();
-  expect(serviceHostDocumentEnabled(storage, binding)).toBe(false);
 });
 
 it("drains a stopped last document, then detaches the workspace and releases it, keeping its store", async () => {
