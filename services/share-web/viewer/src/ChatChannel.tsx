@@ -401,6 +401,8 @@ export function ChannelView({
     follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]),
     cursorRef = useRef<number | null>(null);
+  // Every delete this conversation has heard. A page read before a delete can arrive after it, with the message's text.
+  const deletesRef = useRef<DeletedChatMessage[]>([]);
   const intent = useRef<(ChatPost & { key: string | null }) | null>(null),
     postingRef = useRef(false),
     olderRef = useRef(false);
@@ -429,7 +431,8 @@ export function ChannelView({
     own: boolean,
     deleted: readonly DeletedChatMessage[] = [],
   ) => {
-    const merged = mergeChatMessages(messagesRef.current, incoming, deleted),
+    if (deleted.length) deletesRef.current = [...deletesRef.current, ...deleted];
+    const merged = mergeChatMessages(messagesRef.current, incoming, deletesRef.current),
       added = merged.length - messagesRef.current.length;
     messagesRef.current = merged;
     setMessages(merged);
@@ -496,6 +499,7 @@ export function ChannelView({
       controller.abort();
       follower.current?.abort();
       follower.current = null;
+      deletesRef.current = [];
     };
   }, []);
 
@@ -506,7 +510,11 @@ export function ChannelView({
       (result) => {
         if (controller.signal.aborted) return;
         // A message posted while history loaded stays in the list.
-        messagesRef.current = mergeChatMessages(result.messages, messagesRef.current);
+        messagesRef.current = mergeChatMessages(
+          result.messages,
+          messagesRef.current,
+          deletesRef.current,
+        );
         cursorRef.current = result.nextCursor;
         stick.current = true;
         setMessages(messagesRef.current);
@@ -578,7 +586,11 @@ export function ChannelView({
       if (controller.signal.aborted) return;
       holdPlace();
       // Older pages never move the following cursor.
-      messagesRef.current = mergeChatMessages(messagesRef.current, result.messages);
+      messagesRef.current = mergeChatMessages(
+        messagesRef.current,
+        result.messages,
+        deletesRef.current,
+      );
       setMessages(messagesRef.current);
       setOlderCursor(result.olderCursor);
       setOlder("idle");

@@ -1878,4 +1878,24 @@ describe("deleting a Group message", () => {
     await settle(() => !text().includes("Plans start here"));
     expect(groupPanel().textContent).toContain("Mine to take back");
   });
+
+  it("keeps a message deleted when an older page read before the delete arrives after it", async () => {
+    server({ history, older: { "wire-plans": [chat(2, "Deleted older text")] } });
+    await render();
+    await settledOpen();
+    // The follow brings the delete of a message this page has not loaded yet.
+    await act(async () =>
+      following("chat")[0]!.answer({
+        shareId: "share",
+        nextCursor: 22,
+        hasMore: false,
+        messages: [],
+        deleted: [{ messageId: "m2", threadId: "t2", deletedAtMs: 21_000, relaySeq: 22 }],
+      }),
+    );
+    await click("Load earlier messages");
+    await settle(() => groupPanel().querySelectorAll(".chat-message").length === 3);
+    expect(groupPanel().textContent).not.toContain("Deleted older text");
+    expect(groupPanel().textContent).toContain("Message deleted");
+  });
 });
