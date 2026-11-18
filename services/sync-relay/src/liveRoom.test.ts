@@ -954,7 +954,12 @@ it("keeps a pause's copy until the owner's desktop records it written, and resum
   };
   const sha256 = hash(copy);
   expect(listed.pauses).toMatchObject([
-    { cause: "refused", named: [ben], copy: { sha256, byteLength: 4 } },
+    {
+      path: f.input.evidence.currentPath,
+      cause: "refused",
+      named: [ben],
+      copy: { sha256, byteLength: 4 },
+    },
   ]);
   const { pauseId } = listed.pauses[0]!;
   expect(new Uint8Array(await (await call("GET", pauseId, "copy")).arrayBuffer())).toEqual(copy);
@@ -1512,7 +1517,13 @@ it("pauses at once when the owner moves or deletes the note's file, with every u
   a.session.close();
   await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
   const [moved] = pauses(f);
-  expect(moved).toMatchObject({ cause: "refused", refusal: "stale-binding", named: [ana] });
+  // The path is the one the owner's desktop knew, so it can write the copy next to it.
+  expect(moved).toMatchObject({
+    path: f.input.evidence.currentPath,
+    cause: "refused",
+    refusal: "stale-binding",
+    named: [ana],
+  });
   expect(unsaved(f)).toEqual([]);
   const copy = new Y.Doc();
   Y.applyUpdate(copy, liveRoomCopy(f, moved!.pauseId));
@@ -1533,7 +1544,12 @@ it("pauses at once when the owner moves or deletes the note's file, with every u
   });
   rooms(g);
   await vi.waitFor(() => expect(pauses(g)).toHaveLength(1));
-  expect(pauses(g)[0]).toMatchObject({ cause: "refused", refusal: "stale-binding", named: [ben] });
+  expect(pauses(g)[0]).toMatchObject({
+    path: g.input.evidence.currentPath,
+    cause: "refused",
+    refusal: "stale-binding",
+    named: [ben],
+  });
   expect(unsaved(g)).toEqual([]);
 });
 
