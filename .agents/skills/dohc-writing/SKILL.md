@@ -6,7 +6,7 @@ description: >-
 
 # Writing for dohc
 
-Write in plain and simple language, with the calm, exact tone of good 1960s product writing.
+Write in plain and simple language.
 
 - **Plain.** Everyday words and short sentences. Every sentence states a fact, an instruction, or a reason.
 - **Exact.** Name the thing, the number, and the unit. Use only numbers you measured or can cite.
@@ -20,13 +20,19 @@ Write runbooks, skills, and the steps inside any document as controlled English,
 
 Use this for steps only. Explanations, reasons, and notes keep their natural voice.
 
-## Ice's words
-
-Some text is Ice's own handwriting, such as "A note from Ice" in `AGENTS.md`. Leave it as written: fix typos only, and propose any other change in the PR instead of rewriting it.
-
 ## Code comments
 
-Write the current constraint and what breaks without it. Leave the reviewer, review round, PR or issue number, and plan label to git and the pull request. Keep a link to another project's issue when it explains a workaround.
+Write no comments. If code needs a comment to make sense, change the code: rename it, extract it, or give it a type.
+
+Keep only these:
+
+- Legal and license headers.
+- Behavior forced by something we can't change, such as a dependency, platform, vendor, or protocol. A surprise in our own code is not one of these. Fix the code.
+- Doc comments that define a public API contract.
+- A link to an issue or RFC that explains a constraint the code can't express.
+- Lint suppressions for a rule that is wrong for that line or only about style. If the rule protects correctness or safety, fix the code instead.
+
+A long comment that justifies a workaround means the code is wrong. Words like `IMPORTANT` or "do not remove" don't make a comment a keeper. If a constraint matters, enforce it with a type, a test, or a lint rule.
 
 ## House style
 
@@ -42,6 +48,10 @@ Write the current constraint and what breaks without it. Leave the reviewer, rev
 >
 > After: dohc keeps your work on your computer. It works without an account or a network connection.
 
+> Before: We are pleased to confirm that the installation process has been successfully completed.
+>
+> After: dohc is installed.
+
 > Before: Note that the engine binary may need to be rebuilt in cases where changes have been made to any of the crates.
 >
 > After: If you changed a crate, rebuild the engine with the rust-gate skill.
@@ -50,4 +60,4 @@ Write the current constraint and what breaks without it. Leave the reviewer, rev
 
 Cut hype words, "not just X, but Y", trailing "-ing" clauses that claim a result, lists of three made for rhythm, and filler such as "Here's the thing." Leave code, identifiers, commands, and quotations unchanged.
 
-You are done when every fact, warning, command, and link from the source is still there, every claim matches the code or a cited source, and a reader would call it plain.
+You are done when the prose is very easy to understand and 100% clear.
