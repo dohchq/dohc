@@ -430,7 +430,13 @@ export function createServiceHostFeed(
         storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
-          await warmReach(workspaceId);
+          // A push with no rows names no blob, and a host sends one at each start to confirm its origin. In a
+          // new process the reach is not built, and building it reads every shared document's history. So that
+          // push starts the build and does not wait for it. The first request that checks a blob waits.
+          const warming = warmReach(workspaceId);
+          if (ops.length > 0) await warming;
+          // A workspace with no scope fails the build, and `currentScope` below gives this push the same answer.
+          else void warming.catch(() => undefined);
           guard();
           pushOrigin = originId;
           const scope = currentScope(workspaceId),

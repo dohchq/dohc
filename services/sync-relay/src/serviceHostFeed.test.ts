@@ -1288,3 +1288,37 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   for (const op of nativeAuthoredSettlement)
     expect(hostedWriteAllowed(unhosted, op.opKind, op.payload), op.opKind).toBe(false);
 });
+
+it("answers a push with no rows before a long history is read, and holds a blob check until it is", async () => {
+  const f = await fixture();
+  const read = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  let ended = false,
+    pages = 0;
+  // A history that does not end until the test says so: every page comes back full.
+  vi.spyOn(f.storage, "listServiceHostDocumentRows").mockImplementation((input) => {
+    if (ended) return read(input);
+    pages += 1;
+    const [row] = read({ ...input, afterRelaySeq: 0, limit: 1 });
+    return Array.from({ length: input.limit }, (_, index) => ({
+      ...row!,
+      relaySeq: input.afterRelaySeq + index + 1,
+    }));
+  });
+  try {
+    // The push a host sends at each start, to confirm its origin.
+    expect((await f.push([])).status).toBe(200);
+    expect(pages).toBeGreaterThan(0);
+
+    let answered = false;
+    const have = f
+      .request("POST", "blobs/have", JSON.stringify({ sha256s: [A.sha256] }))
+      .finally(() => (answered = true));
+    // Long enough for a check that did not wait to answer.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(answered).toBe(false);
+    ended = true;
+    expect(await (await have).json()).toEqual({ ok: true, missing: [] });
+  } finally {
+    ended = true;
+  }
+});
