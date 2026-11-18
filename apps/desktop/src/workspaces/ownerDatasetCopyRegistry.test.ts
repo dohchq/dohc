@@ -438,7 +438,9 @@ it("leaves no list a save was writing when a different account signed in", async
 it.each([
   [
     "a sign-in starts",
-    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => registry.sessionChanging(true),
+    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => {
+      registry.sessionChange();
+    },
   ],
   [
     "dohc stops",
