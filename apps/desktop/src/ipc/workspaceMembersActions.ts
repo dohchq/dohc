@@ -65,6 +65,7 @@ const PHRASES: Record<MembersRequest["action"], string> = {
   link: "change the invite link",
   leave: "leave this workspace",
   end: "end membership",
+  group: "change this Group's access",
 };
 
 function failure(action: MembersRequest["action"], status: number): Error {
@@ -108,10 +109,16 @@ function folderName(rootPath: string): string {
   );
 }
 
-function route(template: string, workspaceId: string, memberId?: string): string {
+function route(
+  template: string,
+  workspaceId: string,
+  memberId?: string,
+  channelWireId?: string,
+): string {
   return template
     .replace(":workspaceId", encodeURIComponent(workspaceId))
-    .replace(":memberId", encodeURIComponent(memberId ?? ""));
+    .replace(":memberId", encodeURIComponent(memberId ?? ""))
+    .replace(":channelWireId", encodeURIComponent(channelWireId ?? ""));
 }
 
 /**
@@ -156,12 +163,13 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         const call = async (
           path: string,
           body?: unknown,
+          method: "POST" | "PUT" = "POST",
         ): Promise<{ status: number; data: unknown }> => {
           const init: RequestInit =
             body === undefined
               ? { method: "GET", headers: { accept: "application/json" } }
               : {
-                  method: "POST",
+                  method,
                   headers: { accept: "application/json", "content-type": "application/json" },
                   body: JSON.stringify(body),
                 };
@@ -182,7 +190,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           } else {
             await response.body?.cancel().catch(() => undefined);
           }
-          // Every POST here is a change. Refresh before the currency check,
+          // Every POST and PUT here is a change. Refresh before the currency check,
           // because the relay made the change even if this window moved on.
           if (body !== undefined && response.status === 200)
             dependencies.sharesChanged(localWorkspaceId);
@@ -231,8 +239,12 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           if (status !== 200) throw failure(request.action, status);
         };
 
-        const change = async (path: string, body: unknown): Promise<MembersResult> => {
-          const { status, data } = await call(path, body);
+        const change = async (
+          path: string,
+          body: unknown,
+          method?: "PUT",
+        ): Promise<MembersResult> => {
+          const { status, data } = await call(path, body, method);
           changed(status);
           return ready(data);
         };
@@ -292,6 +304,14 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           }
           case "end":
             return change(route(WORKSPACE_MEMBER_ROUTES.end, workspaceId), {});
+          case "group":
+            // `group` is the Group's wire id here; the CLI resolves a name first.
+            if (request.level === undefined) return list();
+            return change(
+              route(WORKSPACE_MEMBER_ROUTES.groupRule, workspaceId, undefined, request.group),
+              { level: request.level },
+              "PUT",
+            );
         }
       },
       assertMembersWorkspace,

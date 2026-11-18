@@ -150,6 +150,7 @@ const MEMBERS_RESULTS: Record<string, CliSocketVerb> = {
   "let-back-in": "members",
   link: "members",
   end: "members",
+  group: "members",
 };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {

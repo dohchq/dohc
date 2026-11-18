@@ -23,6 +23,9 @@ const email = z
   .min(3)
   .max(MAX_MEMBER_EMAIL_CHARS)
   .regex(/^[^\s@]+@[^\s@]+$/, "Enter an email address.");
+/** A Group: its name or wire id from the CLI, its wire id from the Members page. */
+const group = z.string().trim().min(1).max(256);
+const groupRuleLevel = z.enum(GROUP_RULE_LEVELS);
 const linkChange = z.enum(["turn-on", "turn-off", "reset"] satisfies [
   InviteLinkAction,
   ...InviteLinkAction[],
@@ -37,6 +40,11 @@ const agentActions = [
   z.object({ action: z.literal("letBackIn"), person }).strict(),
   z.object({ action: z.literal("link"), change: linkChange }).strict(),
   z.object({ action: z.literal("end") }).strict(),
+  // A Group's access for members. No `level` reads it; null clears the rule,
+  // so the Group takes the member level.
+  z
+    .object({ action: z.literal("group"), group, level: groupRuleLevel.nullable().optional() })
+    .strict(),
 ] as const;
 
 /** What agents send through the CLI and MCP. Leaving stays in the app. */
@@ -60,6 +68,7 @@ export const MEMBERS_CAPABILITIES = {
   link: "members.link.change",
   end: "members.end",
   leave: "members.leave",
+  group: "members.group.rule",
 } as const satisfies Record<MembersRequest["action"], CapabilityId>;
 
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
@@ -138,6 +147,16 @@ export const MembersResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("refused") }).strict(),
   // Leave finished. This account has no page left to show.
   z.object({ status: z.literal("done") }).strict(),
+  // One Group's access, as `dohc members group` shows it. Null is no rule:
+  // the Group takes the member level.
+  z
+    .object({
+      status: z.literal("group"),
+      name: z.string().max(1024),
+      level: groupRuleLevel.nullable(),
+      memberLevel: level,
+    })
+    .strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
 export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";

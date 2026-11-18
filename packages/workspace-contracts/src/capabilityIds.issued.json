@@ -205,6 +205,7 @@
   "links.in",
   "links.resolve",
   "members.end",
+  "members.group.rule",
   "members.invite",
   "members.leave",
   "members.level.set",

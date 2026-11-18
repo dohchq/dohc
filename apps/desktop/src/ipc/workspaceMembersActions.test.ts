@@ -328,6 +328,8 @@ describe("workspace members actions", () => {
       { action: "letBackIn", person: "m-ana" },
       { action: "link", change: "turn-off" },
       { action: "link", change: "reset" },
+      { action: "group", group: "wire-team", level: "none" },
+      { action: "group", group: "wire-team", level: null },
     ] as const;
     for (const request of requests)
       await h.bridge.workspaceMembers({ workspaceId: "ws-1", request });
@@ -338,6 +340,8 @@ describe("workspace members actions", () => {
       "POST /sync/ws-1/members/m-ana/let-back-in {}",
       'POST /sync/ws-1/members/invite-link {"action":"turn-off"}',
       'POST /sync/ws-1/members/invite-link {"action":"reset","workspaceName":"Community"}',
+      'PUT /sync/ws-1/members/groups/wire-team/rule {"level":"none"}',
+      'PUT /sync/ws-1/members/groups/wire-team/rule {"level":null}',
     ]);
   });
 
