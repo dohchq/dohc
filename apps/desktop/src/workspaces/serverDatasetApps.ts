@@ -170,17 +170,13 @@ export function createServerDatasetApps(options: {
       while (found.sending) await until(found.sending, stop);
       stop.throwIfAborted();
       // A request already sent can still reach the server after its caller stops waiting, so it goes for the
-      // workspace's lifetime, and counts as on its way until the server answers.
+      // workspace's lifetime, and counts as on its way until the server answers or the workspace closes.
       const request = options.server.approve(candidate, options.lifetime);
       sent = request;
-      return then(await until(request, signal));
+      return then(await until(request, stop));
     })();
-    const finished = result
-      .then(
-        () => sent,
-        () => sent,
-      )
-      .catch(() => undefined);
+    const settled = () => sent && until(sent, options.lifetime);
+    const finished = result.then(settled, settled).catch(() => undefined);
     found.approving.add(finished);
     own(finished);
     void finished.then(() => {
@@ -244,7 +240,7 @@ export function createServerDatasetApps(options: {
           };
           found.sending = request.then(clear, clear);
           try {
-            await request;
+            await until(request, lifetime);
             break;
           } catch (error) {
             // The server holds no such app or Collection.

@@ -46,9 +46,11 @@ async function computerWithApp(latencyMs = 0) {
   // Requests the server has answered, and a wait a test can put before a request reaches it. A request held in
   // `before` has not left this computer: once its caller stops waiting, it is never sent. A request held in `late`
   // has left: its caller can stop waiting, and the server still takes it. `deliveries` settles with each request
-  // once the server has answered it or it can no longer reach the server.
+  // once the server has answered it or it can no longer reach the server. A request held in `lookup` waits, as
+  // main's does for this computer's server session, for a step its signal does not stop.
   const answered: string[] = [];
   const gate: {
+    lookup?: (trip: string) => Promise<void>;
     before?: (trip: string) => Promise<void>;
     late?: (trip: string) => Promise<void>;
   } = {};
@@ -56,6 +58,11 @@ async function computerWithApp(latencyMs = 0) {
   const server = createServerCollectionsTransport("w", async (path, body, signal) => {
     const trip = path.replace(/^\/sync\/w\/[^/]+\/[^/]+\//, "");
     trips.push(trip);
+    const lookup = gate.lookup?.(trip);
+    if (lookup) {
+      deliveries.push(lookup);
+      await lookup;
+    }
     if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs));
     const send = (signal?: AbortSignal) =>
       fetch(`${relay.origin}${path}`, {
@@ -143,7 +150,7 @@ async function computerWithApp(latencyMs = 0) {
       (error: Error) => error.message.slice(0, 3),
     );
   // Holds the next request of this kind before it leaves this computer, until `release`.
-  const hold = (kind: "before" | "late", trip: string) => {
+  const hold = (kind: "lookup" | "before" | "late", trip: string) => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
       gate[kind] = async (sent) => {
@@ -430,6 +437,34 @@ it("sends no withdrawal after the workspace closes, so it cannot undo an approva
   withdrawal.release();
   await Promise.all(f.deliveries);
   expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("closes while a withdrawal waits for this computer's server session, and sends that withdrawal nowhere", async () => {
+  const f = await computerWithApp();
+  f.answered.length = 0;
+  const withdrawal = f.hold("lookup", "binding");
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await withdrawal.held;
+  await f.host.close();
+  withdrawal.release();
+  await Promise.all(f.deliveries);
+  expect(f.answered).not.toContain("binding");
+  expect(await f.serverRuns()).toBe("ran");
+}, 60_000);
+
+it("closes while an approval waits for this computer's server session", async () => {
+  const f = await computerWithApp();
+  await f.server.withdraw(id(1), f.published.publicationId);
+  const approval = f.hold("lookup", "binding");
+  f.answered.length = 0;
+  const change = f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  change.catch(() => undefined);
+  await approval.held;
+  await f.host.close();
+  await expect(change).rejects.toThrow();
+  approval.release();
+  await Promise.all(f.deliveries);
+  expect(f.answered).not.toContain("binding");
 }, 60_000);
 
 it("withdraws the app on the server after every approval on its way, when two changes approve it again at once", async () => {
