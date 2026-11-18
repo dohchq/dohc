@@ -116,7 +116,8 @@ export function checkMarkdownWitness(
     typeof source !== "string" ||
     exceedsLiveMarkdownLimit(source) ||
     sourceSha !== sha256(source) ||
-    typeof projectionSha !== "string"
+    typeof projectionSha !== "string" ||
+    !/^[a-f0-9]{64}$/.test(projectionSha)
   )
     return false;
   let canonical: string;

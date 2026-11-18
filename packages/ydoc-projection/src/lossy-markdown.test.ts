@@ -170,6 +170,12 @@ it("checks the whole session when its witness records a lossy source", () => {
   const partial = seeded("Title\n=====\n\n* one\n");
   partial.getMap("meta").delete("dohcMarkdownSourceProjectionSha256");
   expect(witnessKeepsMeaning(partial)).toBe(false);
+  // As the engine reads a witness, a projection must be a digest.
+  for (const malformed of ["", "invalid", "g".repeat(64), "A".repeat(64)]) {
+    const doc = seeded("Title\n=====\n\n* one\n");
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", malformed);
+    expect(witnessKeepsMeaning(doc)).toBe(false);
+  }
   const mismatched = seeded("Title\n=====\n\n* one\n");
   mismatched.getMap("meta").set("dohcMarkdownSource", "Title\n=====\n\n* two\n");
   expect(witnessKeepsMeaning(mismatched)).toBe(false);
