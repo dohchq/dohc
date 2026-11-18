@@ -754,7 +754,7 @@ describe("a member's Chats in a browser", () => {
       )
       .get();
     const pushed = readPushMessage(context, Number(row!.relay_seq))!;
-    expect(pushMessageAccess(context, pushed, "ana")?.place).not.toContain("@[hidden");
+    expect(pushMessageAccess(context, pushed, "ana")?.place).toBe(named);
     expect(pushMessageAccess(context, pushed, OWNER)?.place).toContain("@[hidden]");
   });
 
