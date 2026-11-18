@@ -132,6 +132,8 @@ describe("forgotten share views", () => {
         signature: "sig-1",
         visibilitySignature: "vis-1",
         rootLevel: "view",
+        groupDefault: "view",
+        groups: [],
         folders: [{ path: "team", level: "edit" }],
       },
     };

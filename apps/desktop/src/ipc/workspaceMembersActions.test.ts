@@ -16,6 +16,7 @@ const view = (overrides: Partial<WorkspaceMembersView> = {}): WorkspaceMembersVi
   viewer: { memberId: "owner", role: "owner" },
   memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
+  groupRules: [],
   people: [
     {
       memberId: "owner",
@@ -177,6 +178,7 @@ describe("workspace members actions", () => {
       workspaceId: "owner-ws",
       viewer: { memberId: "m-ana", role: "member" },
       inviteLink: null,
+      groupRules: null,
       people: view().people.map((person) => ({ ...person, email: null })),
     });
 

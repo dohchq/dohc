@@ -3161,6 +3161,8 @@ describe("a joined workspace through the CLI", () => {
         signature: "r1",
         visibilitySignature: "v1",
         rootLevel: "view" as const,
+        groupDefault: "view" as const,
+        groups: [],
         folders: [
           { path: "tasks", level: "edit" as const },
           { path: "notes", level: "comment" as const },
