@@ -28,9 +28,10 @@ export function parseGracePeriodMs(value: string | undefined, fallback: number):
  * the whole grace period.
  *
  * A request that only waits for news, as a long poll does, has no work to
- * finish. Its connection is closed as soon as the server stops listening, and
- * so is one that arrives later. Otherwise each would hold the server open for
- * as long as its client was willing to wait.
+ * finish. Its connection is closed as soon as the server stops listening.
+ * Otherwise it would hold the server open for as long as its client was
+ * willing to wait. The same 100 ms pass closes one that arrives later, and one
+ * whose connection was still carrying a working request.
  */
 export function closeServer(server: Server, gracePeriodMs: number): Promise<void> {
   return new Promise((resolve) => {

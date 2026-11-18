@@ -1,6 +1,6 @@
 import { Agent, request as httpRequest, type IncomingMessage } from "node:http";
 import { connect } from "node:net";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { closeServer, parseGracePeriodMs } from "./process";
 import { ClientClosedRequest, serveFetchHandler } from "./serveFetchHandler";
 
@@ -13,6 +13,9 @@ describe("parseGracePeriodMs", () => {
     expect(parseGracePeriodMs("soon", 10_000)).toBe(10_000);
   });
 });
+
+// Carriage return and line feed, which end each line of an HTTP request.
+const LINE_END = String.fromCharCode(13, 10);
 
 describe("closeServer", () => {
   it("closes soon after its last request ends, though a client keeps its connection in use", async () => {
@@ -105,31 +108,29 @@ describe("closeServer", () => {
     expect(answered).toContain("/third");
   });
 
-  it("closes at once the connection of a request that only waits, and lets one that works finish", async () => {
-    let waitingArrived = () => {},
-      workingArrived = () => {},
-      release = () => {};
-    const bothArrived = Promise.all([
-      new Promise<void>((resolve) => (waitingArrived = resolve)),
-      new Promise<void>((resolve) => (workingArrived = resolve)),
-    ]);
+  /** A server whose `/wait` requests answer only when their signal aborts, and whose `/work` requests answer once released. */
+  async function waitingAndWorking() {
+    const arrived = new Map<string, () => void>();
+    const arrival = (path: string) => new Promise<void>((resolve) => arrived.set(path, resolve));
+    const aborted = new Map<string, AbortSignal>();
+    let release = () => {};
     const held = new Promise<void>((resolve) => (release = resolve));
-    let endedAs: unknown = "still waiting";
     const server = serveFetchHandler({
-      waits: (url) => url.pathname === "/wait",
+      waits: (url) => url.pathname.startsWith("/wait"),
       handler: async (request) => {
-        if (new URL(request.url).pathname === "/wait") {
-          waitingArrived();
-          // A long poll: it answers only when there is news, and there is none.
-          await new Promise<void>((resolve) =>
-            request.signal.addEventListener("abort", () => resolve(), { once: true }),
-          );
-          endedAs = request.signal.reason;
-          return new Response(null, { status: 204 });
+        const path = new URL(request.url).pathname;
+        arrived.get(path)?.();
+        if (path.startsWith("/wait")) {
+          // A long poll: it answers when there is news, or when its request ends.
+          if (path !== "/wait-with-news")
+            await new Promise<void>((resolve) =>
+              request.signal.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          aborted.set(path, request.signal);
+          return new Response(path);
         }
-        workingArrived();
         await held;
-        return new Response("done");
+        return new Response(path);
       },
       maxBodyBytes: () => 1024,
       oversized: () => new Response(null, { status: 413 }),
@@ -138,30 +139,76 @@ describe("closeServer", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no TCP port");
-    const get = (path: string) =>
-      new Promise<number | "closed">((resolve) => {
-        httpRequest({ host: "127.0.0.1", port: address.port, path }, (response) => {
-          response.resume();
-          response.once("end", () => resolve(response.statusCode ?? 0));
-        })
-          .once("error", () => resolve("closed"))
-          .end();
-      });
-    const waiting = get("/wait");
-    const working = get("/work");
-    await bothArrived;
+    /** One connection that sends `paths` one after another without waiting for answers. */
+    const pipeline = (...paths: string[]) => {
+      const socket = connect(address.port, "127.0.0.1");
+      let answered = "";
+      socket.setEncoding("utf8").on("data", (chunk: string) => (answered += chunk));
+      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      const send = (...more: string[]) =>
+        socket.write(
+          more
+            .map((path) => ["GET " + path + " HTTP/1.1", "Host: 127.0.0.1", "", ""].join(LINE_END))
+            .join(""),
+        );
+      send(...paths);
+      return { send, closed, answered: () => answered };
+    };
+    return { server, arrival, aborted, release: () => release(), pipeline };
+  }
+
+  it("closes at once the connection of a request that only waits, and lets one that works finish", async () => {
+    const { server, arrival, aborted, release, pipeline } = await waitingAndWorking();
+    const arrivals = Promise.all([arrival("/wait"), arrival("/work")]);
+    const waiting = pipeline("/wait");
+    const working = pipeline("/work");
+    await arrivals;
 
     const startedAt = Date.now();
     const closing = closeServer(server, 5_000);
-    expect(await waiting).toBe("closed");
+    await waiting.closed;
     // Well under the 5 s grace period, which the waiting request would have used up.
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(waiting.answered()).toBe("");
     // The handler sees a shutdown, not a client that left.
-    expect(endedAs).not.toBeInstanceOf(ClientClosedRequest);
+    await vi.waitFor(() => expect(aborted.get("/wait")?.aborted).toBe(true));
+    expect(aborted.get("/wait")!.reason).not.toBeInstanceOf(ClientClosedRequest);
     release();
-    expect(await working).toBe(200);
-    await closing;
+    await Promise.all([closing, working.closed]);
+    expect(working.answered()).toMatch(/^HTTP\/1\.1 200/u);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("keeps a connection that carries a working request beside a waiting one until the work is answered", async () => {
+    const { server, arrival, aborted, release, pipeline } = await waitingAndWorking();
+    const arrivals = Promise.all([arrival("/work"), arrival("/wait")]);
+    const both = pipeline("/work", "/wait");
+    await arrivals;
+
+    const startedAt = Date.now();
+    const closing = closeServer(server, 5_000);
+    // Longer than the 100 ms between the server's passes over its connections.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(aborted.has("/wait")).toBe(false);
+    expect(both.answered()).toBe("");
+    release();
+    await Promise.all([closing, both.closed]);
+    expect(both.answered()).toMatch(/^HTTP\/1\.1 200/u);
+    expect(both.answered()).toContain("/work");
+    // The waiting request went with the next pass, long before the grace period.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("still closes a connection whose first waiting request was answered while a second waits", async () => {
+    const { server, arrival, pipeline } = await waitingAndWorking();
+    const arrivals = Promise.all([arrival("/wait-with-news"), arrival("/wait")]);
+    const waits = pipeline("/wait-with-news", "/wait");
+    await arrivals;
+    await vi.waitFor(() => expect(waits.answered()).toContain("/wait-with-news"));
+
+    const startedAt = Date.now();
+    await Promise.all([closeServer(server, 5_000), waits.closed]);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it("force-closes a stalled response after the grace period", async () => {

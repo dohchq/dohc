@@ -7,7 +7,7 @@ import {
   installShutdown,
   parseGracePeriodMs,
   serveFetchHandler,
-  waitsOnHold,
+  waitsOnQuery,
 } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 import { createDeviceControlBridge } from "./deviceControlBridge";
@@ -87,7 +87,7 @@ const server = serveFetchHandler({
         : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
   // A page keeps a read open for up to 30 s to hear of a change: the log, chat, and comment activity.
-  waits: waitsOnHold,
+  waits: waitsOnQuery("hold"),
   oversized: (url) =>
     url.pathname === "/api/named-chat/messages"
       ? Response.json(

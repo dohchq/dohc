@@ -70,18 +70,26 @@ const REFUSAL_LINGER_MS = 2_000;
 const READ_FIRST_BYTES = 64 * 1024;
 
 /**
- * Whether a request is a read that waits for news. The relay and the share service take the longest time
- * such a read may wait in its `hold` query, in milliseconds.
+ * Says whether a request is a read that waits for news. Such a read names the longest time it may wait, in
+ * milliseconds, in one of `fields` of its query.
  */
-export const waitsOnHold = (url: URL, method: string): boolean =>
-  method === "GET" && Number(url.searchParams.get("hold")) > 0;
+export const waitsOnQuery =
+  (...fields: string[]) =>
+  (url: URL, method: string): boolean =>
+    method === "GET" && fields.some((field) => Number(url.searchParams.get(field)) > 0);
 
-// The connections of requests that only wait, for each server.
-const waitingConnections = new WeakMap<Server, Set<Socket>>();
+// For each server, the requests each of its connections has not answered yet: those that only wait, and the rest.
+type Unanswered = { waiting: number; working: number };
+const unansweredByServer = new WeakMap<Server, Map<Socket, Unanswered>>();
 
-/** Closes the connection of every request that only waits. `closeServer` calls it once the server has stopped listening. */
+/**
+ * Closes each connection whose unanswered requests all only wait. One that also carries a working request is
+ * left alone: closing it would end that request too. `closeServer` calls this once the server has stopped
+ * listening, and again while it closes.
+ */
 export function closeWaitingConnections(server: Server): void {
-  for (const socket of waitingConnections.get(server) ?? []) socket.destroy();
+  for (const [socket, unanswered] of unansweredByServer.get(server) ?? [])
+    if (unanswered.waiting > 0 && unanswered.working === 0) socket.destroy();
 }
 
 /**
@@ -106,7 +114,7 @@ const IDLE_CONNECTION_MS = 150_000;
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   let bytesInFlight = 0;
   const callerBytesInFlight = new Map<string, number>();
-  const waiting = new Set<Socket>();
+  const unanswered = new Map<Socket, Unanswered>();
   // Headers stay bounded to 60s; the adapter or a streaming handler bounds the body.
   const server = createServer(
     { requestTimeout: 0, headersTimeout: 60_000, keepAliveTimeout: IDLE_CONNECTION_MS },
@@ -120,10 +128,17 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       }
       const arrivedAtMs = Date.now();
       const method = incoming.method ?? "GET";
-      if (options.waits?.(url, method)) {
+      if (options.waits) {
+        // A connection can carry several unanswered requests at once, so each is counted, not the connection.
         const { socket } = incoming;
-        waiting.add(socket);
-        outgoing.once("close", () => waiting.delete(socket));
+        const kind = options.waits(url, method) ? "waiting" : "working";
+        const counts = unanswered.get(socket) ?? { waiting: 0, working: 0 };
+        unanswered.set(socket, counts);
+        counts[kind] += 1;
+        outgoing.once("close", () => {
+          counts[kind] -= 1;
+          if (counts.waiting === 0 && counts.working === 0) unanswered.delete(socket);
+        });
       }
       let answered = false;
       let reserved = 0;
@@ -286,7 +301,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       } else start(body);
     },
   );
-  waitingConnections.set(server, waiting);
+  unansweredByServer.set(server, unanswered);
   return server;
 }
 

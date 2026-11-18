@@ -31,7 +31,7 @@ import {
   jsonResponse,
   parseGracePeriodMs,
   serveFetchHandler,
-  waitsOnHold,
+  waitsOnQuery,
 } from "@dohc/service-http";
 import { Pool, type QueryConfig } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
@@ -1022,8 +1022,10 @@ setInterval(() => {
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
-  // Reads kept open to hear of a change: a page's, sent on by the share service, and a session's operation changes.
-  waits: waitsOnHold,
+  // Reads kept open to hear of a change. `hold`: a page's log, chat and comment activity, sent on by the share
+  // service, presence, and a session's operation changes. `wait`: a computer's chat wakes and a session's notices.
+  // `waitMs`: a computer's button presses.
+  waits: waitsOnQuery("hold", "wait", "waitMs"),
   requestLog: SYNC_RELAY_REQUEST_LOG,
   bodiesInFlight: BODIES_IN_FLIGHT,
   busy: () => errorBody("server_busy"),
