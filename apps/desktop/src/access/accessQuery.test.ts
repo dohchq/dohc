@@ -29,6 +29,7 @@ const reach = (role: "admin" | "member", level: "view" | "comment" | "edit") => 
   role,
   level,
   rules: [],
+  groups: [],
 });
 const input = (source = listing()) => ({
   observation: { listing: source, checkedAtMs: 100, freshness: "fresh" as const },

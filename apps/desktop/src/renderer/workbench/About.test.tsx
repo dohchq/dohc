@@ -306,7 +306,7 @@ describe("About Access", () => {
       status: "active" as const,
       selector: { kind: "workspace" as const },
       access,
-      memberReach: { role: "member" as const, level: access, rules: [] },
+      memberReach: { role: "member" as const, level: access, rules: [], groups: [] },
     });
     const listing = readStoredRoster({
       grants: [
