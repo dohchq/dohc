@@ -420,6 +420,35 @@ it("leaves no list a save was writing when a different account signed in", async
   await expect(saving).rejects.toThrow(/owner changed/);
   expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toEqual([]);
 });
+it.each([
+  [
+    "a sign-in starts",
+    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => registry.sessionChanging(true),
+  ],
+  [
+    "dohc stops",
+    (registry: ReturnType<typeof createOwnerDatasetCopyRegistry>) => registry.closeAll(),
+  ],
+])("keeps the signed-out account's saved list when %s during a save", async (_, interrupt) => {
+  const f = await fixture();
+  const input = { ...f.input, origin: "https://relay" };
+  await f.registry.savedList(input).write([]);
+  await f.registry.credentialsChanged(null);
+  const reached = deferred<void>(),
+    release = deferred<void>();
+  files.holdFolderIn = {
+    parent: "dataset-copies",
+    reached: reached.resolve,
+    until: release.promise,
+  };
+  const saving = f.registry.savedList(input).write([]);
+  await reached.promise;
+  await interrupt(f.registry);
+  release.resolve();
+  await saving.catch(() => undefined);
+  // Neither replaced the account, whose list still reads offline and after a restart.
+  expect(await readdir(join(f.input.rootPath, ".dohc", "local", "dataset-copies"))).toHaveLength(1);
+});
 it("records what an account change will remove before any copy closes, so a stop part way leaves it for the next start", async () => {
   const f = await fixture(),
     copy = await f.registry.get(f.input),
