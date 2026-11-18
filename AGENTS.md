@@ -46,7 +46,7 @@ The desktop must feel native. Being slower than Notion in a browser defeats a re
 
 ### 3. Collaboration on the work itself
 
-The engine gives the workspace memory. Collaboration lets humans and agents carry that memory forward together, with context, history, permissions, and provenance. One person with their agents is already collaborating and should find dohc useful alone. Adding people extends the same work, with no exports, copied context, or second system. It is more than several people typing into one document.
+The engine gives the workspace memory. Collaboration lets humans and agents carry that memory forward together, with context, history, permissions, and provenance. One person with their agents is already collaborating and should find dohc useful alone. Routine work stays useful without programming or an agent, and documents, Collections, and chat stay useful without an app. Adding people extends the same work, with no exports, copied context, or second system. It is more than several people typing into one document.
 
 ### 4. Built for humans and agents
 
@@ -66,7 +66,7 @@ Apps are source-backed, inspectable, dynamic, and limited to the data and capabi
 
 ### 8. Rigid substrate, flexible workflow
 
-Ownership, authentication, permissions, sync, history, provenance, links, and isolation are strict. Folders, tools, rituals, agents, and workflows are the user's choice. People customize dohc through a settings file and pinned apps, and updates keep both. The core ships no prescribed workflows, hardcoded business apps, or mandatory templates.
+Ownership, authentication, permissions, sync, history, provenance, links, and isolation are strict. Folders, tools, rituals, agents, and workflows are the user's choice. App source and Collection automation definitions live in the workspace for any agent to read and change. Keep capabilities composable: changing sharing, apps, or chat never requires changing how the others store state. People customize dohc through a settings file and pinned apps, and updates keep both. The core ships no prescribed workflows, hardcoded business apps, or mandatory templates.
 
 dohc is not an AI wrapper, company brain, Notion clone, dashboard generator, disconnected app builder, chat overlay, or template marketplace.
 
@@ -88,7 +88,7 @@ Never weaken these for convenience.
 - **A slow response for workspace A never repaints workspace B.** In renderer components and hooks, read workspace data with `useWorkspaceQuery`. Guard any other async result with a request token or abort signal. `scripts/check-bridge-reads.mjs` fails new raw bridge reads.
 - **Failures show as a bottom-right toast and a Notices row**, with Try again and copy. A top bar is only for whole-workspace degradation. [dohc-interface](.agents/skills/dohc-interface/SKILL.md) lists the errors that show in place instead.
 - **Reversible changes have a visible way back.** Warn before an irreversible one. Show who made a change, what it can reach, and how to undo it, so people can oversee work nobody read.
-- **One operation per action.** Human and agent entry points route to one shared operation. Entry points handle input, and the authoritative service checks permissions. Declare a read in its family's `*Declarations.ts` and a write in `*WriteDeclarations.ts` in `packages/workspace-contracts/src`. After adding or changing one, run `pnpm write:operation-pins` and read the pin diff closely: it is the review gate for what each door exposes.
+- **One operation per action.** Human and agent entry points route to one shared operation. Entry points handle input, and the authoritative service checks permissions. Declare a read in its family's `*Declarations.ts` and a write in `*WriteDeclarations.ts` in `packages/workspace-contracts/src`. Give each write's socket admission rules a refusal test of their own, because the types check that a rule is allowed, not that it protects the write. After adding or changing a declaration, run `pnpm write:operation-pins` and read the pin diff closely: it is the review gate for what each door exposes.
 - **Measure limits that reject work.** Before adding a limit that rejects valid work, measure healthy work and set the limit beyond it. Developers will not always read the code, but their agents will read the errors. A rejection names the constraint, the limit, its unit, and the observed usage when known.
 
 ## Ways to hurt yourself
@@ -106,13 +106,13 @@ The most common gap is a change that works on the path you tested and is missing
 - **Local and shared.** Offline use, sharing, and a collaborator's permissions and sync. A pass in the owner's workspace proves neither.
 - **State and recovery.** Saved state, restart, undo, failure, and switching workspaces. A success message proves nothing about persistence.
 - **Platforms and the phone.** Windows, macOS, Linux, and `apps/mobile` where affected. Say what you could not check.
-- **Finish.** Loading, failure, empty states, both themes, keyboard access, and reduced motion. Read [dohc-interface](.agents/skills/dohc-interface/SKILL.md) before changing anything a person sees.
+- **Finish.** Loading, failure, empty states, both themes, keyboard access, and reduced motion.
 
 ## Working in the code
 
 - **No backward compatibility.** We have no users yet, so prefer the best current design. Replace old contracts and update callers, tests, fixtures, and docs together. Remove aliases, dual formats, fallbacks, and dead paths. Add a migration only when asked.
 - **Engine migrations that shipped are append-only.** If a build cannot migrate a store, it stops that workspace until a fixed build opens it.
-- **Effect** belongs in Electron main, services, and Node-only packages where it removes manual cancellation, retry, or resource handling. Keep Promise interfaces for callers that don't use Effect, and keep renderer and preload imports Effect-free. Before keeping a conversion, measure its bundle size and first-load time against the old one.
+- **Effect** belongs in Electron main, services, and Node-only packages where it removes manual cancellation, retry, or resource handling. Keep Promise interfaces for callers that don't use Effect, and keep renderer and preload imports Effect-free. Effect interruption does not stop the Promise or native work underneath, so keep native and OS resource limits, wait for owned resources to close before returning, and keep the original error ahead of cleanup failures. Before keeping a conversion, measure its bundle size and first-load time against the old one.
 - **Comments** say the current constraint and what breaks without it. If you need a paragraph-long comment to justify why a workaround is OK, the code is wrong. Fix the code.
 - The desktop does not need Postgres.
 
