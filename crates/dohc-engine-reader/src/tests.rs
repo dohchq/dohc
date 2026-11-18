@@ -230,17 +230,18 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         };
         assert_eq!(keeps_meaning, expected);
         assert_eq!(Some(checker_identity), reader.checker_identity());
-        let wrong = CheckMarkdownWitness {
+        // A projection an older writer recorded doesn't change the verdict:
+        // the source's meaning in today's projection decides.
+        let older = CheckMarkdownWitness {
             projection_sha256: wire::sha(b"different projection"),
             ..input
         };
-        assert!(matches!(
-            run(reader.check_markdown_witness(wrong)),
-            Ok(Outcome::WitnessChecked {
-                keeps_meaning: false,
-                ..
-            })
-        ));
+        let Outcome::WitnessChecked { keeps_meaning, .. } =
+            run(reader.check_markdown_witness(older)).unwrap()
+        else {
+            panic!("the real pipe must answer the witness request");
+        };
+        assert_eq!(keeps_meaning, expected);
     }
     finish(&mut reader);
 }

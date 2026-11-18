@@ -137,7 +137,27 @@ it("settles a session by its witness when the source keeps its meaning, edited o
   expect(witnessKeepsMeaning(seeded("# Plan\n\nText."))).toBe(true);
 });
 
-it("checks the whole session when its witness records a lossy source, or a projection the import no longer gives", () => {
+it("keeps a note editable after an update changes how dohc writes it, while its file keeps its meaning", () => {
+  // A hand-padded table, first opened by a build whose writer padded each
+  // column wider than today's writer does.
+  const source = "| name |\n|---|\n| snake_case |\n";
+  const today = yDocToMarkdown(markdownToYDoc(source));
+  const older = today.replaceAll(" |", "    |");
+  expect(older).not.toBe(today);
+  expect(sameMarkdownMeaning(source, older)).toBe(true);
+  const doc = seeded(source);
+  const meta = doc.getMap("meta");
+  meta.set("dohcMarkdownSourceProjectionSha256", createHash("sha256").update(older).digest("hex"));
+
+  expect(witnessKeepsMeaning(doc)).toBe(true);
+  expect(isLossyDocument(doc, meta.get("dohcMarkdownSourceSha256") as string)).toBe(false);
+  // The meaning check still holds a source today's writer would change.
+  const lossy = seeded("<details>\n\nHidden.\n</details>\n");
+  lossy.getMap("meta").set("dohcMarkdownSourceProjectionSha256", "0".repeat(64));
+  expect(witnessKeepsMeaning(lossy)).toBe(false);
+});
+
+it("checks the whole session when its witness records a lossy source", () => {
   const lossy = seeded("<details>\n\nHidden.\n</details>\n");
   expect(witnessKeepsMeaning(lossy)).toBe(false);
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true);
@@ -147,12 +167,15 @@ it("checks the whole session when its witness records a lossy source, or a proje
   Y.applyUpdate(reopened, Y.encodeStateAsUpdate(lossy));
   expect(isLossyDocument(reopened, null)).toBe(true);
   expect(isLossyDocument(reopened, "converted-head")).toBe(false);
-  const older = seeded("Title\n=====\n\n* one\n");
-  older.getMap("meta").set("dohcMarkdownSourceProjectionSha256", "0".repeat(64));
-  expect(witnessKeepsMeaning(older)).toBe(false);
   const partial = seeded("Title\n=====\n\n* one\n");
   partial.getMap("meta").delete("dohcMarkdownSourceProjectionSha256");
   expect(witnessKeepsMeaning(partial)).toBe(false);
+  // As the engine reads a witness, a projection must be a digest.
+  for (const malformed of ["", "invalid", "g".repeat(64), "A".repeat(64)]) {
+    const doc = seeded("Title\n=====\n\n* one\n");
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", malformed);
+    expect(witnessKeepsMeaning(doc)).toBe(false);
+  }
   const mismatched = seeded("Title\n=====\n\n* one\n");
   mismatched.getMap("meta").set("dohcMarkdownSource", "Title\n=====\n\n* two\n");
   expect(witnessKeepsMeaning(mismatched)).toBe(false);
