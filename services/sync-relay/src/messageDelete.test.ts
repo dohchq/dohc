@@ -699,6 +699,54 @@ describe("what only the relay writes", () => {
   });
 });
 
+describe("a deleted message's poll", () => {
+  type Pulled = { ops: Array<{ opKind: string; payload: Record<string, unknown> }> };
+  const poll = (messageId: string, threadId: string) =>
+    logOp("chat.decision.set", {
+      threadId,
+      messageId,
+      state: "resolved",
+      atMs: 5,
+      options: ["the dock", "the pier"],
+      chosenOption: "the pier",
+    });
+  const pollOf = (ops: Pulled["ops"], messageId: string) =>
+    ops.find((op) => op.opKind === "chat.decision.set" && op.payload.messageId === messageId)
+      ?.payload;
+
+  it("serves a later member the decision on a deleted message without its choices, and the owner all of it", async () => {
+    const { h } = await seed();
+    await ownerAppend(h, [
+      ownerMessage("m-kept", "t-team", "where do we meet?"),
+      poll("msg-team", "t-team"),
+      poll("msg-comment", "t-comment"),
+      poll("m-kept", "t-team"),
+    ]);
+    expect((await deleteMessage(h, OWNER, "msg-team", "t-team")).status).toBe(200);
+    expect((await deleteMessage(h, OWNER, "msg-comment", "t-comment")).status).toBe(200);
+    const ana = await member(h, "ana");
+    const pulled = await h(request("ana", `/sync/shares/${ana.shareId}/log?since=0&limit=500`));
+    expect(pulled.status, await pulled.clone().text()).toBe(200);
+    const { ops } = (await json(pulled)) as Pulled;
+    for (const [messageId, threadId] of [
+      ["msg-team", "t-team"],
+      ["msg-comment", "t-comment"],
+    ])
+      expect(pollOf(ops, messageId)).toEqual({ threadId, messageId, state: "resolved", atMs: 5 });
+    expect(pollOf(ops, "m-kept")).toMatchObject({
+      options: ["the dock", "the pier"],
+      chosenOption: "the pier",
+    });
+
+    const owner = await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`));
+    expect(owner.status, await owner.clone().text()).toBe(200);
+    expect(pollOf(((await json(owner)) as Pulled).ops, "msg-team")).toMatchObject({
+      options: ["the dock", "the pier"],
+      chosenOption: "the pier",
+    });
+  });
+});
+
 describe("a deleted first message's title", () => {
   type Pulled = {
     ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;

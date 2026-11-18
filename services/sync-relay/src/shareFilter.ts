@@ -1415,27 +1415,37 @@ export function filterOpForShare(
   // For a group: serve only this half. A page is read one half at a time.
   half?: "chat" | "files",
 ): ShareOpDecision {
-  return withoutDeletedTitle(
+  return withoutDeletedWords(
     shareReadDecision(selector, opKind, payloadJson, chat, half),
     opKind,
     chat,
   );
 }
 
-// A thread's title often repeats its first message's first line. Once the
-// relay deletes that message, a reader reads the thread with no title, and
-// each copy shows its fallback. Only reads blank it: the stored create keeps
-// the title, so a retry of the create and the owner's journal still match it.
-function withoutDeletedTitle(
+// Two ops repeat a deleted message's words: a thread's title often repeats
+// its first message's first line, and a decision names its poll's choices.
+// Once the relay deletes the message, a reader reads the thread with no title,
+// which each copy replaces with its fallback, and the decision with no
+// choices. Only reads drop them: the stored ops keep them, so a retry and the
+// owner's journal still match.
+function withoutDeletedWords(
   decision: ShareOpDecision,
   opKind: string,
   chat: ChatShareThreadResolver | undefined,
 ): ShareOpDecision {
-  if (!decision.allowed || opKind !== "chat.thread.create" || !chat) return decision;
+  if (!decision.allowed || !chat) return decision;
   const served = asRecord(decision.payload);
   const threadId = collectString(served?.threadId);
-  if (!served || !threadId || !chat.threadFirstMessageDeleted(threadId)) return decision;
-  return { ...decision, payload: { ...served, title: "" } };
+  if (!served || !threadId) return decision;
+  if (opKind === "chat.thread.create")
+    return chat.threadFirstMessageDeleted(threadId)
+      ? { ...decision, payload: { ...served, title: "" } }
+      : decision;
+  const messageId = collectString(served.messageId);
+  if (opKind !== "chat.decision.set" || !messageId || !chat.messageDeleted(threadId, messageId))
+    return decision;
+  const { options: _options, chosenOption: _chosenOption, ...rest } = served;
+  return { ...decision, payload: rest };
 }
 
 function shareReadDecision(
