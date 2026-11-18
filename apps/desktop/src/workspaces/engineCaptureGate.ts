@@ -8,6 +8,12 @@ import type {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 
+// While a note's live editing is paused, the server host turns each engine
+// record into one delivery, and the relay takes about one a second. A record
+// per keystroke left thousands waiting at Resume. One a second keeps up, and
+// a crash loses at most that second of typing.
+const JOURNAL_RECORD_INTERVAL_MS = 1_000;
+
 // The captureFor gate (single owner): the engine store under .dohc/engine/ is
 // the workspace's sole history recorder. The daemon is required, not
 // optional: `startRustEngineDaemon` quits the app when it cannot start, before
@@ -59,6 +65,7 @@ export function captureForWorkspace(
       onRecoveryUnavailable: hooks.onRecoveryUnavailable,
       onSecretKeyUnavailable: hooks.onSecretKeyUnavailable,
       rustEngineSessions,
+      journalRecordIntervalMs: JOURNAL_RECORD_INTERVAL_MS,
       ...captureOptions,
     }),
   };

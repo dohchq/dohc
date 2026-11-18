@@ -70,6 +70,8 @@ export interface EngineYdocProviderSessionOptions {
   // A framed transport should additionally own id allocation as the hard
   // guarantee.
   adapter?: YdocLiveAdapter;
+  // Forwarded to the private adapter; a shared adapter keeps its own.
+  journalRecordIntervalMs?: number;
   workspace: string;
   versionId: string;
   path: string;
@@ -193,7 +195,14 @@ export async function openEngineYdocProviderSession(
   options: EngineYdocProviderSessionOptions,
 ): Promise<EngineYdocProviderSession> {
   const ownsAdapter = options.adapter === undefined;
-  const adapter = options.adapter ?? new YdocLiveAdapter(options.transport);
+  const adapter =
+    options.adapter ??
+    new YdocLiveAdapter(
+      options.transport,
+      options.journalRecordIntervalMs === undefined
+        ? {}
+        : { journalRecordIntervalMs: options.journalRecordIntervalMs },
+    );
   let session: YdocAdapterSession;
   try {
     session = await adapter.openSession({
