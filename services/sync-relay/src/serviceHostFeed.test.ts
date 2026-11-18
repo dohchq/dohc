@@ -18,6 +18,7 @@ import { stableJsonStringify } from "./canonicalJson";
 import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollment";
+import { pauseLiveRoom, recordLiveRoomCopyWritten, resumeLiveRoom } from "./storage/liveRoomPauses";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -1107,6 +1108,29 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect(release(binding.objectId)).toMatchObject({ enabled: false, retired: true });
   expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
   expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
+});
+
+it("cuts a room-paused note's reads until its owner resumes it", async () => {
+  const f = await fixture();
+  const storage = f.storage as StorageContext,
+    copy = new Uint8Array([1, 2, 3]);
+  const read = () => f.storage.readServiceHostFeedScope(ws)!;
+  expect([...read().shared.keys()]).toEqual([binding.objectId]);
+  const pauseId = pauseLiveRoom(storage, {
+    document: binding,
+    cause: "failing",
+    refusal: null,
+    named: [],
+    copy,
+    pausedAtMs: 1,
+  });
+  // Here no activation retires, so only the pause keeps the note out, as it does once a retirement closed.
+  expect(read().settling.size).toBe(0);
+  expect([...read().hosted.keys()]).toEqual([binding.objectId]);
+  expect([...read().shared.keys()]).toEqual([]);
+  expect(recordLiveRoomCopyWritten(storage, ws, pauseId, sha256Hex(copy))).toBe("recorded");
+  expect(resumeLiveRoom(storage, ws, pauseId)).toBe("resumed");
+  expect([...read().shared.keys()]).toEqual([binding.objectId]);
 });
 
 it("keeps the hosted credential alive for an undrained Stop and then drops it, never granting ordinary routes", async () => {
