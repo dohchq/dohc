@@ -4,13 +4,19 @@ import { openEditLinkOnServer } from "./helpers/editLinkServer";
 // The open note sorts after every other, so a host that brings notes back in path order reaches it last.
 const PATH = "zz-open.md";
 const PARAGRAPH = "An ordinary paragraph.";
-const OTHER_NOTES = Number(process.env.DOHC_RESTART_NOTES ?? 25);
+/**
+ * A measurement, run by setting `DOHC_RESTART_NOTES` to how many other notes the link covers. It prints how
+ * long the open note took to be editable again. The order itself is tested in `servicePassOrder.test.ts` and
+ * `serviceLiveHost.test.ts`.
+ */
+const OTHER_NOTES = Number(process.env.DOHC_RESTART_NOTES ?? 0);
 const OTHERS = Array.from({ length: OTHER_NOTES }, (_, index) => ({
   path: `note-${String(index).padStart(3, "0")}.md`,
   contents: `# Note ${String(index)}\n\nA line of text.\n`,
 }));
 
 test("@server-restart-many after a relay restart, the note someone has open is editable again before the server has brought back every other linked note", async () => {
+  test.skip(OTHER_NOTES === 0, "A measurement. Set DOHC_RESTART_NOTES to run it.");
   test.setTimeout(1_200_000);
   const server = await openEditLinkOnServer({
     workspaceId: "server-restart-many-notes",
