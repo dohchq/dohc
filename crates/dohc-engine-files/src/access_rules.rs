@@ -715,14 +715,17 @@ impl<'a> Change<'a> {
             work.take(depth(key) + 1)?;
             for above in chain(key).filter(|above| above != key) {
                 for &point in by_key.get(above).into_iter().flatten() {
+                    // Charged before it is kept: many spellings of one key
+                    // above many twins would otherwise grow this unbounded.
+                    work.take(1)?;
                     under.entry(point).or_default().push(index);
                 }
             }
         }
         for (folder, found) in under {
             // A person no rule here names reaches what a member none names
-            // does.
-            work.take(2 * (depth(folder) + 1 + found.len()))?;
+            // does. Each found twin was charged once when it was kept.
+            work.take(2 * (depth(folder) + 1) + found.len())?;
             let rules: Vec<&'a AccessRule> = chain(folder)
                 .chain(found.iter().map(|&twin| twins[twin].0))
                 .flat_map(|at| [before.get(at), after.get(at)])
