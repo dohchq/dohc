@@ -6762,6 +6762,11 @@ const localDatasetHostFor = async (
         localPersonId: localUserId,
         holder: collectionsHolderCheck(workspace.workspaceId),
         collectionsServer: () => serverCollectionsTransport(workspace.workspaceId),
+        // Made here as the workspace started syncing: the send that started then has already looked.
+        keptAfterSyncStarted: () => {
+          const entry = findWorkspace(workspace.workspaceId);
+          if (entry) sendCollectionsUpFor({ ...entry, attachmentId: attachment.attachmentId });
+        },
         trashItem: (path) => shell.trashItem(path),
         runtime: {
           launch: createDesktopAppRuntimeLauncher(utilityProcess, true),

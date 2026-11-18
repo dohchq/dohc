@@ -165,12 +165,15 @@ export function createCollectionsSendUp(input: {
     waits: ReadonlyMap<string, Promise<Failure>>;
     done: Promise<unknown>;
   } | null;
-  let current: { run: Promise<Started>; settled: boolean } | null = null;
-  async function begin(finish: () => void): Promise<Started> {
+  type SendUp = { run: Promise<Started>; settled: boolean; looked: boolean };
+  let current: SendUp | null = null;
+  async function begin(sendUp: SendUp): Promise<Started> {
+    const finish = () => (sendUp.settled = true);
     const local = await input.open();
     const ids = local
       ? local.keptDatasetIds().filter((id) => local.transferStatus(id)?.state !== "imported")
       : [];
+    sendUp.looked = true;
     if (!local || ids.length === 0) {
       finish();
       return null;
@@ -206,13 +209,20 @@ export function createCollectionsSendUp(input: {
     );
     return { waits, done };
   }
+  // A send that hasn't looked at this computer's Collections yet takes this
+  // start too. One that has may miss a Collection kept since, so another
+  // send follows it.
   function start(): Promise<unknown> {
-    if (current && !current.settled) return current.run;
-    const sendUp: { run: Promise<Started>; settled: boolean } = {
-      run: Promise.resolve(null),
-      settled: false,
-    };
-    sendUp.run = begin(() => (sendUp.settled = true));
+    if (current && !current.settled && !current.looked)
+      return current.run.then((started) => started?.done);
+    const running = current && !current.settled ? current : null;
+    const sendUp: SendUp = { run: Promise.resolve(null), settled: false, looked: false };
+    sendUp.run = running
+      ? running.run
+          .then((started) => started?.done)
+          .catch(() => undefined)
+          .then(() => begin(sendUp))
+      : begin(sendUp);
     sendUp.run.catch(() => (sendUp.settled = true));
     current = sendUp;
     return sendUp.run.then((started) => started?.done);

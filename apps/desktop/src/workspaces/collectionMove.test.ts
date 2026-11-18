@@ -423,3 +423,40 @@ it("stops an attachment's send when the workspace closes, and never sends the re
   expect(outcome).toBe("stopped");
   expect(reported).not.toHaveBeenCalled();
 });
+
+it("sends a Collection kept after a running send looked, once that send ends", async () => {
+  const kept = ["a"];
+  const asked: string[] = [];
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => [...kept],
+        transferStatus: () => null,
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () =>
+      ({
+        // Each Collection asks the server once; "a" waits until the test answers.
+        server: async () => {
+          asked.push(kept[asked.length]!);
+          if (asked.length === 1) await answered;
+          throw Error("The server refused.");
+        },
+        signal: new AbortController().signal,
+      }) as never,
+    reported() {},
+  });
+  void sendUp.start().catch(() => undefined);
+  await vi.waitFor(() => expect(asked).toEqual(["a"]));
+  // "b" is kept here after the running send read its list, as a Collection
+  // made just as the workspace starts syncing is.
+  kept.push("b");
+  void sendUp.start().catch(() => undefined);
+  const read = sendUp.sent("b", new AbortController().signal);
+  answer();
+  await expect(read).rejects.toThrow("The server refused.");
+  expect(asked).toContain("b");
+});
