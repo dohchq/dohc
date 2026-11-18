@@ -19,22 +19,76 @@ import { accountIsFenced } from "./storage/accountDeletion";
 import { collectionFilePaths } from "./storage/collectionFilePresence";
 import type { StorageContext } from "./storage/context";
 
-// The phone reads its account's transactional Collections through each table's own read operation, as the desktop
-// does. It only reads. The account route has checked the sign-in, its fence, the owner and Show on phone. A Collection
-// that is archived, still importing, or whose dataset.json is missing or under a hidden path answers as one that
-// doesn't exist.
+// The phone reads its account's transactional Collections through each table's own read operation, and changes one
+// field of a record through the field's edit operation, as the desktop does. The account route has checked the
+// sign-in, its fence, the owner and Show on phone. A Collection that is archived, still importing, or whose
+// dataset.json is missing or under a hidden path answers as one that doesn't exist.
 
 export const PHONE_COLLECTION_PAGE = 50;
 
-const OPERATIONS = new Set(["collections", "collection", "collectionRecords"]);
+const OPERATIONS = new Set(["collections", "collection", "collectionRecords", "collectionEdit"]);
 
-/** They read the relay's dataset host, so they need no server copy. */
+/** They reach the relay's dataset host, so they need no server copy. */
 export function isPhoneCollectionOperation(name: string): boolean {
   return OPERATIONS.has(name);
 }
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FILE_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** The field types the phone edits: not a relation or an attachment, which need a picker it doesn't have. */
+const EDITABLE = new Set(["text", "number", "checkbox", "date", "select", "multi-select", "url"]);
+/** What the host says when a request names rules it has replaced: nothing ran, and the same request never can. */
+const RULES_REPLACED = "The Collection's rules changed. Its owner must approve this access again.";
+const RULES_DISALLOW =
+  "The Collection's rules no longer allow this change, so dohc did not save it.";
+const MAX_TEXT = 16 * 1024;
+
+const isRecordId = (value: unknown): value is string | number =>
+  (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
+  (typeof value === "number" && Number.isSafeInteger(value));
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+
+type DescribedField = DatasetDescription["tables"][number]["fields"][number];
+
+/** Whether `value` is one the field's type takes, as the generated operations check it. Null empties the field. */
+function fits(field: DescribedField, value: unknown): value is AppBackendJson {
+  if (field.type === "button") return false;
+  if (value === null) return field.type !== "checkbox";
+  const options = field.options ?? [];
+  switch (field.type) {
+    case "text":
+      return typeof value === "string" && value.length <= MAX_TEXT;
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "checkbox":
+      return typeof value === "boolean";
+    case "date":
+      return (
+        typeof value === "string" &&
+        DAY.test(value) &&
+        new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value
+      );
+    case "url":
+      return (
+        typeof value === "string" &&
+        value.length <= MAX_TEXT &&
+        /^https?:\/\/[^\s/?#]+(?:[/?#][^\s]*)?$/i.test(value)
+      );
+    case "select":
+      return typeof value === "string" && options.includes(value);
+    case "multi-select":
+      return (
+        Array.isArray(value) &&
+        value.every((item) => typeof item === "string" && options.includes(item)) &&
+        new Set(value).size === value.length
+      );
+    default:
+      return false;
+  }
+}
 
 function args(value: unknown, required: string[], optional: string[] = []) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -111,6 +165,17 @@ export function createPhoneCollections(options: {
       (operation) =>
         operation.tableId === tableId && operation.kind === "read" && operation.readOnly,
     );
+  // The desktop's choice: the first edit that changes the field. Only a field of a type the phone edits.
+  const editOperation = (description: DatasetDescription, tableId: string, field: DescribedField) =>
+    EDITABLE.has(field.type) && !("generated" in field && field.generated)
+      ? description.operations.find(
+          (operation) =>
+            operation.tableId === tableId &&
+            operation.kind === "edit" &&
+            !operation.readOnly &&
+            operation.fieldIds.includes(field.fieldId),
+        )
+      : undefined;
   // A file still waiting to attach has no name.
   function fileNames(workspaceId: string, datasetId: string, fileIds: ReadonlySet<string>) {
     const names: Record<string, string> = {};
@@ -166,21 +231,33 @@ export function createPhoneCollections(options: {
       return {
         datasetId,
         name: description.name,
+        // The rules this description is of, which a change names. Never the operations or their source.
+        revision: description.revision,
+        revisionSha256: description.revisionSha256,
         tables: description.tables.map((table) => {
           // Only what the read gives, so a field it leaves out never shows as empty or unchecked.
           const read = readOperation(description, table.tableId);
-          const fields = table.fields.flatMap((field) =>
-            field.type === "button" || field.generated || !read?.fieldIds.includes(field.fieldId)
-              ? []
-              : [
-                  {
-                    fieldId: field.fieldId,
-                    name: field.name,
-                    type: field.type,
-                    ...(field.options ? { options: field.options } : {}),
-                  },
-                ],
-          );
+          const fields = table.fields.flatMap((field) => {
+            if (
+              field.type === "button" ||
+              field.generated ||
+              !read?.fieldIds.includes(field.fieldId)
+            )
+              return [];
+            const edit = editOperation(description, table.tableId, field);
+            return [
+              {
+                fieldId: field.fieldId,
+                name: field.name,
+                type: field.type,
+                required: field.required,
+                ...(field.options ? { options: field.options } : {}),
+                // Whether the phone can change it, and whether the change can be undone.
+                editable: edit !== undefined,
+                reversible: edit?.reversible === true,
+              },
+            ];
+          });
           return {
             tableId: table.tableId,
             name: table.name,
@@ -192,29 +269,122 @@ export function createPhoneCollections(options: {
         }),
       };
     }
-    const body = args(input.args, ["datasetId", "tableId"], ["after"]);
+    // Nothing awaits between these checks and the answer.
+    const answers = async (datasetId: string) => {
+      await authorize();
+      holds(userId, workspaceId);
+      describe(host, auth, workspaceId, datasetId);
+    };
+    if (operation === "collectionEdit") {
+      const body = args(input.args, [
+        "datasetId",
+        "tableId",
+        "recordId",
+        "fieldId",
+        "value",
+        "expectedVersion",
+        "revision",
+        "revisionSha256",
+        "idempotencyKey",
+      ]);
+      const datasetId = id(body.datasetId),
+        tableId = id(body.tableId),
+        fieldId = id(body.fieldId);
+      const { recordId, value, expectedVersion, revision, revisionSha256, idempotencyKey } = body;
+      // The key is the phone's own, kept for a retry; the owner's keys are shared with the desktop's, so only a random one.
+      if (
+        typeof idempotencyKey !== "string" ||
+        !ID.test(idempotencyKey) ||
+        !isRecordId(recordId) ||
+        !isCount(expectedVersion) ||
+        !isCount(revision) ||
+        typeof revisionSha256 !== "string" ||
+        !SHA256.test(revisionSha256)
+      )
+        throw badRequest("Invalid Collection arguments.");
+      const description = describe(host, auth, workspaceId, datasetId);
+      const field = description.tables
+        .find((table) => table.tableId === tableId)
+        ?.fields.find((field) => field.fieldId === fieldId);
+      if (!field) throw notFound();
+      const edit = editOperation(description, tableId, field);
+      if (!edit) return { refused: { code: "forbidden", message: RULES_DISALLOW } };
+      if (!fits(field, value)) throw badRequest("Invalid Collection arguments.");
+      let result: AppBackendJson;
+      try {
+        // The phone's stamp, not the description's: a retry sends what its first try sent.
+        ({ result } = await host.invoke(auth, {
+          workspaceId,
+          datasetId,
+          revision,
+          revisionSha256,
+          operationId: edit.operationId,
+          input: { id: recordId, expectedVersion, values: { [fieldId]: value } },
+          idempotencyKey,
+          signal: input.signal,
+        }));
+      } catch (error) {
+        if (isAppBackendRuntimeError(error)) {
+          await answers(datasetId);
+          return { refused: { code: error.refusal.code, message: error.refusal.message } };
+        }
+        if (
+          error instanceof DatasetHostError &&
+          error.code === "conflict" &&
+          error.message === RULES_REPLACED
+        ) {
+          await answers(datasetId);
+          return { rulesChanged: true };
+        }
+        throw error;
+      }
+      await answers(datasetId);
+      const receipt =
+        result && typeof result === "object" && !Array.isArray(result) ? result : null;
+      const prior = receipt?.priorValues;
+      if (
+        !receipt ||
+        !isCount(receipt.version) ||
+        (prior !== undefined &&
+          (!prior || typeof prior !== "object" || Array.isArray(prior) || !(fieldId in prior)))
+      )
+        throw relayError("conflict", "This Collection's edit gave an answer dohc can't show.");
+      return {
+        saved: {
+          version: receipt.version,
+          ...(prior === undefined ? {} : { priorValue: prior[fieldId] ?? null }),
+        },
+      };
+    }
+    const body = args(input.args, ["datasetId", "tableId"], ["after", "recordId"]);
     const datasetId = id(body.datasetId),
       tableId = id(body.tableId),
-      after = cursor(body.after);
+      after = cursor(body.after),
+      recordId = body.recordId;
+    if (recordId !== undefined && (!isRecordId(recordId) || after))
+      throw badRequest("Invalid Collection arguments.");
     const description = describe(host, auth, workspaceId, datasetId);
     const table = description.tables.find((table) => table.tableId === tableId);
     if (!table) throw notFound();
     const read = readOperation(description, tableId);
     if (!read) return { status: "refused", reason: "no-read" };
+    // One record, by its key, as the desktop reads a record again.
+    const key = table.primaryKeyFieldId;
+    if (recordId !== undefined && (!key || !read.fieldIds.includes(key))) throw notFound();
     const { result } = await host.invoke(auth, {
       workspaceId,
       datasetId,
       revision: description.revision,
       revisionSha256: description.revisionSha256,
       operationId: read.operationId,
-      input: { limit: PHONE_COLLECTION_PAGE, ...(after ? { after } : {}) },
+      input:
+        recordId !== undefined
+          ? { limit: 1, filters: [{ fieldId: key!, value: recordId }] }
+          : { limit: PHONE_COLLECTION_PAGE, ...(after ? { after } : {}) },
       idempotencyKey: randomUUID(),
       signal: input.signal,
     });
-    await authorize();
-    // Nothing awaits between these checks and the answer.
-    holds(userId, workspaceId);
-    describe(host, auth, workspaceId, datasetId);
+    await answers(datasetId);
     if (
       !result ||
       typeof result !== "object" ||

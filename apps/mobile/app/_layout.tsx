@@ -67,6 +67,8 @@ export default function RootLayout() {
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
             <Stack.Screen name="outbox" options={{ title: chatWords.messagesOnPhone }} />
             <Stack.Screen name="app-review" options={{ title: appWords.review }} />
+            {/* A record's field, changed in a sheet with Cancel and Save in its header. */}
+            <Stack.Screen name="collection-field" options={{ presentation: "modal" }} />
             {/* The app runs under its own name, without the swipe back that the app's own swipes would meet. */}
             <Stack.Screen name="app-run" options={{ gestureEnabled: false }} />
             <Stack.Screen

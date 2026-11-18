@@ -1,7 +1,7 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { describe, expect, it } from "vitest";
 import type { CollectionFieldType } from "../server/phoneCollections";
-import { rowText, shownValue } from "./collectionFields";
+import { draftOf, editorKind, rowText, shownValue, valueOf } from "./collectionFields";
 
 const files = { "file-1234567890abcdef": "receipt.pdf" };
 const shown = (type: CollectionFieldType, value: Parameters<typeof shownValue>[1]) =>
@@ -76,5 +76,83 @@ describe("a value in a record's row", () => {
       "https://example.com",
     );
     expect(rowText({ kind: "text", text: "Ana" }, "Name")).toBe("Ana");
+  });
+});
+
+describe("a field's editor", () => {
+  const field = (type: CollectionFieldType, required = false, options: string[] = []) => ({
+    type,
+    name: "Status",
+    required,
+    options,
+  });
+  const choices = ["Unpaid", "Paid", "Waived"];
+
+  it("edits the types the phone has an editor for, and not a date, a relation or an attachment", () => {
+    for (const type of ["text", "number", "url", "checkbox", "select", "multi-select"] as const)
+      expect(editorKind({ type })).toBe(type);
+    for (const type of ["date", "relation", "attachment"] as const)
+      expect(editorKind({ type })).toBeNull();
+  });
+
+  it("starts from the record's value", () => {
+    expect(draftOf({ type: "text" }, "Ana")).toBe("Ana");
+    expect(draftOf({ type: "text" }, null)).toBe("");
+    expect(draftOf({ type: "number" }, 12.5)).toBe("12.5");
+    expect(draftOf({ type: "url" }, undefined)).toBe("");
+    expect(draftOf({ type: "checkbox" }, true)).toBe(true);
+    expect(draftOf({ type: "checkbox" }, null)).toBe(false);
+    expect(draftOf({ type: "select" }, "Paid")).toEqual(["Paid"]);
+    expect(draftOf({ type: "select" }, null)).toEqual([]);
+    expect(draftOf({ type: "multi-select" }, ["Paid", 3])).toEqual(["Paid"]);
+  });
+
+  it("saves typed text as it is, and an empty field as null unless the field needs a value", () => {
+    expect(valueOf(field("text"), " Ana ")).toEqual({ value: " Ana " });
+    expect(valueOf(field("text"), "")).toEqual({ value: null });
+    expect(valueOf(field("text", true), "")).toEqual({
+      problem: collectionWords.enterValue("Status"),
+    });
+  });
+
+  it("saves a number as typed, with a decimal point or comma, and says when it isn't one", () => {
+    expect(valueOf(field("number"), " 12.5 ")).toEqual({ value: 12.5 });
+    expect(valueOf(field("number"), "-3")).toEqual({ value: -3 });
+    expect(valueOf(field("number"), "2,5")).toEqual({ value: 2.5 });
+    expect(valueOf(field("number"), "1e3")).toEqual({ value: 1000 });
+    expect(valueOf(field("number"), "")).toEqual({ value: null });
+    for (const typed of ["12a", "1.2.3", "Infinity", "0x10", "1e999", "-"])
+      expect(valueOf(field("number"), typed), typed).toEqual({
+        problem: collectionWords.enterNumber,
+      });
+  });
+
+  it("saves a web address the Collection takes, and says when it isn't one", () => {
+    expect(valueOf(field("url"), " https://dohc.example/a?b ")).toEqual({
+      value: "https://dohc.example/a?b",
+    });
+    for (const typed of ["dohc.example", "ftp://dohc.example", "https://", "https://a b"])
+      expect(valueOf(field("url"), typed), typed).toEqual({
+        problem: collectionWords.enterWebAddress,
+      });
+  });
+
+  it("saves a switch as true or false", () => {
+    expect(valueOf(field("checkbox"), true)).toEqual({ value: true });
+    expect(valueOf(field("checkbox"), false)).toEqual({ value: false });
+  });
+
+  it("saves one choice, or none, and several in the options' order", () => {
+    expect(valueOf(field("select", false, choices), ["Paid"])).toEqual({ value: "Paid" });
+    expect(valueOf(field("select", false, choices), [])).toEqual({ value: null });
+    expect(valueOf(field("select", true, choices), [])).toEqual({
+      problem: collectionWords.enterValue("Status"),
+    });
+    // A choice the field no longer has is left out.
+    expect(valueOf(field("select", false, choices), ["Gone"])).toEqual({ value: null });
+    expect(valueOf(field("multi-select", false, choices), ["Waived", "Unpaid"])).toEqual({
+      value: ["Unpaid", "Waived"],
+    });
+    expect(valueOf(field("multi-select", true, choices), [])).toEqual({ value: [] });
   });
 });

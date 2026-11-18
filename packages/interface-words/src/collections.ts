@@ -14,10 +14,26 @@ export const collectionWords = {
   // CollectionResourceInputs.tsx, for a file whose name the server doesn't have.
   attachedFile: "Attached file",
 
+  // A change to a record's field. transactionalWriteQueue.ts and TransactionalCollectionPage.tsx.
+  notConfirmed: "dohc could not confirm this change.",
+  refused: (reason: string) => `The Collection refused this change. ${reason}`,
+  rulesChanged:
+    "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
+  undoLastEdit: "Undo last edit",
+  // transactionalCollectionModel.ts
+  enterValue: (field: string) => `Enter ${field}.`,
+  enterNumber: "Enter a number.",
+  enterWebAddress: "Enter a web address.",
+
   // The phone's.
   /** A table whose Collection has no operation that reads it. */
   noRead: (table: string) => `Nothing in this Collection reads ${table}'s records.`,
   recordMissing: "dohc could not find this record. Go back and open it again.",
   checked: "Checked",
   notChecked: "Not checked",
+  /** A record whose version the server answered as newer than the one the phone read. */
+  recordChanged: "This record changed since this phone read it.",
+  reload: "Reload",
+  save: "Save",
+  saving: "Saving",
 } as const;

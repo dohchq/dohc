@@ -43,7 +43,7 @@ Any other build signs in to a server first (`src/account/Connect.tsx`), then rea
 Search shows "Not built yet".
 
 Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
-Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, and editing a page.
+Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, and a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`).
 An app's Revoke is the one exception: an approval holds on every phone of the account, so every phone shows its way back (`src/apps/AppReview.tsx`).
 Apps open only on iOS (`src/apps/canOpenApps.ts`): on Android, react-native-webview doesn't ask about every frame's loads and saves downloads, so the runner's rules don't hold.
 A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.
@@ -64,6 +64,7 @@ The server client is in `src/server`. Its files hold how each part works.
 - Check `SignIn.isCurrent()` before applying anything a request answered. A sign-in's generation changes at sign-out, at a 401 and when another sign-in starts, and the change aborts that sign-in's requests (`src/server/account.ts`).
 - Use `requestGenerations()` for results that replace each other (`src/server/client.ts`).
 - A page edited live opens with `openPage`, then its owner socket, which only the server client opens, so the token stays there. The page's one-use ticket goes only into the socket's protocols. The web view runs the provider and sees neither (`src/pages/pageLive.ts`, `src/pages/liveBridge.ts`).
+- A Collection record's field changes live in memory in its Collections store, one per record, sent while the app runs and never through the outbox. Try again sends a change with its own key and stamp (`src/collections/collectionStore.ts`).
 - The open workspace's reads live in one store per sign-in and workspace. The store stops when either changes, so a late answer can't reach another workspace's screen (`src/server/workspaceData.ts`).
 - The phone opens only workspaces the list marks `canOpen`. A 404 for the open workspace clears and stops its store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`).
 - The read cache keeps a copy in cache.db, in Caches, so a relaunch opens the last workspace before the server answers. `src/server/cacheRows.ts` and the `ReadCache` in `src/server/workspaceData.ts` hold when it writes and deletes its rows. Every change of sign-in deletes cache.db. Its writes have their own connection and queue, so a cache save never delays a Send.

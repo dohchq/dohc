@@ -1,7 +1,8 @@
 import { accountOperations, each, isFields, text } from "./api";
 import type { ServerClient } from "./client";
 
-// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts). They only read.
+// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, and a
+// change to one field of a record.
 
 export type CollectionFieldType =
   | "text"
@@ -18,6 +19,13 @@ export interface CollectionField {
   readonly fieldId: string;
   readonly name: string;
   readonly type: CollectionFieldType;
+  readonly required: boolean;
+  /** A select's or a multi-select's choices, in order; empty for any other type. */
+  readonly options: readonly string[];
+  /** The Collection has an edit for it, of a type the phone changes. */
+  readonly editable: boolean;
+  /** Its edit can be undone. */
+  readonly reversible: boolean;
 }
 
 export interface CollectionTable {
@@ -33,7 +41,13 @@ export interface PhoneCollection {
   readonly name: string;
 }
 
-export interface CollectionDescription extends PhoneCollection {
+/** The rules a description is of. A change names them, and a retry names the same. */
+export interface RulesStamp {
+  readonly revision: number;
+  readonly revisionSha256: string;
+}
+
+export interface CollectionDescription extends PhoneCollection, RulesStamp {
   readonly tables: readonly CollectionTable[];
 }
 
@@ -49,8 +63,35 @@ export type RecordId = string | number;
 
 export interface CollectionRecord {
   readonly id: RecordId;
+  /** What a change to it must name, or null when the read gave none, so the phone can't change it. */
+  readonly version: number | null;
   readonly values: Readonly<Record<string, RecordValue>>;
 }
+
+/** One field's change to a record, as the phone sends it and sends it again. */
+export interface FieldChange extends RulesStamp {
+  readonly datasetId: string;
+  readonly tableId: string;
+  readonly recordId: RecordId;
+  readonly fieldId: string;
+  readonly value: RecordValue;
+  readonly expectedVersion: number;
+  /** A random UUID, the same on every try. */
+  readonly idempotencyKey: string;
+}
+
+/** The Collection's answer to a change. */
+export type ChangeAnswer =
+  /** `priorValue` is absent when the edit gave none, so nothing can undo it. */
+  | {
+      readonly kind: "saved";
+      readonly version: number;
+      readonly priorValue?: RecordValue;
+    }
+  /** The Collection's operation refused it, as `stale_record` for a record changed since the phone read it. */
+  | { readonly kind: "refused"; readonly code: string; readonly message: string }
+  /** It named rules the Collection has replaced, so it never ran. */
+  | { readonly kind: "rulesChanged" };
 
 /** Where the next page starts: the last record's ID and its sort value, as the read gave them. */
 export interface RecordCursor {
@@ -92,14 +133,35 @@ const readCollection = (item: unknown): PhoneCollection | null =>
     ? { datasetId: item.datasetId, name: item.name }
     : null;
 
-const readField = (item: unknown): CollectionField | null =>
-  isFields(item) &&
-  text(item.fieldId, 64) &&
-  text(item.name, 1024) &&
-  typeof item.type === "string" &&
-  TYPES.has(item.type)
-    ? { fieldId: item.fieldId, name: item.name, type: item.type as CollectionFieldType }
-    : null;
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+
+function readField(item: unknown): CollectionField | null {
+  if (
+    !isFields(item) ||
+    !text(item.fieldId, 64) ||
+    !text(item.name, 1024) ||
+    typeof item.type !== "string" ||
+    !TYPES.has(item.type) ||
+    typeof item.required !== "boolean" ||
+    typeof item.editable !== "boolean" ||
+    typeof item.reversible !== "boolean"
+  )
+    return null;
+  const type = item.type as CollectionFieldType;
+  const choices = type === "select" || type === "multi-select";
+  const options = choices ? each(item.options, (option) => (text(option) ? option : null)) : [];
+  if (!options) return null;
+  return {
+    fieldId: item.fieldId,
+    name: item.name,
+    type,
+    required: item.required,
+    options,
+    editable: item.editable,
+    reversible: item.editable && item.reversible,
+  };
+}
 
 function readTable(item: unknown): CollectionTable | null {
   if (!isFields(item) || !text(item.tableId, 64) || !text(item.name, 1024)) return null;
@@ -117,10 +179,32 @@ function readTable(item: unknown): CollectionTable | null {
 
 export function readDescription(result: unknown, datasetId: string): CollectionDescription | null {
   const collection = readCollection(result);
-  const tables = isFields(result) ? each(result.tables, readTable) : null;
-  return collection && collection.datasetId === datasetId && tables
-    ? { ...collection, tables }
+  if (!collection || !isFields(result) || collection.datasetId !== datasetId) return null;
+  const tables = each(result.tables, readTable);
+  const { revision, revisionSha256 } = result;
+  return tables &&
+    isCount(revision) &&
+    text(revisionSha256, 64) &&
+    /^[0-9a-f]{64}$/.test(revisionSha256)
+    ? { ...collection, revision, revisionSha256, tables }
     : null;
+}
+
+/** The relay's answer to a change, or null. */
+export function readChangeAnswer(result: unknown): ChangeAnswer | null {
+  if (!isFields(result)) return null;
+  const { saved, refused } = result;
+  if (result.rulesChanged === true) return { kind: "rulesChanged" };
+  if (isFields(refused))
+    return text(refused.code, 64) && text(refused.message, 1024)
+      ? { kind: "refused", code: refused.code, message: refused.message }
+      : null;
+  if (!isFields(saved) || !isCount(saved.version)) return null;
+  return {
+    kind: "saved",
+    version: saved.version,
+    ...(Object.hasOwn(saved, "priorValue") ? { priorValue: saved.priorValue as RecordValue } : {}),
+  };
 }
 
 /** A page of a table's records, each keeping only the fields the table describes. */
@@ -145,7 +229,7 @@ export function readPage(result: unknown, table: CollectionTable): RecordPage | 
     for (const field of table.fields)
       if (Object.hasOwn(row.values, field.fieldId))
         values[field.fieldId] = row.values[field.fieldId] as RecordValue;
-    return { id: row.id, values };
+    return { id: row.id, version: isCount(row.version) ? row.version : null, values };
   });
   const cursor = result.nextCursor;
   const next =
@@ -180,6 +264,22 @@ export function collectionOperations(
         { datasetId, tableId: table.tableId, ...(after ? { after } : {}) },
         (result) => readPage(result, table),
       ),
+
+    /** One record, read again by its key, or null when it is gone. */
+    record: (datasetId: string, table: CollectionTable, id: RecordId) =>
+      run(
+        "collectionRecords",
+        { datasetId, tableId: table.tableId, recordId: id },
+        (result): { record: CollectionRecord | null } | null => {
+          const page = readPage(result, table);
+          if (page?.status !== "ready" || page.rows.length > 1) return null;
+          const record = page.rows[0];
+          return { record: record && record.id === id ? record : null };
+        },
+      ),
+
+    /** Sends a change. Try again sends the same one, key and stamp included. */
+    change: (change: FieldChange) => run("collectionEdit", change, readChangeAnswer),
   };
 }
 

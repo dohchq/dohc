@@ -39,7 +39,8 @@ const DATASET = id(1),
   ADD_NOTE = id(12),
   EMAIL = id(13),
   RECEIPT = id(14),
-  OTHER = id(15);
+  OTHER = id(15),
+  EDIT = id(16);
 const definition: DatasetDefinition = {
   formatVersion: 1,
   datasetId: DATASET,
@@ -135,6 +136,18 @@ const definition: DatasetDefinition = {
       access: "owner",
       readOnly: true,
       fieldIds: [KEY, NAME, PAID, RECEIPT],
+    },
+    // It changes neither the ID nor the receipt.
+    {
+      operationId: EDIT,
+      name: "edit",
+      label: "Edit",
+      tableId: PEOPLE,
+      kind: "edit",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [NAME, PAID],
+      reversible: true,
     },
     // Notes take records but have no read.
     {
@@ -285,21 +298,32 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
   expect(await f.op("collections", {})).toEqual(
     ok({ collections: [{ datasetId: DATASET, name: "Registrations" }], nextCursor: null }),
   );
-  // Names, IDs, types and the primary field of what each table's read gives; never a button, a column, or an operation.
+  // Names, IDs, types and the primary field of what each table's read gives, and which an edit changes; never a
+  // button, a column, or an operation.
+  const field = (fieldId: string, name: string, type: string, required: boolean, edit = false) => ({
+    fieldId,
+    name,
+    type,
+    required,
+    editable: edit,
+    reversible: edit,
+  });
   expect(await f.op("collection", { datasetId: DATASET })).toEqual(
     ok({
       datasetId: DATASET,
       name: "Registrations",
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
       tables: [
         {
           tableId: PEOPLE,
           name: "People",
           primaryFieldId: KEY,
           fields: [
-            { fieldId: KEY, name: "ID", type: "text" },
-            { fieldId: NAME, name: "Name", type: "text" },
-            { fieldId: PAID, name: "Paid", type: "checkbox" },
-            { fieldId: RECEIPT, name: "Receipt", type: "attachment" },
+            field(KEY, "ID", "text", true),
+            field(NAME, "Name", "text", true, true),
+            field(PAID, "Paid", "checkbox", false, true),
+            field(RECEIPT, "Receipt", "attachment", false),
           ],
         },
         { tableId: NOTES, name: "Notes", primaryFieldId: null, fields: [] },
@@ -460,4 +484,163 @@ it("gives a computer's sign-in of the owner what it gives the phone", async () =
   expect(rowKeys(await f.records(undefined, "owner:desktop-1:desktop"))).toEqual(
     KEYS.slice(0, PHONE_COLLECTION_PAGE),
   );
+});
+
+/** One field's change to record `r01`, as the phone sends it. */
+const edit = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionEdit",
+    {
+      datasetId: DATASET,
+      tableId: PEOPLE,
+      recordId: "r01",
+      fieldId: NAME,
+      value: "Maya",
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(100),
+      ...change,
+    },
+    as,
+  );
+/** Record `r01`, read again by its key. */
+const r01 = async (f: Awaited<ReturnType<typeof phone>>) => {
+  const answer = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: PEOPLE,
+    recordId: "r01",
+  });
+  expect(answer.status).toBe(200);
+  const rows = (answer.body.result as { rows: { version: number; values: object }[] }).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0]!;
+};
+
+it("saves a field's change, replays its retry, and undoes it with the prior value", async () => {
+  const f = await phone();
+  expect(await edit(f)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+  expect(await r01(f)).toMatchObject({ version: 2, values: { [NAME]: "Maya" } });
+  // The same key and stamp answer the same receipt, with no second version.
+  expect(await edit(f)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+  expect((await r01(f)).version).toBe(2);
+  // The same key with another value is not a retry.
+  expect(await edit(f, { value: "Maya L." })).toMatchObject({
+    status: 409,
+    body: { ok: false, code: "conflict" },
+  });
+  // Undo: the prior value at the saved version, with a new key.
+  expect(
+    await edit(f, { value: "Person r01", expectedVersion: 2, idempotencyKey: id(101) }),
+  ).toEqual(ok({ saved: { version: 3, priorValue: "Maya" } }));
+  expect(await r01(f)).toMatchObject({ version: 3, values: { [NAME]: "Person r01" } });
+  // A checkbox takes a boolean.
+  expect(
+    await edit(f, { fieldId: PAID, value: true, expectedVersion: 3, idempotencyKey: id(102) }),
+  ).toEqual(ok({ saved: { version: 4, priorValue: false } }));
+});
+
+it("answers a stale version with the record's refusal, and a field no edit changes before any invoke", async () => {
+  const f = await phone();
+  await edit(f);
+  expect(await edit(f, { value: "Other", idempotencyKey: id(101) })).toEqual(
+    ok({
+      refused: {
+        code: "stale_record",
+        message: "This record changed. Refresh the table before editing it.",
+      },
+    }),
+  );
+  let invoked = 0;
+  f.during(() => void invoked++);
+  expect(await edit(f, { fieldId: KEY, value: "r99", idempotencyKey: id(102) })).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  // A value the field's type can't take, and a key that isn't random, go no further either.
+  expect((await edit(f, { fieldId: PAID, value: "yes", idempotencyKey: id(103) })).status).toBe(
+    400,
+  );
+  expect((await edit(f, { idempotencyKey: "r01-name" })).status).toBe(400);
+  expect(invoked).toBe(0);
+  expect((await r01(f)).values).toMatchObject({ [NAME]: "Maya", [PAID]: false });
+});
+
+it("answers a change made under rules the Collection has replaced as rules changed", async () => {
+  const f = await phone();
+  const next = structuredClone(definition);
+  next.operations.find((operation) => operation.operationId === EDIT)!.fieldIds.push(EMAIL);
+  next.schemaPath = "registrations/revision-2/schema.sql";
+  next.operationsPath = "registrations/revision-2/operations.js";
+  const nextSource = generateDatasetOperations(next);
+  const widened = describeDatasetRevision({
+    definition: next,
+    revision: 2,
+    schemaSql,
+    operationSource: nextSource,
+  });
+  const preview = await f.host.prepareMigration(owner, {
+    workspaceId: "w",
+    revision: widened,
+    schemaSql,
+    operationSource: nextSource,
+    expected: f.host.approvedArtifacts(owner, scope).cursor,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration(owner, {
+    ...scope,
+    candidateId: preview.candidateId,
+    checkpointSha256: preview.checkpointSha256,
+  });
+  expect(await edit(f)).toEqual(ok({ rulesChanged: true }));
+  expect((await r01(f)).values).toMatchObject({ [NAME]: "Person r01" });
+  // Under the new rules' stamp, the same change saves.
+  expect(
+    await edit(f, { revision: 2, revisionSha256: widened.revisionSha256, idempotencyKey: id(101) }),
+  ).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+});
+
+it("refuses a change from another account, with Show on phone off, a revoked sign-in, a fenced account, or an archived Collection", async () => {
+  const f = await phone();
+  expect(await edit(f, {}, "intruder:phone-2:phone")).toEqual(notFound);
+  f.showOnPhone(false);
+  expect(await edit(f)).toEqual(notFound);
+  f.showOnPhone(true);
+  revoked.add("phone-1");
+  expect((await edit(f)).status).toBe(401);
+  revoked.clear();
+  expect((await r01(f)).version).toBe(1);
+  initializeAccountDeletion(f.storage, "k".repeat(32));
+  fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+  expect(await edit(f)).toEqual(notFound);
+
+  const archived = await phone();
+  archived.host.archiveDataset(owner, scope);
+  expect(await edit(archived)).toEqual(notFound);
+});
+
+it("refuses a change when Show on phone turns off as it starts, and its answer when it turns off after it ran", async () => {
+  const before = await phone();
+  before.during(() => before.showOnPhone(false));
+  expect(await edit(before)).toEqual(notFound);
+  before.during(() => undefined);
+  before.showOnPhone(true);
+  expect((await r01(before)).version).toBe(1);
+
+  const after = await phone();
+  let calls = 0;
+  after.during(() => {
+    if (++calls === 2) after.showOnPhone(false);
+  });
+  const answer = await edit(after);
+  expect(answer).toEqual(notFound);
+  expect(JSON.stringify(answer.body)).not.toContain("Person");
 });
