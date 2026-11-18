@@ -674,7 +674,7 @@ describe("merge rule order from the engine", () => {
       "says to resolve a rule's open conflict",
       true,
       MergeRuleConflictError,
-      `dohc stopped the merge at a conflict in ${TEAM}. Resolve that conflict, then merge again.`,
+      `dohc stopped the merge. ${TEAM} has an open conflict. Resolve that conflict, then merge again.`,
     ],
   ])(
     "stops, writing nothing, when the engine refuses every order it planned, and %s",

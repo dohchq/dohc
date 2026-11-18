@@ -1420,16 +1420,21 @@ export class MergeWidensAccessError extends Error {
 }
 
 // A rule conflicted partway through a merge, and the rule changes after it
-// can no longer be made safely while Main keeps its copy. The first line is
-// the words; the rules that could not be ordered follow, for Details.
+// can no longer be made safely while Main keeps its copy. Or the engine
+// refused every order while a rule had an open conflict: the one refusal
+// with a known way out, though not proved to be the cause. The first line
+// is the words; the rules that could not be ordered follow, for Details.
 export class MergeRuleConflictError extends Error {
   constructor(
     readonly path: string,
     readonly rules: readonly string[],
+    caused = true,
   ) {
     super(
       [
-        `dohc stopped the merge at a conflict in ${path}. Resolve that conflict, then merge again.`,
+        caused
+          ? `dohc stopped the merge at a conflict in ${path}. Resolve that conflict, then merge again.`
+          : `dohc stopped the merge. ${path} has an open conflict. Resolve that conflict, then merge again.`,
         ...rules,
       ].join("\n"),
     );
@@ -7884,6 +7889,7 @@ export function createWorkspaceEngineCapture(
                 : new MergeRuleConflictError(
                     conflicted,
                     mergeOrder.slice(index).filter(isRuleStep),
+                    false,
                   );
             }
             await replan(index);
