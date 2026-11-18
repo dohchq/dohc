@@ -1,9 +1,10 @@
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords } from "@dohc/interface-words/notices";
+import type { PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
-import { useRef, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -25,13 +26,21 @@ import {
   type SubmitFailure,
   type SubmitOutcome,
 } from "./conversationWrites";
+import { MentionMenu } from "./MentionMenu";
 import {
   acceptsReport,
+  activeMention,
+  askReplacement,
   composing,
+  mentionCompletion,
+  mentionMatches,
   NO_REPLACING,
+  phoneMentions,
   replacementAnswered,
+  replacePending,
   snapshotOf,
   type FieldSnapshot,
+  type PhoneMention,
   type Replacing,
 } from "./mentionDraft";
 
@@ -85,6 +94,10 @@ export function outboxProblem(
 // composing, Send stays off, since the word being composed isn't text yet. A range replacement goes to the field as
 // a request made from that report (`askReplacement`), which the field applies only if nothing moved since, and answers
 // once (`replacementAnswered`).
+//
+// `mentions` are who the conversation's context read says it can mention, or null while that read loads or after it
+// failed. While the caret types an `@` outside code, the menu above the field lists the matches; a tap asks the field to
+// complete the text, once, and a refusal leaves it as it was.
 export function Composer({
   placeholder,
   lanes,
@@ -100,6 +113,7 @@ export function Composer({
   onCleared,
   onLayoutHeight,
   docked = true,
+  mentions = null,
 }: {
   placeholder: string;
   lanes: Lanes;
@@ -115,6 +129,7 @@ export function Composer({
   onCleared?(): void;
   onLayoutHeight?(height: number): void;
   docked?: boolean;
+  mentions?: readonly PhoneMentionCandidate[] | null;
 }) {
   const theme = useTheme();
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -185,6 +200,16 @@ export function Composer({
     }
   }
 
+  // The menu waits while the field owes an answer, so a second tap can't ask for another completion meanwhile.
+  const candidates = useMemo(() => (mentions ? phoneMentions(mentions) : null), [mentions]);
+  const active = candidates && !replacePending(replacing) ? activeMention(field) : null;
+  const matches = candidates && active ? mentionMatches(active, candidates) : null;
+  const pick = (candidate: PhoneMention) => {
+    if (field === null || active === null) return;
+    const asked = askReplacement(replacing, field, mentionCompletion(field, active, candidate));
+    if (asked.kind === "asked") setReplacing(asked.replacing);
+  };
+
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
   const fieldLabel = replyTo ? replyLabel(replyTo) : placeholder;
   const Holder = docked ? Dock : Inline;
@@ -241,6 +266,7 @@ export function Composer({
           ) : null}
         </View>
       ) : null}
+      {matches ? <MentionMenu matches={matches} onPick={pick} /> : null}
       <View style={styles.row}>
         {lanes.post && mode === "send" ? (
           <Pressable

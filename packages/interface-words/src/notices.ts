@@ -106,6 +106,11 @@ export const chatWords = {
   title: "Title",
   /** The composer's placeholder, and the name of its field. */
   messageTo: (name: string) => `Message ${name}`,
+  /** The @name menu above the composer when nobody the chat knows matches what follows the @. */
+  noMentionMatch: "No matching people or agents",
+  /** A row of that menu, for VoiceOver: the name, then what they are. */
+  mentionPerson: (name: string) => `${name}, person`,
+  mentionAgent: (name: string) => `${name}, agent`,
   /** A message's author while only this phone has it. */
   you: "You",
   /** A message on its way: a request may have reached the server. */

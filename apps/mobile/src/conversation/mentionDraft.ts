@@ -1,3 +1,11 @@
+import {
+  activeMentionQuery,
+  applyMentionCompletion,
+  codeRanges,
+  matchMentionCandidates,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
+import type { PhoneMentionCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import type { FieldChange, ReplaceAnswer, ReplaceRequest } from "../../modules/chat-composer";
 
 // What the composer knows of its native field's editing, apart from how it looks: the latest report of its text,
@@ -148,4 +156,72 @@ export function replacementAnswered(
   if (answer === undefined || !replacePending(current) || answer.token !== current.request.token)
     return current;
   return { ...current, answer };
+}
+
+// Mentions, by the rules the desktop and the relay share (packages/workspace-contracts/src/chatMentions.ts). Choosing
+// someone only completes the text with their `@handle `: the body stays plain text, and the relay reads it as it reads
+// a typed handle. A handle two candidates share stays plain text, so the menu may list both, and either writes the same.
+
+/** Someone the composer offers, in the shared shape: a person is a `user`, and both kinds of agent are an `agent`. */
+export interface PhoneMention extends MentionCandidate {
+  /** A personal agent, one dohc does not start. */
+  readonly connected: boolean;
+}
+
+/** The context read's candidates in the shared shape. `id` keys a row on this phone only. */
+export const phoneMentions = (rows: readonly PhoneMentionCandidate[]): readonly PhoneMention[] =>
+  rows.map((row) => ({
+    id: JSON.stringify(row),
+    kind: row.kind === "person" ? "user" : "agent",
+    handle: row.handle,
+    label: row.label,
+    connected: row.kind === "personalAgent",
+  }));
+
+/** The `@` the caret is typing after, in UTF-16 code units, and what was typed since. */
+export interface ActiveMention {
+  readonly start: number;
+  readonly query: string;
+}
+
+/**
+ * The mention the caret is typing, or null: none for a selection, while an input method composes, or for an `@` in
+ * inline code or a code fence.
+ */
+export function activeMention(snapshot: FieldSnapshot | null): ActiveMention | null {
+  if (snapshot === null || composing(snapshot)) return null;
+  const { text, selectionStart, selectionEnd } = snapshot;
+  if (selectionStart !== selectionEnd) return null;
+  const active = activeMentionQuery(text, selectionEnd);
+  if (!active) return null;
+  const inCode = codeRanges(text).some(
+    ([start, end]) => active.start >= start && active.start < end,
+  );
+  return inCode ? null : active;
+}
+
+/** The candidates for `active`, best first, as the desktop ranks them, six at most. */
+export function mentionMatches(
+  active: ActiveMention,
+  candidates: readonly PhoneMention[],
+): readonly PhoneMention[] {
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  return matchMentionCandidates(active.query, candidates).flatMap(
+    (candidate) => byId.get(candidate.id) ?? [],
+  );
+}
+
+/** The edit that turns `active` into `candidate`'s `@handle ` with the caret after the space, keeping what follows. */
+export function mentionCompletion(
+  snapshot: FieldSnapshot,
+  active: ActiveMention,
+  candidate: MentionCandidate,
+): Replacement {
+  const { value, caret } = applyMentionCompletion(snapshot.text, active, candidate);
+  return {
+    start: active.start,
+    end: active.start + 1 + active.query.length,
+    replacement: value.slice(active.start, caret),
+    caret,
+  };
 }

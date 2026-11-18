@@ -266,4 +266,41 @@ final class ServerRoundTests: XCTestCase {
       .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
   }
+
+  // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
+  // name differs by round, so the test takes the first name the menu offers for "@", types its first letters, and taps
+  // its row. The tap completes the text and keeps the keyboard up; the message sent shows the field's text exactly.
+  @MainActor
+  func test10_mentionsSomeone() throws {
+    let app = XCUIApplication()
+    app.launch()
+    tab(app, "Chats")
+    let planning = app.buttons["Planning"]
+    XCTAssertTrue(planning.waitForExistence(timeout: 30), "Chats should show the group Planning")
+    planning.tap()
+    let field = app.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "Message ")).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 30), "Planning should show the composer")
+    field.tap()
+    field.typeText("Can @")
+    let rows = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@ OR label ENDSWITH %@", ", person", ", agent"))
+    XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 30), "Typing @ should offer who Planning can mention")
+    let label = rows.firstMatch.label
+    let comma = try XCTUnwrap(label.range(of: ", ", options: .backwards), "A row's label should end in its kind")
+    let name = String(label[..<comma.lowerBound])
+    field.typeText(String(name.prefix(2)))
+    let row = app.buttons[label]
+    XCTAssertTrue(row.waitForExistence(timeout: 10), "\(name) should still match its first letters")
+    row.tap()
+    let completed = NSPredicate(format: "value MATCHES %@", "Can @\\S+ ")
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: completed, evaluatedWith: field)], timeout: 10), .completed,
+                   "The row should make the text \"Can @handle \"")
+    XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should stay up after the tap")
+    let tail = "join us? \(UUID().uuidString.prefix(8))"
+    field.typeText(tail)
+    let body = try XCTUnwrap(field.value as? String, "The field should report its text")
+    XCTAssertTrue(body.hasSuffix(" \(tail)"), "Typing should go on after the mention, not \(body)")
+    app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
+    // The field's label is its placeholder, so only the message's text can match.
+    XCTAssertTrue(containing(app, body).waitForExistence(timeout: 60), "Planning should show the message exactly as sent: \(body)")
+  }
 }
