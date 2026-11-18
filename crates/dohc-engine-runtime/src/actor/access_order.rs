@@ -2799,14 +2799,15 @@ fn folded_folders(
     Ok(Some((folded, twins)))
 }
 
-/// Every rule file either version holds, taking one unit of `work` for each
-/// path read. `None` when the work runs out first.
+/// Every rule file either version holds. The scan keeps only rule paths,
+/// which `rule_merge_steps` charges before it compares them. Charging every
+/// path read here too would refuse even a one-rule merge in a version of
+/// about a million paths, which the planner lets through.
 fn version_rule_paths(
     conn: &Connection,
     workspace: &str,
     versions: [&str; 2],
-    work: &mut RuleOrderWork,
-) -> Result<Option<Vec<String>>, RuntimeError> {
+) -> Result<Vec<String>, RuntimeError> {
     let mut scan = conn
         .prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2")
         .map_err(StorageError::corrupt_public)?;
@@ -2817,15 +2818,12 @@ fn version_rule_paths(
             .map_err(StorageError::corrupt_public)?;
         for path in paths {
             let path = path.map_err(StorageError::corrupt_public)?;
-            if work.take(1).is_none() {
-                return Ok(None);
-            }
             if is_access_rule_path(&path) {
                 rules.insert(path);
             }
         }
     }
-    Ok(Some(rules.into_iter().collect()))
+    Ok(rules.into_iter().collect())
 }
 
 /// The order a merge from `source` into `target` makes its rule changes in,
@@ -2910,9 +2908,7 @@ pub(super) fn check_rule_merge_order(
         input.target_version_id.as_str(),
     );
     let mut work = RuleOrderWork::default();
-    let Some(rules) = version_rule_paths(conn, workspace, [target, source], &mut work)? else {
-        return Err(RuntimeError::RuleMergeOrderChanged);
-    };
+    let rules = version_rule_paths(conn, workspace, [target, source])?;
     let Some(merge) = rule_merge_steps(conn, workspace, source, target, &rules, &mut work)? else {
         return Err(RuntimeError::RuleMergeOrderChanged);
     };
