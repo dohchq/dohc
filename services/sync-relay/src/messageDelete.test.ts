@@ -987,4 +987,31 @@ describe("the owner's raw pull", () => {
       }),
     ).rejects.toMatchObject({ code: "server_busy", statusCode: 503 });
   });
+
+  it("answers a reference-free page whole from before a delete that lands as it answers, and the next page deletes", async () => {
+    const { storage } = await seed();
+    const routes = createWorkspaceReplicationRoutes(
+      storage,
+      () => 2000,
+      { wakeLog() {}, wait: async () => {} },
+      { watched: () => false },
+    );
+    const pull = (since: number) =>
+      routes.respondToWorkspaceReplication(
+        request(OWNER, `/sync/${WORKSPACE}/log?since=${since}&limit=500&includeReferences=false`),
+        { route: "log", workspaceId: WORKSPACE },
+        { userId: OWNER },
+      );
+    const pulling = pull(0);
+    // The route's first yield.
+    remove(storage, "msg-team");
+    const first = (await json(await pulling)) as Pulled & { nextCursor: number };
+    expect(JSON.stringify(first.ops)).toContain("welcome to the team");
+    expect(first.ops.map((op) => op.opKind)).not.toContain("chat.message.delete");
+    const next = (await json(await pull(first.nextCursor))) as Pulled;
+    expect(next.ops.at(-1)).toMatchObject({
+      opKind: "chat.message.delete",
+      payload: { messageId: "msg-team" },
+    });
+  });
 });
