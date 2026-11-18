@@ -7870,7 +7870,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                     raw.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR)?;
                 }
                 let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
-                raw.push_str(&rendered)?;
+                // Per block, as Tiptap renders a cell, so a backtick in one
+                // block doesn't open a code span in the next.
+                raw.push_str(&write_table_cell_breaks(&rendered))?;
             }
             let text = collapse_js_whitespace(&table_cell_line_breaks(
                 &prepare_rendered_table_cell(&raw.into_string())?,
@@ -8050,10 +8052,9 @@ fn closing_backtick_run(bytes: &[u8], from: usize, length: usize) -> Option<usiz
 }
 
 fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
-    let normalized = write_table_cell_breaks(markdown);
     let mut output = ProjectionBuffer::new();
     let mut preceding_backslashes = 0usize;
-    for character in normalized.chars() {
+    for character in markdown.chars() {
         if character == '|' && preceding_backslashes % 2 == 0 {
             output.push('\\')?;
         }
