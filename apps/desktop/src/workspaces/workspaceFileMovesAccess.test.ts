@@ -1,10 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { createTestScratch } from "./testTemp";
 import { AccessChangeError, moveAccessWarning } from "./moveAccessWarning";
 import { moveWorkspacePathByHand } from "./workspaceFileMoves";
+import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 const person = { kind: "human" as const, humanId: "local:installation" };
 
@@ -22,18 +23,19 @@ async function workspace() {
     "Projects/Team2/Brief.md",
   ]) {
     await mkdir(dirname(join(rootPath, file)), { recursive: true });
-    await writeFile(join(rootPath, file), "members: view\n");
+    await writeFile(join(rootPath, file), file.endsWith("access.yaml") ? "members: view\n" : file);
   }
-  // The capture stops each change as it starts: these tests check only
-  // whether the change got that far.
-  const capture = {
-    changePathsAs: vi.fn(async () => {
-      throw new Error("stopped at capture");
-    }),
-    beginFileRename: vi.fn(async () => {
-      throw new Error("stopped at capture");
-    }),
+  // The capture runs each change without History, as the move does with no capture.
+  let captured = 0;
+  const changePathsAs: WorkspaceEngineCapture["changePathsAs"] = async (_paths, _meta, work) => {
+    captured += 1;
+    return work(null as never);
   };
+  const beginFileRename: WorkspaceEngineCapture["beginFileRename"] = async () => {
+    captured += 1;
+    return async () => undefined;
+  };
+  const capture = { changePathsAs, beginFileRename };
   const operation = {
     workspace: { workspaceId: "workspace", rootPath, attachmentId: Symbol("attachment") },
     state: undefined,
@@ -46,8 +48,7 @@ async function workspace() {
     trashItem: async () => undefined,
     markDeleted: () => undefined,
   };
-  const reachedCapture = () =>
-    capture.changePathsAs.mock.calls.length + capture.beginFileRename.mock.calls.length > 0;
+  const reachedCapture = () => captured > 0;
   return { rootPath, operation, options, reachedCapture };
 }
 
@@ -83,15 +84,50 @@ it("asks before the app's move changes the rule folders above it, and moves once
   expect(f.reachedCapture()).toBe(false);
   expect(existsSync(join(f.rootPath, "Plan.md"))).toBe(true);
 
+  await moveWorkspacePathByHand(
+    f.operation,
+    { fromPath: "Plan.md", toPath: "Team/Plan.md", confirmAccessChange: true },
+    person,
+    f.options,
+  );
+  expect(existsSync(join(f.rootPath, "Plan.md"))).toBe(false);
+  await expect(readFile(join(f.rootPath, "Team/Plan.md"), "utf8")).resolves.toBe("Plan.md");
+});
+
+it("asks about a move spelled with backslashes, as the move reads it", async () => {
+  const f = await workspace();
   await expect(
     moveWorkspacePathByHand(
       f.operation,
-      { fromPath: "Plan.md", toPath: "Team/Plan.md", confirmAccessChange: true },
+      { fromPath: "Team\\Plan2.md", toPath: "Plan2.md" },
       person,
       f.options,
     ),
-  ).rejects.toThrow("stopped at capture");
-  expect(f.reachedCapture()).toBe(true);
+  ).rejects.toThrow(
+    "Moving Plan2.md out of Team may change who can see it. People who could read it may keep a copy.",
+  );
+  expect(f.reachedCapture()).toBe(false);
+  expect(existsSync(join(f.rootPath, "Team/Plan2.md"))).toBe(true);
+});
+
+it("asks about a rule written while the move waits for the workspace", async () => {
+  const f = await workspace();
+  await mkdir(join(f.rootPath, "Later"));
+  const moving = moveWorkspacePathByHand(
+    f.operation,
+    { fromPath: "Plan.md", toPath: "Later/Plan.md" },
+    person,
+    {
+      ...f.options,
+      // admit runs under the workspace lock, after the change queued before this move.
+      admit: () => writeFile(join(f.rootPath, "Later/access.yaml"), "members: view\n"),
+    },
+  );
+  await expect(moving).rejects.toThrow(
+    "Moving Plan.md into Later may change who can see it. People who could read it may keep a copy.",
+  );
+  expect(f.reachedCapture()).toBe(false);
+  expect(existsSync(join(f.rootPath, "Plan.md"))).toBe(true);
 });
 
 it("lets the app's move under the same rule folders go without asking", async () => {
@@ -103,6 +139,9 @@ it("lets the app's move under the same rule folders go without asking", async ()
       person,
       f.options,
     ),
-  ).rejects.toThrow("stopped at capture");
-  expect(f.reachedCapture()).toBe(true);
+  ).resolves.toMatchObject({ path: "Team/Old.md" });
+  expect(existsSync(join(f.rootPath, "Team/Notes/Old.md"))).toBe(false);
+  await expect(readFile(join(f.rootPath, "Team/Old.md"), "utf8")).resolves.toBe(
+    "Team/Notes/Old.md",
+  );
 });

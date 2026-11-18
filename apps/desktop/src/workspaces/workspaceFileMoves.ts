@@ -545,7 +545,15 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
         });
     }
     // An agent's move goes, and its answer carries the warning a person is asked.
-    const accessWarning = await moveAccessWarning(rootPath, input.fromPath, input.toPath);
+    // A path the move refuses gets no warning; the move's answer names it.
+    let accessWarning: string | null = null;
+    try {
+      accessWarning = await moveAccessWarning(
+        rootPath,
+        checkedPath(input.fromPath),
+        checkedPath(input.toPath),
+      );
+    } catch {}
     const move = await prepareMoveWorkspacePath(operation, input, author, options);
     if (!accessWarning) return move;
     return async () => {
@@ -629,10 +637,6 @@ export async function moveWorkspacePathByHand(
     ]);
     if (paths.length) throw new NotVersionedError(paths);
   }
-  if (!input.confirmAccessChange) {
-    const warning = await moveAccessWarning(rootPath, input.fromPath, input.toPath);
-    if (warning) throw new AccessChangeError(warning);
-  }
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async (markChanged) => {
     assertWritable(operation);
     await options.admit?.();
@@ -643,6 +647,15 @@ export async function moveWorkspacePathByHand(
     );
     const destinationError = workspaceDestinationError(prepared.physicalToPath, process.platform);
     if (destinationError) throw new Error(destinationError);
+    // Under the lock, so a rule written before the move runs is counted.
+    if (!input.confirmAccessChange) {
+      const warning = await moveAccessWarning(
+        rootPath,
+        prepared.physicalFromPath,
+        prepared.physicalToPath,
+      );
+      if (warning) throw new AccessChangeError(warning);
+    }
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
       if (!options.capture) {
         throw historyOff(prepared.physicalFromPath, "move", true);

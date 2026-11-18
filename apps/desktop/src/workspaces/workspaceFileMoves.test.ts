@@ -379,6 +379,12 @@ describe("agent moves and deletes", () => {
     });
     expect(existsSync(join(f.rootPath, "Team/Plan.txt"))).toBe(true);
     expect(await f.move("Team/Plan.txt", "Team/Kept.txt")).not.toHaveProperty("accessWarning");
+    // The warning reads the paths as the move does.
+    expect(await f.move("Team\\Kept.txt", "Kept.txt")).toMatchObject({
+      ok: true,
+      accessWarning:
+        "Moving Kept.txt out of Team may change who can see it. People who could read it may keep a copy.",
+    });
   });
 
   it("stops a folder delete at the file History refuses, puts the rest back, and names the files deleted", async () => {
