@@ -658,11 +658,10 @@ impl<'a> Change<'a> {
         };
         for &point in &candidates {
             work.take(depth(point) + 1)?;
-            let moved_by: Vec<usize> = chain(point)
-                .filter_map(|folder| movers.get(folder))
-                .flatten()
-                .copied()
-                .collect();
+            let movers_of = || chain(point).filter_map(|folder| movers.get(folder));
+            // Charged before it is kept, as in `anchor`.
+            work.take(movers_of().map(Vec::len).sum())?;
+            let moved_by: Vec<usize> = movers_of().flatten().copied().collect();
             if moved_by.is_empty() {
                 continue;
             }
@@ -672,7 +671,7 @@ impl<'a> Change<'a> {
             let emails = named_in(&named, chain(point), work)?;
             // Each bound walks the point's folders from the root.
             let walk = depth(point) + 1;
-            work.take(2 * (emails.len() + 1) * walk + moved_by.len())?;
+            work.take(2 * (emails.len() + 1) * walk)?;
             let first = change.bounds.len();
             for email in std::iter::once(None).chain(emails.into_iter().map(Some)) {
                 change.bounds.push((
@@ -783,12 +782,15 @@ impl<'a> Change<'a> {
                     })
                     .collect(),
             });
-            let moved_by: BTreeSet<usize> = chain(folder)
-                .chain(found.iter().map(|&twin| twins[twin].0))
-                .filter_map(|folder| movers.get(folder))
-                .flatten()
-                .copied()
-                .collect();
+            let movers_of = || {
+                chain(folder)
+                    .chain(found.iter().map(|&twin| twins[twin].0))
+                    .filter_map(|folder| movers.get(folder))
+            };
+            // Charged before it is kept: one folder can hold many rule files,
+            // each its own step, under many spellings of one key above it.
+            work.take(movers_of().map(Vec::len).sum())?;
+            let moved_by: BTreeSet<usize> = movers_of().flatten().copied().collect();
             for step in moved_by {
                 self.anchored[step].push(index);
                 self.cost[step] += people * judging;
