@@ -856,7 +856,7 @@ impl<'a> Change<'a> {
 
 /// The search keeps the steps a group has taken as the bits of one word.
 /// Past this many in one group, only the order given is tried.
-const MAX_SEARCHED_RULE_STEPS: usize = 64;
+const MAX_SEARCHED_RULE_STEPS: usize = 128;
 
 /// What the search found for a change of many rule files. Each list holds
 /// indexes into the writes, then into the deletes.
@@ -957,10 +957,10 @@ impl<'a> Search<'_, 'a> {
     fn search(
         &mut self,
         files: &RuleFiles<'a>,
-        done: u64,
-        write_slots: u64,
+        done: u128,
+        write_slots: u128,
         group: &[usize],
-        failed: &mut BTreeSet<u64>,
+        failed: &mut BTreeSet<u128>,
         order: &mut Vec<usize>,
     ) -> Option<bool> {
         if order.len() == group.len() {
@@ -2923,6 +2923,29 @@ mod tests {
         );
         eprintln!("128 folders of 1,000 people: {:?}", started.elapsed());
         assert_eq!(safe_writes(order), [1, 0]);
+    }
+
+    /// Sol's case from R9 review: the root goes from hidden to View, 40
+    /// teams from Edit to View, and 40 old rules go. The root's write, which
+    /// the desktop gives first, would show Edit in every team, so the search
+    /// must move it after the teams: 81 steps in one group.
+    #[test]
+    fn a_group_of_writes_and_deletes_past_64_steps_is_still_searched() {
+        let teams: Vec<String> = (0..40).map(|i| format!("team{i:02}/access.yaml")).collect();
+        let olds: Vec<String> = (0..40).map(|i| format!("old{i:02}/access.yaml")).collect();
+        let mut files = vec![("access.yaml", "people:\n")];
+        files.extend(teams.iter().map(|path| (path.as_str(), "members: edit\n")));
+        files.extend(olds.iter().map(|path| (path.as_str(), VIEW_TEXT)));
+        let before = rule_files(&files);
+        let steps: Vec<(&str, Option<&str>)> = std::iter::once(("access.yaml", Some(VIEW_TEXT)))
+            .chain(teams.iter().map(|path| (path.as_str(), Some(VIEW_TEXT))))
+            .chain(olds.iter().map(|path| (path.as_str(), None)))
+            .collect();
+        let made = merged_as_the_desktop_does(&before, &steps, &[]);
+        assert!(
+            matches!(made, Some(Ok(ref made)) if made.len() == steps.len()),
+            "{made:?}"
+        );
     }
 
     /// Opus's case from review: a Version makes 60 sibling folders private,
