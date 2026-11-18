@@ -1138,6 +1138,8 @@ export const MoveWorkspacePathPayload = z.object({
   fromPath: PATH_STRING,
   toPath: PATH_STRING,
   confirmNotVersioned: z.literal(true).optional(),
+  // The person agreed that the move may change who can see the item.
+  confirmAccessChange: z.literal(true).optional(),
 });
 export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 

@@ -264,3 +264,39 @@ it("pressing Delete again asks once, and a question never follows the person to 
   await waitFor(() => expect(screen.queryByTestId("not-versioned-confirm")).toBeNull());
   expect(deleteWorkspacePath).not.toHaveBeenCalled();
 });
+
+describe("Explorer, for a move main says may change who can see the item", () => {
+  const accessRefusal = () =>
+    new Error(
+      "Error invoking remote method 'desktop:move-workspace-path': AccessChangeError: Moving notes.md into Team may change who can see it. People who could read it may keep a copy.",
+    );
+
+  it("asks with main's sentence, and Cancel moves nothing", async () => {
+    const { props } = renderExplorer([]);
+    moveWorkspacePath.mockRejectedValueOnce(accessRefusal());
+    await renameTo("notes.md", "renamed.md");
+    const dialog = await screen.findByTestId("access-change-confirm");
+    expect(dialog.textContent).toContain("Moving notes.md into Team may change who can see it.");
+    expect(dialog.textContent).toContain("People who could read it may keep a copy.");
+    fireEvent.click(screen.getByTestId("cancel-access-change"));
+    await waitFor(() => expect(screen.queryByTestId("access-change-confirm")).toBeNull());
+    expect(moveWorkspacePath).toHaveBeenCalledTimes(1);
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("moves once the person agrees, telling main they did", async () => {
+    const { props } = renderExplorer([]);
+    moveWorkspacePath.mockRejectedValueOnce(accessRefusal());
+    await renameTo("notes.md", "renamed.md");
+    fireEvent.click(await screen.findByTestId("confirm-access-change"));
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-1",
+        fromPath: "notes.md",
+        toPath: "renamed.md",
+        confirmAccessChange: true,
+      }),
+    );
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+});

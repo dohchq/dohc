@@ -55,6 +55,7 @@ import {
   removeEmptyWorkspaceFolder,
 } from "./workspaceFiles";
 import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
+import { AccessChangeError, moveAccessWarning } from "./moveAccessWarning";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   beginPendingRecovery,
@@ -543,7 +544,14 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
           reason: notVersionedReason(paths),
         });
     }
-    return prepareMoveWorkspacePath(operation, input, author, options);
+    // An agent's move goes, and its answer carries the warning a person is asked.
+    const accessWarning = await moveAccessWarning(rootPath, input.fromPath, input.toPath);
+    const move = await prepareMoveWorkspacePath(operation, input, author, options);
+    if (!accessWarning) return move;
+    return async () => {
+      const result = await move();
+      return result.ok ? { ...result, accessWarning } : result;
+    };
   });
 }
 
@@ -586,7 +594,13 @@ function historyOff(
 
 export async function moveWorkspacePathByHand(
   operation: PathChangeOperation,
-  input: { fromPath: string; toPath: string; confirmNotVersioned?: boolean },
+  input: {
+    fromPath: string;
+    toPath: string;
+    confirmNotVersioned?: boolean;
+    // The person agreed that the move may change who can see the item.
+    confirmAccessChange?: boolean;
+  },
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
   options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & {
     capture:
@@ -614,6 +628,10 @@ export async function moveWorkspacePathByHand(
       (await prepareWorkspaceMove(rootPath, input.fromPath, input.toPath)).physicalFromPath,
     ]);
     if (paths.length) throw new NotVersionedError(paths);
+  }
+  if (!input.confirmAccessChange) {
+    const warning = await moveAccessWarning(rootPath, input.fromPath, input.toPath);
+    if (warning) throw new AccessChangeError(warning);
   }
   return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async (markChanged) => {
     assertWritable(operation);

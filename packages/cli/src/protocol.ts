@@ -2783,6 +2783,8 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
       toPath: z.string(),
       withoutHistory: z.array(z.string()).optional(),
       replaced: replacedPathSchema.optional(),
+      // The folder rules above the item changed, so who can see it may have.
+      accessWarning: z.string().optional(),
     })
     .strict(),
   z
