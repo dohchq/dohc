@@ -348,7 +348,8 @@ export function viewMeta(value: unknown): ViewMeta | null {
   const access = record.access;
   if (
     (access !== "view" && access !== "comment" && access !== "edit") ||
-    selectorRecord.access !== access ||
+    // A member's selector names no level: theirs varies by folder.
+    ("access" in selectorRecord && selectorRecord.access !== access) ||
     !Array.isArray(selectorRecord.paths) ||
     selectorRecord.paths.some((path) => typeof path !== "string") ||
     (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||

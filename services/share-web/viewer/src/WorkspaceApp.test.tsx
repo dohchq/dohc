@@ -175,7 +175,7 @@ function server(
   const user = () => options.user ?? "sam";
   const meta = () => ({
     ok: true,
-    effectiveSelector: { paths: [], versionId: null, access: levelNow(), wholeWorkspace: true },
+    effectiveSelector: { paths: [], versionId: null, wholeWorkspace: true },
     access: levelNow(),
     subjectName: "Trip",
     lastSettledAtMs: Date.now(),
