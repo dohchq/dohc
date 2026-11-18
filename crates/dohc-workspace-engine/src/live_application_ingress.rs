@@ -20,12 +20,14 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 const RANGE_BYTES: usize = 16;
 // Worst-case canonical request with 100 selectors and six-byte JSON escapes.
 const MAX_HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
+// An initial sync carries the host vector beside its update.
+const MAX_OWNER_BODY_BYTES: usize = MAX_YDOC_UPDATE_BYTES * 2;
 mod adoption;
 mod replica;
 mod restore;
@@ -247,14 +249,24 @@ pub enum UploadCompletion {
 }
 
 struct Reservation {
-    _bytes: OwnedSemaphorePermit,
-    _upload: OwnedSemaphorePermit,
+    bytes: Option<OwnedSemaphorePermit>,
+    slot: Option<OwnedSemaphorePermit>,
+    released: Arc<Notify>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        // Return the permits before waking owner work that waits for them.
+        drop((self.bytes.take(), self.slot.take()));
+        self.released.notify_waiters();
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct SettlementAdmission {
     budget: Arc<Semaphore>,
     slots: Arc<Semaphore>,
+    released: Arc<Notify>,
     bytes: u32,
     reconstruction: NativeHistoryReconstruction,
 }
@@ -281,9 +293,67 @@ impl SettlementAdmission {
             .try_acquire_many_owned(self.bytes)
             .map_err(|_| overloaded())?;
         Ok(Arc::new(Reservation {
-            _bytes: bytes,
-            _upload: upload,
+            bytes: Some(bytes),
+            slot: Some(upload),
+            released: self.released.clone(),
         }))
+    }
+}
+
+/// Owner work waits for room in the shared budget instead of failing while
+/// another call holds it. Calls take turns in arrival order. Only the call
+/// whose turn it is waits for permits, and it holds none while it waits, so
+/// admissions that try once still find free room.
+#[derive(Clone)]
+pub(crate) struct OwnerAdmission {
+    budget: Arc<Semaphore>,
+    released: Arc<Notify>,
+    turn: Arc<tokio::sync::Mutex<()>>,
+    bytes: u32,
+    longest_wait: std::time::Duration,
+}
+
+impl OwnerAdmission {
+    /// Takes no upload slot: an owner upload holds one while it waits here.
+    /// The wait ends when the call is cancelled or reaches its deadline. A
+    /// call with no deadline of its own waits no longer than an upload may.
+    pub(crate) async fn reserve(
+        &self,
+        cancelled: &dohc_engine_runtime::CancellationToken,
+        has_deadline: bool,
+    ) -> Result<Arc<dyn Send + Sync>, WireError> {
+        let refused = || WireError::new(ErrorCode::Overloaded, "live-settlement-capacity");
+        let wait = async {
+            let _turn = tokio::select! {
+                biased;
+                () = cancelled.cancelled() => return Err(refused()),
+                turn = self.turn.lock() => turn,
+            };
+            loop {
+                let released = self.released.notified();
+                tokio::pin!(released);
+                // Registered before the attempt, so a release between them still wakes this call.
+                released.as_mut().enable();
+                if let Ok(bytes) = self.budget.clone().try_acquire_many_owned(self.bytes) {
+                    return Ok(Arc::new(Reservation {
+                        bytes: Some(bytes),
+                        slot: None,
+                        released: self.released.clone(),
+                    }) as Arc<dyn Send + Sync>);
+                }
+                tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => return Err(refused()),
+                    () = &mut released => {}
+                }
+            }
+        };
+        if has_deadline {
+            return wait.await;
+        }
+        tokio::time::timeout(self.longest_wait, wait)
+            .await
+            .unwrap_or_else(|_| Err(refused()))
     }
 }
 
@@ -293,27 +363,39 @@ pub struct LiveApplicationIngress {
     config: LiveApplicationIngressConfig,
     budget: Arc<Semaphore>,
     upload_slots: Arc<Semaphore>,
+    released: Arc<Notify>,
+    owner_turn: Arc<tokio::sync::Mutex<()>>,
     uploads: HashMap<u64, Upload>,
     restores: HashMap<u64, restore::Upload>,
     last_stream_id: Option<u64>,
 }
 
 impl LiveApplicationIngress {
-    pub(crate) fn owner_admission(&self) -> Result<SettlementAdmission, WireError> {
+    pub(crate) fn owner_admission(&self) -> Result<OwnerAdmission, WireError> {
         // Two input buffers plus decoded vector, checkpoint and output scratch.
         // The configured working reserve remains charged while the actor hydrates Yrs.
         let bytes = self
             .config
             .assembly_reservation_bytes(MAX_YDOC_UPDATE_BYTES * 2, 0)
             .and_then(|n| n.checked_add(MAX_YDOC_UPDATE_BYTES * 10))
-            .filter(|n| *n <= self.config.aggregate_bytes)
-            .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(overloaded)?;
-        Ok(SettlementAdmission {
+        // Owner uploads keep their bodies while they wait for this reservation,
+        // so it must fit beside the largest body in every upload slot.
+        if self
+            .config
+            .max_uploads
+            .checked_mul(MAX_OWNER_BODY_BYTES)
+            .and_then(|bodies| bodies.checked_add(bytes))
+            .is_none_or(|total| total > self.config.aggregate_bytes)
+        {
+            return Err(overloaded());
+        }
+        Ok(OwnerAdmission {
             budget: self.budget.clone(),
-            slots: self.upload_slots.clone(),
-            bytes,
-            reconstruction: self.config.reconstruction(),
+            released: self.released.clone(),
+            turn: self.owner_turn.clone(),
+            bytes: u32::try_from(bytes).map_err(|_| overloaded())?,
+            longest_wait: self.config.upload_deadline,
         })
     }
     pub(crate) fn sync_admission(
@@ -328,6 +410,7 @@ impl LiveApplicationIngress {
         Ok(SettlementAdmission {
             budget: self.budget.clone(),
             slots: self.upload_slots.clone(),
+            released: self.released.clone(),
             bytes,
             reconstruction: self.config.reconstruction(),
         })
@@ -378,6 +461,7 @@ impl LiveApplicationIngress {
         Ok(SettlementAdmission {
             budget: self.budget.clone(),
             slots: self.upload_slots.clone(),
+            released: self.released.clone(),
             bytes,
             reconstruction: self.config.reconstruction(),
         })
@@ -404,6 +488,8 @@ impl LiveApplicationIngress {
             service,
             budget: Arc::new(Semaphore::new(config.aggregate_bytes)),
             upload_slots: Arc::new(Semaphore::new(config.max_uploads)),
+            released: Arc::new(Notify::new()),
+            owner_turn: Arc::new(tokio::sync::Mutex::new(())),
             config,
             uploads: HashMap::new(),
             restores: HashMap::new(),
@@ -598,7 +684,8 @@ impl LiveApplicationIngress {
                 .checked_mul(8)
                 .and_then(|n| n.checked_add(self.config.application_working_reserve_bytes))
         } else if matches!(&metadata, Metadata::Owner(_)) {
-            Some(self.owner_admission()?.bytes as usize)
+            // The body only. Its handler waits for the owner reservation.
+            Some(update.expected)
         } else if let Metadata::Sync(_) = &metadata {
             Some(self.service.sync_admission(connection)?.1.bytes as usize)
         } else if let Metadata::Adoption { max_bytes, .. } = &metadata {
@@ -621,16 +708,19 @@ impl LiveApplicationIngress {
         let mut first_seen = Vec::new();
         let admission = (|| {
             let permit = Arc::new(Reservation {
-                _upload: self
-                    .upload_slots
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| overloaded())?,
-                _bytes: self
-                    .budget
-                    .clone()
-                    .try_acquire_many_owned(reserved)
-                    .map_err(|_| overloaded())?,
+                slot: Some(
+                    self.upload_slots
+                        .clone()
+                        .try_acquire_owned()
+                        .map_err(|_| overloaded())?,
+                ),
+                bytes: Some(
+                    self.budget
+                        .clone()
+                        .try_acquire_many_owned(reserved)
+                        .map_err(|_| overloaded())?,
+                ),
+                released: self.released.clone(),
             });
             bytes
                 .try_reserve_exact(update.expected)
@@ -1020,6 +1110,54 @@ pub(crate) mod tests {
         next.params["rangeStreamId"] = serde_json::json!(4);
         ingress.begin(next, &owner.handle()).unwrap();
         assert!(ingress.uploads.get(&4).unwrap().admission.is_ok());
+    }
+
+    #[tokio::test]
+    async fn waiting_owner_work_leaves_free_room_to_other_admissions() {
+        let ingress =
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config()).unwrap();
+        let owner = ingress.owner_admission().unwrap();
+        let never = dohc_engine_runtime::CancellationToken::new();
+        let first = owner.reserve(&never, true).await.unwrap();
+        let second = owner.reserve(&never, true);
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            _ = &mut second => panic!("two owner reservations fit this budget"),
+            () = std::future::ready(()) => {}
+        }
+        let settlement = ingress.settlement_admission(4).unwrap().reserve().unwrap();
+        drop((settlement, first));
+        second.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_work_without_a_deadline_waits_at_most_an_upload_deadline() {
+        let ingress =
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config()).unwrap();
+        let owner = ingress.owner_admission().unwrap();
+        let never = dohc_engine_runtime::CancellationToken::new();
+        let _held = owner.reserve(&never, false).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let refused = owner.reserve(&never, false).await.err().unwrap();
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert!(started.elapsed() >= config().upload_deadline);
+    }
+
+    #[test]
+    fn owner_admission_fits_beside_a_full_body_in_every_upload_slot() {
+        let admission = |max_uploads| {
+            let config = LiveApplicationIngressConfig {
+                max_uploads,
+                ..config()
+            };
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config)
+                .unwrap()
+                .owner_admission()
+        };
+        let owner = admission(4).unwrap();
+        assert!(owner.bytes as usize + 4 * MAX_OWNER_BODY_BYTES <= config().aggregate_bytes);
+        assert!(admission(5).is_err());
     }
 
     #[tokio::test]

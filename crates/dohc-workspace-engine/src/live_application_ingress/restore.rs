@@ -144,20 +144,25 @@ pub(super) fn begin(
     let mut bytes = Vec::new();
     let admission = (|| {
         let permit = Arc::new(Reservation {
-            _upload: ingress
-                .upload_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| overloaded())?,
-            _bytes: ingress
-                .budget
-                .clone()
-                .try_acquire_many_owned(
-                    ingress
-                        .restore_reservation(&config)
-                        .ok_or_else(overloaded)?,
-                )
-                .map_err(|_| overloaded())?,
+            slot: Some(
+                ingress
+                    .upload_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| overloaded())?,
+            ),
+            bytes: Some(
+                ingress
+                    .budget
+                    .clone()
+                    .try_acquire_many_owned(
+                        ingress
+                            .restore_reservation(&config)
+                            .ok_or_else(overloaded)?,
+                    )
+                    .map_err(|_| overloaded())?,
+            ),
+            released: ingress.released.clone(),
         });
         bytes
             .try_reserve_exact(params.byte_length)

@@ -267,11 +267,36 @@ struct OwnerYDocDeliveryReceiptParams {
     accepting_host_epoch: i64,
 }
 
+fn owner_delivery_receipt(
+    receipt: OwnerYDocDeliveryReceiptParams,
+) -> Result<dohc_engine_collab::OwnerDeliveryReceipt, WireError> {
+    let wire = 1..=dohc_engine_protocol::MAX_WIRE_INTEGER as i64;
+    if !wire.contains(&receipt.accepting_host_epoch) || !wire.contains(&receipt.journal_cursor) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-receipt",
+        ));
+    }
+    Ok(dohc_engine_collab::OwnerDeliveryReceipt {
+        delivery_id: receipt.delivery_id,
+        update_digest: receipt.update_digest,
+        journal_cursor: receipt.journal_cursor,
+        accepting_host_epoch: receipt.accepting_host_epoch,
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OwnerYDocOutboxAcknowledgeParams {
     outbox_id: String,
     receipts: Vec<OwnerYDocDeliveryReceiptParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxAcknowledgeTakenParams {
+    outbox_id: String,
+    receipt: OwnerYDocDeliveryReceiptParams,
 }
 
 #[derive(Deserialize)]
@@ -652,6 +677,7 @@ impl EngineService {
         open: &Arc<OpenWorkspace>,
         key: &DocKey,
         cancellation: &OperationCancellation,
+        room: &OperationCancellation,
     ) -> Result<EditorDraftRead, WireError> {
         let descriptor = open
             .actor
@@ -662,7 +688,7 @@ impl EngineService {
         let Some(descriptor) = descriptor else {
             return Ok((None, None));
         };
-        let reservation = self.reserve_owner_delivery()?;
+        let reservation = self.reserve_owner_delivery(room).await?;
         let draft = open
             .actor
             .owner_ydoc_open_draft(
@@ -1258,28 +1284,11 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: OwnerYDocOutboxAcknowledgeParams = parse(params)?;
-        for receipt in &params.receipts {
-            if receipt.accepting_host_epoch < 1
-                || receipt.accepting_host_epoch > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
-                || receipt.journal_cursor < 1
-                || receipt.journal_cursor > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
-            {
-                return Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "invalid-owner-outbox-receipt",
-                ));
-            }
-        }
         let receipts = params
             .receipts
             .into_iter()
-            .map(|receipt| dohc_engine_collab::OwnerDeliveryReceipt {
-                delivery_id: receipt.delivery_id,
-                update_digest: receipt.update_digest,
-                journal_cursor: receipt.journal_cursor,
-                accepting_host_epoch: receipt.accepting_host_epoch,
-            })
-            .collect::<Vec<_>>();
+            .map(owner_delivery_receipt)
+            .collect::<Result<Vec<_>, _>>()?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
         let cancellation = OperationCancellation::new(ctx);
@@ -1303,6 +1312,54 @@ impl EngineService {
             .map_err(|error| match error {
                 RuntimeError::Cancelled => {
                     cancellation.interruption("ydoc.ownerOutbox.acknowledge")
+                }
+                error => map_runtime(error),
+            })?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({
+            "acknowledged": result.acknowledged,
+            "pendingBytes": result.pending_bytes,
+            "oldestEntryAtMs": result.oldest_entry_at_ms,
+        }))
+    }
+
+    /// The relay took the queue's first delivery: a live room wrote it down
+    /// unsaved, or the journal committed it before its frame arrived.
+    pub(super) async fn owner_ydoc_outbox_acknowledge_taken(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxAcknowledgeTakenParams = parse(params)?;
+        let receipt = owner_delivery_receipt(params.receipt)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        // Nothing in the engine proves the relay took it, so only the
+        // connection that delivers the owner's edits may say so.
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, Some(&handle))?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(
+                &open,
+                &cancellation,
+                "ydoc.ownerOutbox.acknowledgeTaken (queued)",
+            )
+            .await?;
+        let open = self.open(Some(&handle))?;
+        let result = open
+            .actor
+            .owner_ydoc_outbox_acknowledge_taken(
+                open.workspace_id.clone(),
+                params.outbox_id,
+                receipt,
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => {
+                    cancellation.interruption("ydoc.ownerOutbox.acknowledgeTaken")
                 }
                 error => map_runtime(error),
             })?
@@ -1630,8 +1687,14 @@ impl EngineService {
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
+        // The landed open has no deadline, so its wait for owner room ends
+        // when the blob's budget does.
+        let room = OperationCancellation::new(&RequestContext {
+            deadline: Some(budget_until.into_std()),
+            ..ctx.clone()
+        });
         let (draft, _draft_reservation) = self
-            .ydoc_editor_draft(&open, &state.key, &cancellation)
+            .ydoc_editor_draft(&open, &state.key, &cancellation, &room)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != params.path
@@ -1880,7 +1943,7 @@ impl EngineService {
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
             let token = cancellation.token();
-            let reservation = self.reserve_owner_delivery()?;
+            let reservation = self.reserve_owner_delivery(&cancellation).await?;
             let append = tokio::spawn(async move {
                 let _serial = serial;
                 actor
@@ -2124,7 +2187,7 @@ impl EngineService {
             ));
         }
         let (draft, reservation) = self
-            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .ydoc_editor_draft(&open, &session.key, &cancellation, &cancellation)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != session.path
@@ -2650,7 +2713,7 @@ impl EngineService {
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let (draft, _draft_reservation) = self
-            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .ydoc_editor_draft(&open, &session.key, &cancellation, &cancellation)
             .await?;
         if draft.as_ref().is_some_and(|draft| {
             draft.descriptor.binding.current_path != session.path

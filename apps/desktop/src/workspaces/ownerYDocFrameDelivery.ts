@@ -1,8 +1,6 @@
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { setTimeout as backoff } from "node:timers/promises";
-import { isOwnerDeliveryBackoff } from "./ownerDeliveryBackoff";
 import {
   connectOwnerLiveTransport,
   type OwnerLiveTransport,
@@ -24,7 +22,6 @@ import {
 import {
   parseAgentDeclaration,
   type AgentDeclaration,
-  type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
 import type {
   FreshOwnerAuthority,
@@ -40,7 +37,10 @@ export interface OwnerAcceptedState {
     binding: LiveObjectBinding,
     signal: AbortSignal,
   ): Promise<{ stateVector: Uint8Array; journalCursor: number }>;
-  /** Return retry when the native operation cannot durably install this exact cut. */
+  /**
+   * Return retry when the native operation cannot durably install this exact cut.
+   * Drops the rows an earlier connection put: the route sends them again after this sync.
+   */
   applyInitialSync(
     input: {
       binding: LiveObjectBinding;
@@ -55,15 +55,20 @@ export interface OwnerAcceptedState {
       binding: LiveObjectBinding;
       previousAcceptedCursor: number;
       journalCursor: number;
+      /** A room save: the last room position it holds. */
+      rowsThrough?: number;
       updateBytes: Uint8Array;
     },
     signal: AbortSignal,
   ): Promise<"applied" | "retry">;
-  /** Exact durable cursor/digest association; a higher checkpoint cursor is insufficient. */
-  isReceiptApplied(
-    input: { binding: LiveObjectBinding; receipt: LiveUpdateReceipt },
+  /**
+   * An edit the note's room holds unsaved, at its room position, for the owner's screen.
+   * "reconnect" when a different edit is already held there.
+   */
+  putRow(
+    input: { binding: LiveObjectBinding; position: number; updateBytes: Uint8Array },
     signal: AbortSignal,
-  ): Promise<boolean>;
+  ): Promise<"added" | "unchanged" | "reconnect">;
 }
 
 export interface OwnerYDocFrameDeliveryOptions {
@@ -105,7 +110,10 @@ interface Attempt {
   abort: AbortController;
   protocol: ReturnType<typeof createLiveFrameSession>;
   ready: ReturnType<typeof deferred<OwnerAuthorityResult>>;
+  /** The route's opening sync is installed. */
+  open: boolean;
   delivered: ReturnType<typeof deferred<OwnerYDocDeliveryResult>>;
+  ended: ReturnType<typeof deferred<void>>;
   authority?: FreshOwnerAuthority;
   transport?: OwnerLiveTransport;
   controls: LiveFrame[];
@@ -126,11 +134,14 @@ interface Attempt {
   envelope?: Pick<OwnerYDocDeliveryEnvelope, "deliveryId" | "update" | "updateDigest"> & {
     authorContext?: LiveAuthorContext;
   };
-  receipt?: LiveUpdateReceipt;
   stopTimer?: ReturnType<typeof setTimeout>;
 }
 
-/** One stored head per authenticated route. The workspace lifecycle has not mounted this adapter. */
+/**
+ * One authenticated route at a time. While it stays open it carries the queue's
+ * heads one after another, and puts the room's unsaved edits on the owner's screen.
+ * The timeout bounds its opening and each delivery, not an idle open route.
+ */
 export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private active?: Attempt;
   private disposed = false;
@@ -164,6 +175,11 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     if (this.active) this.stop(this.active);
   }
 
+  /** Settles when the route open now closes; at once when none is open. */
+  ended(): Promise<void> {
+    return this.active?.ended.promise ?? Promise.resolve();
+  }
+
   private current(attempt: Attempt): boolean {
     return this.active === attempt && !this.disposed && !attempt.signal.aborted;
   }
@@ -182,6 +198,13 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       result.kind === "receipt" || result.kind === "not-accepted" ? { kind: "retry" } : result,
     );
     attempt.delivered.resolve(result);
+    attempt.ended.resolve();
+  }
+
+  private arm(attempt: Attempt): void {
+    clearTimeout(attempt.stopTimer);
+    attempt.stopTimer = setTimeout(() => this.stop(attempt), this.options.attemptTimeoutMs);
+    attempt.stopTimer.unref();
   }
 
   private routeUrl(
@@ -205,17 +228,28 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   }
 
   async freshOwnerAuthority(bindingValue: LiveObjectBinding): Promise<OwnerAuthorityResult> {
-    if (this.active) this.stop(this.active);
-    if (this.disposed || this.options.signal.aborted) return { kind: "retry" };
     const binding = parseLiveObjectBinding(bindingValue),
-      abort = new AbortController();
+      open = this.active;
+    // The route that is open and idle still holds this note's authority.
+    if (
+      open?.open &&
+      this.current(open) &&
+      !open.envelope &&
+      isDeepStrictEqual(open.binding, binding)
+    )
+      return { kind: "authority", authority: open.authority! };
+    if (open) this.stop(open);
+    if (this.disposed || this.options.signal.aborted) return { kind: "retry" };
+    const abort = new AbortController();
     const attempt: Attempt = {
       binding,
       abort,
       signal: AbortSignal.any([abort.signal, this.options.signal]),
       protocol: createLiveFrameSession("client", this.options.frames),
       ready: deferred(),
+      open: false,
       delivered: deferred(),
+      ended: deferred(),
       controls: [{ kind: "hello", receivePolicy: this.options.frames.receive }],
       vector: new Uint8Array(),
       vectorSent: false,
@@ -238,8 +272,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       },
       { once: true },
     );
-    attempt.stopTimer = setTimeout(() => this.stop(attempt), this.options.attemptTimeoutMs);
-    attempt.stopTimer.unref();
+    this.arm(attempt);
     try {
       const state = await abortable(
         this.options.acceptedState.readState(binding, attempt.signal),
@@ -345,6 +378,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
           }
         : {}),
     };
+    this.arm(attempt);
     void this.pump(attempt);
     return attempt.delivered.promise;
   }
@@ -508,8 +542,16 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
               if (frame.ack.acceptingHostEpoch > attempt.authority!.hostEpoch)
                 throw new Error("Owner result epoch mismatch.");
               const { deliveryId, updateDigest, journalCursor, acceptingHostEpoch } = frame.ack;
-              attempt.receipt = { deliveryId, updateDigest, journalCursor, acceptingHostEpoch };
-              await this.finishReceipt(attempt);
+              // The relay took it; the route stays open for the next head.
+              clearTimeout(attempt.stopTimer);
+              const delivered = attempt.delivered;
+              attempt.envelope = undefined;
+              attempt.submitted = false;
+              attempt.delivered = deferred();
+              delivered.resolve({
+                kind: "receipt",
+                receipt: { deliveryId, updateDigest, journalCursor, acceptingHostEpoch },
+              });
             } else if (
               frame.result === "refused" &&
               [
@@ -552,6 +594,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
                 return;
               }
               attempt.cursor = begin.appliedThroughJournalCursor;
+              attempt.open = true;
+              clearTimeout(attempt.stopTimer);
               this.synchronized = true;
               attempt.controls.push({
                 kind: "sync-applied",
@@ -567,6 +611,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
                     binding: attempt.binding,
                     previousAcceptedCursor: attempt.cursor,
                     journalCursor: begin.journalCursor,
+                    ...(begin.rowsThrough === undefined ? {} : { rowsThrough: begin.rowsThrough }),
                     updateBytes: update,
                   },
                   attempt.signal,
@@ -579,7 +624,21 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
                 return;
               }
               attempt.cursor = begin.journalCursor;
-              await this.finishReceipt(attempt);
+            } else if (begin.purpose === "room-row") {
+              if (!attempt.open) throw new Error("Owner row before its sync.");
+              const outcome = await abortable(
+                this.options.acceptedState.putRow(
+                  { binding: attempt.binding, position: begin.position, updateBytes: update },
+                  attempt.signal,
+                ),
+                attempt.signal,
+              );
+              this.check(attempt);
+              // The route sends every row above its sync again when it reopens.
+              if (outcome === "reconnect") {
+                this.stop(attempt);
+                return;
+              }
             } else throw new Error("Unexpected owner transfer.");
           }
         } finally {
@@ -597,28 +656,5 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
         attempt.incomingBytes -= owned.length;
         attempt.incomingFrames--;
       });
-  }
-
-  private async finishReceipt(attempt: Attempt): Promise<void> {
-    if (!attempt.receipt) return;
-    let backoffMs = 25;
-    while (this.current(attempt)) {
-      try {
-        const applied = await abortable(
-          this.options.acceptedState.isReceiptApplied(
-            { binding: attempt.binding, receipt: attempt.receipt },
-            attempt.signal,
-          ),
-          attempt.signal,
-        );
-        this.check(attempt);
-        if (applied) this.stop(attempt, { kind: "receipt", receipt: attempt.receipt });
-        return;
-      } catch (error) {
-        if (!isOwnerDeliveryBackoff(error)) throw error;
-        await backoff(backoffMs, undefined, { signal: attempt.signal, ref: false });
-        backoffMs = Math.min(backoffMs * 2, 250);
-      }
-    }
   }
 }

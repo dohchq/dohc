@@ -106,6 +106,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_restore_fences",
     "live_restore_cancellations",
     "ydoc_owner_applied_frames",
+    "ydoc_owner_taken_rows",
     "ydoc_owner_bindings",
     "owner_pending_settlements",
     "owner_pending_settlement_blobs",

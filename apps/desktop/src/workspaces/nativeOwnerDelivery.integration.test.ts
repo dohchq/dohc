@@ -141,7 +141,7 @@ async function deliver(
     },
   });
   const acknowledge = vi
-    .spyOn(OwnerYDocOutbox.prototype, "acknowledge")
+    .spyOn(OwnerYDocOutbox.prototype, "acknowledgeTaken")
     .mockResolvedValue({ acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null });
   const client = {
     ownerYDocPrepareEnrollment: vi.fn(async () => ({
@@ -159,7 +159,7 @@ async function deliver(
       acceptedCursor: 0,
       nativeHeadSequence: 2,
     })),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true),
+    ownerYDocRestartCommittedRows: vi.fn(async () => undefined),
   };
   const options = {
     client: client as unknown as EngineClient,
@@ -175,7 +175,7 @@ async function deliver(
     },
   };
   expect(await runNativeOwnerDeliveryPass(options)).toBe("acknowledged");
-  expect(acknowledge).toHaveBeenCalledWith("outbox", [receipt]);
+  expect(acknowledge).toHaveBeenCalledWith("outbox", receipt);
   return submit.mock.calls[0]![0];
 }
 

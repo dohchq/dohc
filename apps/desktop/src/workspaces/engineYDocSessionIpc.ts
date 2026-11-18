@@ -156,6 +156,8 @@ interface EngineYDocSessionIpcOptions {
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
   /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  // An owner's edit of a shared note is in its queue for the server.
+  onOwnerEdit?: (workspaceId: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
 }
@@ -507,6 +509,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
   readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
+  readonly #onOwnerEdit: EngineYDocSessionIpcOptions["onOwnerEdit"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
   readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
@@ -533,6 +536,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#onError = options.onError;
     this.#onLiveEditsPaused = options.onLiveEditsPaused;
     this.#onOwnerOpened = options.onOwnerOpened;
+    this.#onOwnerEdit = options.onOwnerEdit;
     this.#localPersonId = options.localPersonId;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
@@ -768,6 +772,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   `dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`,
                 );
             },
+            onOwnerEditQueued: () => this.#onOwnerEdit?.(workspace.workspaceId),
             onEditRefused: (requestId, message, paused) => {
               if (paused) this.#onLiveEditsPaused?.(workspace.workspaceId, canonicalPath);
               publish(() =>
@@ -1509,6 +1514,28 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       accepted: true,
       updates: acknowledged.updates,
     });
+  }
+
+  /** Whether an editor here has `path` open as the owner of its shared note. */
+  ownerHasOpen(workspaceId: string, path: string): boolean {
+    let authority: ReturnType<EngineYDocSessionIpcOptions["acquireWorkspace"]>;
+    try {
+      authority = this.#acquireWorkspace(workspaceId);
+    } catch {
+      return false;
+    }
+    try {
+      authority.assertCurrent();
+      if (this.#isSharedView(authority.workspace)) return false;
+      return (
+        this.#owner.documentSession(authority.workspace.attachmentId, path)?.session.provider
+          .ownerBound === true
+      );
+    } catch {
+      return false;
+    } finally {
+      authority.release();
+    }
   }
 
   async close(sender: EngineYDocIpcSender, payload: ClosePayload): Promise<void> {

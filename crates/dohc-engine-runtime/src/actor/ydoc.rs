@@ -621,6 +621,7 @@ impl ActorHandle {
                 if let Some(through) = rows_through {
                     cache.drop_owner_rows_through(&key, through);
                 }
+                cache.drop_owner_row_at(&key, input.journal_cursor);
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
                 decide_owner_holds_after_commit(store, cache, &key);
             }
@@ -846,6 +847,31 @@ impl ActorHandle {
                     &workspace_id,
                     &outbox_id,
                     &receipts,
+                ))
+            }
+        })
+        .await
+    }
+
+    /// The relay took the queue's first delivery; see
+    /// [`dohc_engine_collab::owner_outbox::acknowledge_taken`].
+    pub async fn owner_ydoc_outbox_acknowledge_taken(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        receipt: OwnerDeliveryReceipt,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, cache| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                Ok(dohc_engine_collab::owner_outbox::acknowledge_taken(
+                    store,
+                    cache,
+                    &workspace_id,
+                    &outbox_id,
+                    &receipt,
                 ))
             }
         })

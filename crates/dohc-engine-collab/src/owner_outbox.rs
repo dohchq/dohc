@@ -25,6 +25,7 @@ pub mod publication;
 mod recovery;
 pub mod release;
 pub mod retirement;
+mod taken;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
@@ -2063,6 +2064,68 @@ pub fn acknowledge(
         Ok(result)
     })?;
     committed(outcome)
+}
+
+/// The relay took the queue's first delivery at `receipt.journal_cursor`:
+/// a live room wrote it down unsaved, or the journal committed it and its
+/// frame has not arrived. It leaves the queue at once, so the next one can
+/// go. The owner's disk keeps its bytes and the owner's screen shows it as a
+/// row at that cursor, until the accepted state holds it. A delivery the
+/// accepted state already holds is acknowledged as usual.
+pub fn acknowledge_taken(
+    store: &mut EngineStore,
+    cache: &mut crate::WriterDocCache,
+    workspace_id: &str,
+    outbox_id: &str,
+    receipt: &OwnerDeliveryReceipt,
+) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
+    validate_identifier(outbox_id, "outbox id must be non-empty and bounded")?;
+    let receipts = std::slice::from_ref(receipt);
+    validate_receipts(receipts)?;
+    let outcome = store.write_with(&NoFaults, |tx| -> Result<_, OwnerOutboxError> {
+        let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+        require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        require_unfrozen(&parent, receipts)?;
+        let observed = accepted::current(tx, &parent.binding)?;
+        let taken = if accepted::is_receipt_applied_in(
+            tx,
+            &parent.binding,
+            &observed.relay_database_namespace,
+            receipt,
+        )? {
+            if accepted::check_release_in(tx, &parent, receipts)? {
+                return Ok((
+                    OwnerOutboxAcknowledgeResult {
+                        acknowledged: 1,
+                        pending_bytes: parent.pending_bytes,
+                        oldest_entry_at_ms: parent.oldest_entry_at_ms,
+                    },
+                    None,
+                ));
+            }
+            None
+        } else {
+            let found = delivery_group::find_in(
+                tx,
+                outbox_id,
+                &receipt.delivery_id,
+                &receipt.update_digest,
+            )?
+            .and_then(|found| found.pending)
+            .ok_or(OwnerOutboxError::ReceiptMismatch)?;
+            let bytes = found.update(tx)?;
+            taken::put_in(tx, &parent.binding, receipt.journal_cursor, &bytes)?;
+            Some((parent.binding.clone(), bytes))
+        };
+        let result = acknowledge_prefix_in(tx, &parent, receipts)?;
+        accepted::prune_in(tx, &parent.binding)?;
+        Ok((result, taken))
+    })?;
+    let (result, taken) = committed(outcome)?;
+    if let Some((binding, bytes)) = taken {
+        draft::put_committed_row(store, cache, &binding, receipt.journal_cursor, bytes)?;
+    }
+    Ok(result)
 }
 
 fn validate_receipts(receipts: &[OwnerDeliveryReceipt]) -> Result<(), OwnerOutboxError> {

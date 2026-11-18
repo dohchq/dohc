@@ -26,10 +26,10 @@ pub struct OwnerDraft {
 }
 
 /// Edits the note's room took and has not saved yet, keyed by room position
-/// and held in memory for the owner's screen. They never reach the store; the
-/// room sends its unsaved edits again after a reconnect or a restart. A save
-/// names the last room position it holds, which can be below its own journal
-/// cursor, so rows go only through that position.
+/// and held in memory for the owner's screen. The room sends its unsaved edits
+/// again after a reconnect or a restart; only the owner's own are also on disk
+/// (`taken.rs`). A save names the last room position it holds, which can be
+/// below its own journal cursor, so rows go only through that position.
 #[derive(Default)]
 pub(crate) struct OwnerLayer {
     binding: Option<(String, i64)>,
@@ -51,6 +51,10 @@ impl OwnerLayer {
     pub(crate) fn drop_through(&mut self, cursor: i64) {
         self.saved_through = self.saved_through.max(cursor);
         self.rows.retain(|held, _| *held > cursor);
+    }
+
+    pub(crate) fn drop_at(&mut self, cursor: i64) {
+        self.rows.remove(&cursor);
     }
 
     pub(super) fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
@@ -852,7 +856,8 @@ pub(super) fn layered_parts_in(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let checkpoint = bounded_blob(conn, &observed.checkpoint_digest)?;
-    let rows = layer.map_or_else(Vec::new, |layer| layer.unsaved(binding));
+    let mut rows = super::taken::read_in(conn, binding)?;
+    rows.extend(layer.map_or_else(Vec::new, |layer| layer.unsaved(binding)));
     let pending = pending_updates_in(
         conn,
         binding,
@@ -3475,6 +3480,247 @@ mod tests {
         .unwrap();
         let copy = copy_text(&store).unwrap();
         assert!(copy.contains("Saved row") && copy.contains("Unsaved row"));
+    }
+
+    /// Two edits typed one after the other: the head goes alone, the second
+    /// waits behind it.
+    fn typed_head_and_second(
+        store: &mut EngineStore,
+        observed: &ObservedOwnerBinding,
+        checkpoint: &[u8],
+    ) -> Typed {
+        let owner = Ydoc::wire();
+        owner.apply(checkpoint).unwrap();
+        type_drafts(store, observed, &owner, 1, &["Taken head", "Second edit"])
+    }
+
+    fn row_cursors(cache: &crate::WriterDocCache, key: &DocKey) -> Vec<i64> {
+        cache
+            .owner_layer(key)
+            .map(|layer| layer.rows.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn taken_rows(store: &EngineStore) -> i64 {
+        store.table_row_count("ydoc_owner_taken_rows").unwrap()
+    }
+
+    #[test]
+    fn a_taken_delivery_leaves_the_queue_and_stays_on_screen_until_a_save_holds_it() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let ((head, head_delta), (second, _)) = (&typed[0], &typed[1]);
+        let outbox = head.outbox_id.clone();
+        let shown = |store: &EngineStore, cache: &mut crate::WriterDocCache| {
+            snapshot_text(
+                &open_draft_cached(store, cache, &observed.binding, revision(store, &observed))
+                    .unwrap(),
+            )
+        };
+
+        // Only the head can be taken.
+        assert!(matches!(
+            super::super::acknowledge_taken(
+                &mut store,
+                &mut cache,
+                "workspace",
+                &outbox,
+                &receipt_for(&second.delivery_id, &second.update_digest, 5),
+            ),
+            Err(OwnerOutboxError::ReceiptMismatch)
+        ));
+        assert!(row_cursors(&cache, &key).is_empty());
+
+        let receipt = receipt_for(&head.delivery_id, &head.update_digest, 5);
+        let taken =
+            super::super::acknowledge_taken(&mut store, &mut cache, "workspace", &outbox, &receipt)
+                .unwrap();
+        assert_eq!(taken.acknowledged, 1);
+        let waiting = super::super::read_pending(&store, "workspace", &outbox).unwrap();
+        assert_eq!(waiting.entries.len(), 1);
+        assert_eq!(waiting.entries[0].delivery_id, second.delivery_id);
+        assert_eq!(row_cursors(&cache, &key), vec![5]);
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Taken head") && text.contains("Second edit"));
+        assert!(!stored_text(&store).contains("Taken head"));
+        // A restarted engine has no layer and no connection, and still shows it.
+        assert_eq!(taken_rows(&store), 1);
+        let text = shown(&store, &mut crate::WriterDocCache::default());
+        assert!(text.contains("Taken head") && text.contains("Second edit"));
+
+        // A room save at 6 that does not hold the head keeps its row.
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        feed(
+            &mut store,
+            &observed,
+            6,
+            collaborator.richdoc_append_paragraph("Saved elsewhere"),
+        );
+        assert_eq!(taken_rows(&store), 1);
+
+        // A room save at 7 holds rows through 5: the note has the head and
+        // the row goes, from memory and from disk.
+        feed(&mut store, &observed, 7, head_delta.clone());
+        cache.drop_owner_rows_through(&key, 5);
+        assert!(row_cursors(&cache, &key).is_empty());
+        assert_eq!(taken_rows(&store), 0);
+        assert!(stored_text(&store).contains("Taken head"));
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Taken head") && text.contains("Second edit"));
+
+        // The same answer again changes nothing.
+        super::super::acknowledge_taken(&mut store, &mut cache, "workspace", &outbox, &receipt)
+            .unwrap();
+        assert!(row_cursors(&cache, &key).is_empty());
+        assert_eq!(
+            super::super::read_pending(&store, "workspace", &outbox)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_stop_past_a_save_that_lacks_a_taken_edit_keeps_the_edit() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let typed = type_drafts(&mut store, &observed, &owner, 1, &["Taken head"]);
+        let (head, _) = &typed[0];
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        // A save at 6 that holds only an earlier edit.
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        feed(
+            &mut store,
+            &observed,
+            6,
+            collaborator.richdoc_append_paragraph("Saved elsewhere"),
+        );
+        committed(
+            store
+                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, true, 21))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.write_with(&NoFaults, |tx| {
+                release::release_in_tx(tx, &observed.binding, Some(6), None, 22, |_, _, _, _, _| {
+                    Ok(())
+                })
+            }),
+            Err(OwnerOutboxError::StopConflict)
+        ));
+        assert_eq!(taken_rows(&store), 1);
+    }
+
+    #[test]
+    fn a_pause_after_a_restart_keeps_a_taken_edit_in_its_copy_and_frees_the_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let (head, head_delta) = &typed[0];
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        // The restarted engine's room sends the owner's row again.
+        let mut cache = crate::WriterDocCache::default();
+        put_committed_row(&store, &mut cache, &observed.binding, 5, head_delta.clone()).unwrap();
+        assert_eq!(row_cursors(&cache, &key), vec![5]);
+        let accepted = store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap()
+            .accepted_cursor;
+        let mut input = pause_input(&observed);
+        (input.applied_cursor, input.row_cursor) = (accepted, 5);
+        super::super::release::pause_cached(
+            &mut store,
+            &mut cache,
+            &input,
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Taken head") && copy.contains("Second edit"));
+        assert_eq!(taken_rows(&store), 0);
+    }
+
+    #[test]
+    fn without_a_room_the_frame_at_the_taken_cursor_drops_its_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let (head, head_delta) = &typed[0];
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Row at 6");
+        put_committed_row(&store, &mut cache, &observed.binding, 6, row).unwrap();
+
+        assert_eq!(taken_rows(&store), 1);
+        feed(&mut store, &observed, 5, head_delta.clone());
+        cache.drop_owner_row_at(&key, 5);
+        assert_eq!(row_cursors(&cache, &key), vec![6]);
+        assert_eq!(taken_rows(&store), 0);
+        assert!(stored_text(&store).contains("Taken head"));
+    }
+
+    #[test]
+    fn a_delivery_whose_frame_came_first_is_acknowledged_without_a_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let typed = typed_head_and_second(&mut store, &observed, &checkpoint);
+        let ((head, head_delta), (second, _)) = (&typed[0], &typed[1]);
+        feed(&mut store, &observed, 5, head_delta.clone());
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &head.outbox_id,
+            &receipt_for(&head.delivery_id, &head.update_digest, 5),
+        )
+        .unwrap();
+        assert!(row_cursors(&cache, &key).is_empty());
+        assert_eq!(taken_rows(&store), 0);
+        let waiting = super::super::read_pending(&store, "workspace", &head.outbox_id).unwrap();
+        assert_eq!(waiting.entries.len(), 1);
+        assert_eq!(waiting.entries[0].delivery_id, second.delivery_id);
     }
 
     #[test]

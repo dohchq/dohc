@@ -125,7 +125,7 @@ async function deliver(
         readState: async () => ({ stateVector: Uint8Array.of(0), journalCursor: 0 }),
         applyInitialSync: async () => "applied",
         applyAcceptedFrame: async () => "applied",
-        isReceiptApplied: async () => true,
+        putRow: async () => "added",
       },
       connect: async (input) => {
         server = createNamedLiveFrameSession({

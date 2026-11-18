@@ -14,9 +14,10 @@ pub const RETIRED_REASON: &str = "retired";
 /// For each binding, every queue of its exact restore generation is set aside
 /// under [`RETIRED_REASON`] with the accepted checkpoint its entries build on.
 /// Refused and abandoned bytes become pending again, so the recovery copy holds
-/// them. Native state that the checkpoint and those entries lack is kept as
-/// one more entry. Then the
-/// binding and its applied frames go, so publication proof answers `Unbound`.
+/// them. Each of the owner's edits the relay took that no save holds yet is
+/// kept as one more entry, and so is native state that the checkpoint and
+/// those entries lack. Then the binding, its taken edits and its applied
+/// frames go, so publication proof answers `Unbound`.
 ///
 /// Unlike Stop's release, this unbinds even when settlements are pending or a
 /// Stop was deferred, because the document they wait for is being deleted.
@@ -67,15 +68,16 @@ pub fn close_retired_in_tx(
             None => open_closed_outbox_in_tx(tx, &binding, now_ms)?,
         };
         close_generation_in_tx(tx, &binding, &observed.checkpoint_digest)?;
+        // No queue entry keeps a taken edit's bytes, and native state lacks it.
+        for taken in super::taken::read_in(tx, &binding)? {
+            retain_in(tx, parent.as_ref(), observed.revision, &taken, now_ms)?;
+        }
         let native = match native {
             Some(doc) => adds_to(tx, &binding, &observed.checkpoint_digest, &doc)?,
             None => None,
         };
         if let Some(native) = native {
-            let parent = parent.ok_or(OwnerOutboxError::Corrupt)?;
-            let parent = read_parent(tx, &parent.outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
-            let append_key = format!("owner-retired:{}", hex_sha256(&native));
-            retain_fenced_in_tx(tx, &parent, observed.revision, &append_key, &native, now_ms)?;
+            retain_in(tx, parent.as_ref(), observed.revision, &native, now_ms)?;
         }
         let scope = params![
             binding.workspace_id,
@@ -83,6 +85,7 @@ pub fn close_retired_in_tx(
             binding.object_id,
             binding.lineage_claim_id
         ];
+        super::taken::clear_in(tx, &binding)?;
         tx.execute(
             "DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 \
              AND object_id=?3 AND lineage_claim_id=?4",
@@ -97,6 +100,22 @@ pub fn close_retired_in_tx(
         .map_err(write_sql)?;
     }
     Ok(())
+}
+
+/// Keeps `update` as a pending entry of the retired generation's queue.
+fn retain_in(
+    tx: &rusqlite::Transaction<'_>,
+    parent: Option<&ParentRow>,
+    revision: i64,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let parent = parent.ok_or(OwnerOutboxError::Corrupt)?;
+    let parent = read_parent(tx, &parent.outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
+    // Unique per queue: another note's queue may keep the same bytes.
+    let identity = [parent.outbox_id.as_bytes(), &b"\0"[..], update].concat();
+    let append_key = format!("owner-retired:{}", hex_sha256(&identity));
+    retain_fenced_in_tx(tx, &parent, revision, &append_key, update, now_ms)
 }
 
 /// The documents whose observed-owner binding outlived their marker, as a
@@ -269,4 +288,37 @@ fn adds_to(
     let before = bounded(&kept)?;
     kept.apply(&native).map_err(collab)?;
     Ok((bounded(&kept)? != before).then_some(native))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two notes' retired queues can each keep the same taken bytes.
+    #[test]
+    fn two_retired_queues_keep_the_same_taken_bytes() {
+        let dir = dohc_test_scratch::ScratchDir::new_named("retired-taken").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let base = b"base";
+        store
+            .write_with(&NoFaults, |tx| {
+                put_binary_blob_with_sha(tx, base, &hex_sha256(base))?;
+                for object in ["first", "second"] {
+                    let binding = LiveObjectBinding {
+                        workspace_id: "workspace".into(),
+                        main_version_id: "main".into(),
+                        object_id: object.into(),
+                        lineage_claim_id: hex_sha256(base),
+                        current_path: format!("{object}.md"),
+                        selector_paths: vec![format!("{object}.md")],
+                        restore_fence_generation: 0,
+                    };
+                    let parent = open_closed_outbox_in_tx(tx, &binding, 1)?;
+                    close_generation_in_tx(tx, &binding, &hex_sha256(base))?;
+                    retain_in(tx, parent.as_ref(), 1, b"taken", 1)?;
+                }
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+    }
 }
