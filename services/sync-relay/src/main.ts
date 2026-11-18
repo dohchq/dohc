@@ -1659,6 +1659,8 @@ process.once("SIGINT", stopJournalCheck);
 process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  // First, so the work this callback starts is not counted as binding the port.
+  startTimeline.done("listening");
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   pushSender.start();
   void (async () => {
@@ -1670,7 +1672,6 @@ server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
   console.log(`[sync-relay] listening on ${host}:${actualPort}`);
-  startTimeline.done("listening");
   console.log(`[sync-relay] ${startTimeline.line()}`);
   console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
