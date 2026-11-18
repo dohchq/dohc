@@ -699,6 +699,142 @@ describe("what only the relay writes", () => {
   });
 });
 
+describe("a deleted first message's title", () => {
+  type Pulled = {
+    ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+  };
+  // A Group thread and a Comment thread named by their first messages, and
+  // a Group thread whose later message goes.
+  async function titled(h: SyncRelayHandler) {
+    await ownerAppend(h, [
+      logOp(
+        "chat.thread.create",
+        chatThreadCreate("t-friday", GROUP, { slug: "team", title: "Friday plans" }).payload,
+      ),
+      ownerMessage("m-friday", "t-friday", "Friday plans\nmeet at the dock"),
+      ownerMessage("m-friday-reply", "t-friday", "sounds good"),
+      logOp("chat.thread.create", {
+        threadId: "t-typo",
+        title: "Typo on line 3",
+        createdAtMs: 4,
+        linkedAtMs: 4,
+        linkedObjectId: PLAN_OBJECT,
+      }),
+      ownerMessage("m-typo", "t-typo", "Typo on line 3"),
+      logOp(
+        "chat.thread.create",
+        chatThreadCreate("t-kept", GROUP, { slug: "team", title: "Kept title" }).payload,
+      ),
+      ownerMessage("m-kept", "t-kept", "Kept title"),
+      ownerMessage("m-kept-reply", "t-kept", "a reply that goes"),
+    ]);
+  }
+  const titleOf = (ops: Pulled["ops"], threadId: string) =>
+    ops.find((op) => op.opKind === "chat.thread.create" && op.payload.threadId === threadId)
+      ?.payload.title;
+
+  it("serves a member's pull of the whole share each thread whose first message went with no title", async () => {
+    const { h } = await seed();
+    await titled(h);
+    expect((await deleteMessage(h, OWNER, "m-friday", "t-friday")).status).toBe(200);
+    expect((await deleteMessage(h, OWNER, "m-typo", "t-typo")).status).toBe(200);
+    expect((await deleteMessage(h, OWNER, "m-kept-reply", "t-kept")).status).toBe(200);
+    const ana = await member(h, "ana");
+    const pulled = await h(request("ana", `/sync/shares/${ana.shareId}/log?since=0&limit=500`));
+    expect(pulled.status, await pulled.clone().text()).toBe(200);
+    const { ops } = (await json(pulled)) as Pulled;
+    expect(titleOf(ops, "t-friday")).toBe("");
+    expect(titleOf(ops, "t-typo")).toBe("");
+    expect(titleOf(ops, "t-kept")).toBe("Kept title");
+    expect(JSON.stringify(ops)).not.toMatch(/Friday plans|Typo on line 3/u);
+  });
+
+  it("serves a member's Group pull the thread with no title", async () => {
+    const { h } = await seed();
+    await titled(h);
+    expect((await deleteMessage(h, OWNER, "m-friday", "t-friday")).status).toBe(200);
+    const ana = await member(h, "ana");
+    const pulled = await h(
+      request("ana", `/sync/shares/${ana.shareId}/log?since=0&limit=500&channelWireId=${GROUP}`),
+    );
+    expect(pulled.status, await pulled.clone().text()).toBe(200);
+    const { ops } = (await json(pulled)) as Pulled;
+    expect(titleOf(ops, "t-friday")).toBe("");
+    expect(titleOf(ops, "t-kept")).toBe("Kept title");
+    expect(JSON.stringify(ops)).not.toContain("Friday plans");
+  });
+
+  it("serves no title when the first message is deleted while the pull waits on author names", async () => {
+    const { h } = await seed();
+    await titled(h);
+    const ana = await member(h, "ana");
+    const names = holdNames();
+    const pulling = h(request("ana", `/sync/shares/${ana.shareId}/log?since=0&limit=500`));
+    await names.atLookup;
+    expect((await deleteMessage(h, OWNER, "m-friday", "t-friday")).status).toBe(200);
+    names.release();
+    const answer = await pulling;
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    const { ops } = (await json(answer)) as Pulled;
+    expect(titleOf(ops, "t-friday")).toBe("");
+    expect(JSON.stringify(ops)).not.toContain("Friday plans");
+  });
+
+  // Guards: these pass without the change. The owner's computers and the
+  // stored create keep the title, so the owner's journal and a retry match.
+  it("keeps the title in the owner's pull and in the stored create, and holds a member's exact retry", async () => {
+    const { storage, h } = await seed();
+    const ana = await member(h, "ana");
+    const created = {
+      ...logOp(
+        "chat.thread.create",
+        chatThreadCreate("t-ana", GROUP, { slug: "team", title: "Ana's question" }).payload,
+      ),
+      originSeq: 0,
+      recordedAtMs: 7000,
+    };
+    const batch = {
+      originId: "origin-ana",
+      ops: [created, { ...memberBatch("ana", "m-ana", "Ana's question", 1, "t-ana").ops[0] }],
+    };
+    expect((await push(h, "ana", ana.shareId, batch)).status).toBe(200);
+    expect((await deleteMessage(h, "ana", "m-ana", "t-ana")).status).toBe(200);
+
+    const retried = await push(h, "ana", ana.shareId, batch);
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    const stored = inspect(storagePath(storage), (db) =>
+      db
+        .prepare(
+          `SELECT payload_json FROM sync_relay_log WHERE workspace_id = ?
+           AND op_kind = 'chat.thread.create' AND json_extract(payload_json, '$.threadId') = ?`,
+        )
+        .all(WORKSPACE, "t-ana"),
+    ) as Array<{ payload_json: string }>;
+    expect(stored.map((row) => JSON.parse(row.payload_json).title)).toEqual(["Ana's question"]);
+
+    const owner = await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`));
+    expect(owner.status, await owner.clone().text()).toBe(200);
+    expect(titleOf(((await json(owner)) as Pulled).ops, "t-ana")).toBe("Ana's question");
+  });
+
+  it("serves no thread title in a browser page or follow", async () => {
+    const { h } = await seed();
+    const ana = await member(h, "ana");
+    const page = await json(
+      await browser(h, "ana", `messages?shareId=${ana.shareId}&channelWireId=${GROUP}`),
+    );
+    await titled(h);
+    expect((await deleteMessage(h, OWNER, "m-friday", "t-friday")).status).toBe(200);
+    const fresh = await json(
+      await browser(h, "ana", `messages?shareId=${ana.shareId}&channelWireId=${GROUP}`),
+    );
+    const followed = await json(
+      await browser(h, "ana", `messages?shareId=${ana.shareId}&since=${page.nextCursor}`),
+    );
+    expect(JSON.stringify([fresh, followed])).not.toContain("Friday plans");
+  });
+});
+
 describe("a member's raw pull", () => {
   type Pulled = {
     ops: Array<{ relaySeq: number; opKind: string; payload: Record<string, unknown> }>;

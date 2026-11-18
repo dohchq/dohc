@@ -12,7 +12,11 @@ import { workspaceFileReach } from "../workspaceReach";
 import type { StorageContext } from "./context";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { removeChatMessageNotices } from "./notices";
-import { findChannelCreateKind, findThreadCreateChannelWireId } from "./objectIndex";
+import {
+  findChannelCreateKind,
+  findThreadCreateChannelWireId,
+  findThreadFirstMessageId,
+} from "./objectIndex";
 import { commentFileOf, type CommentFile, type PersonalCredential } from "./personalAgentChat";
 import { personalReachIn, readPersonalAuthority } from "./personalAgents";
 import { rowToLogRow } from "./rows";
@@ -130,6 +134,24 @@ export function firstDeletedInThread(
     )
     .get(workspaceId, threadId);
   return row ? { relaySeq: Number(row.relay_seq), messageId: String(row.message_id) } : null;
+}
+
+/**
+ * Whether the relay deleted the thread's first message, by the rule
+ * `findThreadFirstMessageId` reads. A thread's title often repeats that
+ * message's first line, so a reader other than the owner's computers then
+ * reads the thread with no title.
+ */
+export function threadFirstMessageDeleted(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  const deleted = firstDeletedInThread(storage, workspaceId, threadId);
+  return (
+    deleted !== null &&
+    findThreadFirstMessageId(storage, workspaceId, threadId) === deleted.messageId
+  );
 }
 
 /** The digests of a deleted coordinate's append, for a retry of it, or null. */

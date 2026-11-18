@@ -1986,6 +1986,7 @@ export interface SyncRelayStorage {
   deleteWorkspaceMessage: MessageDeletesMethod<"deleteWorkspaceMessage">;
   deletedMessageCount: MessageDeletesMethod<"deletedMessageCount">;
   messageDeleted: MessageDeletesMethod<"messageDeleted">;
+  threadFirstMessageDeleted: MessageDeletesMethod<"threadFirstMessageDeleted">;
   deletedMessageTimes: MessageDeletesMethod<"deletedMessageTimes">;
   // Direct messages (storage/directMessages.ts).
   resolveDirectPick: DirectMessagesMethod<"resolveDirectPick">;

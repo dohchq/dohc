@@ -280,6 +280,9 @@ export interface ChatShareThreadResolver extends ShareFileChatResolver {
   // Whether the relay deleted this message. A deleted message's attachments
   // are withheld, as its copies drop them.
   messageDeleted(threadId: string, messageId: string): boolean;
+  // Whether the relay deleted the thread's first message. A reader then
+  // reads the thread's create with no title.
+  threadFirstMessageDeleted(threadId: string): boolean;
 }
 
 export function isChatChannelSelector(
@@ -1410,6 +1413,36 @@ export function filterOpForShare(
   payloadJson: string,
   chat?: ChatShareThreadResolver,
   // For a group: serve only this half. A page is read one half at a time.
+  half?: "chat" | "files",
+): ShareOpDecision {
+  return withoutDeletedTitle(
+    shareReadDecision(selector, opKind, payloadJson, chat, half),
+    opKind,
+    chat,
+  );
+}
+
+// A thread's title often repeats its first message's first line. Once the
+// relay deletes that message, a reader reads the thread with no title, and
+// each copy shows its fallback. Only reads blank it: the stored create keeps
+// the title, so a retry of the create and the owner's journal still match it.
+function withoutDeletedTitle(
+  decision: ShareOpDecision,
+  opKind: string,
+  chat: ChatShareThreadResolver | undefined,
+): ShareOpDecision {
+  if (!decision.allowed || opKind !== "chat.thread.create" || !chat) return decision;
+  const served = asRecord(decision.payload);
+  const threadId = collectString(served?.threadId);
+  if (!served || !threadId || !chat.threadFirstMessageDeleted(threadId)) return decision;
+  return { ...decision, payload: { ...served, title: "" } };
+}
+
+function shareReadDecision(
+  selector: AnyShareSelector,
+  opKind: string,
+  payloadJson: string,
+  chat?: ChatShareThreadResolver,
   half?: "chat" | "files",
 ): ShareOpDecision {
   const parsed = parseShareOpPayloadWithReferencedPaths(payloadJson);

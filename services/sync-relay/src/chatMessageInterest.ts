@@ -91,6 +91,8 @@ export function pushChatResolver(
     objectIdAtPath: (path) => storage.objectIdAtPath(workspaceId, path),
     messageDeleted: (threadId, messageId) =>
       storage.messageDeleted(workspaceId, threadId, messageId),
+    threadFirstMessageDeleted: (threadId) =>
+      storage.threadFirstMessageDeleted(workspaceId, threadId),
   };
 }
 
