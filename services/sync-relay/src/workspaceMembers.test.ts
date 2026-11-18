@@ -564,6 +564,8 @@ describe("what a member reaches", () => {
     const reach = await listed();
     expect(Object.keys(reach).sort()).toEqual([
       "folders",
+      "groupDefault",
+      "groups",
       "rootLevel",
       "signature",
       "visibilitySignature",
@@ -1740,6 +1742,173 @@ describe("an admin's new Group", () => {
     expect(
       (await createGroup(h, "ana", ana.shareId, { name: "Events", purpose: "a\nb" })).status,
     ).toBe(400);
+  });
+});
+
+describe("a Group's rule", () => {
+  function setRule(h: SyncRelayHandler, as: string, wireId: string, body: unknown) {
+    return h(
+      request(as, `/sync/${WORKSPACE}/members/groups/${wireId}/rule`, {
+        ...jsonBody(body),
+        method: "PUT",
+      }),
+    );
+  }
+  async function ruled(h: SyncRelayHandler, as: string, wireId: string, level: unknown) {
+    const response = await setRule(h, as, wireId, { level });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return (await response.json()) as WorkspaceMembersView;
+  }
+  async function admin(h: SyncRelayHandler, userId: string) {
+    const memberId = await invited(h, userId);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    return memberId;
+  }
+  async function visibility(h: SyncRelayHandler, userId: string, shareId: string) {
+    const page = await pull(h, userId, shareId);
+    expect(page.status).toBe(200);
+    return ((await json(page)).reach as { visibilitySignature: string }).visibilitySignature;
+  }
+
+  it("is set by the owner and an admin, never a member, and only on an ordinary Group", async () => {
+    const { h } = await seed();
+    await admin(h, "ben");
+    await invited(h, "ana");
+    expect((await ruled(h, OWNER, GROUP, "view")).groupRules).toEqual([
+      { channelWireId: GROUP, level: "view" },
+    ]);
+    expect((await ruled(h, "ben", GROUP, "none")).groupRules).toEqual([
+      { channelWireId: GROUP, level: "none" },
+    ]);
+    // A member is refused as a missing Group is, so a refusal confirms nothing.
+    const refused = await setRule(h, "ana", GROUP, { level: "comment" });
+    expect(refused.status).toBe(404);
+    for (const wireId of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT, UNKNOWN]) {
+      expect((await setRule(h, OWNER, wireId, { level: "view" })).status, wireId).toBe(404);
+    }
+    // A rule names one level for every member, never a person.
+    for (const body of [
+      { level: "edit" },
+      { level: "ana@dohc.test" },
+      { level: "view", people: { "ana@dohc.test": "edit" } },
+      { rule: "members: view\npeople:\n  ana@dohc.test: edit\n" },
+    ]) {
+      expect((await setRule(h, OWNER, GROUP, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await membersView(h, OWNER)).groupRules).toEqual([
+      { channelWireId: GROUP, level: "none" },
+    ]);
+    // It names hidden Groups, so a member never reads it.
+    expect((await membersView(h, "ana")).groupRules).toBeNull();
+    // Clearing keeps the row, and the Group takes the member level again.
+    expect((await ruled(h, OWNER, GROUP, null)).groupRules).toEqual([]);
+  });
+
+  it("withholds a hidden Group from a member's pull, posts, and presence, and View refuses only that Group's posts", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerAppend(h, [
+      channel(LATER_GROUP, "later"),
+      thread("t-later", LATER_GROUP, "later"),
+      message("msg-later", "t-later", "another group"),
+    ]);
+    await ruled(h, OWNER, GROUP, "view");
+    const viewOnly = await postInGroup(h, "ana", shareId, "m-view");
+    // The member posts elsewhere, so the filter refuses this Group's op.
+    expect(viewOnly.status).toBe(403);
+    expect(await code(viewOnly)).toBe("share_op_rejected");
+    const elsewhere = await post(h, "ana", `/sync/shares/${shareId}/log`, {
+      originId: "origin-ana-later",
+      ops: [
+        {
+          ...logOp(
+            "chat.message.append",
+            chatMessageAppend("m-later", "t-later", "hello", { authorUserId: "ana" }).payload,
+          ),
+          originSeq: 0,
+        },
+      ],
+    });
+    expect(elsewhere.status, await elsewhere.clone().text()).toBe(200);
+
+    await ruled(h, OWNER, GROUP, "none");
+    const all = await pulledText(h, "ana", shareId);
+    expect(all).not.toContain(GROUP);
+    expect(all).not.toContain("t-team");
+    expect(all).not.toContain("welcome to the team");
+    expect(all).toContain("another group");
+    expect((await pull(h, "ana", shareId, GROUP)).status).toBe(404);
+    expect((await postInGroup(h, "ana", shareId, "m-none", 1)).status).toBe(403);
+    for (const topic of [GROUP, "chat:thread:t-team"]) {
+      const presence = await h(
+        request(
+          "ana",
+          `/sync/shares/${shareId}/presence?topic=${encodeURIComponent(topic)}&hold=0`,
+        ),
+      );
+      expect(presence.status, topic).toBe(404);
+    }
+  });
+
+  it("never serves a Group created as No access, and clearing its rule rebuilds a member's copy with its history", async () => {
+    const { h } = await seed();
+    await admin(h, "ben");
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const before = await visibility(h, "ana", shareId);
+    const created = await post(h, "ben", "/sync/members/groups", {
+      shareId: await shareIdOf(h, "ben"),
+      name: "Staff",
+      level: "none",
+    });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const { channelWireId } = (await json(created)) as { channelWireId: string };
+    await ownerAppend(h, [
+      thread("t-staff", channelWireId, "staff"),
+      message("msg-staff", "t-staff", "STAFF ONLY"),
+    ]);
+    // The member pulls past the Group without it, and creating it hidden rebuilds nothing.
+    const page = await pull(h, "ana", shareId);
+    const pulled = await json(page);
+    expect(JSON.stringify(pulled.ops)).not.toContain(channelWireId);
+    expect(JSON.stringify(pulled.ops)).not.toContain("STAFF ONLY");
+    expect(await visibility(h, "ana", shareId)).toBe(before);
+    expect(
+      (
+        await h(
+          request(
+            "ana",
+            `/sync/shares/${shareId}/log?since=${pulled.nextCursor as number}&limit=500`,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    // Clearing the rule shows the Group: the signature changes, so the copy
+    // pulls fresh and gets the create and messages its cursor passed.
+    await ruled(h, "ben", channelWireId, null);
+    expect(await visibility(h, "ana", shareId)).not.toBe(before);
+    const rebuilt = await pulledText(h, "ana", shareId);
+    expect(rebuilt).toContain(channelWireId);
+    expect(rebuilt).toContain("STAFF ONLY");
+  });
+
+  it("wakes held reads when a rule changes", async () => {
+    const activity = new DiscussionActivityHub();
+    const woken: string[] = [];
+    const wakeLog = activity.wakeLog.bind(activity);
+    activity.wakeLog = (workspaceId: string) => {
+      woken.push(workspaceId);
+      wakeLog(workspaceId);
+    };
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    await ruled(h, OWNER, GROUP, "none");
+    expect(woken).toContain(WORKSPACE);
   });
 });
 

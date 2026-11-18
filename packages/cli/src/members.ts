@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  GROUP_RULE_LEVELS,
   isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
   MEMBER_STATES,
@@ -104,12 +105,23 @@ const WorkspaceMembersViewSchema = z
       .strict(),
     memberLevel: level,
     inviteLink: InviteLinkSchema.nullable(),
+    groupRules: z
+      .array(
+        z
+          .object({ channelWireId: z.string().min(1).max(256), level: z.enum(GROUP_RULE_LEVELS) })
+          .strict(),
+      )
+      .nullable(),
     people: z.array(WorkspacePersonSchema),
   })
   .strict()
   .refine(
     (view) => (view.viewer.role !== "member") === (view.inviteLink !== null),
     "Only the owner and admins get the invite link.",
+  )
+  .refine(
+    (view) => (view.viewer.role !== "member") === (view.groupRules !== null),
+    "Only the owner and admins get Group rules.",
   )
   .refine(
     (view) =>

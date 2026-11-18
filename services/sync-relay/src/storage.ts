@@ -1966,6 +1966,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
     return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
   }
+  setWorkspaceGroupRule(...args: Parameters<SyncRelayStorage["setWorkspaceGroupRule"]>) {
+    return workspaceMembersStorage.setWorkspaceGroupRule(this, ...args);
+  }
   resolveDirectPick(...args: Parameters<SyncRelayStorage["resolveDirectPick"]>) {
     return directMessagesStorage.resolveDirectPick(this, ...args);
   }

@@ -8,8 +8,8 @@ import type { MemberReach } from "./storage/memberReach";
 //
 // Files: every tracked path on main, current and future. The engine path
 // floor still applies, so secret and engine paths stay out.
-// Chat: every ordinary Group. Never General, a direct message, an agent chat,
-// or a channel the owner's log does not name as a Group.
+// Chat: every ordinary Group its rule doesn't hide. Never General, a direct
+// message, an agent chat, or a channel the owner's log does not name as a Group.
 // File Comments follow file reach.
 
 export interface StoredWorkspaceShareSelector {
@@ -49,18 +49,20 @@ export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
   };
 }
 
-/** Whether the workspace share reaches this channel's messages. */
+/** Whether the workspace share reaches this channel's messages: an ordinary Group its rule doesn't hide. */
 export function workspaceGroupReachable(
+  selector: WorkspaceShareSelector,
   channelWireId: unknown,
   chat: { channelKind(channelWireId: string): string | null | undefined } | undefined,
 ): channelWireId is string {
   return (
     typeof channelWireId === "string" &&
-    isWorkspaceGroup(channelWireId, chat?.channelKind(channelWireId))
+    isWorkspaceGroup(channelWireId, chat?.channelKind(channelWireId)) &&
+    selector.reach.groupLevel(channelWireId) !== null
   );
 }
 
-/** View reads a Group. Comment and Edit read and post. */
+/** View reads a Group. Comment and Edit read and post. Call it only for a reachable Group. */
 export function workspaceChatAccess(
   selector: WorkspaceShareSelector,
   channelWireId: string,
@@ -74,7 +76,7 @@ export function workspaceGroupReach(
   channelWireId: unknown,
   chat: { channelKind(channelWireId: string): string | null | undefined } | undefined,
 ): { kind: "chat"; channelWireId: string; access: ChatShareAccess } | null {
-  return workspaceGroupReachable(channelWireId, chat)
+  return workspaceGroupReachable(selector, channelWireId, chat)
     ? { kind: "chat", channelWireId, access: workspaceChatAccess(selector, channelWireId) }
     : null;
 }

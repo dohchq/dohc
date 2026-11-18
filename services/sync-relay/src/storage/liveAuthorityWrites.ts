@@ -14,6 +14,7 @@ export const LIVE_AUTHORITY_TABLES = [
   "sync_relay_workspace_memberships",
   "sync_relay_workspace_members",
   "sync_relay_access_rules",
+  "sync_relay_group_rules",
   "sync_relay_account_emails",
   "sync_relay_link_sessions",
   "sync_relay_link_principals",

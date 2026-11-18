@@ -739,7 +739,7 @@ export function presenceTopicAllowedForShare(
     const threadId = parseChatThreadTopic(topic);
     if (threadId !== null) {
       const channel = chat.threadChannelWireId(threadId);
-      if (typeof channel === "string") return workspaceGroupReachable(channel, chat);
+      if (typeof channel === "string") return workspaceGroupReachable(selector, channel, chat);
       if (channel !== null) return false;
       const path = resolvedThreadPath(chat, chat.threadFileBinding(threadId));
       return path !== null && pathVisibleThroughShare(files, path);
@@ -752,7 +752,7 @@ export function presenceTopicAllowedForShare(
       agentIdForChannelWireId(topic) !== null ||
       chat.channelKind(topic) !== undefined
     ) {
-      return workspaceGroupReachable(topic, chat);
+      return workspaceGroupReachable(selector, topic, chat);
     }
     return pathVisibleThroughShare(files, topic);
   }
