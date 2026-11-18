@@ -96,6 +96,17 @@ test("an aborted relay validation process writes no core file", () => {
   assert.deepEqual(compose.services["sync-relay"].ulimits, { core: 0 });
 });
 
+test("the relay caps Node's space for new objects, with an option Node starts with", () => {
+  const options = compose.services["sync-relay"].environment.NODE_OPTIONS;
+  assert.equal(options, "--max-semi-space-size=16");
+  // Node refuses to start with an option it does not allow here, and the relay would never come up.
+  const started = spawnSync(process.execPath, ["-e", ""], {
+    env: { ...process.env, NODE_OPTIONS: options },
+    encoding: "utf8",
+  });
+  assert.equal(started.status, 0, started.stderr);
+});
+
 test("database readiness waits for TCP after the temporary initialization server stops", () => {
   assert.match(compose.services.postgres.healthcheck.test[1], /pg_isready\s+-h\s+127\.0\.0\.1\s/);
   assert.equal(
