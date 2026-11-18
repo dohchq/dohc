@@ -12,6 +12,7 @@ import { OwnerLiveRefusalsResult } from "../ipc/bridgeContract";
 import { ServerKeptEditsConflict, ServerRecoveryCopyRefusedError } from "./ownerLiveQuarantine";
 import { OwnerJournalPage } from "./ownerJournal";
 import { z } from "zod";
+import { validateUserWritePath } from "@dohc/workspace-core";
 
 const LIVE_PAUSE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -407,6 +408,8 @@ export function createServerOwnerConnection(options: {
                     lineageClaimId: z.string().min(1),
                     pausedAtMs: z.number(),
                     savedCursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+                    // The copy is written next to it.
+                    path: z.string().refine((path) => validateUserWritePath(path).ok),
                     cause: z.enum(["refused", "failing"]),
                     refusal: z.string().nullable(),
                     named: z.array(z.unknown()),

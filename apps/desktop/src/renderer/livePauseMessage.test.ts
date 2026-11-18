@@ -17,8 +17,8 @@ describe("livePauseMessage", () => {
       "The server couldn't save edits for 10 minutes, so live editing is paused until you resume. Edits since the last save are in a copy next to the note.",
     ],
     [
-      { ...pause, cause: "moved" as const, leftOut: true },
-      "notes/plan.md was moved or deleted outside dohc, so live editing stopped. Edits since the last save are in a copy. Some edits couldn't be kept.",
+      { ...pause, cause: "ended" as const, leftOut: true },
+      "notes/plan.md was moved, deleted or replaced, so live editing stopped. Edits since the last save are in a copy. Some edits couldn't be kept.",
     ],
   ])("says what the owner approved for %o", (row, words) => {
     expect(livePauseMessage(row)).toBe(words);

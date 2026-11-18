@@ -1,14 +1,14 @@
 /** What the owner reads about a note the server paused for good. */
 export function livePauseMessage(pause: {
   path: string;
-  cause: "refused" | "failing" | "moved";
+  cause: "refused" | "failing" | "ended";
   names: readonly string[];
   leftOut: boolean;
 }): string {
   const copy = "Edits since the last save are in a copy";
   const told =
-    pause.cause === "moved"
-      ? `${pause.path} was moved or deleted outside dohc, so live editing stopped. ${copy}.`
+    pause.cause === "ended"
+      ? `${pause.path} was moved, deleted or replaced, so live editing stopped. ${copy}.`
       : pause.cause === "failing"
         ? `The server couldn't save edits for 10 minutes, so live editing is paused until you resume. ${copy} next to the note.`
         : `The server couldn't save the latest edits, so live editing is paused until you resume. ${copy} next to the note.${

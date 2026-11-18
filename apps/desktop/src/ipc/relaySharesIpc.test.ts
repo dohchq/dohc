@@ -132,6 +132,9 @@ function harness() {
     keptEdits: "kept",
   }));
   const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
+  const resumeOwnerLivePause = vi.fn<NonNullable<Dependencies["resumeOwnerLivePause"]>>(
+    async () => null,
+  );
   const ownerLiveStop = vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace, action, path) =>
     action === "clear" || action === "retired"
       ? undefined
@@ -188,6 +191,7 @@ function harness() {
     unwrittenOwnerLiveReleases,
     retryOwnerLiveQuarantine,
     retryOwnerLiveRelease,
+    resumeOwnerLivePause,
     saveOwnerLiveRecoveryCopy,
     sharesChanged,
     sendRendererActivity,
@@ -244,6 +248,7 @@ function harness() {
     unwrittenOwnerLiveReleases,
     retryOwnerLiveQuarantine,
     retryOwnerLiveRelease,
+    resumeOwnerLivePause,
     saveOwnerLiveRecoveryCopy,
     ownerHandlersDependencies,
     retireRenderer: () => {
@@ -1042,6 +1047,18 @@ describe("registered relay share handlers", () => {
         access: "comment",
       }),
     ).rejects.toThrow("sharing failed (500)");
+  });
+
+  it("ends the server's pause of a note whose file is gone from its path, and starts nothing there", async () => {
+    const h = harness();
+    h.resumeOwnerLivePause.mockResolvedValueOnce("ended");
+    await h.invoke(relayShareOperations.resumeOwnerLiveDocument.channel, {
+      workspaceId,
+      path: "live.md",
+    });
+    expect(h.resumeOwnerLivePause).toHaveBeenCalledWith(expect.anything(), "live.md");
+    expect(h.request).not.toHaveBeenCalled();
+    expect(h.ownerLiveStop).not.toHaveBeenCalled();
   });
 
   it("registers only this family and authenticates every channel before parsing or work", async () => {

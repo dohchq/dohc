@@ -153,8 +153,11 @@ interface RelayShareRequest {
 
 /** What Stop and Resume of one live document need, for the window and for agents alike. */
 export interface OwnerLiveDocumentActionDependencies<Workspace> {
-  /** Ends the server's pause of the note at `path`; false when it is not paused. */
-  resumeOwnerLivePause?(workspace: Workspace, path: string): Promise<boolean>;
+  /** Ends the server's pause of the note at `path` and returns its cause; null when it is not paused. */
+  resumeOwnerLivePause?(
+    workspace: Workspace,
+    path: string,
+  ): Promise<"refused" | "failing" | "ended" | null>;
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
@@ -741,8 +744,10 @@ export function createOwnerLiveDocumentActions<
       input.path,
       async (): Promise<ResumeOwnerLiveDocumentResult> => {
         // A note the server paused for good resumes there first; the rest is an ordinary Resume.
-        await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
+        const paused = await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
         operation.assertCurrent();
+        // A note whose file was moved, deleted or replaced has nothing at its path to start again.
+        if (paused === "ended") return {};
         // A Resume names its document by path, and the server resumes its own document there: the record names that one.
         const row =
           record && input.author ? await serverRow(operation, { path: input.path }) : null;

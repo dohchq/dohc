@@ -1712,9 +1712,9 @@ const SYNC_STATUS_BASE_FIELDS = {
         pauseId: z.string().min(1),
         objectId: z.string().min(1),
         path: SAFE_RELATIVE_PATH,
-        cause: z.enum(["refused", "failing", "moved"]),
+        cause: z.enum(["refused", "failing", "ended"]),
         names: z.array(z.string()).max(256),
-        copyPath: SAFE_RELATIVE_PATH,
+        copyPath: SAFE_RELATIVE_PATH.nullable(),
         leftOut: z.boolean(),
       }),
     )

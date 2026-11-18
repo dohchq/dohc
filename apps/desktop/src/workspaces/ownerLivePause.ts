@@ -9,6 +9,8 @@ export interface RelayLivePause {
   readonly objectId: string;
   readonly lineageClaimId: string;
   readonly savedCursor: number;
+  /** The note's path when it paused. */
+  readonly path: string;
   readonly cause: "refused" | "failing";
   readonly refusal: string | null;
   readonly named: readonly LiveAuthorSnapshot[];
@@ -21,11 +23,12 @@ export interface OwnerLivePause {
   readonly pauseId: string;
   readonly objectId: string;
   readonly path: string;
-  /** "moved" when the note's file was moved or deleted outside dohc. */
-  readonly cause: "refused" | "failing" | "moved";
+  /** "ended" when the note's file was moved, deleted or replaced, or its lineage ended. */
+  readonly cause: "refused" | "failing" | "ended";
   /** The people whose edits were in the refused save. */
   readonly names: string[];
-  readonly copyPath: string;
+  /** Null when the copy was written before this desktop started and can't be named. */
+  readonly copyPath: string | null;
   /** Some edits could not be shown as text, so the copy leaves them out. */
   readonly leftOut: boolean;
 }
@@ -72,20 +75,45 @@ function authorNames(named: readonly LiveAuthorSnapshot[]): string[] {
   return [...names];
 }
 
+async function relayCopy(
+  relay: OwnerLivePauseRelay,
+  pause: RelayLivePause,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const bytes = await relay.copy(pause, signal);
+  if (createHash("sha256").update(bytes).digest("hex") !== pause.copy?.sha256)
+    throw new Error("The server's copy of the paused note changed while it was read.");
+  return bytes;
+}
+
 /**
- * Brings each paused note to rest on this computer: the engine pauses it with
- * the relay's copy of the room, the copy is written next to the note, and the
- * relay deletes its own. Each step is recorded before the next, so a pass that
- * ends early continues on the next. A note this pass can't settle yet, such
- * as one whose saves have not all arrived, is tried again on the next pass.
+ * Brings each paused note to rest on this computer and returns what its owner
+ * is told. The relay's copy is in a file before the relay is told it may
+ * delete its own. A note this computer can still pause is paused by the
+ * engine with that copy, so the owner's unsent edits join it. Any other copy,
+ * such as one of a note moved or deleted outside dohc, is written as the
+ * relay sent it. Each step is recorded before the next, so a pass that ends
+ * early continues on the next. A note this pass can't settle yet, such as one
+ * whose saves have not all arrived, is tried again on the next pass.
  */
 export async function settleOwnerLivePauses(input: {
   pauses: readonly RelayLivePause[];
+  /** What the last pass told the owner, which names the copies it wrote. */
+  previous: readonly OwnerLivePause[];
   documents: readonly ListedOwnerDeliveryDocument[];
-  client: Pick<EngineClient, "ownerYDocPause" | "ownerYDocPausedCopy" | "ownerYDocPausedCopyWritten">;
+  client: Pick<
+    EngineClient,
+    | "ownerYDocPause"
+    | "ownerYDocPausedCopy"
+    | "ownerYDocPausedCopyWritten"
+    | "ownerYDocStopList"
+    | "ownerYDocStopClear"
+  >;
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
+  /** The note's Markdown from its whole state. */
+  render(state: Uint8Array): Promise<string>;
   signal: AbortSignal;
   onError(pause: RelayLivePause, error: unknown): void;
 }): Promise<OwnerLivePause[]> {
@@ -101,49 +129,70 @@ export async function settleOwnerLivePauses(input: {
     const document = { mainVersionId: "main", objectId: pause.objectId };
     try {
       let held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
-      if (!held) {
-        // The engine needs the note's binding and the room's copy to pause it.
-        if (!listed || !pause.copy) continue;
-        const roomCopy = await input.relay.copy(pause, input.signal);
-        if (createHash("sha256").update(roomCopy).digest("hex") !== pause.copy.sha256)
-          throw new Error("The server's copy of the paused note changed while it was read.");
+      // Only a pause made here and now holds the relay's copy. A Stop held from
+      // before may be an earlier pause's, so the relay's copy then gets a file of its own.
+      let joined = false;
+      if (!held && listed && pause.copy) {
         await input.client.ownerYDocPause(
           request(),
           {
             binding: listed.binding,
             appliedCursor: pause.savedCursor,
             rowCursor: pause.savedCursor,
-            copyPath: await freeName(listed.binding.currentPath, input.writes),
-            roomCopy,
+            copyPath: await freeName(pause.path, input.writes),
+            roomCopy: await relayCopy(input.relay, pause, input.signal),
           },
           input.signal,
         );
         held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
         if (!held) throw new Error("The paused note's copy is missing.");
+        joined = true;
       }
-      let { paused } = held.stop;
-      if (!paused.copyWritten) {
-        const path = (await input.writes.exists(paused.copyPath))
-          ? await freeName(held.stop.document.currentPath, input.writes)
-          : paused.copyPath;
+      let copy: { copyPath: string | null; leftOut: boolean } | null =
+        input.previous.find((told) => told.pauseId === pause.pauseId) ??
+        held?.stop.paused ??
+        null;
+      if (held && !held.stop.paused.copyWritten) {
+        const path = (await input.writes.exists(held.stop.paused.copyPath))
+          ? await freeName(pause.path, input.writes)
+          : held.stop.paused.copyPath;
         const written = await input.writes.create(path, held.bytes?.toString("utf8") ?? "");
-        paused = (await input.client.ownerYDocPausedCopyWritten(request(), document, written))
+        copy = (await input.client.ownerYDocPausedCopyWritten(request(), document, written))
           .paused;
+      }
+      if (pause.copy && !joined) {
+        const text = await input.render(await relayCopy(input.relay, pause, input.signal));
+        copy = {
+          copyPath: await input.writes.create(await freeName(pause.path, input.writes), text),
+          leftOut: false,
+        };
       }
       if (pause.copy) await input.relay.copyWritten(pause.pauseId, pause.copy.sha256, input.signal);
       settled.push({
         pauseId: pause.pauseId,
         objectId: pause.objectId,
-        path: held.stop.document.currentPath,
-        cause: pause.refusal === "stale-binding" ? "moved" : pause.cause,
+        path: pause.path,
+        cause: pause.refusal === "stale-binding" ? "ended" : pause.cause,
         names: authorNames(pause.named),
-        copyPath: paused.copyPath,
-        leftOut: paused.leftOut,
+        copyPath: copy?.copyPath ?? null,
+        leftOut: copy?.leftOut ?? false,
       });
     } catch (error) {
       input.signal.throwIfAborted();
       input.onError(pause, error);
     }
+  }
+  // A pause that ended elsewhere, by a Resume on another computer or one cut
+  // short here, leaves this computer's Stop behind. Once its copy is on disk,
+  // clearing it lets the note join its room again.
+  const paused = new Set(input.pauses.map((pause) => pause.objectId));
+  try {
+    for (const stop of await input.client.ownerYDocStopList(request(), input.signal))
+      if (stop.paused?.copyWritten && !paused.has(stop.document.objectId))
+        await input.client.ownerYDocStopClear(request(), stop.document, input.signal);
+  } catch (error) {
+    input.signal.throwIfAborted();
+    console.error("[desktop] a resumed note's Stop could not be cleared:", error);
   }
   return settled;
 }

@@ -3835,18 +3835,21 @@ export function DesktopWorkspaceShell(props: {
       const identity = identityOf(row.pauseId);
       if (shown.has(identity)) continue;
       shown.add(identity);
+      const { copyPath } = row;
       reportShellFailure({
         identity,
         title: `Live editing paused for ${row.path}`,
         tone: "warning",
         message: livePauseMessage(row),
         action: {
-          label: "Resume",
+          // A note whose file is gone from its path has nothing there to resume: Done ends the pause.
+          label: row.cause === "ended" ? "Done" : "Resume",
           run: () => {
             if (!current()) return;
             void resumeLiveDocument(workspaceId, row.path).then(
               () => {
-                if (current()) showSuccessNotice("Live editing resumed from the last save.");
+                if (current() && row.cause !== "ended")
+                  showSuccessNotice("Live editing resumed from the last save.");
               },
               (error: unknown) => {
                 if (current())
@@ -3854,16 +3857,18 @@ export function DesktopWorkspaceShell(props: {
               },
             );
           },
-          additional: [
-            {
-              label: "Open copy",
-              run: () => {
-                if (current()) openFile(row.copyPath);
-              },
-            },
-          ],
+          additional: copyPath
+            ? [
+                {
+                  label: "Open copy",
+                  run: () => {
+                    if (current()) openFile(copyPath);
+                  },
+                },
+              ]
+            : [],
         },
-        target: { to: "file", path: row.copyPath },
+        ...(copyPath ? { target: { to: "file" as const, path: copyPath } } : {}),
       });
     }
   }, [
