@@ -131,6 +131,16 @@ describe("CredentialSessionCache", () => {
     await expect(reading).resolves.toBe("second-session");
   });
 
+  it("reads the credentials set after the load it waited on failed, not that load's error", async () => {
+    const cache = new CredentialSessionCache<string>();
+    const failing = deferred<string | null>();
+    const refreshing = cache.refresh(() => failing.promise).catch(() => cache.set("replacement"));
+    const reading = cache.read(async () => "unused");
+    failing.reject(new Error("EACCES: credentials.json"));
+    await refreshing;
+    await expect(reading).resolves.toBe("replacement");
+  });
+
   it("tells each warm caller why the load it waited on failed, even after a later load starts", async () => {
     const cache = new CredentialSessionCache<string>();
     const unreadable = new Error("EACCES: credentials.json");
