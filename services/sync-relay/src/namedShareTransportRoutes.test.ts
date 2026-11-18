@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DiscussionActivityHub } from "./discussionActivity";
 import type { StorageContext } from "./storage/context";
 import {
   appendLog,
@@ -56,10 +57,13 @@ function heldNames() {
 
 // The owner's workspace: a file, and a Group, Team, with a thread and a
 // message, each with a registered reference. Ana is a member.
-async function seed() {
+async function seed(activity = new DiscussionActivityHub()) {
   const storage = (await testStorage()) as StorageContext;
   const names = heldNames();
-  const h = testHandler(storage, { lookupUserDisplayName: names.lookup });
+  const h = testHandler(storage, {
+    lookupUserDisplayName: names.lookup,
+    discussionActivity: activity,
+  });
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
   ).toBe(200);
@@ -212,6 +216,21 @@ describe("a member's raw pull answered across a change", () => {
     const body = await json(response);
     const next = await s.pull(`since=${body.nextCursor as string}`);
     expect(next.status, await next.clone().text()).toBe(200);
+  });
+
+  it("ends a held pull when a rule hides a Group, with none of its messages", async () => {
+    const activity = new DiscussionActivityHub();
+    const s = await seed(activity);
+    const first = await json(await s.pull());
+    const held = s.pull(`since=${first.nextCursor as string}&hold=30000`);
+    await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
+    // Only the rule's wake ends the hold: nothing else is written.
+    await s.rule("none");
+    const response = await held;
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = await json(response);
+    expect(body).toMatchObject({ ops: [], levelChanged: true });
+    expect(JSON.stringify(body)).not.toContain("the surprise");
   });
 
   it("answers busy when the rerun is stale too, and not-found when access ends", async () => {
