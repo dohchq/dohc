@@ -67,7 +67,13 @@ const thread: ChatsNav = {
   },
 };
 
-const NO_SAVED_NAMES = { directNames: {}, onDirectName: () => {}, accountKey: undefined };
+// What most tests leave alone: saved names and tabs whose Group is gone.
+const UNUSED_INPUT = {
+  directNames: {},
+  onDirectName: () => {},
+  accountKey: undefined,
+  onGone: () => {},
+};
 
 // Hidden conversations ask for their unread counts, and direct tabs for the people's names; most tests ignore them.
 const UNREAD_BRIDGE = {
@@ -100,7 +106,7 @@ describe("chat editor tabs", () => {
       const { result } = renderHook(() =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -132,7 +138,7 @@ describe("chat editor tabs", () => {
       const { result } = renderHook(() =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -181,7 +187,7 @@ describe("chat editor tabs", () => {
       ({ activePaths }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -208,7 +214,7 @@ describe("chat editor tabs", () => {
     renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen: vi.fn(),
@@ -239,7 +245,7 @@ describe("chat editor tabs", () => {
       ({ enabled }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -260,6 +266,63 @@ describe("chat editor tabs", () => {
     expect(result.current.get(path).drafts).toBeUndefined();
   });
 
+  // Such as a Group the owner set to No access while the tab sat behind another.
+  it("closes a hidden Group's tab once Chats lists without that Group, and keeps it while the list fails", async () => {
+    const list = deferred<unknown>();
+    const listChatChannels = vi.fn(() => list.promise);
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      listChatChannels,
+    });
+    const gone = chatTabPath({ kind: "channel", id: "garden" });
+    const kept = chatEditorPath(general);
+    const home = chatEditorPath({ level: "feed" });
+    const onGone = vi.fn();
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        ...UNUSED_INPUT,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onGone,
+        paths: [gone, kept, home],
+        activePaths: [home],
+        enabled: true,
+      }),
+    );
+    await act(async () => {});
+    expect(onGone).not.toHaveBeenCalled();
+    await act(async () => list.resolve({ channels: [general.channel], fileThreads: [] }));
+    expect(onGone.mock.calls).toEqual([[gone]]);
+    expect(result.current.titles.get(kept)).toBe("General");
+
+    const failed = vi.fn().mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      listChatChannels: failed,
+    });
+    const onGoneOffline = vi.fn();
+    renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        ...UNUSED_INPUT,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onGone: onGoneOffline,
+        paths: [gone, home],
+        activePaths: [home],
+        enabled: true,
+      }),
+    );
+    await act(async () => {});
+    expect(failed).toHaveBeenCalledOnce();
+    expect(onGoneOffline).not.toHaveBeenCalled();
+  });
+
   it("does not repeatedly hydrate missing chats when tabs change", async () => {
     const listChatChannels = vi.fn().mockResolvedValue({ channels: [], fileThreads: [] });
     vi.stubGlobal("dohcDesktop", {
@@ -272,7 +335,7 @@ describe("chat editor tabs", () => {
       ({ paths }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -304,7 +367,7 @@ describe("chat editor tabs", () => {
     const { result } = renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen: vi.fn(),
@@ -333,7 +396,7 @@ describe("chat editor tabs", () => {
     const { result } = renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen,
@@ -367,7 +430,7 @@ describe("chat editor tabs", () => {
     const { result } = renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen: vi.fn(),
@@ -388,7 +451,7 @@ describe("chat editor tabs", () => {
     const { result } = renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen: vi.fn(),
@@ -418,7 +481,7 @@ describe("chat editor tabs", () => {
     const { result } = renderHook(() =>
       useChatEditorTabs({
         readRevision: 0,
-        ...NO_SAVED_NAMES,
+        ...UNUSED_INPUT,
         workspaceId: "workspace",
         agents: NO_AGENTS,
         onOpen: vi.fn(),
@@ -460,7 +523,7 @@ describe("chat editor tabs", () => {
       ({ workspaceId }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId,
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -492,7 +555,7 @@ describe("chat editor tabs", () => {
       ({ agents }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId: "workspace",
           agents,
           onOpen: vi.fn(),
@@ -549,7 +612,7 @@ describe("chat editor tabs", () => {
           activePaths,
           enabled: true,
           readRevision,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
         }),
       { initialProps: { activePaths: [chatEditorPath(agent)], readRevision: 0 } },
     );
@@ -595,7 +658,7 @@ describe("chat editor tabs", () => {
       ({ workspaceId }) =>
         useChatEditorTabs({
           readRevision: 0,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
           workspaceId,
           agents: NO_AGENTS,
           onOpen: vi.fn(),
@@ -660,7 +723,7 @@ describe("chat editor tabs", () => {
           activePaths,
           enabled: true,
           readRevision,
-          ...NO_SAVED_NAMES,
+          ...UNUSED_INPUT,
         }),
       { initialProps: { activePaths: [person], readRevision: 0 } },
     );
@@ -712,6 +775,7 @@ describe("chat editor tabs", () => {
           workspaceId: "workspace",
           agents: NO_AGENTS,
           onOpen: vi.fn(),
+          onGone: vi.fn(),
           paths: [path, home],
           activePaths: [home],
           enabled: true,

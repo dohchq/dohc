@@ -4629,6 +4629,12 @@ export function DesktopWorkspaceShell(props: {
   const chatEditors = useChatEditorTabs({
     workspaceId,
     onOpen: openVirtualTab,
+    onGone: (path) =>
+      closeTabsAfterFlush(
+        wbRef.current.editorGroups.flatMap((group) =>
+          group.tabs.filter((tab) => tab.path === path).map((tab) => ({ groupId: group.id, tab })),
+        ),
+      ),
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => (group.activeTab ? [group.activeTab] : [])),
     enabled: chatsAvailable,

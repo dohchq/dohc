@@ -2299,6 +2299,12 @@ export function ChatsView(props: {
     const target = tab?.kind === "chat" ? tab.target : null;
     if (!seed && target?.kind === "channel" && overview.status === "ready") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
+      // A Group Chats no longer lists takes its tab with it, as a deleted file does.
+      if (!channel && props.onCloseTab) {
+        seededRef.current = true;
+        props.onCloseTab();
+        return;
+      }
       seed = channel ? { level: "channel", channel } : { level: "channels" };
     } else if (!seed && target?.kind === "dm") {
       seed = { level: "direct", conversationId: target.id };
@@ -2339,6 +2345,7 @@ export function ChatsView(props: {
     props.initialDrafts,
     props.initialNav,
     props.editorTabPath,
+    props.onCloseTab,
     overview,
     variant,
   ]);

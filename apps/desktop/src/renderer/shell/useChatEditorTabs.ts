@@ -31,6 +31,8 @@ type ChatEditor = {
 export function useChatEditorTabs(input: {
   workspaceId: string;
   onOpen: (path: string) => void;
+  // Closes a tab whose Group the channel list no longer holds.
+  onGone: (path: string) => void;
   paths: readonly string[];
   activePaths?: readonly string[];
   // Whether the workspace's own chats can be read. Direct messages live on
@@ -179,17 +181,15 @@ export function useChatEditorTabs(input: {
       entry.restoreAttempted = true;
       return [{ path, entry, target }];
     });
-    const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
-      if (
-        !owner.active ||
-        store.current !== owner ||
-        !session.current.ready ||
-        session.current.generation !== generation ||
-        owner.entries.get(path) !== entry ||
-        entry.nav
-      )
-        return;
-      if (!nav) return;
+    const unresolved = (path: string, entry: ChatEditor) =>
+      owner.active &&
+      store.current === owner &&
+      session.current.ready &&
+      session.current.generation === generation &&
+      owner.entries.get(path) === entry &&
+      !entry.nav;
+    const remember = (path: string, entry: ChatEditor, nav: ChatsNav) => {
+      if (!unresolved(path, entry)) return;
       entry.nav = nav;
       render((value) => value + 1);
     };
@@ -200,7 +200,9 @@ export function useChatEditorTabs(input: {
           for (const { path, entry, target } of targets) {
             if (target?.kind !== "channel") continue;
             const channel = channels.find((entry) => entry.id === target.id);
-            remember(path, entry, channel ? { level: "channel", channel } : undefined);
+            if (channel) remember(path, entry, { level: "channel", channel });
+            // A Group Chats no longer lists takes its tab with it, as a deleted file does.
+            else if (unresolved(path, entry)) callbacks.current.onGone(path);
           }
         })
         .catch(() => undefined);
