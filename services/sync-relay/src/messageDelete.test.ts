@@ -559,4 +559,25 @@ describe("what only the relay writes", () => {
       "chat.message.delete",
     ]);
   });
+
+  it("keeps a deleted first message as the start of its post in a browser page, and its reply as a reply", async () => {
+    const { h } = await seed();
+    const ana = await member(h, "ana");
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-reply", "a reply", 0))).status,
+    ).toBe(200);
+    expect((await deleteMessage(h, OWNER, "msg-team", "t-team")).status).toBe(200);
+    const page = await json(
+      await browser(h, "ana", `messages?shareId=${ana.shareId}&channelWireId=${GROUP}`),
+    );
+    const lines = page.messages as Array<Record<string, unknown>>;
+    expect(lines.find((line) => line.messageId === "msg-team")).toMatchObject({
+      body: null,
+      startsPost: true,
+    });
+    expect(lines.find((line) => line.messageId === "m-reply")).toMatchObject({
+      body: "a reply",
+      startsPost: false,
+    });
+  });
 });
