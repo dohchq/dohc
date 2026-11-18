@@ -11,7 +11,7 @@ export {
 
 /**
  * A folder's access rule, read from the `access.yaml` inside it
- * (docs/engineering/adr/0015-access-rules-live-in-the-folder.md).
+ * (ADR 0017, docs/engineering/adr/0017-access-rules-live-in-the-folder.md).
  * `members` is the level for anyone with the Member role whom no person
  * entry names; null leaves them out, which hides the folder from them.
  * `people` is keyed by normalized email.
