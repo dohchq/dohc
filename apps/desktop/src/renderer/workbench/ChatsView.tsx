@@ -1557,7 +1557,7 @@ export function ChatsView(props: {
   );
 
   // A Group's access, from the Members list the relay answers this account.
-  // Until someone else is in the workspace, there is no one for a rule to hide from.
+  // Until someone else is in the workspace or can join it, a Group with no rule hides nothing.
   const loadGroupAccess = useCallback(
     async (wireId: string): Promise<GroupAccess> => {
       const result = await bridge().workspaceMembers({ workspaceId, request: { action: "list" } });
@@ -1565,7 +1565,7 @@ export function ChatsView(props: {
     },
     [workspaceId],
   );
-  // New group offers the Members picker once anyone else is in the workspace.
+  // New group offers the Members picker once anyone else is in the workspace or the invite link is on.
   // A workspace that never synced has no one else; any other failure is no
   // connection, and the Group is made here as before.
   const loadNewGroupAccess = useCallback(async (): Promise<NewGroupAccess> => {

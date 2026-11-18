@@ -143,31 +143,61 @@ describe("groupAccessFrom", () => {
   const rules = [{ channelWireId: "g1", level: "none" as const }];
 
   // The relay answers the owner an empty rule list before anyone is invited.
-  it("says only you are here until someone else is in the workspace", () => {
-    expect(groupAccessFrom({ memberLevel: "comment", people: [owner], groupRules: [] }, "g1")).toBe(
-      "no-members",
-    );
+  it("says only you are here until someone else is in the workspace or can join it", () => {
+    expect(
+      groupAccessFrom(
+        { memberLevel: "comment", people: [owner], groupRules: [], inviteLink: null },
+        "g1",
+      ),
+    ).toBe("no-members");
     expect(
       groupAccessFrom(
         {
           memberLevel: "comment",
           people: [owner, { role: "member", state: "removed" }],
           groupRules: rules,
+          inviteLink: { enabled: false },
         },
-        "g1",
+        "g2",
       ),
     ).toBe("no-members");
   });
 
   it("reads the Group's rule once someone else is invited", () => {
     const people = [owner, { role: "member", state: "invited" }];
-    expect(groupAccessFrom({ memberLevel: "comment", people, groupRules: rules }, "g1")).toEqual({
+    const list = { people, groupRules: rules, inviteLink: null };
+    expect(groupAccessFrom({ ...list, memberLevel: "comment" }, "g1")).toEqual({
       level: "none",
       memberLevel: "comment",
     });
-    expect(groupAccessFrom({ memberLevel: "view", people, groupRules: rules }, "g2")).toEqual({
+    expect(groupAccessFrom({ ...list, memberLevel: "view" }, "g2")).toEqual({
       level: null,
       memberLevel: "view",
     });
+  });
+
+  // The first person to join by the link must not see a Group the owner meant to hide.
+  it("offers access while the invite link is on, before anyone joins", () => {
+    expect(
+      groupAccessFrom(
+        { memberLevel: "comment", people: [owner], groupRules: [], inviteLink: { enabled: true } },
+        "g1",
+      ),
+    ).toEqual({ level: null, memberLevel: "comment" });
+  });
+
+  // A rule still applies to the next person who joins, so it stays visible and changeable.
+  it("shows a Group's own rule after everyone else has left", () => {
+    expect(
+      groupAccessFrom(
+        {
+          memberLevel: "comment",
+          people: [owner, { role: "member", state: "removed" }],
+          groupRules: rules,
+          inviteLink: null,
+        },
+        "g1",
+      ),
+    ).toEqual({ level: "none", memberLevel: "comment" });
   });
 });

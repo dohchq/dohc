@@ -17,19 +17,24 @@ type MembersList = {
   memberLevel: MemberLevel;
   people: ReadonlyArray<{ role: string; state: string }>;
   groupRules: ReadonlyArray<{ channelWireId: string; level: GroupRuleLevel }> | null;
+  inviteLink: { enabled: boolean } | null;
 };
 
-/** Whether anyone but the owner is in the workspace, invited or joined. */
-export const othersInWorkspace = (list: Pick<MembersList, "people">) =>
+/** Whether anyone but the owner is in the workspace, invited or joined, or can join by the invite link. */
+export const othersInWorkspace = (list: Pick<MembersList, "people" | "inviteLink">) =>
+  list.inviteLink?.enabled === true ||
   list.people.some((person) => person.role !== "owner" && person.state !== "removed");
 
-/** A Group's access from the Members list. Until someone else is in the workspace, no rule hides it from anyone. */
+/**
+ * A Group's access from the Members list. Until someone else is in the workspace
+ * or can join it, a Group with no rule hides nothing from anyone. A Group's own
+ * rule still applies to the next person who joins, so it always shows.
+ */
 export function groupAccessFrom(list: MembersList, wireId: string): GroupAccess {
-  if (list.groupRules === null || !othersInWorkspace(list)) return "no-members";
-  return {
-    level: list.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null,
-    memberLevel: list.memberLevel,
-  };
+  if (list.groupRules === null) return "no-members";
+  const level = list.groupRules.find((rule) => rule.channelWireId === wireId)?.level ?? null;
+  if (level === null && !othersInWorkspace(list)) return "no-members";
+  return { level, memberLevel: list.memberLevel };
 }
 
 const OPTIONS = [
