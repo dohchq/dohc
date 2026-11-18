@@ -112,6 +112,9 @@ export function parseAccessRule(text: string): AccessRule | null {
   let peopleIndent: number | null = null;
   const people = new Map<string, ShareAccess>();
   for (const raw of text.replace(/^﻿/, "").split(/\r?\n/)) {
+    // YAML ends a line at a lone CR too. Reading on would let a comment hide
+    // the line after it, so a rule with one is unreadable.
+    if (raw.includes("\r")) return null;
     const line = readLine(raw);
     if (line === "skip") continue;
     if (!line) return null;

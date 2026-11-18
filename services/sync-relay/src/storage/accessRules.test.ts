@@ -160,11 +160,15 @@ describe("the relay's access rule index", () => {
     try {
       const first = r.write("A/access.yaml", "members: view\n");
       const moved = r.rename("A/access.yaml", "B/access.yaml");
-      const respelled = r.rename("B/access.yaml", "B/Access.yaml");
+      const twin = r.write("B/ACCESS.yaml", "members: edit\n");
+      // Between its delete and its put, the respell leaves one readable rule
+      // for a moment that no reader saw.
+      const respelled = r.rename("B/ACCESS.yaml", "B/Access.yaml");
       expect(r.rows()).toEqual([
         { folder: "A", rule_text: "members: view\n", from_seq: first, to_seq: moved },
-        { folder: "B", rule_text: "members: view\n", from_seq: moved, to_seq: respelled },
-        { folder: "B", rule_text: "members: view\n", from_seq: respelled, to_seq: null },
+        { folder: "B", rule_text: "members: view\n", from_seq: moved, to_seq: twin },
+        { folder: "B", rule_text: null, from_seq: twin, to_seq: respelled },
+        { folder: "B", rule_text: null, from_seq: respelled, to_seq: null },
       ]);
     } finally {
       r.db.close();
@@ -183,6 +187,14 @@ describe("the relay's access rule index", () => {
           { path: "Drafts/access.yaml", blobSha256: sha, contentKind: "text" },
         ],
       });
+      expect(
+        r.db
+          .prepare(
+            "SELECT path FROM sync_relay_current_files WHERE version_id = 'draft' ORDER BY path",
+          )
+          .all()
+          .map((row) => row.path),
+      ).toEqual(["Drafts/access.yaml", "access.yaml"]);
       expect(r.rows()).toEqual([
         { folder: "", rule_text: "members: view\n", from_seq: root, to_seq: null },
       ]);
@@ -203,6 +215,36 @@ describe("the relay's access rule index", () => {
       expect(r.rows()).toEqual([
         { folder: "Drafts", rule_text: "members: comment\n", from_seq: seq, to_seq: null },
       ]);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("charges the workspace for each rule row it keeps", () => {
+    const r = relay();
+    try {
+      const usage = () =>
+        Number(
+          r.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()!.usage_bytes,
+        );
+      const start = usage();
+      r.db
+        .prepare("INSERT INTO sync_relay_access_rules VALUES ('ws', 'Team', ?, 1, NULL)")
+        .run("members: view\n");
+      r.db
+        .prepare("INSERT INTO sync_relay_access_rules VALUES ('ws', 'Team', NULL, 2, NULL)")
+        .run();
+      expect(usage() - start).toBe(2 * "Team".length + "members: view\n".length);
+      r.write("Drafts/access.yaml", "members: view\n");
+      r.write("Drafts/access.yaml", "members: edit\n");
+      const kept = usage();
+      r.db.exec("DELETE FROM sync_relay_access_rules");
+      expect(kept - usage()).toBe(
+        2 * "Team".length +
+          2 * "Drafts".length +
+          "members: view\n".length * 2 +
+          "members: edit\n".length,
+      );
     } finally {
       r.db.close();
     }

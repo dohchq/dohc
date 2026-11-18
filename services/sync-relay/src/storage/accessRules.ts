@@ -29,6 +29,17 @@ export function initializeAccessRuleSchema(db: SqliteDb): void {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_access_rules_open
       ON sync_relay_access_rules(workspace_id, folder) WHERE to_seq IS NULL;
+    -- Rows outlive the rule they copy, so the workspace pays for them.
+    CREATE TRIGGER IF NOT EXISTS sync_relay_access_rules_usage_insert
+      AFTER INSERT ON sync_relay_access_rules BEGIN
+      UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes
+        + length(CAST(NEW.folder AS BLOB)) + COALESCE(length(CAST(NEW.rule_text AS BLOB)), 0)
+      WHERE workspace_id = NEW.workspace_id; END;
+    CREATE TRIGGER IF NOT EXISTS sync_relay_access_rules_usage_delete
+      AFTER DELETE ON sync_relay_access_rules BEGIN
+      UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes
+        - length(CAST(OLD.folder AS BLOB)) - COALESCE(length(CAST(OLD.rule_text AS BLOB)), 0)
+      WHERE workspace_id = OLD.workspace_id; END;
   `);
   if (
     db
