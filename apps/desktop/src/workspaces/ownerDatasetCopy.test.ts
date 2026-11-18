@@ -565,15 +565,31 @@ it("says this computer can't update its copy, not that the server is out of reac
       heard = resolve;
     });
   await mkdir(options.directory);
-  const copy = await createOwnerDatasetCopy(options);
+  let copy = await createOwnerDatasetCopy(options);
+  // Set to hold the server's answer to an update until the test lets it go.
+  let held: Promise<void> | undefined,
+    asked: (() => void) | undefined,
+    release = () => {};
   const source: DatasetReplicaSource = {
-    capture: async () => host.replicaCapture(actor, scope),
+    capture: async () => {
+      asked?.();
+      await held;
+      return host.replicaCapture(actor, scope);
+    },
     page: async (input) => host.replicaPage(actor, { ...scope, ...input }),
     blob: async (input) => host.replicaBlob(actor, { ...scope, ...input }),
   };
+  const invoke = vi.fn(
+    async ({ after: _after, ...input }: Parameters<OwnerDatasetData["invoke"]>[0]) =>
+      host.invoke(actor, { ...input, workspaceId: "w", access: { kind: "data" } }),
+  );
   const remote = {
+    invoke,
     describe: async () => host.describe(actor, scope),
   } as unknown as OwnerDatasetData;
+  const pinned = { ...scope, revision: 1, revisionSha256: revision.revisionSha256 };
+  const refusal =
+    "dohc didn't save this change. This Collection is read-only until dohc can update its copy on this device.";
   const signal = new AbortController().signal;
   try {
     await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });
@@ -598,6 +614,13 @@ it("says this computer can't update its copy, not that the server is out of reac
     expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
       copy: { offline: true, updateFailed: true },
     });
+    // A change the copy knows how to make is refused too, before it reaches the server.
+    await expect(
+      copy
+        .data(remote, source, signal)
+        .invoke({ ...pinned, operationId: id(5), input: {}, idempotencyKey: "stale" }),
+    ).rejects.toThrow(refusal);
+    expect(invoke).not.toHaveBeenCalled();
     disk.full = false;
     found = changed();
     await copy.data(remote, source, signal).inspect!(id(1));
@@ -605,8 +628,57 @@ it("says this computer can't update its copy, not that the server is out of reac
     const recovered = await copy.data(remote, source, signal).inspect!(id(1));
     expect(recovered.copy).toMatchObject({ offline: false });
     expect(recovered.copy).not.toHaveProperty("updateFailed");
+
+    // A retry the server is slow to answer shows the server out of reach while
+    // it waits. When this computer then fails to write again, the page hears it.
+    await copy.close();
+    copy = await createOwnerDatasetCopy({ ...options, slowMs: 200, retryMs: 300 });
+    await host.invoke(actor, {
+      ...pinned,
+      operationId: id(5),
+      input: {},
+      idempotencyKey: "again",
+      workspaceId: "w",
+      access: { kind: "data" },
+    });
+    disk.full = true;
+    const hold = () => {
+      held = new Promise((resolve) => (release = resolve));
+      return new Promise<void>((resolve) => (asked = resolve));
+    };
+    let waiting = hold();
+    found = changed();
+    await copy.data(remote, source, signal).inspect!(id(1));
+    await waiting;
+    await found;
+    found = changed();
+    release();
+    await found;
+    waiting = hold();
+    found = changed();
+    expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
+      copy: { offline: true, updateFailed: true },
+    });
+    // That read or the retry after it asks the server again.
+    await waiting;
+    await found;
+    const slow = await copy.data(remote, source, signal).inspect!(id(1));
+    expect(slow.copy).toMatchObject({ offline: true });
+    expect(slow.copy).not.toHaveProperty("updateFailed");
+    let heardOnce = false;
+    void changed().then(() => (heardOnce = true));
+    held = undefined;
+    // The next retry asks once this one has ended.
+    waiting = new Promise((resolve) => (asked = resolve));
+    release();
+    await waiting;
+    expect(heardOnce).toBe(true);
+    expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
+      copy: { offline: true, updateFailed: true },
+    });
   } finally {
     disk.full = false;
+    release();
     await copy.close();
     await host.close();
     await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });

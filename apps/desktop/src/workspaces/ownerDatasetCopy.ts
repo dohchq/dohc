@@ -461,13 +461,15 @@ export async function createOwnerDatasetCopy(
         tellChanged();
       }
     }
-    const shownOffline = before.offline || slow;
+    // A slow update showed the server out of reach in place of what it showed before.
+    const shownOffline = before.offline || slow,
+      shownUpdateFailed = before.updateFailed && !slow;
     slow = false;
     if (reachable === false || updateFailed) scheduleRetry();
     const cursor = replica.state()?.cursor;
     if (
       shownOffline !== offlineNow() ||
-      before.updateFailed !== notUpdated() ||
+      shownUpdateFailed !== notUpdated() ||
       before.archived !== (archived !== null) ||
       (before.cursor && cursor
         ? !equalRecoveryCursor(before.cursor, cursor)
@@ -695,7 +697,8 @@ export async function createOwnerDatasetCopy(
               (operation) => operation.operationId === input.operationId && !operation.readOnly,
             )
           ) {
-            if (signedOut) throw refused();
+            // A server out of reach may be back, so only the change finds out.
+            if (signedOut || (updateFailed && reachable !== false)) throw refused();
             return change(input, saved.cursor);
           }
           const state = await current(signal);
