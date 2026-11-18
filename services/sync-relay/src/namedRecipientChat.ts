@@ -35,6 +35,7 @@ import {
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import { readAuthorized, type AuthorizedShareAction } from "./shareAuthorization";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import {
   chatSideOf,
   filterOpForShare,
@@ -440,8 +441,8 @@ export function createNamedRecipientChat(options: {
         if (deleting) {
           const deleted = storage.deleteWorkspaceMessage({
             workspaceId: share.workspaceId,
-            threadId: parseString(input.threadId, "threadId", 512),
-            messageId: parseString(input.messageId, "messageId", 512),
+            threadId: parseString(input.threadId, "threadId", MESSAGE_DELETE_ID_MAX_CHARS),
+            messageId: parseString(input.messageId, "messageId", MESSAGE_DELETE_ID_MAX_CHARS),
             actor: { kind: "account", userId: actor.userId },
             nowMs: options.nowMs(),
           });

@@ -1,6 +1,7 @@
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import { runAccountOperation } from "./accountOperations";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
@@ -368,8 +369,8 @@ export function createPersonalAgentToolRoutes(input: {
     const workspaceId = parseWorkspaceId(body.workspaceId);
     const deleted = storage.deleteWorkspaceMessage({
       workspaceId,
-      threadId: parseString(body.threadId, "threadId", CHAT_ID_CHARS),
-      messageId: parseString(body.messageId, "messageId", CHAT_ID_CHARS),
+      threadId: parseString(body.threadId, "threadId", MESSAGE_DELETE_ID_MAX_CHARS),
+      messageId: parseString(body.messageId, "messageId", MESSAGE_DELETE_ID_MAX_CHARS),
       actor: { kind: "personal-agent", credential: credential(authority) },
       nowMs: nowMs(),
     });

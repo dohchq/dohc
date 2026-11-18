@@ -13,13 +13,13 @@
         "threadId": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256,
+          "maxLength": 512,
           "description": "The message's threadId, from dohc_read_channel or dohc_read_discussion."
         },
         "messageId": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256,
+          "maxLength": 512,
           "description": "The messageId of a message you posted."
         }
       },

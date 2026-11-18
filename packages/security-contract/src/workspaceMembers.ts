@@ -33,6 +33,9 @@ export const MAX_WORKSPACE_MEMBERS = 1_000;
 
 export const MAX_MEMBER_EMAIL_CHARS = 320;
 
+/** The longest message or thread id any door takes to delete a message. */
+export const MESSAGE_DELETE_ID_MAX_CHARS = 512;
+
 export interface WorkspacePerson {
   /** Stable id of this entry. The owner's entry uses `"owner"`. */
   memberId: string;

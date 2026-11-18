@@ -4,6 +4,7 @@ import {
   isPaletteSlot,
   MAX_MEMBER_EMAIL_CHARS,
   MEMBER_STATES,
+  MESSAGE_DELETE_ID_MAX_CHARS,
   WORKSPACE_ROLES,
   type InviteLinkAction,
   type WorkspaceMembersView,
@@ -50,8 +51,8 @@ const agentActions = [
   z
     .object({
       action: z.literal("deleteMessage"),
-      threadId: z.string().min(1).max(512),
-      messageId: z.string().min(1).max(512),
+      threadId: z.string().min(1).max(MESSAGE_DELETE_ID_MAX_CHARS),
+      messageId: z.string().min(1).max(MESSAGE_DELETE_ID_MAX_CHARS),
     })
     .strict(),
 ] as const;

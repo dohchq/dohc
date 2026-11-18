@@ -1325,6 +1325,8 @@ describe("a personal agent's posts", () => {
     });
     await expectRefused(await remove("from-owner"));
     await expectRefused(await remove(theirs.messageId));
+    // Every delete door takes the same id lengths.
+    await expectRefused(await remove("m".repeat(512)));
     const kinds = logOf(f, WS_A).map((row) => [row.opKind, payloadOf(row).messageId]);
     expect(kinds).toContainEqual(["chat.message.tombstone", mine.messageId]);
     expect(kinds).toContainEqual(["chat.message.delete", mine.messageId]);

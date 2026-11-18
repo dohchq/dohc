@@ -2,6 +2,7 @@ import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core/records";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import {
   ANSWER_RESERVE_MS,
   answerMcp,
@@ -621,9 +622,13 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
         threadId: z
           .string()
           .min(1)
-          .max(256)
+          .max(MESSAGE_DELETE_ID_MAX_CHARS)
           .describe("The message's threadId, from dohc_read_channel or dohc_read_discussion."),
-        messageId: z.string().min(1).max(256).describe("The messageId of a message you posted."),
+        messageId: z
+          .string()
+          .min(1)
+          .max(MESSAGE_DELETE_ID_MAX_CHARS)
+          .describe("The messageId of a message you posted."),
       }),
     },
     async ({ workspace, threadId, messageId }) => {

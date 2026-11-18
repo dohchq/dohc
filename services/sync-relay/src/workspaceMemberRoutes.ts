@@ -6,6 +6,7 @@ import {
   isInviteLinkAction,
   type GroupRuleLevel,
   MAX_MEMBER_EMAIL_CHARS,
+  MESSAGE_DELETE_ID_MAX_CHARS,
   type WorkspaceJoinPreview,
   type WorkspaceJoinResult,
   type WorkspaceMembersView,
@@ -97,7 +98,7 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
       return {
         route: "members-message-delete",
         workspaceId: parseWorkspaceId(parts[1]),
-        messageId: parseString(parts[4], "messageId", MESSAGE_ID_MAX_CHARS),
+        messageId: parseString(parts[4], "messageId", MESSAGE_DELETE_ID_MAX_CHARS),
       };
     } catch {
       return null;
@@ -130,8 +131,6 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
 }
 
 const GROUP_NAME_MAX_CHARS = 80;
-const MESSAGE_ID_MAX_CHARS = 512;
-const THREAD_ID_MAX_CHARS = 512;
 const GROUP_PURPOSE_MAX_CHARS = 200;
 // The slug of the default agent's chat. It and every slug under it belong to
 // agent chats, and the owner's computer refuses a Group that takes one.
@@ -463,7 +462,7 @@ export function createWorkspaceMemberRoutes(options: {
 
     if (route.route === "members-message-delete") {
       const input = await readJsonObject(request);
-      const threadId = parseString(input.threadId, "threadId", THREAD_ID_MAX_CHARS);
+      const threadId = parseString(input.threadId, "threadId", MESSAGE_DELETE_ID_MAX_CHARS);
       const deleted = storage.deleteWorkspaceMessage({
         workspaceId: route.workspaceId,
         threadId,
