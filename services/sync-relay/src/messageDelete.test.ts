@@ -357,6 +357,7 @@ describe("deleting a message", () => {
         linkedObjectId: "object-notes",
       }),
       ownerMessage("msg-notes", "t-notes", "a comment on the notes"),
+      ownerMessage("msg-notes-control", "t-notes", "another comment on the notes"),
     ]);
     const ana = await member(h, "ana");
     const ben = await member(h, "ben");
@@ -388,6 +389,8 @@ describe("deleting a message", () => {
       (await push(h, "ben", ben.shareId, memberBatch("ben", "m-ben-notes", "mine", 1, "t-notes")))
         .status,
     ).toBe(200);
+    // The control: before the move hides the notes, the admin deletes their Comments.
+    expect((await deleteMessage(h, "ana", "msg-notes-control", "t-notes")).status).toBe(200);
     await ownerAppend(
       h,
       [
