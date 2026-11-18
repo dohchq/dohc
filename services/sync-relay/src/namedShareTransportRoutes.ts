@@ -13,6 +13,7 @@ import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import {
   assertChatAuthorship,
   assertClientLogProvenance,
+  MESSAGE_TOMBSTONE_OP_KIND,
   namedShareOrigin,
   parseNamedShareLogOps,
   type LogAuthorNameLookup,
@@ -90,7 +91,10 @@ async function nameAuthorsByAccount(
       const payload = op.payload;
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return op;
       const fields = payload as Record<string, unknown>;
-      if (op.opKind === "chat.message.append" && typeof fields.authorUserId === "string") {
+      if (
+        (op.opKind === "chat.message.append" || op.opKind === MESSAGE_TOMBSTONE_OP_KIND) &&
+        typeof fields.authorUserId === "string"
+      ) {
         if (fields.authorKind === "human") {
           return {
             ...op,
@@ -128,6 +132,7 @@ export function createNamedShareTransportRoutes(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "messageDeleted"
+    | "deletedMessageCount"
     | "appendLogBatch"
     | "appendBrowserChatBatch"
     | "putBlob"
@@ -231,7 +236,11 @@ export function createNamedShareTransportRoutes(
       const signed = () => (reach ? { reach: reach.listed(reachKey), logHead } : {});
       // What the page's read decided by, as one value. The selector holds the
       // member's evaluated reach, so a level or Group rule change moves it.
-      const markOf = (selector: AnyShareSelector) => JSON.stringify({ selector });
+      // Deletes only add rows, so the count moves with each one, as the
+      // highest relay_seq would not for an older message deleted after a
+      // newer one.
+      const markOf = (selector: AnyShareSelector) =>
+        JSON.stringify({ selector, deleted: storage.deletedMessageCount(share.workspaceId) });
       let pageMark = "";
       const authorizeRead = () => {
         const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;

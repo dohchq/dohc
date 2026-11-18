@@ -65,6 +65,27 @@ async function ownerAppend(h: SyncRelayHandler, ops: unknown[], originId = "orig
   expect(response.status, await response.clone().text()).toBe(200);
 }
 
+// A pull's author-name lookup waits here while a test holds it.
+let heldNames: { hold(): Promise<void> } | null = null;
+function holdNames() {
+  let reached!: () => void, release!: () => void;
+  const atLookup = new Promise<void>((resolve) => (reached = resolve));
+  const open = new Promise<void>((resolve) => (release = resolve));
+  heldNames = {
+    hold: () => {
+      reached();
+      return open;
+    },
+  };
+  return {
+    atLookup,
+    release: () => {
+      heldNames = null;
+      release();
+    },
+  };
+}
+
 // The owner's workspace: a Group, General, a direct message, an agent chat, a
 // channel the log never created, and a file with a Comment thread. Nobody is
 // a member yet.
@@ -72,7 +93,8 @@ async function seed(): Promise<{ storage: SyncRelayStorage; h: SyncRelayHandler 
   resetOpSeq();
   const storage = await testStorage();
   const h = testHandler(storage, {
-    lookupUserDisplayName: (userId: string) => `Name ${userId}`,
+    lookupUserDisplayName: (userId: string) =>
+      heldNames ? heldNames.hold().then(() => `Name ${userId}`) : `Name ${userId}`,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
     namedBrowserSessionLimits: {
       maxSessions: 8,
@@ -579,5 +601,67 @@ describe("what only the relay writes", () => {
       body: "a reply",
       startsPost: false,
     });
+  });
+});
+
+describe("a member's raw pull", () => {
+  type Pulled = {
+    ops: Array<{ relaySeq: number; opKind: string; payload: Record<string, unknown> }>;
+  };
+  const pull = (h: SyncRelayHandler, shareId: string) =>
+    h(request("ana", `/sync/shares/${shareId}/log?since=0&limit=500`));
+
+  it("answers with the tombstone when the message is deleted while the page waits on author names", async () => {
+    const { storage, h } = await seed();
+    await ownerAppend(h, [
+      ownerMessage("m-pic", "t-team", "the deleted words"),
+      logOp("chat.attachment.add", {
+        attachmentId: "att-1",
+        messageId: "m-pic",
+        threadId: "t-team",
+        targetKind: "file",
+        targetPath: "docs/plan.md",
+        createdAtMs: 5,
+      }),
+    ]);
+    const ana = await member(h, "ana");
+    const [append] = rowsOf(storage, "m-pic");
+    const names = holdNames();
+    const pulling = pull(h, ana.shareId);
+    await names.atLookup;
+    expect((await deleteMessage(h, OWNER, "m-pic", "t-team")).status).toBe(200);
+    names.release();
+    const answer = await pulling;
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    const { ops } = (await json(answer)) as Pulled;
+    expect(JSON.stringify(ops)).not.toContain("the deleted words");
+    expect(ops.find((op) => op.relaySeq === append!.relay_seq)).toMatchObject({
+      opKind: "chat.message.tombstone",
+      payload: { messageId: "m-pic", authorDisplayName: "Name owner" },
+    });
+    expect(ops.filter((op) => op.opKind === "chat.attachment.add")).toEqual([]);
+  });
+
+  it("rebuilds when an older message is deleted after a newer one was", async () => {
+    const { storage, h } = await seed();
+    await ownerAppend(h, [
+      ownerMessage("m-old", "t-team", "the older words"),
+      ownerMessage("m-new", "t-team", "the newer words"),
+    ]);
+    expect((await deleteMessage(h, OWNER, "m-new", "t-team")).status).toBe(200);
+    const ana = await member(h, "ana");
+    const [older] = rowsOf(storage, "m-old");
+    const names = holdNames();
+    const pulling = pull(h, ana.shareId);
+    await names.atLookup;
+    expect((await deleteMessage(h, OWNER, "m-old", "t-team")).status).toBe(200);
+    names.release();
+    const answer = await pulling;
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    const { ops } = (await json(answer)) as Pulled;
+    expect(JSON.stringify(ops)).not.toContain("the older words");
+    expect(ops.find((op) => op.relaySeq === older!.relay_seq)?.opKind).toBe(
+      "chat.message.tombstone",
+    );
   });
 });

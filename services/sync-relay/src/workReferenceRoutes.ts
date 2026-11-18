@@ -3,7 +3,7 @@ import { jsonResponse } from "@dohc/service-http";
 import { notFound } from "./errors";
 import { parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import type { WorkReferenceReader } from "./storage/workReferences";
+import { StaleReferenceCollection, type WorkReferenceReader } from "./storage/workReferences";
 import { authorizeShareAction, authorizeShareGrantAction } from "./shareAuthorization";
 
 export type WorkReferenceRoute =
@@ -87,13 +87,17 @@ export function createWorkReferenceRoutes(
       if (resolved.status !== "found") throw notFound();
       return respond(resolved);
     }
-    return respond(
-      await storage.listWorkReferences({
+    // This list keeps answering a grant that changed mid-collection as not-found.
+    const listed = await storage
+      .listWorkReferences({
         workspaceId: route.workspaceId,
         reader,
         identityKey,
         after: new URL(request.url).searchParams.get("after") || undefined,
-      }),
-    );
+      })
+      .catch((error: unknown) => {
+        throw error instanceof StaleReferenceCollection ? notFound() : error;
+      });
+    return respond(listed);
   };
 }
