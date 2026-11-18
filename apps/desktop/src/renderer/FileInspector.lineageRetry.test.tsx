@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -157,7 +157,12 @@ function EditorGroup(props: { children: ReactNode }) {
   useFocusSurface(root, () => null);
   return (
     <div ref={root}>
-      <section data-focus-surface="editor" data-active="true" tabIndex={-1}>
+      <section
+        data-testid="editor-group"
+        data-focus-surface="editor"
+        data-active="true"
+        tabIndex={-1}
+      >
         {props.children}
       </section>
     </div>
@@ -174,4 +179,32 @@ it("keeps the caret in the editor when a replacement rebuilds it", async () => {
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   await waitFor(() => expect(screen.getByTestId("markdown-editor")).not.toBe(before));
   await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("markdown-editor")));
+});
+
+// A click after the old editor goes and before the new one mounts: on the
+// group's blank space, which focuses the group, or outside any focusable
+// element, which leaves focus on the page.
+it.each([
+  ["the editor group", (group: HTMLElement) => group],
+  ["the page", () => document.body],
+])("leaves focus on %s when a click puts it there while the editor rebuilds", async (_, target) => {
+  render(<EditorGroup>{surface("ws-1")}</EditorGroup>);
+  await screen.findByTestId("markdown-source-toggle");
+  const before = await screen.findByTestId("markdown-editor");
+  before.focus();
+  const group = screen.getByTestId("editor-group");
+  const clicked = target(group);
+  let done = false;
+  group.addEventListener("focusin", (event) => {
+    if (done || event.target !== group) return;
+    done = true;
+    fireEvent.pointerDown(clicked);
+    // After focusSurface returns, or it puts focus back on the group.
+    if (clicked !== group) queueMicrotask(() => group.blur());
+  });
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(done).toBe(true));
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(screen.getByTestId("markdown-editor")).not.toBe(before));
+  expect(document.activeElement).toBe(clicked);
 });

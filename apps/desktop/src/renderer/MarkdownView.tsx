@@ -1146,6 +1146,14 @@ export function MarkdownView(props: {
     if (handle.caret() !== null) refocus.current = null;
   }, []);
   useEffect(() => {
+    // A click while the editor rebuilds puts focus where the user chose.
+    const drop = () => {
+      refocus.current = null;
+    };
+    document.addEventListener("pointerdown", drop, true);
+    return () => document.removeEventListener("pointerdown", drop, true);
+  }, []);
+  useEffect(() => {
     if (!onEditorReady || opening) return;
     if (readOnly || (!displayDoc && surfaceMode !== "wysiwyg")) {
       onEditorReady(null);
