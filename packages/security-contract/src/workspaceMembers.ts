@@ -147,6 +147,12 @@ export const WORKSPACE_MEMBER_ROUTES = {
    * admin. Null clears the rule, so the Group takes the member level.
    */
   groupRule: "/sync/:workspaceId/members/groups/:channelWireId/rule",
+  /**
+   * POST {threadId} → the tombstone's fields. Deletes a message in a Group or
+   * a file's Comments: the owner or an admin any message, a member their own.
+   * Every refusal answers not-found.
+   */
+  messageDelete: "/sync/:workspaceId/chat/messages/:messageId/delete",
   /** POST {token} → WorkspaceJoinPreview. Signed in. */
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */

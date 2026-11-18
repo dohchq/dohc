@@ -113,6 +113,7 @@ export function createLinkChatRoutes(options: {
     | "getShareLabels"
     | "getLinkPrincipalForGrantProfile"
     | "workspaceIsOwnedBy"
+    | "deletedMessageTimes"
     | "findThreadCreateLane"
     | "findThreadFirstMessageId"
   >;

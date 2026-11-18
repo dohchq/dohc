@@ -1982,6 +1982,11 @@ export interface SyncRelayStorage {
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
   setWorkspaceGroupRule: WorkspaceMembersMethod<"setWorkspaceGroupRule">;
+  // Deleted messages (storage/messageDeletes.ts).
+  deleteWorkspaceMessage: MessageDeletesMethod<"deleteWorkspaceMessage">;
+  deletedMessageCount: MessageDeletesMethod<"deletedMessageCount">;
+  messageDeleted: MessageDeletesMethod<"messageDeleted">;
+  deletedMessageTimes: MessageDeletesMethod<"deletedMessageTimes">;
   // Direct messages (storage/directMessages.ts).
   resolveDirectPick: DirectMessagesMethod<"resolveDirectPick">;
   findDirectConversation: DirectMessagesMethod<"findDirectConversation">;
@@ -2261,6 +2266,13 @@ export interface LiveTicketStoragePolicy {
 
 type WorkspaceMembersModule = typeof import("./workspaceMembers");
 type DirectMessagesModule = typeof import("./directMessages");
+type MessageDeletesModule = typeof import("./messageDeletes");
+type MessageDeletesMethod<K extends keyof MessageDeletesModule> = MessageDeletesModule[K] extends (
+  storage: never,
+  ...args: infer A
+) => infer R
+  ? (...args: A) => R
+  : never;
 type DirectMessagesMethod<K extends keyof DirectMessagesModule> = DirectMessagesModule[K] extends (
   storage: never,
   ...args: infer A

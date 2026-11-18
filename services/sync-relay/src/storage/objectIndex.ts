@@ -3,6 +3,7 @@ import { type SyncRelayLogRow, type ThreadFileBinding, type ObjectMomentRow } fr
 import { SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow, rowToObjectMomentRow } from "./rows";
 import { asRecord } from "@dohc/workspace-core";
+import { firstDeletedInThread } from "./messageDeletes";
 import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 export function listObjectMomentLogRowsByBlob(
@@ -262,8 +263,10 @@ export function findThreadCreateLane(
 }
 
 /**
- * The message that starts a thread: its earliest admitted message. The push
- * index holds each thread's messages, so this reads one thread, not the log.
+ * The message that starts a thread: its earliest admitted message, deleted or
+ * not, so a reply never takes a deleted first message's place. The push index
+ * holds each thread's appends and the deleted-messages index its deleted
+ * ones, so this reads one thread, not the log.
  */
 export function findThreadFirstMessageId(
   storage: StorageContext,
@@ -272,13 +275,15 @@ export function findThreadFirstMessageId(
 ): string | undefined {
   const row = storage.db
     .prepare(
-      `SELECT json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
+      `SELECT relay_seq, json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
      WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ?
        AND op_kind = 'chat.message.append' AND json_valid(payload_json)
        AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
      ORDER BY relay_seq LIMIT 1`,
     )
     .get(workspaceId, threadId);
+  const deleted = firstDeletedInThread(storage, workspaceId, threadId);
+  if (deleted && (!row || deleted.relaySeq < Number(row.relay_seq))) return deleted.messageId;
   return typeof row?.message_id === "string" ? row.message_id : undefined;
 }
 

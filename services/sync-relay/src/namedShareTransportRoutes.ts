@@ -127,6 +127,7 @@ export function createNamedShareTransportRoutes(
     | "findThreadCreateFileBinding"
     | "objectCurrentPath"
     | "objectIdAtPath"
+    | "messageDeleted"
     | "appendLogBatch"
     | "appendBrowserChatBatch"
     | "putBlob"
@@ -483,6 +484,8 @@ export function createNamedShareTransportRoutes(
         },
         objectCurrentPath: (objectId) => storage.objectCurrentPath(share.workspaceId, objectId),
         objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
+        messageDeleted: (threadId, messageId) =>
+          storage.messageDeleted(share.workspaceId, threadId, messageId),
       };
       const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {

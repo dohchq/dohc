@@ -18,7 +18,7 @@ import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplay
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { hashLinkBearer, mintLinkBearer, sealLinkBearer, unsealLinkBearer } from "./linkSecurity";
-import { parseShareId, parseWorkspaceId, readJsonObject } from "./requestInputs";
+import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 import {
   WORKSPACE_NAME_MAX_CHARS,
@@ -44,7 +44,8 @@ export type WorkspaceMemberRoute =
   | { route: "members-group-rule"; workspaceId: string; channelWireId: string }
   | { route: "members-join-preview" }
   | { route: "members-join" }
-  | { route: "members-group-create" };
+  | { route: "members-group-create" }
+  | { route: "members-message-delete"; workspaceId: string; messageId: string };
 
 export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   members: "/sync/:workspaceId/members",
@@ -60,6 +61,7 @@ export const WORKSPACE_MEMBER_ROUTE_PATTERNS = {
   "members-join-preview": "/sync/members/join-preview",
   "members-join": "/sync/members/join",
   "members-group-create": "/sync/members/groups",
+  "members-message-delete": "/sync/:workspaceId/chat/messages/:messageId/delete",
 } as const satisfies Record<WorkspaceMemberRoute["route"], string>;
 
 export function isWorkspaceMemberRoute(route: { route: string }): route is WorkspaceMemberRoute {
@@ -79,9 +81,28 @@ const MEMBER_ACTIONS = {
   "let-back-in": "members-let-back-in",
 } as const;
 
-/** Parses `/sync/members/...` and `/sync/:workspaceId/members/...`; null for any other path. */
+/**
+ * Parses `/sync/members/...`, `/sync/:workspaceId/members/...` and
+ * `/sync/:workspaceId/chat/messages/:messageId/delete`; null for any other path.
+ */
 export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMemberRoute | null {
   if (parts[0] !== "sync") return null;
+  if (
+    parts.length === 6 &&
+    parts[2] === "chat" &&
+    parts[3] === "messages" &&
+    parts[5] === "delete"
+  ) {
+    try {
+      return {
+        route: "members-message-delete",
+        workspaceId: parseWorkspaceId(parts[1]),
+        messageId: parseString(parts[4], "messageId", MESSAGE_ID_MAX_CHARS),
+      };
+    } catch {
+      return null;
+    }
+  }
   if (parts.length === 3 && parts[1] === "members") {
     if (parts[2] === "join") return { route: "members-join" };
     if (parts[2] === "join-preview") return { route: "members-join-preview" };
@@ -109,6 +130,8 @@ export function parseWorkspaceMemberRoute(parts: readonly string[]): WorkspaceMe
 }
 
 const GROUP_NAME_MAX_CHARS = 80;
+const MESSAGE_ID_MAX_CHARS = 512;
+const THREAD_ID_MAX_CHARS = 512;
 const GROUP_PURPOSE_MAX_CHARS = 200;
 // The slug of the default agent's chat. It and every slug under it belong to
 // agent chats, and the owner's computer refuses a Group that takes one.
@@ -141,6 +164,7 @@ type MemberRouteStorage = Pick<
   | "joinWorkspace"
   | "createWorkspaceGroup"
   | "setWorkspaceGroupRule"
+  | "deleteWorkspaceMessage"
 >;
 
 export function createWorkspaceMemberRoutes(options: {
@@ -435,6 +459,22 @@ export function createWorkspaceMemberRoutes(options: {
         200,
         { "cache-control": "no-store" },
       );
+    }
+
+    if (route.route === "members-message-delete") {
+      const input = await readJsonObject(request);
+      const threadId = parseString(input.threadId, "threadId", THREAD_ID_MAX_CHARS);
+      const deleted = storage.deleteWorkspaceMessage({
+        workspaceId: route.workspaceId,
+        threadId,
+        messageId: route.messageId,
+        actor: { kind: "account", userId },
+        nowMs: options.nowMs(),
+      });
+      if (!deleted.ok) throw notFound();
+      // Copies and open follows pull the delete now.
+      if (!deleted.repeated) options.discussionActivity.wakeLog(route.workspaceId);
+      return jsonResponse(deleted.tombstone.payload, 200, { "cache-control": "no-store" });
     }
 
     const { workspaceId } = route;

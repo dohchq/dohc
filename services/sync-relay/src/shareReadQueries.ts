@@ -54,6 +54,7 @@ export function createShareReadQueries(
     | "findThreadCreateFileBinding"
     | "objectCurrentPath"
     | "objectIdAtPath"
+    | "messageDeleted"
     | "fetchLogPage"
     | "hasRefusedSettlement"
     | "fetchLogPageDescending"
@@ -119,6 +120,8 @@ export function createShareReadQueries(
         objectAtPathCache.set(path, objectId);
         return objectId;
       },
+      messageDeleted: (threadId, messageId) =>
+        storage.messageDeleted(workspaceId, threadId, messageId),
     };
   };
 

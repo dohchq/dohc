@@ -37,10 +37,11 @@ import {
 
 // A resolver that knows no file-linked thread and no object: a DM grant is a
 // chat selector, and the file half must never decide anything for it.
-const NO_FILE_CHAT: ShareFileChatResolver = {
+const NO_FILE_CHAT: ShareFileChatResolver & Pick<ChatShareThreadResolver, "messageDeleted"> = {
   threadFileBinding: () => undefined,
   objectCurrentPath: () => undefined,
   objectIdAtPath: () => undefined,
+  messageDeleted: () => false,
 };
 
 afterEach(closeTestStorages);
