@@ -320,6 +320,8 @@ it("refuses a rule write whose rule row would take the workspace over its quota"
   expect(context.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_access_rules").get()!.n).toBe(0);
   context.options.workspaceQuotaBytes += "Team".length + text.length;
   append();
-  expect(currentAccessRuleSet(context.db, "ws")).not.toBeNull();
+  expect(context.db.prepare("SELECT folder, rule_text FROM sync_relay_access_rules").all()).toEqual(
+    [{ folder: "Team", rule_text: text }],
+  );
   expect(workspaceUsageBytes(context, "ws")).toBe(context.options.workspaceQuotaBytes);
 });
