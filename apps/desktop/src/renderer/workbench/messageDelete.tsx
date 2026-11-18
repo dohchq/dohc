@@ -41,15 +41,18 @@ const DeleteRole = createContext<Role | null>(null);
 /**
  * Reads the reader's role when a workspace opens, and again when
  * `refreshKey` changes: the workspace reconnected, or the relay named a new
- * membership role. A workspace that never synced lists no Members, so it
- * offers no Delete: deleting asks the server to stop serving the text.
+ * membership role. A failed read also tries again on each "current" event
+ * from `shareAccessCurrent`, the shared view's access check. A workspace that
+ * never synced lists no Members, so it offers no Delete: deleting asks the
+ * server to stop serving the text.
  */
 export function MessageDeleteRole(props: {
   workspaceId: string;
   refreshKey: string;
+  shareAccessCurrent?: EventTarget;
   children: ReactNode;
 }) {
-  const { workspaceId, refreshKey } = props;
+  const { workspaceId, refreshKey, shareAccessCurrent } = props;
   const members = useWorkspaceQuery(useWorkspaceSession(), {
     key: `message-delete:${workspaceId}`,
     load: () => bridge().workspaceMembers({ workspaceId, request: { action: "list" } }),
@@ -62,6 +65,13 @@ export function MessageDeleteRole(props: {
     readFor.current = { workspaceId, refreshKey };
     if (previous.workspaceId === workspaceId && previous.refreshKey !== refreshKey) void retry();
   }, [workspaceId, refreshKey, retry]);
+  const failed = members.error !== null;
+  useEffect(() => {
+    if (!failed || !shareAccessCurrent) return;
+    const tryAgain = () => void retry();
+    shareAccessCurrent.addEventListener("current", tryAgain);
+    return () => shareAccessCurrent.removeEventListener("current", tryAgain);
+  }, [failed, shareAccessCurrent, retry]);
   const role = members.value?.status === "ready" ? members.value.view.viewer.role : null;
   return <DeleteRole.Provider value={role}>{props.children}</DeleteRole.Provider>;
 }

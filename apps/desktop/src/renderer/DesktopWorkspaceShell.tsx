@@ -681,11 +681,16 @@ function InvalidSitePathFallback({
 function WorkspaceReads(props: {
   workspaceId: string;
   deleteRoleKey: string;
+  shareAccessCurrent: EventTarget;
   children: ReactNode;
 }) {
   return (
     <CollectionFieldMarksProvider workspaceId={props.workspaceId}>
-      <MessageDeleteRole workspaceId={props.workspaceId} refreshKey={props.deleteRoleKey}>
+      <MessageDeleteRole
+        workspaceId={props.workspaceId}
+        refreshKey={props.deleteRoleKey}
+        shareAccessCurrent={props.shareAccessCurrent}
+      >
         {props.children}
       </MessageDeleteRole>
     </CollectionFieldMarksProvider>
@@ -2759,6 +2764,10 @@ export function DesktopWorkspaceShell(props: {
   const serverReached =
     syncStatus === null || (!syncStatus.syncFailure && REACHED_STATES.has(syncStatus.state));
   const deleteRoleKey = `${serverReached} ${membershipRole ?? ""}`;
+  // A shared view reaches its server through the share's access check, so its
+  // sync status can read "synced" while Delete's role read failed. Each
+  // current answer lets a failed read try again.
+  const [shareAccessCurrent] = useState(() => new EventTarget());
   // Closed shared notes whose edits wait for the server. Rows read the marks
   // themselves, so a change leaves the Explorer and every other row alone; an
   // open note's editor shows its own state.
@@ -3233,6 +3242,7 @@ export function DesktopWorkspaceShell(props: {
     },
     onVerified: (result) => {
       if (!shareView) return;
+      if (result.status === "current") shareAccessCurrent.dispatchEvent(new Event("current"));
       if (
         result.status === "ended" ||
         result.status === "needs-reopen" ||
@@ -8219,7 +8229,11 @@ export function DesktopWorkspaceShell(props: {
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
           <CustomizeContext.Provider value={customizeContext}>
-            <WorkspaceReads workspaceId={workspaceId} deleteRoleKey={deleteRoleKey}>
+            <WorkspaceReads
+              workspaceId={workspaceId}
+              deleteRoleKey={deleteRoleKey}
+              shareAccessCurrent={shareAccessCurrent}
+            >
               <ShellErrorReporter.Provider value={reportShellFailure}>
                 <MessageLinks.Provider value={makeMessageLink}>
                   <WorkReferences.Provider value={workReferenceLinks}>
