@@ -199,6 +199,23 @@ describe("closeServer", () => {
     expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 
+  it("leaves a working request sent after a waiting one to the grace period, since its answer queues behind", async () => {
+    const { server, arrival, aborted, release, pipeline } = await waitingAndWorking();
+    const arrivals = Promise.all([arrival("/wait"), arrival("/work")]);
+    const both = pipeline("/wait", "/work");
+    let closed = false;
+    void both.closed.then(() => (closed = true));
+    await arrivals;
+
+    const closing = closeServer(server, 800);
+    release();
+    // Several of the server's passes over its connections, and well short of the grace period.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(aborted.has("/wait")).toBe(false);
+    expect(closed).toBe(false);
+    await Promise.all([closing, both.closed]);
+  });
+
   it("still closes a connection whose first waiting request was answered while a second waits", async () => {
     const { server, arrival, pipeline } = await waitingAndWorking();
     const arrivals = Promise.all([arrival("/wait-with-news"), arrival("/wait")]);
