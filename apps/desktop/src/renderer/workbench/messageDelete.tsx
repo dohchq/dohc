@@ -39,16 +39,29 @@ type Role = Extract<MembersResult, { status: "ready" }>["view"]["viewer"]["role"
 const DeleteRole = createContext<Role | null>(null);
 
 /**
- * Reads the reader's role once per visit to a workspace. A workspace that
- * never synced lists no Members, so it offers no Delete: deleting asks the
- * server to stop serving the text.
+ * Reads the reader's role when a workspace opens, and again when
+ * `refreshKey` changes: the workspace reconnected, or the relay named a new
+ * membership role. A workspace that never synced lists no Members, so it
+ * offers no Delete: deleting asks the server to stop serving the text.
  */
-export function MessageDeleteRole(props: { workspaceId: string; children: ReactNode }) {
-  const { workspaceId } = props;
+export function MessageDeleteRole(props: {
+  workspaceId: string;
+  refreshKey: string;
+  children: ReactNode;
+}) {
+  const { workspaceId, refreshKey } = props;
   const members = useWorkspaceQuery(useWorkspaceSession(), {
     key: `message-delete:${workspaceId}`,
     load: () => bridge().workspaceMembers({ workspaceId, request: { action: "list" } }),
   });
+  const { retry } = members;
+  // A new workspace starts its own read.
+  const readFor = useRef({ workspaceId, refreshKey });
+  useEffect(() => {
+    const previous = readFor.current;
+    readFor.current = { workspaceId, refreshKey };
+    if (previous.workspaceId === workspaceId && previous.refreshKey !== refreshKey) void retry();
+  }, [workspaceId, refreshKey, retry]);
   const role = members.value?.status === "ready" ? members.value.view.viewer.role : null;
   return <DeleteRole.Provider value={role}>{props.children}</DeleteRole.Provider>;
 }

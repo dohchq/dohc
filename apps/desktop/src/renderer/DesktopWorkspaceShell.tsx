@@ -678,13 +678,27 @@ function InvalidSitePathFallback({
 }
 
 // What the workspace's chats and Collections read once per workspace visit.
-function WorkspaceReads(props: { workspaceId: string; children: ReactNode }) {
+function WorkspaceReads(props: {
+  workspaceId: string;
+  deleteRoleKey: string;
+  children: ReactNode;
+}) {
   return (
     <CollectionFieldMarksProvider workspaceId={props.workspaceId}>
-      <MessageDeleteRole workspaceId={props.workspaceId}>{props.children}</MessageDeleteRole>
+      <MessageDeleteRole workspaceId={props.workspaceId} refreshKey={props.deleteRoleKey}>
+        {props.children}
+      </MessageDeleteRole>
     </CollectionFieldMarksProvider>
   );
 }
+
+// The sync states in which the workspace last reached its server.
+const REACHED_STATES: ReadonlySet<SyncStatusResult["state"]> = new Set([
+  "synced",
+  "syncing",
+  "local-changes",
+  "conflict",
+]);
 
 /**
  * A record's body in a Collection tab's record panel. While it is on the page, the shell knows which record's
@@ -2739,6 +2753,12 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  // Delete reads the role again when the workspace reaches its server again,
+  // or the relay names a new membership role. Before the first status, the
+  // server counts as reached, so an opening online reads once.
+  const serverReached =
+    syncStatus === null || (!syncStatus.syncFailure && REACHED_STATES.has(syncStatus.state));
+  const deleteRoleKey = `${serverReached} ${membershipRole ?? ""}`;
   // Closed shared notes whose edits wait for the server. Rows read the marks
   // themselves, so a change leaves the Explorer and every other row alone; an
   // open note's editor shows its own state.
@@ -8199,7 +8219,7 @@ export function DesktopWorkspaceShell(props: {
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
           <CustomizeContext.Provider value={customizeContext}>
-            <WorkspaceReads workspaceId={workspaceId}>
+            <WorkspaceReads workspaceId={workspaceId} deleteRoleKey={deleteRoleKey}>
               <ShellErrorReporter.Provider value={reportShellFailure}>
                 <MessageLinks.Provider value={makeMessageLink}>
                   <WorkReferences.Provider value={workReferenceLinks}>

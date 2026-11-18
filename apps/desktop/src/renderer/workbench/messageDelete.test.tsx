@@ -112,14 +112,18 @@ function Chat(props: { messages: ChatMessageRecord[]; enabled?: boolean }) {
   );
 }
 
-function renderChat(messages: ChatMessageRecord[], enabled?: boolean) {
-  return render(
+function chatIn(messages: ChatMessageRecord[], enabled?: boolean, refreshKey = "online") {
+  return (
     <WorkspaceSessionProvider workspaceId="ws">
-      <MessageDeleteRole workspaceId="ws">
+      <MessageDeleteRole workspaceId="ws" refreshKey={refreshKey}>
         <Chat messages={messages} enabled={enabled} />
       </MessageDeleteRole>
-    </WorkspaceSessionProvider>,
+    </WorkspaceSessionProvider>
   );
+}
+
+function renderChat(messages: ChatMessageRecord[], enabled?: boolean) {
+  return render(chatIn(messages, enabled));
 }
 
 const row = (id: string) =>
@@ -157,6 +161,25 @@ describe("Delete on a message", () => {
     await Promise.resolve();
     expect(deleteIn("message-mine")).toBeNull();
     expect(deleteIn("message-theirs")).toBeNull();
+  });
+
+  it("reads the role again when the workspace reconnects or the membership role changes", async () => {
+    let answer: () => Promise<MembersResult> = () =>
+      Promise.reject(new Error("dohc could not reach the server."));
+    const { workspaceMembers } = stubMembers(() => answer());
+    const shown = render(chatIn([mine, theirs], true, "offline"));
+    await waitFor(() => expect(workspaceMembers).toHaveBeenCalledTimes(1));
+    expect(deleteIn("message-mine")).toBeNull();
+
+    answer = async () => view("member");
+    shown.rerender(chatIn([mine, theirs], true, "online"));
+    await waitFor(() => expect(deleteIn("message-mine")).not.toBeNull());
+    expect(deleteIn("message-theirs")).toBeNull();
+
+    answer = async () => view("admin");
+    shown.rerender(chatIn([mine, theirs], true, "online admin"));
+    await waitFor(() => expect(deleteIn("message-theirs")).not.toBeNull());
+    expect(workspaceMembers).toHaveBeenCalledTimes(3);
   });
 
   it("shows a deleted message as its author, time and line, with nothing it held", async () => {
