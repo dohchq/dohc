@@ -44,7 +44,7 @@ export function assertMemberChanges(
       if (!reach || reach.levelAt(before) === null || reach.levelAt(after) === null) refuse();
       // Both ends are visible, so naming the rule boundary shows nothing hidden.
       else if (reach.nearestRule(before) !== reach.nearestRule(after))
-        refuse("Ask an admin to move this.");
+        refuse("Ask the owner to move this.");
     }
     if (creates && (!reach || reach.folderLevel(accessRuleFolder(after)) === null))
       refuse("can't create here");

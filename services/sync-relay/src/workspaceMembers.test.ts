@@ -905,7 +905,7 @@ describe("what a member reaches", () => {
     );
     expect(await moved.json()).toMatchObject({
       code: "share_op_rejected",
-      error: "Ask an admin to move this.",
+      error: "Ask the owner to move this.",
     });
     // Case twins with their own rules are two boundaries.
     await ownerWrite(h, "Other/access.yaml", "members: edit\n");
@@ -915,7 +915,7 @@ describe("what a member reaches", () => {
     );
     expect(await twin.json()).toMatchObject({
       code: "share_op_rejected",
-      error: "Ask an admin to move this.",
+      error: "Ask the owner to move this.",
     });
     // A move with a hidden end gets the plain refusal, so it can't find where hidden rules are.
     await ownerWrite(h, "private/deep/access.yaml", "members: edit\n");
