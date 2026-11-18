@@ -1438,16 +1438,19 @@ export class MergeRuleConflictError extends Error {
 }
 
 // How many times one rule's merge plans its order again when the engine
-// finds Main or the version changed under it, before the merge gives up.
+// refuses it, before the merge gives up.
 const RULE_ORDER_TRIES = 3;
 
-// Main or the version changed under every order planned for a rule's merge.
-export class MergeRulesKeptChangingError extends Error {
+// The engine refused every order planned for a rule's merge. Main or the
+// version may have changed under each, or the engine's check ran out of
+// work, and dohc can't tell which, so the words name no cause. The merge's
+// result says whether files merged before it.
+export class MergeRuleOrderUnconfirmedError extends Error {
   constructor() {
     super(
-      "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
+      "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
     );
-    this.name = "MergeRulesKeptChangingError";
+    this.name = "MergeRuleOrderUnconfirmedError";
   }
 }
 
@@ -7869,7 +7872,20 @@ export function createWorkspaceEngineCapture(
             const changed =
               error instanceof DaemonRefusalError && error.message === "rule-merge-order-changed";
             if (!changed) throw error;
-            if (++tries >= RULE_ORDER_TRIES) throw new MergeRulesKeptChangingError();
+            if (++tries >= RULE_ORDER_TRIES) {
+              // The engine plans every rule the versions differ in, so an
+              // order without a rule whose conflict is open is refused until
+              // that conflict is resolved.
+              const conflicted = mergeOrder.find(
+                (rule) => isAccessRulePath(rule) && openConflictPaths.has(rule),
+              );
+              throw conflicted === undefined
+                ? new MergeRuleOrderUnconfirmedError()
+                : new MergeRuleConflictError(
+                    conflicted,
+                    mergeOrder.slice(index).filter(isRuleStep),
+                  );
+            }
             await replan(index);
             index -= 1;
             continue;

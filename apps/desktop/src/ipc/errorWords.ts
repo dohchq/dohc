@@ -535,7 +535,7 @@ export function readError(error: unknown): ReadError {
   if (
     name === "MergeWidensAccessError" ||
     name === "MergeRuleConflictError" ||
-    name === "MergeRulesKeptChangingError"
+    name === "MergeRuleOrderUnconfirmedError"
   ) {
     return { words: message.split("\n")[0]!, mapped: false, cause: text, canRetry: false };
   }

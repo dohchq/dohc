@@ -37,7 +37,7 @@ import {
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
   MergeRuleConflictError,
-  MergeRulesKeptChangingError,
+  MergeRuleOrderUnconfirmedError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   YDocOpenRacedError,
@@ -471,6 +471,8 @@ describe("merge rule order from the engine", () => {
     orders: Order[];
     // Team's rule merge conflicts, and its conflict stays open.
     conflict?: boolean;
+    // Team's rule has a conflict open from an earlier merge.
+    openConflict?: boolean;
     // A rule whose first merges the engine refuses because Main changed.
     staleAt?: string;
     staleTimes?: number;
@@ -512,7 +514,7 @@ describe("merge rule order from the engine", () => {
     );
     // The loopback keeps no conflict ledger. The merge reads only these
     // fields of an open conflict.
-    const open: string[] = [];
+    const open: string[] = options.openConflict ? [TEAM] : [];
     let draftId = "";
     vi.spyOn(stores.store, "listTextConflicts").mockImplementation(async () => ({
       conflicts: open.map((path) => ({
@@ -658,22 +660,60 @@ describe("merge rule order from the engine", () => {
     ]);
   });
 
-  it("stops, writing nothing, when Main changed under every order it planned", async () => {
-    const order = { writes: [PRIVATE, OTHER, TEAM], deletes: [] };
-    const { failure, asked, merged, onDisk } = await mergeWithRuleOrder({
+  // The engine refuses an order when Main changed under it, when its check
+  // runs out of work, and when the order leaves out a rule whose conflict is
+  // open. Only the last has a known way out.
+  it.each([
+    [
+      "says only that dohc could not confirm the order",
+      false,
+      MergeRuleOrderUnconfirmedError,
+      "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
+    ],
+    [
+      "says to resolve a rule's open conflict",
+      true,
+      MergeRuleConflictError,
+      `dohc stopped the merge at a conflict in ${TEAM}. Resolve that conflict, then merge again.`,
+    ],
+  ])(
+    "stops, writing nothing, when the engine refuses every order it planned, and %s",
+    async (_name, openConflict, stop, words) => {
+      // A rule whose conflict is open is not in the order.
+      const order = {
+        writes: openConflict ? [PRIVATE, OTHER] : [PRIVATE, OTHER, TEAM],
+        deletes: [],
+      };
+      const { failure, asked, merged, onDisk } = await mergeWithRuleOrder({
+        openConflict,
+        staleAt: PRIVATE,
+        staleTimes: 3,
+        orders: [order, order, order],
+      });
+      expect(failure).toBeInstanceOf(stop);
+      expect(readError(failure)).toMatchObject({ words, canRetry: false });
+      expect(asked).toHaveLength(3);
+      expect(merged).toEqual([]);
+      expect(onDisk).toBe(VIEW_RULE);
+    },
+  );
+
+  it("leaves it to the merge's result to say a refused order stopped it partway", async () => {
+    const { failure, merged } = await mergeWithRuleOrder({
       staleAt: PRIVATE,
       staleTimes: 3,
-      orders: [order, order, order],
+      orders: [
+        { writes: [OTHER, PRIVATE, TEAM], deletes: [] },
+        { writes: [PRIVATE, TEAM], deletes: [] },
+        { writes: [PRIVATE, TEAM], deletes: [] },
+      ],
     });
-    expect(failure).toBeInstanceOf(MergeRulesKeptChangingError);
-    expect(readError(failure)).toMatchObject({
-      words:
-        "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
-      canRetry: false,
-    });
-    expect(asked).toHaveLength(3);
-    expect(merged).toEqual([]);
-    expect(onDisk).toBe(VIEW_RULE);
+    expect(paths(merged)).toEqual([OTHER]);
+    expect(failure).toBeInstanceOf(MergeStoppedPartwayError);
+    const { words, cause } = readError(failure);
+    expect(words).toBeNull();
+    expect(cause).toContain("MergeRuleOrderUnconfirmedError");
+    expect(cause).not.toMatch(/Nothing was merged/);
   });
 });
 

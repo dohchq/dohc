@@ -38,7 +38,7 @@ import {
   liveFolderTitle,
   LivePageOwnedError,
   MergeRuleConflictError,
-  MergeRulesKeptChangingError,
+  MergeRuleOrderUnconfirmedError,
   MergeStoppedPartwayError,
   MergeWidensAccessError,
   RestorePolicyRefusalError,
@@ -728,11 +728,14 @@ describe("error words", () => {
     });
   });
 
-  it("says what happened when Main or the version kept changing under a merge's rule order", () => {
-    const stopped = acrossIpc(new MergeRulesKeptChangingError(), "desktop:merge-workspace-version");
+  it("says only that dohc could not confirm a merge's rule order, not why", () => {
+    const stopped = acrossIpc(
+      new MergeRuleOrderUnconfirmedError(),
+      "desktop:merge-workspace-version",
+    );
     expect(readError(stopped)).toMatchObject({
       words:
-        "Nothing was merged because Main or this version kept changing. Merge again once they stop.",
+        "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
       canRetry: false,
     });
     expect(isMergeStoppedPartway(stopped)).toBe(false);
