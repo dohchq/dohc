@@ -291,7 +291,8 @@ function placeOf(storage: StorageContext, workspaceId: string, threadId: string)
 }
 
 // What a member reads through the workspace share: every Group, and the
-// Comments of each current file its file reach shows.
+// Comments of each current file its file reach shows. On the restack onto
+// per-target access, this reads the member's reach for this Group or file.
 function memberReads(storage: StorageContext, workspaceId: string, place: MessagePlace): boolean {
   if (place.kind === "group") return true;
   const path = storage.objectCurrentPath(workspaceId, place.file.objectId);
@@ -315,6 +316,7 @@ function admittedActor(
     const { check, fenceEpoch, connectionId } = actor.credential;
     const connection = readPersonalAuthority(storage, check, fenceEpoch, nowMs);
     if (!connection || connection.connectionId !== connectionId) return null;
+    // On the restack onto per-target access, this also reads the agent's reach for this place.
     if (!personalReachIn(storage, connection, workspaceId)) return null;
     // An agent deletes only its own messages, whatever its person's role.
     return first.originId === personalAgentOrigin(connection.agentId)

@@ -10,6 +10,7 @@ import {
   chatMessageAppend,
   chatThreadCreate,
   closeTestStorages,
+  createShare,
   expectNoDeletedDigest,
   inspect,
   json,
@@ -191,14 +192,20 @@ async function member(h: SyncRelayHandler, userId: string) {
   return { memberId, shareId: await shareIdOf(h, userId) };
 }
 
-function memberBatch(userId: string, messageId: string, body: string, seq: number) {
+function memberBatch(
+  userId: string,
+  messageId: string,
+  body: string,
+  seq: number,
+  threadId = "t-team",
+) {
   return {
     originId: `origin-${userId}`,
     ops: [
       {
         ...logOp(
           "chat.message.append",
-          chatMessageAppend(messageId, "t-team", body, { authorUserId: userId }).payload,
+          chatMessageAppend(messageId, threadId, body, { authorUserId: userId }).payload,
         ),
         originSeq: seq,
         recordedAtMs: 7000 + seq,
@@ -315,6 +322,31 @@ describe("deleting a message", () => {
 
   it("lets an admin delete anyone's message in a Group, and never in General, a direct message, an agent chat or an unknown channel", async () => {
     const { storage, h } = await seed();
+    // A file whose Comments a member writes in before the owner moves it where the workspace share hides it.
+    await ownerAppend(h, [
+      logOp("moment.append", {
+        momentId: "m-notes",
+        versionId: "main",
+        objectId: "object-notes",
+        path: "docs/notes.md",
+        recordedAtMs: 901,
+        operation: "write",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: null,
+        payloadAfterPath: "docs/notes.md",
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      }),
+      logOp("chat.thread.create", {
+        threadId: "t-notes",
+        title: "",
+        createdAtMs: 5,
+        linkedAtMs: 5,
+        linkedObjectId: "object-notes",
+      }),
+      ownerMessage("msg-notes", "t-notes", "a comment on the notes"),
+    ]);
     const ana = await member(h, "ana");
     const ben = await member(h, "ben");
     expect(
@@ -324,6 +356,53 @@ describe("deleting a message", () => {
     expect((await push(h, "ben", ben.shareId, memberBatch("ben", "m-ben", "spam", 0))).status).toBe(
       200,
     );
+    // A member the owner then removes.
+    const dan = await member(h, "dan");
+    expect((await push(h, "dan", dan.shareId, memberBatch("dan", "m-dan", "mine", 0))).status).toBe(
+      200,
+    );
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${dan.memberId}/remove`)).status).toBe(
+      200,
+    );
+    // A named recipient of the plan, who is not a member, comments on it.
+    const cara = await createShare(h, OWNER, WORKSPACE, {
+      recipientUserId: "cara",
+      paths: ["docs/plan.md"],
+      access: "comment",
+    });
+    expect(
+      (await push(h, "cara", cara, memberBatch("cara", "m-cara", "a note", 0, "t-comment"))).status,
+    ).toBe(200);
+    expect(
+      (await push(h, "ben", ben.shareId, memberBatch("ben", "m-ben-notes", "mine", 1, "t-notes")))
+        .status,
+    ).toBe(200);
+    await ownerAppend(
+      h,
+      [
+        {
+          originSeq: 0,
+          recordedAtMs: 902,
+          opKind: "moment.append",
+          payload: {
+            momentId: "m-notes-hidden",
+            versionId: "main",
+            objectId: "object-notes",
+            path: "docs/.env",
+            recordedAtMs: 902,
+            operation: "rename",
+            payloadBeforeBlobSha256: null,
+            payloadBeforePath: "docs/notes.md",
+            beforePath: "docs/notes.md",
+            payloadAfterBlobSha256: null,
+            payloadAfterPath: "docs/.env",
+            metadata: { origin: "user" },
+            beforePresent: "null",
+          },
+        },
+      ],
+      "origin-owner-move",
+    );
 
     expect((await deleteMessage(h, "ana", "m-ben", "t-team")).status).toBe(200);
     expect((await deleteMessage(h, "ana", "msg-team", "t-team")).status).toBe(200);
@@ -331,14 +410,21 @@ describe("deleting a message", () => {
       expect.objectContaining({ deleted_by: "account:ana" }),
     ]);
 
-    for (const [messageId, threadId] of [
-      ["msg-general", "t-general"],
-      ["msg-dm", "t-dm"],
-      ["msg-agent", "t-agent"],
-      ["msg-unknown", "t-unknown"],
-      ["msg-missing", "t-team"],
+    for (const [messageId, threadId, actors] of [
+      ["msg-general", "t-general", ["ana", OWNER]],
+      ["msg-dm", "t-dm", ["ana", OWNER]],
+      ["msg-agent", "t-agent", ["ana", OWNER]],
+      ["msg-unknown", "t-unknown", ["ana", OWNER]],
+      ["msg-missing", "t-team", ["ana", OWNER]],
+      // A removed member, their own message.
+      ["m-dan", "t-team", ["dan"]],
+      // A named file-share recipient who is not a member, their own Comment.
+      ["m-cara", "t-comment", ["cara"]],
+      // A Comment on a file under a path the workspace share hides: an admin, and its member author.
+      ["msg-notes", "t-notes", ["ana"]],
+      ["m-ben-notes", "t-notes", ["ben"]],
     ] as const) {
-      for (const as of ["ana", OWNER]) {
+      for (const as of actors) {
         const refused = await deleteMessage(h, as, messageId, threadId);
         expect(refused.status, `${as} ${messageId}`).toBe(404);
       }
