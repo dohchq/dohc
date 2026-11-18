@@ -94,6 +94,9 @@ export function datasetReferenceReadContainsRecord(
   });
 }
 
+/** What an app's row on the server holds besides the app itself, counted as a binding's is. */
+const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
+
 /** The existing relay connection owns every authoritative dataset transaction. */
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const { storage, limits, publicEditRelease } = options,
@@ -131,6 +134,29 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     PRIMARY KEY(workspace_id,app_id),
     FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`),
   );
+  // Apps approved on owners' computers before the server counted them toward storage are counted
+  // once, so withdrawing one gives back only what was counted.
+  storage.tx(() => {
+    const marker = "local-dataset-app-storage-v1";
+    if (storage.db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker))
+      return;
+    const collection = storage.db.prepare(
+      "UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?",
+    );
+    const workspace = storage.db.prepare(
+      "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
+    );
+    for (const row of storage.db
+      .prepare("SELECT workspace_id,dataset_id,app_id,candidate FROM sync_relay_local_dataset_apps")
+      .all()) {
+      const bytes = localAppBytes(String(row.app_id)) + Buffer.byteLength(String(row.candidate));
+      collection.run(bytes, row.workspace_id, row.dataset_id);
+      workspace.run(bytes, row.workspace_id);
+    }
+    storage.db
+      .prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+      .run(marker, Date.now());
+  });
   // The relay's own private folder, which it keeps at the path it was given.
   await mkdir(options.directory, { recursive: true });
   const workers = await realpath(options.directory);
@@ -383,7 +409,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         "SELECT candidate,authority_revision,owner_user_id FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
       )
       .get(auth.workspaceId, appId);
-    if (!row) return null;
+    // A withdrawn app keeps its row with no app in it.
+    if (!row || row.candidate === "") return null;
     if (auth.grantId || row.owner_user_id !== auth.userId) throw notFound();
     const authority = owner(auth, auth.workspaceId);
     return {
@@ -1306,13 +1333,23 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth: AppBackendAuth,
         input: { workspaceId: string; datasetId: string; publicationId: string },
       ): void {
-        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null }, () =>
+        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null }, () => {
+          const scope = [input.workspaceId, input.datasetId, input.publicationId] as const;
+          const row = storage.db
+            .prepare(
+              "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            )
+            .get(...scope);
+          if (!row || row.candidate === "") return;
+          // The app goes, and its row stays with its revision, so approving it again gives the
+          // next one, and a change sent under this approval never runs under that one.
           storage.db
             .prepare(
-              "DELETE FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+              "UPDATE sync_relay_local_dataset_apps SET candidate='' WHERE workspace_id=? AND dataset_id=? AND app_id=?",
             )
-            .run(input.workspaceId, input.datasetId, input.publicationId),
-        );
+            .run(...scope);
+          account(input.workspaceId, input.datasetId, -Buffer.byteLength(String(row.candidate)));
+        });
       },
       /** Approves, or approves again, an app on the owner's computer over this Collection. */
       approveLocalApp(
@@ -1358,22 +1395,24 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           () => {
             const row = storage.db
               .prepare(
-                "SELECT authority_revision FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
+                "SELECT authority_revision,candidate FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
               )
               .get(input.workspaceId, appId);
             authorityRevision = row ? Number(row.authority_revision) + 1 : 1;
+            const kept = JSON.stringify(candidate);
+            // The server keeps the app, so the workspace's storage counts it. The app's row stays
+            // after a withdrawal, until its Collection goes, so it counts from its first approval.
+            account(
+              input.workspaceId,
+              input.datasetId,
+              Buffer.byteLength(kept) -
+                (row ? Buffer.byteLength(String(row.candidate)) : -localAppBytes(appId)),
+            );
             storage.db
               .prepare(
                 "INSERT INTO sync_relay_local_dataset_apps VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,app_id) DO UPDATE SET candidate=excluded.candidate,authority_revision=excluded.authority_revision",
               )
-              .run(
-                input.workspaceId,
-                appId,
-                input.datasetId,
-                auth.userId,
-                JSON.stringify(candidate),
-                authorityRevision,
-              );
+              .run(input.workspaceId, appId, input.datasetId, auth.userId, kept, authorityRevision);
           },
         );
         return { publicationId: appId, authorityRevision };
