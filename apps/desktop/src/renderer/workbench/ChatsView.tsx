@@ -497,6 +497,16 @@ export function ChatsView(props: {
     [workspaceId],
   );
   const variant = props.variant ?? "panel";
+  // A direct conversation's page, or New message's. Direct messages live on
+  // the account's server, so this page neither reads nor waits for the
+  // workspace's own chats, which main refuses where nothing records.
+  const pageTarget = parseTab(props.editorTabPath ?? null);
+  const directPage =
+    variant === "page" &&
+    (props.initialNav?.level === "direct" ||
+      props.initialNav?.level === "direct-new" ||
+      (pageTarget?.kind === "chat" &&
+        (pageTarget.target.kind === "dm" || pageTarget.target.kind === "new")));
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   // Feed posts by personal agents name them from the roster.
@@ -1250,8 +1260,10 @@ export function ChatsView(props: {
     setBookmarks([]);
     setBookmarkBusy(new Set());
     setOverview({ status: "loading" });
-    void refreshOverview();
-    void refreshBookmarks();
+    if (!directPage) {
+      void refreshOverview();
+      void refreshBookmarks();
+    }
     return () => {
       liveToken.current += 1;
       invalidate();
@@ -1260,7 +1272,14 @@ export function ChatsView(props: {
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
     };
-  }, [invalidate, refreshBookmarks, refreshOverview, resetForWorkspace, resetGroupForm]);
+  }, [
+    directPage,
+    invalidate,
+    refreshBookmarks,
+    refreshOverview,
+    resetForWorkspace,
+    resetGroupForm,
+  ]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -2199,11 +2218,11 @@ export function ChatsView(props: {
   // re-apply a stale seed.
   const seededRef = useRef(false);
   useEffect(() => {
-    if (seededRef.current || overview.status !== "ready") return;
+    if (seededRef.current || (overview.status !== "ready" && !directPage)) return;
     let seed = props.initialNav;
     const tab = parseTab(props.editorTabPath ?? null);
     const target = tab?.kind === "chat" ? tab.target : null;
-    if (!seed && target?.kind === "channel") {
+    if (!seed && target?.kind === "channel" && overview.status === "ready") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
       seed = channel ? { level: "channel", channel } : { level: "channels" };
     } else if (!seed && target?.kind === "dm") {
@@ -2237,6 +2256,7 @@ export function ChatsView(props: {
     }
   }, [
     openChannel,
+    directPage,
     openDirect,
     openFeed,
     openThread,
@@ -3565,6 +3585,44 @@ export function ChatsView(props: {
     [postThreadId],
   );
 
+  if (nav.level === "direct-new") {
+    return (
+      <NewDirectMessage
+        workspaceId={workspaceId}
+        memberId={nav.memberId}
+        variant={variant}
+        onBack={variant === "panel" ? goBack : undefined}
+        onError={props.onError}
+        onClearError={props.onClearError}
+        serverNamed={props.serverNamed}
+        onOpenSettings={props.onOpenSettings}
+        onOpenConversation={(conversationId, title) => {
+          // The conversation takes a tab of its own, so New message's has done its job. It closes after,
+          // so a group holding only New message keeps the conversation. The composer's focus makes its group active.
+          openConversation({ level: "direct", conversationId, title });
+          if (variant === "page" && props.editorTabPath && props.onOpenInTab) props.onCloseTab?.();
+        }}
+      />
+    );
+  }
+
+  if (nav.level === "direct") {
+    return (
+      <DirectConversationView
+        key={nav.conversationId}
+        conversationId={nav.conversationId}
+        variant={variant}
+        onBack={variant === "panel" ? goBack : undefined}
+        onTitle={setDirectTitle}
+        savedName={props.savedDirectName?.(nav.conversationId)}
+        onOpenSettings={props.onOpenSettings}
+        onError={props.onError}
+        onClearError={props.onClearError}
+        serverNamed={props.serverNamed}
+      />
+    );
+  }
+
   if (overview.status === "loading") {
     return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
@@ -3874,44 +3932,6 @@ export function ChatsView(props: {
           }}
         />
       </div>
-    );
-  }
-
-  if (nav.level === "direct-new") {
-    return (
-      <NewDirectMessage
-        workspaceId={workspaceId}
-        memberId={nav.memberId}
-        variant={variant}
-        onBack={variant === "panel" ? goBack : undefined}
-        onError={props.onError}
-        onClearError={props.onClearError}
-        serverNamed={props.serverNamed}
-        onOpenSettings={props.onOpenSettings}
-        onOpenConversation={(conversationId, title) => {
-          // The conversation takes a tab of its own, so New message's has done its job. It closes after,
-          // so a group holding only New message keeps the conversation. The composer's focus makes its group active.
-          openConversation({ level: "direct", conversationId, title });
-          if (variant === "page" && props.editorTabPath && props.onOpenInTab) props.onCloseTab?.();
-        }}
-      />
-    );
-  }
-
-  if (nav.level === "direct") {
-    return (
-      <DirectConversationView
-        key={nav.conversationId}
-        conversationId={nav.conversationId}
-        variant={variant}
-        onBack={variant === "panel" ? goBack : undefined}
-        onTitle={setDirectTitle}
-        savedName={props.savedDirectName?.(nav.conversationId)}
-        onOpenSettings={props.onOpenSettings}
-        onError={props.onError}
-        onClearError={props.onClearError}
-        serverNamed={props.serverNamed}
-      />
     );
   }
 

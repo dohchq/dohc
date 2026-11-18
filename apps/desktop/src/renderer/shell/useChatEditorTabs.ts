@@ -33,6 +33,8 @@ export function useChatEditorTabs(input: {
   onOpen: (path: string) => void;
   paths: readonly string[];
   activePaths?: readonly string[];
+  // Whether the workspace's own chats can be read. Direct messages live on
+  // the account's server, so their tabs restore and take names either way.
   enabled: boolean;
   // The agents in Settings, whose names agent chat tabs take.
   agents: readonly SettingsAgent[];
@@ -164,18 +166,19 @@ export function useChatEditorTabs(input: {
   // Mounted pages resolve their own destinations. Hydrate only hidden tabs.
   const pathsKey = JSON.stringify(input.paths.filter((path) => !input.activePaths?.includes(path)));
   useEffect(() => {
-    if (!input.enabled || !session.current.ready) return;
+    if (!session.current.ready) return;
     const owner = store.current;
     const generation = session.current.generation;
     const paths: string[] = JSON.parse(pathsKey);
-    const targets = paths
-      .filter((path) => !get(path).nav && !get(path).restoreAttempted)
-      .map((path) => {
-        const entry = get(path);
-        entry.restoreAttempted = true;
-        const tab = parseTab(path);
-        return { path, entry, target: tab.kind === "chat" ? tab.target : null };
-      });
+    const targets = paths.flatMap((path) => {
+      const entry = get(path);
+      if (entry.nav || entry.restoreAttempted) return [];
+      const tab = parseTab(path);
+      const target = tab.kind === "chat" ? tab.target : null;
+      if (!input.enabled && target?.kind !== "dm" && target?.kind !== "new") return [];
+      entry.restoreAttempted = true;
+      return [{ path, entry, target }];
+    });
     const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
       if (
         !owner.active ||
@@ -229,7 +232,7 @@ export function useChatEditorTabs(input: {
   );
   const listReady = useRef(false);
   useEffect(() => {
-    if (!input.enabled || directIds === "[]") return;
+    if (directIds === "[]") return;
     const owner = store.current;
     const direct = directStore();
     const open = new Set<string>(JSON.parse(directIds));
@@ -267,7 +270,7 @@ export function useChatEditorTabs(input: {
     const stop = direct.subscribe(name);
     name();
     return stop;
-  }, [directIds, input.enabled, input.workspaceId, sessionRevision]);
+  }, [directIds, input.workspaceId, sessionRevision]);
   // revision and sessionRevision move with listReady and the account.
   const directNames = input.directNames;
   const savedDirectName = useCallback(

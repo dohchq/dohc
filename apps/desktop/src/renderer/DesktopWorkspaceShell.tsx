@@ -8908,7 +8908,12 @@ export function DesktopWorkspaceShell(props: {
                                                     // Each loading state of the tab puts its lines at the top, so
                                                     // each one takes over from the last without blinking.
                                                     <SkeletonSlot>
-                                                      {chatsAvailable ? (
+                                                      {/* Direct messages belong to the signed-in account and live on
+                                                      its server, so they open wherever the workspace's own chats
+                                                      cannot: no recording, a shared view. */}
+                                                      {chatsAvailable ||
+                                                      groupTab.target.kind === "dm" ||
+                                                      groupTab.target.kind === "new" ? (
                                                         <div className="flex min-h-0 flex-1 flex-col">
                                                           {agentsRestricted ? (
                                                             <RestrictedAgentsBand

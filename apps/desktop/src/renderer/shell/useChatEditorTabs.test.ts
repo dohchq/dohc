@@ -83,74 +83,90 @@ beforeEach(() =>
 afterEach(() => vi.unstubAllGlobals());
 
 describe("chat editor tabs", () => {
-  it("restores a hidden direct message tab from its path, without a read", () => {
-    const path = chatEditorPath(dm);
-    const home = chatEditorPath({ level: "feed" });
-    const { result } = renderHook(() =>
-      useChatEditorTabs({
-        readRevision: 0,
-        ...NO_SAVED_NAMES,
-        workspaceId: "workspace",
-        agents: NO_AGENTS,
-        onOpen: vi.fn(),
-        paths: [path, home],
-        activePaths: [home],
-        enabled: true,
-      }),
-    );
-    expect(result.current.get(path).nav).toEqual({
-      level: "direct",
-      conversationId: "conversation-1",
-    });
-    expect(result.current.titles.get(path)).toBe("Direct message");
-  });
+  // Direct messages live on the account's server, so their tabs restore while
+  // the workspace's own chats cannot be read, as where nothing records.
+  it.each([true, false])(
+    "restores a hidden direct message tab from its path, without a read, when workspace chats are %s",
+    (enabled) => {
+      const listChatChannels = vi.fn().mockResolvedValue({ channels: [], fileThreads: [] });
+      vi.stubGlobal("dohcDesktop", {
+        ...UNREAD_BRIDGE,
+        onCloudSessionChanged: () => () => {},
+        listChatChannels,
+      });
+      const path = chatEditorPath(dm);
+      const home = chatEditorPath({ level: "feed" });
+      const channel = chatEditorPath(general);
+      const { result } = renderHook(() =>
+        useChatEditorTabs({
+          readRevision: 0,
+          ...NO_SAVED_NAMES,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          paths: [path, channel, home],
+          activePaths: [home],
+          enabled,
+        }),
+      );
+      expect(result.current.get(path).nav).toEqual({
+        level: "direct",
+        conversationId: "conversation-1",
+      });
+      expect(result.current.titles.get(path)).toBe("Direct message");
+      expect(listChatChannels).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    },
+  );
 
-  it("names a hidden direct message tab once the list reads, such as when the server comes back", async () => {
-    const list = deferred<unknown>();
-    vi.stubGlobal("dohcDesktop", {
-      ...UNREAD_BRIDGE,
-      onCloudSessionChanged: () => () => {},
-      directConversations: () => list.promise,
-    });
-    const path = chatEditorPath(dm);
-    const home = chatEditorPath({ level: "feed" });
-    const { result } = renderHook(() =>
-      useChatEditorTabs({
-        readRevision: 0,
-        ...NO_SAVED_NAMES,
-        workspaceId: "workspace",
-        agents: NO_AGENTS,
-        onOpen: vi.fn(),
-        paths: [path, home],
-        activePaths: [home],
-        enabled: true,
-      }),
-    );
-    expect(result.current.titles.get(path)).toBe("Direct message");
-    await act(async () =>
-      list.resolve({
-        available: true,
-        viewerId: "viewer",
-        scope: "a".repeat(64),
-        conversations: [
-          {
-            conversationId: "conversation-1",
-            person: { personId: "alice", name: "Alice Moreno", blocked: false },
-            last: {
-              seq: 1,
-              messageId: "m1",
-              authorId: "alice",
-              authorName: "Alice Moreno",
-              body: "Hi",
-              createdAtMs: 0,
+  it.each([true, false])(
+    "names a hidden direct message tab once the list reads, such as when the server comes back, when workspace chats are %s",
+    async (enabled) => {
+      const list = deferred<unknown>();
+      vi.stubGlobal("dohcDesktop", {
+        ...UNREAD_BRIDGE,
+        onCloudSessionChanged: () => () => {},
+        directConversations: () => list.promise,
+      });
+      const path = chatEditorPath(dm);
+      const home = chatEditorPath({ level: "feed" });
+      const { result } = renderHook(() =>
+        useChatEditorTabs({
+          readRevision: 0,
+          ...NO_SAVED_NAMES,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          paths: [path, home],
+          activePaths: [home],
+          enabled,
+        }),
+      );
+      expect(result.current.titles.get(path)).toBe("Direct message");
+      await act(async () =>
+        list.resolve({
+          available: true,
+          viewerId: "viewer",
+          scope: "a".repeat(64),
+          conversations: [
+            {
+              conversationId: "conversation-1",
+              person: { personId: "alice", name: "Alice Moreno", blocked: false },
+              last: {
+                seq: 1,
+                messageId: "m1",
+                authorId: "alice",
+                authorName: "Alice Moreno",
+                body: "Hi",
+                createdAtMs: 0,
+              },
+              unread: 0,
             },
-            unread: 0,
-          },
-        ],
-      }),
-    );
-    await waitFor(() => expect(result.current.titles.get(path)).toBe("Alice Moreno"));
-  });
+          ],
+        }),
+      );
+      await waitFor(() => expect(result.current.titles.get(path)).toBe("Alice Moreno"));
+    },
+  );
 
   it("does not retry failed hidden restores when the active tab changes", async () => {
     const listChatChannels = vi.fn().mockRejectedValue(new Error("offline"));

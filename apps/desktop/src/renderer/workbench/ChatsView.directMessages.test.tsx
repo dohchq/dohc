@@ -1224,6 +1224,43 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-new")).toBeNull();
   });
 
+  // Direct messages live on the account's server, so a workspace whose Chats
+  // main refuses (no history recording) still opens them, from a notice or
+  // from Members' Message, and reads none of its own chats to do it.
+  it.each([
+    { level: "direct" as const, tab: chatTabPath({ kind: "dm", id: "conversation-sam" }) },
+    { level: "direct-new" as const, tab: chatTabPath({ kind: "new" }) },
+  ])("opens a $level tab where the workspace's Chats are refused", async ({ level, tab }) => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
+    bridgeMock.listChatChannels.mockRejectedValue(
+      new Error("Chats is not available in this workspace."),
+    );
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, {
+      variant: "page",
+      editorTabPath: tab,
+      onOpenInTab: vi.fn(),
+      initialNav:
+        level === "direct"
+          ? { level, conversationId: "conversation-sam" }
+          : { level, memberId: "sam" },
+    });
+    if (level === "direct") {
+      const view = await screen.findByTestId("chats-dm-view");
+      await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(1));
+      expect(await within(view).findByTestId("chats-dm-composer")).toBeTruthy();
+    } else {
+      expect(
+        (await screen.findAllByTestId("chats-dm-new-pick")).map((pick) => pick.dataset.memberId),
+      ).toEqual(["sam"]);
+    }
+    expect(bridgeMock.listChatChannels).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("opens New message with a member already picked, as Members' Message does", async () => {
     signedIn([]);
     members([
