@@ -3871,6 +3871,7 @@ mod tests {
             row_cursor: 5,
             copy_path: "owner (unsaved edits).md".into(),
             kept_snapshot: None,
+            room_copy: None,
             now_ms: 20,
         }
     }
@@ -3892,6 +3893,47 @@ mod tests {
             .read_with(|conn| super::super::release::paused_copy_in(conn, &key))
             .unwrap()
             .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn a_pause_takes_the_rows_this_computer_never_received_from_the_room_copy() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        held_note(&mut store, &mut cache, &observed, &checkpoint);
+        // The room took a collaborator's row and another after it; the relay
+        // paused before any save held them, and a restart lost the one this
+        // computer had.
+        let room = Ydoc::wire();
+        room.apply(&checkpoint).unwrap();
+        room.richdoc_append_paragraph("Committed by a collaborator");
+        room.richdoc_append_paragraph("Only in the room");
+        let mut cache = crate::WriterDocCache::default();
+        let mut input = pause_input(&observed);
+        input.row_cursor = input.applied_cursor;
+        assert!(matches!(
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &input,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+        input.room_copy = Some(room.encode_full_state());
+
+        let stop = release::pause_cached(&mut store, &mut cache, &input, &NoFaults, |tx, pause| {
+            pause(tx)
+        })
+        .unwrap();
+        assert!(!stop.paused.unwrap().left_out);
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Owner says: Committed by a collaborator"));
+        assert!(copy.contains("Standalone owner paragraph"));
+        assert!(copy.contains("Only in the room"));
+        assert_eq!(entry_count(&store), 0);
     }
 
     #[test]

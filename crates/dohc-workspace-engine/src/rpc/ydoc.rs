@@ -939,6 +939,7 @@ impl EngineService {
             row_cursor: Option<i64>,
             copy_path: String,
             kept_snapshot: Option<String>,
+            room_copy_base64: Option<String>,
         }
         let params: Params = parse(params)?;
         let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-owner-pause-input");
@@ -953,6 +954,7 @@ impl EngineService {
             && params.applied_cursor.is_none()
             && params.row_cursor.is_none()
             && params.kept_snapshot.is_none()
+            && params.room_copy_base64.is_none()
             && params.main_version_id.is_some()
             && params.object_id.is_some();
         if !(if pause { pause_shape } else { written_shape })
@@ -985,6 +987,11 @@ impl EngineService {
                         row_cursor: params.row_cursor.ok_or_else(invalid)?,
                         copy_path: params.copy_path,
                         kept_snapshot: params.kept_snapshot,
+                        room_copy: params
+                            .room_copy_base64
+                            .as_deref()
+                            .map(decode_owner_outbox_base64)
+                            .transpose()?,
                         now_ms: now_ms()?,
                     },
                     Arc::new(NoFaults),

@@ -510,6 +510,10 @@ pub struct OwnerPauseInput {
     pub copy_path: String,
     /// The refused edits the desktop recorded as kept edits before the pause.
     pub kept_snapshot: Option<String>,
+    /// The relay's copy of the paused room: its whole state as one update,
+    /// holding the rows it took and no save holds, which this computer may
+    /// never have received.
+    pub room_copy: Option<Vec<u8>>,
     pub now_ms: i64,
 }
 
@@ -622,7 +626,10 @@ fn pause_in_tx(
     if refused && input.kept_snapshot.is_none() {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    let mut parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    // After the rows held here, so a room copy that cannot render leaves
+    // out only what this computer never received.
+    parts.rows.extend(input.room_copy.clone());
     let (markdown, left_out) = copy_text(parts)?;
     // A blob holds at least one byte; an empty note's copy is an empty file.
     let copy_digest = if markdown.is_empty() {
