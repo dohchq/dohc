@@ -1593,8 +1593,11 @@ export function ChatsView(props: {
     return map;
   }, [channelShares]);
 
+  // "read" asks whether opening a thread moves this reader's read mark. Read
+  // state is the reader's own, so a Group at View takes no post but its posts
+  // still count as read once shown.
   const channelIsLocked = useCallback(
-    (channel: ChatChannelRecord) => {
+    (channel: ChatChannelRecord, use: "post" | "read" = "post") => {
       // Share metadata is the authority for whether this local row is owned
       // or joined. If that authority is unavailable, fail closed: treating an
       // unknown joined channel as local would re-enable writes and read-cursor
@@ -1605,7 +1608,8 @@ export function ChatsView(props: {
           channel.kind !== "channel" ||
           !channel.wireId ||
           channel.wireId === GENERAL_CHANNEL_WIRE_ID ||
-          (groupLevels !== undefined &&
+          (use === "post" &&
+            groupLevels !== undefined &&
             (groupLevels.groups.get(channel.wireId) ?? groupLevels.groupDefault) === "view")
         );
       }
@@ -1681,7 +1685,7 @@ export function ChatsView(props: {
         if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
           return;
         }
-        applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
+        applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel, "read"));
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
@@ -1722,7 +1726,7 @@ export function ChatsView(props: {
           if (token !== liveToken.current || refreshSeq !== threadRefreshSeq.current) {
             return;
           }
-          applyThreadSnapshot(threadId, snapshot, !channelIsLocked(nav.channel));
+          applyThreadSnapshot(threadId, snapshot, !channelIsLocked(nav.channel, "read"));
           setMessagesLoading(false);
         })
         .catch(() => {

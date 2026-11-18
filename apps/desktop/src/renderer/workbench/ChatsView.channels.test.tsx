@@ -86,6 +86,42 @@ describe("ChatsView channels", () => {
       },
     );
 
+    // Read state is the reader's own, so a post read in a View only Group
+    // leaves its unread count behind.
+    it("marks a post read in a Group at View", async () => {
+      const team = channel({ id: "channel-team", name: "Team", wireId: "wire-team" });
+      bridgeMock.listChatChannels.mockResolvedValue({ channels: [team], fileThreads: [] });
+      bridgeMock.listChannelThreads.mockResolvedValue({
+        threads: [
+          thread({
+            channelId: "channel-team",
+            messageCount: 1,
+            lastReadSequence: 0,
+            unreadCount: 1,
+          }),
+        ],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+      renderView(vi.fn(), vi.fn(), {
+        joinedWorkspace: {
+          createsGroups: false,
+          groupLevels: { groupDefault: "comment", groups: new Map([["wire-team", "view"]]) },
+        },
+      });
+      await userEvent.click(await screen.findByTestId("chats-channel"));
+      await userEvent.click(await screen.findByTestId("chats-thread"));
+      expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(
+        "You can read this Group.",
+      );
+      await waitFor(() =>
+        expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
+          workspaceId: "workspace-a",
+          threadId: "thread-1",
+          upToSequence: 1,
+        }),
+      );
+    });
+
     it("shows no Agents section and makes no saved-message calls", async () => {
       bridgeMock.listChatChannels.mockResolvedValue({
         channels: [channel({ name: "Launch team" })],
