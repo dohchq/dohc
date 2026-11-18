@@ -283,6 +283,21 @@ describe("a record's properties", () => {
     expect(dismiss).toHaveBeenCalledOnce();
   });
 
+  it("shows the stored value on a change the Collection refused, and starts the next edit from what was typed", () => {
+    const { store } = statusStore({
+      "rec-a:title": {
+        state: "refused",
+        value: "Typed",
+        reason: "Enter a shorter name.",
+        dismiss: vi.fn(),
+        stored: true,
+      },
+    });
+    renderProperties({ cellStatuses: store });
+    expect(value("title").textContent).toBe("Task a");
+    expect(within(openEditor("title")).getByRole<HTMLInputElement>("textbox").value).toBe("Typed");
+  });
+
   it("draws a host's cell and editor, and never opens the shared text editor on one", () => {
     const close = vi.fn();
     const file: TableHostCell = {
