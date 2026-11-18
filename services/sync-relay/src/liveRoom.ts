@@ -883,6 +883,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           if (room || paused || left) throw new Error("Live room sync is unavailable.");
           // A paused note's owner still catches up on every save the room made before it paused,
           // so the owner's file holds all that anyone was told was saved. Only its edits wait.
+          // Under a service host the pause retires the host's activation, which publishes those saves instead.
           if (owner && liveRoomPaused(storage, host.room.document)) {
             paused = true;
             return host.openSync(clientVector, signal);
