@@ -473,7 +473,10 @@ export function createWorkspaceMemberRoutes(options: {
       if (!deleted.ok) throw notFound();
       // Copies and open follows pull the delete now.
       if (!deleted.repeated) options.discussionActivity.wakeLog(route.workspaceId);
-      return jsonResponse(deleted.tombstone.payload, 200, { "cache-control": "no-store" });
+      const { messageId, threadId: deletedThreadId, deletedAtMs } = deleted.tombstone.payload;
+      return jsonResponse({ messageId, threadId: deletedThreadId, deletedAtMs }, 200, {
+        "cache-control": "no-store",
+      });
     }
 
     const { workspaceId } = route;

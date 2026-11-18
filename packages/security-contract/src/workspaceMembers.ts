@@ -151,7 +151,7 @@ export const WORKSPACE_MEMBER_ROUTES = {
    */
   groupRule: "/sync/:workspaceId/members/groups/:channelWireId/rule",
   /**
-   * POST {threadId} → the tombstone's fields. Deletes a message in a Group or
+   * POST {threadId} → {messageId, threadId, deletedAtMs}. Deletes a message in a Group or
    * a file's Comments: the owner or an admin any message, a member their own.
    * Every refusal answers not-found.
    */

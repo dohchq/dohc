@@ -274,13 +274,10 @@ describe("deleting a message", () => {
 
     const deleted = await deleteMessage(h, "ana", "m-ana", "t-team");
     expect(deleted.status, await deleted.clone().text()).toBe(200);
+    // Every delete door answers the same three fields.
     expect(await deleted.json()).toEqual({
       messageId: "m-ana",
       threadId: "t-team",
-      authorKind: "human",
-      authorDisplayName: "Name ana",
-      authorUserId: "ana",
-      createdAtMs: 3,
       deletedAtMs: 2_000,
     });
 
