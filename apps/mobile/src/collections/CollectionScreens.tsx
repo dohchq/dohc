@@ -1,7 +1,7 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
 import { ChevronRight, Square, SquareCheck, Undo2 } from "lucide-react-native";
 import { memo, useCallback, useEffect, useSyncExternalStore } from "react";
 import {
@@ -237,6 +237,7 @@ const RecordRow = memo(function RecordRow(props: {
 export function RecordScreen() {
   const theme = useTheme();
   const router = useRouter();
+  const navigation = useNavigation();
   const problemText = useProblemText();
   const { collections } = useAccount();
   const view = useSyncExternalStore(
@@ -265,9 +266,9 @@ export function RecordScreen() {
       params: { field: fieldId, ...(value === undefined ? {} : { value: JSON.stringify(value) }) },
     });
   // Reads the record again, then opens the editor with what the person entered, if the same record is still open and
-  // its field still takes a change.
+  // on top, so no editor opened meanwhile sits under it, and its field still takes a change.
   const reload = async ({ change }: RecordChange) => {
-    if (!(await collections.reloadRecord())) return;
+    if (!(await collections.reloadRecord()) || !navigation.isFocused()) return;
     const from = collections.edit(change.fieldId)?.from;
     if (from && recordKey(from.datasetId, from.tableId, from.recordId) === key)
       edit(change.fieldId, change.value);
