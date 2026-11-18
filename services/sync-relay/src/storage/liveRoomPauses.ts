@@ -141,19 +141,29 @@ export function liveRoomPaused(
   },
 ): boolean {
   const { workspaceId, objectId, lineageClaimId } = document;
-  return storage.readTx(
-    () =>
-      (lineageClaimId === undefined
-        ? storage.db
-            .prepare(
-              `SELECT 1 FROM ${LIVE_ROOM_PAUSES} p JOIN sync_relay_live_documents d USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.workspace_id=? AND p.object_id=? AND d.lineage_state='current' LIMIT 1`,
-            )
-            .get(workspaceId, objectId)
-        : storage.db
-            .prepare(
-              `SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND object_id=? AND lineage_claim_id=? LIMIT 1`,
-            )
-            .get(workspaceId, objectId, lineageClaimId)) !== undefined,
+  return storage.readTx(() =>
+    lineageClaimId === undefined
+      ? currentLineagePaused(storage, workspaceId, objectId)
+      : storage.db
+          .prepare(
+            `SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND object_id=? AND lineage_claim_id=? LIMIT 1`,
+          )
+          .get(workspaceId, objectId, lineageClaimId) !== undefined,
+  );
+}
+
+/** Whether the note's current lineage is paused, read in one statement, so inside a caller's transaction too. */
+export function currentLineagePaused(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${LIVE_ROOM_PAUSES} p JOIN sync_relay_live_documents d USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.workspace_id=? AND p.object_id=? AND d.lineage_state='current' LIMIT 1`,
+      )
+      .get(workspaceId, objectId) !== undefined
   );
 }
 
