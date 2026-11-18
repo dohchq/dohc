@@ -3089,6 +3089,8 @@ export function createWorkspaceEngineCapture(
     // refusal.
     let objectChanged = false;
     let current: EngineYdocProviderSession | null = null;
+    // The generation that is leaving live editing, until the note replaces its document.
+    let leaving: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
     let dead = false;
@@ -3285,7 +3287,11 @@ export function createWorkspaceEngineCapture(
               if (current !== opened || canonicalDoc === null) return;
               const retired = canonicalDoc;
               canonicalDoc = replacement;
-              if ((opened?.lineageClaimId ?? null) !== canonicalLineageClaimId) {
+              // A note that left live editing keeps its claim, but the room's rows are gone
+              // from it. The pause's copy took the edits still waiting here.
+              const left = leaving === opened && opened?.ownerBound === false;
+              if (left) leaving = null;
+              if ((opened?.lineageClaimId ?? null) !== canonicalLineageClaimId || left) {
                 clearPendingRecords();
                 recordedDoc.destroy();
                 recordedDoc = new Y.Doc();
@@ -4082,6 +4088,24 @@ export function createWorkspaceEngineCapture(
       },
       get ownerBound() {
         return current?.ownerBound;
+      },
+      // Behind the edits already handed over, so the generation holds them.
+      leaveLiveEditing(leave) {
+        if (closed) return Promise.reject(closedError());
+        return append(async () => {
+          const generation = current;
+          if (!generation?.leaveLiveEditing) {
+            if (canonicalDoc === null) throw closedError();
+            return leave(Y.encodeStateAsUpdate(canonicalDoc, Y.encodeStateVector(recordedDoc)));
+          }
+          leaving = generation;
+          try {
+            return await generation.leaveLiveEditing(leave);
+          } catch (error) {
+            if (generation.ownerBound) leaving = null;
+            throw error;
+          }
+        });
       },
       contentKind,
       get artifactAssets() {
@@ -6648,6 +6672,9 @@ export function createWorkspaceEngineCapture(
         },
         get ownerBound() {
           return session.ownerBound;
+        },
+        leaveLiveEditing(leave) {
+          return session.leaveLiveEditing!(leave);
         },
         async readArtifactAsset(descriptor) {
           const bytes = await engine.readBinaryBlob({

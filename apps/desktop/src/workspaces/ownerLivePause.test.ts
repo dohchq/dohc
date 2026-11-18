@@ -87,6 +87,7 @@ function fixture() {
     (_path: string, pause: (unsent: Uint8Array[]) => Promise<unknown>) => pause([]),
   );
   const errors: unknown[] = [];
+  const tried = new Set<string>();
   const settle = (
     pauses = [pause],
     options: { listed?: boolean; previous?: OwnerLivePause[] } = {},
@@ -94,6 +95,7 @@ function fixture() {
     settleOwnerLivePauses({
       pauses,
       previous: options.previous ?? [],
+      tried,
       documents: options.listed === false ? [] : [{ binding, relayDatabaseNamespace: "ns" }],
       client: client as never,
       workspaceHandle: "handle",
@@ -185,8 +187,14 @@ describe("settleOwnerLivePauses", () => {
 
   it("writes an earlier Stop's copy and the server's in files of their own, since the Stop may hold an earlier pause", async () => {
     const f = fixture();
-    // The name picked at that pause was taken before its copy was written.
-    f.setStop({ copyPath: "notes/plan (unsaved edits).md", copyWritten: false, leftOut: false });
+    // The name picked at that pause was taken before its copy was written. That pause
+    // saved last at this one's save too: another computer resumed it before it saved again.
+    f.setStop({
+      copyPath: "notes/plan (unsaved edits).md",
+      copyWritten: false,
+      leftOut: false,
+      appliedCursor: 7,
+    });
     const [told] = await f.settle();
     expect(f.client.ownerYDocPause).not.toHaveBeenCalled();
     expect(f.files.get("notes/plan (unsaved edits).md")).toBe("older");

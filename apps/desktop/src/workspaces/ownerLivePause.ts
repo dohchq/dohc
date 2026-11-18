@@ -113,6 +113,8 @@ export async function settleOwnerLivePauses(input: {
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
+  /** The pauses this desktop has asked the engine to make and not yet settled. */
+  tried: Set<string>;
   /**
    * Runs `pause` between the edits of the editors open on the note at `path`,
    * given the edits they have not sent. Once it succeeds, they show the note.
@@ -147,17 +149,14 @@ export async function settleOwnerLivePauses(input: {
     const document = { mainVersionId: "main", objectId: pause.objectId };
     try {
       let held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
-      // Only this pause's Stop holds the relay's copy: one made now, or one made at
-      // this pause's save whose copy no pass has written. A Stop held from an
-      // earlier pause leaves the relay's copy a file of its own.
-      let joined =
-        held !== null &&
-        !held.stop.paused.copyWritten &&
-        held.stop.paused.appliedCursor === pause.savedCursor &&
-        held.stop.binding?.lineageClaimId === pause.lineageClaimId;
+      // Only this pause's Stop holds the relay's copy: one this desktop made for it, now
+      // or on a pass whose answer failed after the engine made it. Any other Stop leaves
+      // the relay's copy a file of its own.
+      let joined = held !== null && !held.stop.paused.copyWritten && input.tried.has(pause.pauseId);
       if (!held && listed && pause.copy) {
         const roomCopy = await relayCopy(input.relay, pause, input.signal);
         const copyPath = await freeName(pause.path, input.writes);
+        input.tried.add(pause.pauseId);
         // The owner's open editor waits while the note pauses, so the copy takes
         // what it shows, and then it shows the note.
         await input.leaveLiveEditing(listed.binding.currentPath, (unsent) =>
@@ -195,6 +194,7 @@ export async function settleOwnerLivePauses(input: {
         };
       }
       if (pause.copy) await input.relay.copyWritten(pause.pauseId, pause.copy.sha256, input.signal);
+      input.tried.delete(pause.pauseId);
       settled.push({
         pauseId: pause.pauseId,
         objectId: pause.objectId,
