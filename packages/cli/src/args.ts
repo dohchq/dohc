@@ -1003,7 +1003,9 @@ const CHAT_VERBS = {
       const purpose = lastValue(input, "--purpose");
       const word = lastValue(input, "--level");
       const level =
-        word === undefined ? undefined : GROUP_LEVEL_WORDS[word as keyof typeof GROUP_LEVEL_WORDS];
+        word === undefined || !Object.hasOwn(GROUP_LEVEL_WORDS, word)
+          ? undefined
+          : GROUP_LEVEL_WORDS[word as keyof typeof GROUP_LEVEL_WORDS];
       if (word !== undefined && level === undefined) fail("--level must be post, view or none");
       return {
         verb: "groupCreate",
@@ -2325,7 +2327,9 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
             };
           if (level === undefined)
             return { verb: "members", request: membersRequest({ action: "group", group }) };
-          const stored = GROUP_LEVEL_WORDS[level as keyof typeof GROUP_LEVEL_WORDS];
+          const stored = Object.hasOwn(GROUP_LEVEL_WORDS, level)
+            ? GROUP_LEVEL_WORDS[level as keyof typeof GROUP_LEVEL_WORDS]
+            : undefined;
           if (stored === undefined) return fail("Choose post, view, or none.");
           return {
             verb: "members",

@@ -95,6 +95,7 @@ describe("dohc members", () => {
     [["list", "extra"], "members list does not accept"],
     [["group"], "Name a Group."],
     [["group", "Team", "--level", "comment"], "Choose post, view, or none."],
+    [["group", "Team", "--level", "constructor"], "Choose post, view, or none."],
     [["group", "Team", "--level", "view", "--clear"], "Choose --level or --clear, not both."],
   ])("refuses members %j", (operands, message) => {
     expect(() => parseCliArguments(["members", ...operands], {})).toThrow(message);
@@ -259,6 +260,9 @@ describe("dohc members", () => {
     });
     expect(() =>
       parseCliArguments(["chat", "create-group", "Board", "--level", "edit"], {}),
+    ).toThrow("--level must be post, view or none");
+    expect(() =>
+      parseCliArguments(["chat", "create-group", "Board", "--level", "constructor"], {}),
     ).toThrow("--level must be post, view or none");
   });
 
