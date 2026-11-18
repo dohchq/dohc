@@ -527,11 +527,9 @@ it("saves a field's change, replays its retry, and undoes it with the prior valu
   // The same key and stamp answer the same receipt, with no second version.
   expect(await edit(f)).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
   expect((await r01(f)).version).toBe(2);
-  // The same key with another value is not a retry.
-  expect(await edit(f, { value: "Maya L." })).toMatchObject({
-    status: 409,
-    body: { ok: false, code: "conflict" },
-  });
+  // The same key with another payload: the phone never changes a change it resends, so the rules changed between tries.
+  expect(await edit(f, { value: "Maya L." })).toEqual(ok({ rulesChanged: true }));
+  expect(await r01(f)).toMatchObject({ version: 2, values: { [NAME]: "Maya" } });
   // Undo: the prior value at the saved version, with a new key.
   expect(
     await edit(f, { value: "Person r01", expectedVersion: 2, idempotencyKey: id(101) }),
@@ -574,9 +572,9 @@ it("answers a stale version with the record's refusal, and a field no edit chang
   expect((await edit(f, { idempotencyKey: "r01-name" })).status).toBe(400);
   expect(invoked).toBe(0);
   // The operation refuses a value the field's type can't take.
-  expect(await edit(f, { fieldId: PAID, value: "yes", idempotencyKey: id(103) })).toEqual(
-    ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }),
-  );
+  expect(
+    await edit(f, { fieldId: PAID, value: "yes", expectedVersion: 2, idempotencyKey: id(103) }),
+  ).toEqual(ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }));
   expect((await r01(f)).values).toMatchObject({ [NAME]: "Maya", [PAID]: false });
 });
 

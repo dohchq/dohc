@@ -1,6 +1,6 @@
 import type { ScopedEnds } from "../pages/pageLive";
 import type { SignIn } from "../server/account";
-import { requestGenerations, ServerError, shownProblem } from "../server/client";
+import { requestGenerations, shownProblem } from "../server/client";
 import {
   collectionOperations,
   type ChangeAnswer,
@@ -195,7 +195,7 @@ export function createWorkspaceCollections(
   };
   // An answer lands only while its change is still the record's, so one Discard dropped, or a store cleared, never
   // comes back.
-  async function send(key: string, entry: Omit<RecordChange, "state">, retry = false) {
+  async function send(key: string, entry: Omit<RecordChange, "state">) {
     if (!isLive()) return;
     const sent: RecordChange = { ...entry, state: { kind: "saving" } };
     setChange(key, sent);
@@ -209,12 +209,7 @@ export function createWorkspaceCollections(
       const problem = shownProblem(error);
       // A cancelled change belongs to a store cleared already, and a 401 clears it.
       if (!lands() || problem === null) return;
-      // A retry's key already used: the rules changed between tries, and the first may have saved.
-      const used = retry && error instanceof ServerError && error.status === 409;
-      setChange(key, {
-        ...sent,
-        state: used ? { kind: "rulesChanged" } : { kind: "failed", problem },
-      });
+      setChange(key, { ...sent, state: { kind: "failed", problem } });
     }
   }
 
@@ -373,7 +368,7 @@ export function createWorkspaceCollections(
     },
     retry(key) {
       const last = changes.get(key);
-      if (last?.state.kind === "failed") void send(key, last, true);
+      if (last?.state.kind === "failed") void send(key, last);
     },
     discard(key) {
       if (changes.has(key) && changes.get(key)?.state.kind !== "saving") setChange(key, null);

@@ -40,6 +40,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const EDITABLE = new Set(["text", "number", "checkbox", "date", "select", "multi-select", "url"]);
 /** What the host says when a request names rules it has replaced: nothing ran, and the same request never can. */
 const RULES_REPLACED = "The Collection's rules changed. Its owner must approve this access again.";
+const KEY_USED = "This retry key was already used for different values. Start a new response.";
 const RULES_DISALLOW =
   "The Collection's rules no longer allow this change, so dohc did not save it.";
 
@@ -300,10 +301,13 @@ export function createPhoneCollections(options: {
           await answers(datasetId);
           return { refused: { code: error.refusal.code, message: error.refusal.message } };
         }
+        // A key used before for another payload: the phone resends a change unchanged, so its operation or rules
+        // changed between tries, and the first try may have saved.
         if (
-          error instanceof DatasetHostError &&
-          error.code === "conflict" &&
-          error.message === RULES_REPLACED
+          (error instanceof DatasetHostError &&
+            error.code === "conflict" &&
+            error.message === RULES_REPLACED) ||
+          (error instanceof JournalError && error.code === "conflict" && error.message === KEY_USED)
         ) {
           await answers(datasetId);
           return { rulesChanged: true };

@@ -658,24 +658,6 @@ describe("a record's change", () => {
     expect(collections.view()?.problem).toBeNull();
   });
 
-  it("treats a 409 on Try again as rules changed, and keeps what was entered", async () => {
-    const { server, collections } = await onRecord();
-    const used = { status: 409, body: { ok: false, code: "conflict", error: "conflict" } };
-    server.on("POST", EDIT, used, "offline", used);
-    // A first try's 409 is only a failure.
-    change(collections, "f-name", "Maya");
-    await answered(collections);
-    expect(state(collections)).toEqual({ kind: "failed", problem: "refused" });
-    collections.discard(KEY);
-    change(collections, "f-name", "Maya");
-    await answered(collections);
-    expect(state(collections)).toEqual({ kind: "failed", problem: "offline" });
-    collections.retry(KEY);
-    await answered(collections);
-    expect(state(collections)).toEqual({ kind: "rulesChanged" });
-    expect(collections.changes().get(KEY)?.change.value).toBe("Maya");
-  });
-
   it("lands a change's answer after the Collection closes", async () => {
     const { server, collections } = await onRecord();
     const held = deferred<Answer>();
