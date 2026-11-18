@@ -33,8 +33,10 @@ export interface ShareViewWriteScope {
   // joined workspace with no stored reach yet, the level the PINNED grant
   // names.
   access: ShareAccess | null;
-  // The pinned grant's level, which a Group takes. Absent, `access`.
-  member?: ShareAccess | null;
+  // The level in one Group, by channel wire id, and whether some Group takes
+  // posts. Absent, every Group takes `access`.
+  levelInGroup?: (channelWireId: string) => ShareAccess | null;
+  postsInSomeGroup?: boolean;
   // The level at one path and inside one folder (`shareViewLevels`). Absent,
   // every path takes `access`.
   levelAt?: (path: string) => ShareAccess | null;
@@ -88,13 +90,16 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
  * Where a write lands:
  * - a file's `path`: an existing file's current path, or a new file's;
  * - a `folder`, "" for the root: where a new file in it lands;
- * - `"group"`: a Group's posts, which take the member level until Group rules
- *   exist;
+ * - a `group`, by channel wire id: that Group's posts, at its rule's level;
  * - `"somewhere"`: any folder, for a create offer before its folder is known
  *   and for sending what waits. Each change is judged again at its own path,
  *   here when it is made and by the relay when it is sent.
  */
-export type ShareViewWritePlace = { path: string } | { folder: string } | "group" | "somewhere";
+export type ShareViewWritePlace =
+  | { path: string }
+  | { folder: string }
+  | { group: string }
+  | "somewhere";
 
 /**
  * The level at which a share view takes the recipient's own write at one
@@ -117,19 +122,23 @@ export function shareViewWriteLevel(
 ): ShareAccess | null {
   if (scope.ended || scope.writer === "other") return null;
   if (place === "somewhere") return scope.access;
-  if (place === "group") return scope.member === undefined ? scope.access : scope.member;
+  if ("group" in place) return scope.levelInGroup ? scope.levelInGroup(place.group) : scope.access;
   if ("path" in place) return scope.levelAt ? scope.levelAt(place.path) : scope.access;
   return scope.levelIn ? scope.levelIn(place.folder) : scope.access;
 }
 
 /**
- * Whether a joined workspace takes its member's posts anywhere: in its Groups
- * or on some file. File rules don't lower the Group level, so a Comment member
- * under a `members: view` rule still posts in Groups.
+ * Whether a joined workspace takes its member's posts anywhere: in some Group
+ * or on some file. File rules and Group rules are separate, so a Comment
+ * member under a `members: view` file rule still posts in Groups.
  */
 export function shareViewTakesPosts(scope: ShareViewWriteScope): boolean {
-  return [shareViewWriteLevel(scope, "group"), shareViewWriteLevel(scope, "somewhere")].some(
-    (level) => level === "comment" || level === "edit",
+  if (scope.ended || scope.writer === "other") return false;
+  const somewhere = shareViewWriteLevel(scope, "somewhere");
+  return (
+    somewhere === "comment" ||
+    somewhere === "edit" ||
+    (scope.postsInSomeGroup ?? (scope.access === "comment" || scope.access === "edit"))
   );
 }
 
@@ -196,9 +205,10 @@ export function shareViewWriteScopeOf(
 export function writeScopeOfLevels(levels: ShareViewLevels, ended: boolean): ShareViewWriteScope {
   return {
     access: levels.highest,
-    member: levels.member,
     levelAt: levels.at,
     levelIn: levels.in,
+    levelInGroup: levels.group,
+    postsInSomeGroup: levels.postsInSomeGroup,
     ended,
   };
 }

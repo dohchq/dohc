@@ -85,6 +85,8 @@ it("reads a membership's listed reach from its smallest page, and refuses one it
     visibilitySignature: "v1",
     rootLevel: "comment",
     folders: [{ path: "Team/Plans", level: "edit" }],
+    groupDefault: "comment",
+    groups: [{ channelWireId: "wire-news", level: "view" }],
   };
   const page = (reach: unknown) => ({ ok: true, ops: [], nextCursor: 0, hasMore: false, reach });
   const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(page(listed)));
@@ -102,6 +104,7 @@ it("reads a membership's listed reach from its smallest page, and refuses one it
     page({ ...listed, folders: [{ path: "/Team", level: "edit" }] }),
     page({ ...listed, rootLevel: "owner" }),
     page({ ...listed, folders: [{ path: "", level: "edit" }] }),
+    page({ ...listed, groups: [{ channelWireId: "wire-news", level: "none" }] }),
   ]) {
     await expect(
       fetchShareViewReach({

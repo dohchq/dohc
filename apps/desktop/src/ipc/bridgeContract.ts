@@ -394,6 +394,20 @@ export const WorkspaceSummary = z.object({
       // A membership's role as the relay last named it. It shows admin actions
       // before the next check; the relay decides each one.
       role: z.enum(["admin", "member"]).optional(),
+      // A membership's Group levels from its stored reach: each listed Group's,
+      // else `groupDefault`. Chats locks a Group's composer at View. Main
+      // refuses the post either way.
+      groupLevels: z
+        .object({
+          groupDefault: SHARE_ACCESS,
+          groups: z
+            .array(
+              z.object({ channelWireId: z.string().min(1).max(256), level: SHARE_ACCESS }).strict(),
+            )
+            .max(100_000),
+        })
+        .strict()
+        .optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell
