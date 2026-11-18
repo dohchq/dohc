@@ -1236,6 +1236,12 @@ function coversLink(files: ShareSelector | null, path: string): boolean {
   return !(files && "reach" in files && files.reach && files.reach.folderLevel(path) === null);
 }
 
+// A text as a reader whose file side is `files` reads it: a Group's name or
+// a label, with only the file links those files cover.
+export function withheldLinkText(text: string, files: ShareSelector | null): string {
+  return withholdChatFileLinks(text, (path) => coversLink(files, path));
+}
+
 function withheldLinks(
   decision: ShareOpDecision,
   opKind: string,
@@ -1277,7 +1283,7 @@ export function shareLabelFor(
       : selector?.kind === "workspace" && readerFiles
         ? { ...readerFiles, ruleFiles: undefined }
         : null;
-  const covered = withholdChatFileLinks(label, (path) => coversLink(files, path));
+  const covered = withheldLinkText(label, files);
   if (reader === "member" || files === null) return covered;
   const projection = createAccountlessPathProjection(files);
   return projectChatFileLinks(covered, (path) => projection.projectPath(path));

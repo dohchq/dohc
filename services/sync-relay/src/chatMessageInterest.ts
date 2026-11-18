@@ -1,7 +1,13 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
-import { fileSideOf, filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
+import {
+  fileSideOf,
+  filterOpForShare,
+  withheldLinkText,
+  type ChatShareThreadResolver,
+  type ShareSelector,
+} from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
 
@@ -102,6 +108,8 @@ function chatPlace(
   storage: StorageContext,
   message: PushMessage,
   resolver: ChatShareThreadResolver,
+  // A member's file side; the owner, who passes none, reads the name whole.
+  files?: ShareSelector | null,
 ): { place: string; channel: boolean } | null {
   const { workspaceId, threadId } = message;
   const channel = resolver.threadChannelWireId(threadId);
@@ -120,7 +128,11 @@ function chatPlace(
     AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
         .get(workspaceId, channel)
     : undefined;
-  const name = row ? (JSON.parse(String(row.payload_json)) as { name?: unknown }).name : undefined;
+  const stored = row
+    ? (JSON.parse(String(row.payload_json)) as { name?: unknown }).name
+    : undefined;
+  const name =
+    typeof stored === "string" && files !== undefined ? withheldLinkText(stored, files) : stored;
   return {
     place: pushPlainText(name ?? filePath?.split("/").at(-1)?.replace(/\.md$/iu, ""), "a chat"),
     channel: Boolean(channel),
@@ -165,7 +177,10 @@ export function pushMessageAccess(
       ).allowed
     )
       continue;
-    const found = Number(row.membership) === 1 ? chatPlace(storage, message, resolver) : null;
+    const found =
+      Number(row.membership) === 1
+        ? chatPlace(storage, message, resolver, fileSideOf(authority.effectiveSelector))
+        : null;
     return {
       place:
         found?.place ??

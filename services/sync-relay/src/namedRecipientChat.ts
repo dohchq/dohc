@@ -37,6 +37,7 @@ import {
   chatSideOf,
   filterOpForShare,
   isWorkspaceSelector,
+  withheldLinkText,
   type AnyShareSelector,
   type ChatShareThreadResolver,
 } from "./shareFilter";
@@ -413,11 +414,12 @@ export function createNamedRecipientChat(options: {
               .filter((group) => workspaceGroupReachable(group.channelWireId, resolver!));
             const fresh = recheck().effectiveSelector;
             if (!isWorkspaceSelector(fresh)) throw notFound();
+            const files = workspaceFileReach(fresh);
             return json({
               ...listing,
               channels: groups.map((group) => ({
                 channelWireId: group.channelWireId,
-                name: group.name,
+                name: withheldLinkText(group.name, files),
                 kind: "channel",
                 type: group.type,
                 access: workspaceChatAccess(fresh, group.channelWireId),

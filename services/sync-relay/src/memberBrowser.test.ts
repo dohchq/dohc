@@ -1,6 +1,7 @@
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { pushMessageAccess, readPushMessage } from "./chatMessageInterest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
@@ -717,6 +718,43 @@ describe("a member's Chats in a browser", () => {
         parentMessageId: "msg-chat",
       }),
     ]);
+  });
+
+  it("withholds a Group name's link to a folder the member can't see, in the list and a push", async () => {
+    const { h, storage } = await seed();
+    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    await ownerAppend(h, [
+      logOp(
+        "chat.channel.create",
+        chatChannelCreate("wire-plans", {
+          channelId: "chan-plans",
+          name: "Plans @[hidden] @[hidden/x.md] @[docs/plan.md]",
+          slug: "plans",
+          kind: "channel",
+          type: "both",
+          purpose: "",
+          folderPath: "plans",
+        }).payload,
+      ),
+      laneThread("t-plans", "wire-plans"),
+      message("msg-plans", "t-plans", "hello"),
+    ]);
+    const ana = await member(h, storage, "ana");
+    const named = "Plans (a file not shared here) (a file not shared here) @[docs/plan.md]";
+    const listed = await json(await chat(h, `channels?grantId=${ana.grantId}`, "ana"));
+    expect(listed.channels).toContainEqual(
+      expect.objectContaining({ channelWireId: "wire-plans", name: named }),
+    );
+    const context = storage as unknown as StorageContext;
+    const row = context.db
+      .prepare(
+        "SELECT relay_seq FROM sync_relay_log WHERE op_kind = 'chat.message.append' AND json_extract(payload_json, '$.messageId') = 'msg-plans'",
+      )
+      .get();
+    const pushed = readPushMessage(context, Number(row!.relay_seq))!;
+    expect(pushMessageAccess(context, pushed, "ana")?.place).not.toContain("@[hidden");
+    expect(pushMessageAccess(context, pushed, OWNER)?.place).toContain("@[hidden]");
   });
 
   it("withholds a Group message's link to a folder the member can't see", async () => {
