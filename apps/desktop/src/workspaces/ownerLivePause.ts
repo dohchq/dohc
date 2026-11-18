@@ -118,6 +118,18 @@ export async function settleOwnerLivePauses(input: {
   onError(pause: RelayLivePause, error: unknown): void;
 }): Promise<OwnerLivePause[]> {
   const request = () => ({ id: 0, workspace: input.workspaceHandle, deadlineMs: 30_000 });
+  /** Writes a held Stop's copy next to `near` and records it. */
+  const writeHeld = async (
+    held: NonNullable<Awaited<ReturnType<EngineClient["ownerYDocPausedCopy"]>>>,
+    near: string,
+  ) => {
+    const path = (await input.writes.exists(held.stop.paused.copyPath))
+      ? await freeName(near, input.writes)
+      : held.stop.paused.copyPath;
+    const written = await input.writes.create(path, held.bytes?.toString("utf8") ?? "");
+    return (await input.client.ownerYDocPausedCopyWritten(request(), held.stop.document, written))
+      .paused;
+  };
   const settled: OwnerLivePause[] = [];
   for (const pause of input.pauses) {
     input.signal.throwIfAborted();
@@ -148,18 +160,11 @@ export async function settleOwnerLivePauses(input: {
         if (!held) throw new Error("The paused note's copy is missing.");
         joined = true;
       }
+      // After a restart only a Stop paused at this pause's save can name its copy.
       let copy: { copyPath: string | null; leftOut: boolean } | null =
         input.previous.find((told) => told.pauseId === pause.pauseId) ??
-        held?.stop.paused ??
-        null;
-      if (held && !held.stop.paused.copyWritten) {
-        const path = (await input.writes.exists(held.stop.paused.copyPath))
-          ? await freeName(pause.path, input.writes)
-          : held.stop.paused.copyPath;
-        const written = await input.writes.create(path, held.bytes?.toString("utf8") ?? "");
-        copy = (await input.client.ownerYDocPausedCopyWritten(request(), document, written))
-          .paused;
-      }
+        (held?.stop.paused.appliedCursor === pause.savedCursor ? held.stop.paused : null);
+      if (held && !held.stop.paused.copyWritten) copy = await writeHeld(held, pause.path);
       if (pause.copy && !joined) {
         const text = await input.render(await relayCopy(input.relay, pause, input.signal));
         copy = {
@@ -183,13 +188,18 @@ export async function settleOwnerLivePauses(input: {
     }
   }
   // A pause that ended elsewhere, by a Resume on another computer or one cut
-  // short here, leaves this computer's Stop behind. Once its copy is on disk,
-  // clearing it lets the note join its room again.
+  // short here, leaves this computer's Stop behind. Its copy goes on disk,
+  // then clearing it lets the note join its room again.
   const paused = new Set(input.pauses.map((pause) => pause.objectId));
   try {
-    for (const stop of await input.client.ownerYDocStopList(request(), input.signal))
-      if (stop.paused?.copyWritten && !paused.has(stop.document.objectId))
-        await input.client.ownerYDocStopClear(request(), stop.document, input.signal);
+    for (const stop of await input.client.ownerYDocStopList(request(), input.signal)) {
+      if (!stop.paused || paused.has(stop.document.objectId)) continue;
+      if (!stop.paused.copyWritten) {
+        const held = await input.client.ownerYDocPausedCopy(request(), stop.document, input.signal);
+        if (held && !held.stop.paused.copyWritten) await writeHeld(held, stop.document.currentPath);
+      }
+      await input.client.ownerYDocStopClear(request(), stop.document, input.signal);
+    }
   } catch (error) {
     input.signal.throwIfAborted();
     console.error("[desktop] a resumed note's Stop could not be cleared:", error);

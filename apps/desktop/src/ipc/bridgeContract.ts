@@ -639,8 +639,9 @@ export const StopOwnerLiveDocumentResult = z
   .strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
 // `already` when the server says the document was already live, so this Resume changed nothing.
+// `ended`: the note's file was moved, deleted or replaced, so the server's pause ended and nothing started.
 export const ResumeOwnerLiveDocumentResult = z
-  .object({ already: z.literal(true).optional() })
+  .object({ already: z.literal(true).optional(), ended: z.literal(true).optional() })
   .strict();
 export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({

@@ -368,7 +368,7 @@ export interface CliLiveDocumentsPort {
   resume(
     path: string,
     author: import("@dohc/workspace-contracts/change-author").ChangeAuthor,
-  ): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
+  ): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already" | "ended">>;
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
@@ -4203,6 +4203,7 @@ async function dispatchWorkspace(
           ok: true as const,
           path: request.args.path,
           ...(resumed.already ? { already: true as const } : {}),
+          ...(resumed.ended ? { ended: true as const } : {}),
         };
       } catch (error) {
         return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);

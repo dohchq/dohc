@@ -32,7 +32,7 @@ const pause: RelayLivePause = {
 };
 const document = { mainVersionId: "main", objectId: "note", currentPath: "notes/plan.md" };
 
-type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean };
+type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean; appliedCursor?: number };
 
 /** An engine that holds one paused Stop once paused, and a folder of files. */
 function fixture() {
@@ -46,7 +46,7 @@ function fixture() {
   const client = {
     ownerYDocPausedCopy: vi.fn(async () => held()),
     ownerYDocPause: vi.fn(async (_request: unknown, input: { copyPath: string }) => {
-      stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true };
+      stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true, appliedCursor: 7 };
       return {};
     }),
     ownerYDocPausedCopyWritten: vi.fn(
@@ -184,8 +184,19 @@ describe("settleOwnerLivePauses", () => {
     expect(await f.settle([{ ...pause, copy: null }], { previous })).toMatchObject([
       { copyPath: "notes/plan (unsaved edits 4).md" },
     ]);
-    // After a restart nothing here names it.
+    // After a restart only a Stop paused at this pause's save names its copy.
     expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([{ copyPath: null }]);
+    f.setStop({ copyPath: "notes/plan (unsaved edits 5).md", copyWritten: true, leftOut: true });
+    expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([{ copyPath: null }]);
+    f.setStop({
+      copyPath: "notes/plan (unsaved edits 5).md",
+      copyWritten: true,
+      leftOut: true,
+      appliedCursor: 7,
+    });
+    expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([
+      { copyPath: "notes/plan (unsaved edits 5).md", leftOut: true },
+    ]);
     expect(f.relay.copy).not.toHaveBeenCalled();
     expect(f.relay.copyWritten).not.toHaveBeenCalled();
   });
@@ -200,17 +211,23 @@ describe("settleOwnerLivePauses", () => {
     expect(await f.settle()).toHaveLength(1);
   });
 
-  it("clears a Stop whose pause ended elsewhere once its copy is on disk", async () => {
+  it("writes the copy of a Stop whose pause ended elsewhere, then clears the Stop", async () => {
     const f = fixture();
     f.setStop({ copyPath: "notes/plan (unsaved edits).md", copyWritten: false, leftOut: false });
-    await f.settle([]);
-    expect(f.client.ownerYDocStopClear).not.toHaveBeenCalled();
-    f.setStop({ copyPath: "notes/plan (unsaved edits).md", copyWritten: true, leftOut: false });
     expect(await f.settle([])).toEqual([]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana's words and the owner's");
     expect(f.client.ownerYDocStopClear).toHaveBeenCalledWith(
       expect.anything(),
       document,
       expect.anything(),
     );
+    expect(f.relay.copyWritten).not.toHaveBeenCalled();
+  });
+
+  it("clears no Stop while the server still holds its pause", async () => {
+    const f = fixture();
+    f.setStop({ copyPath: "notes/plan (unsaved edits).md", copyWritten: true, leftOut: false });
+    await f.settle([{ ...pause, copy: null }]);
+    expect(f.client.ownerYDocStopClear).not.toHaveBeenCalled();
   });
 });

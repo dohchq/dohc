@@ -4,8 +4,10 @@ import {
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
+  yDocToArtifactMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
+import * as Y from "yjs";
 import {
   isLossyDocumentState,
   isLossyMarkdownCached,
@@ -19,6 +21,8 @@ import { recoveredDocument, type RecoveredDocument } from "./recoveredDocument";
 
 export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
+  // The note's file text, keeping the source a file read records.
+  | { kind: "file"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
   // `refuseLossy` names the note, which refuses here if it is a lossy note
   // (CONTEXT.md): this is the turn that would change it.
@@ -81,6 +85,15 @@ export function runDocumentProjection(
   switch (request.kind) {
     case "read":
       return documentMarkdown(request.state);
+    case "file": {
+      const doc = new Y.Doc();
+      try {
+        Y.applyUpdate(doc, request.state);
+        return yDocToArtifactMarkdown(doc);
+      } finally {
+        doc.destroy();
+      }
+    }
     case "read-settled":
       return settledDocumentMarkdown(request.markdown);
     case "edit":

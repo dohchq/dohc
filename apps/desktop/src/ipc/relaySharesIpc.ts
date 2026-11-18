@@ -747,7 +747,7 @@ export function createOwnerLiveDocumentActions<
         const paused = await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
         operation.assertCurrent();
         // A note whose file was moved, deleted or replaced has nothing at its path to start again.
-        if (paused === "ended") return {};
+        if (paused === "ended") return { ended: true };
         // A Resume names its document by path, and the server resumes its own document there: the record names that one.
         const row =
           record && input.author ? await serverRow(operation, { path: input.path }) : null;

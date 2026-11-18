@@ -2430,7 +2430,12 @@ const liveStopResultSchema = z.discriminatedUnion("ok", [
 ]);
 const liveResumeResultSchema = z.discriminatedUnion("ok", [
   z
-    .object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() })
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      already: z.literal(true).optional(),
+      ended: z.literal(true).optional(),
+    })
     .strict(),
   rawFailureSchema,
 ]);

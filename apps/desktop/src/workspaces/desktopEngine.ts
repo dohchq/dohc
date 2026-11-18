@@ -7,11 +7,7 @@ import {
   type OwnerStopRetirementTarget,
 } from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
-import {
-  settleOwnerLivePauses,
-  type OwnerLivePause,
-  type RelayLivePause,
-} from "./ownerLivePause";
+import { settleOwnerLivePauses, type OwnerLivePause, type RelayLivePause } from "./ownerLivePause";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -1079,7 +1075,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                               createDurableFile(operation.workspace.rootPath, relative, text),
                           },
                           render: (state) =>
-                            dependencies.documentProjection.run({ kind: "read", state }),
+                            dependencies.documentProjection.run({ kind: "file", state }),
                           signal,
                           onError: (pause, error) =>
                             console.error("[desktop] a paused note could not be settled:", error),
@@ -2010,9 +2006,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       workspace: EngineWorkspace,
       path: string,
     ): Promise<OwnerLivePause["cause"] | null> {
-      const pause = ownerLivePauses
-        .get(workspace.workspaceId)
-        ?.find((row) => row.path === path);
+      const pause = ownerLivePauses.get(workspace.workspaceId)?.find((row) => row.path === path);
       if (!pause) return null;
       ownerLivePauseResumes.set(
         workspace.workspaceId,
@@ -2021,9 +2015,16 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       await withServerSession(workspace.workspaceId, (session, signal) =>
         session.resumeLivePause(pause.pauseId, signal),
       );
+      // Again once it is done, for a pass that read the pauses while it ran.
+      ownerLivePauseResumes.set(
+        workspace.workspaceId,
+        (ownerLivePauseResumes.get(workspace.workspaceId) ?? 0) + 1,
+      );
       ownerLivePauses.set(
         workspace.workspaceId,
-        (ownerLivePauses.get(workspace.workspaceId) ?? []).filter((row) => row !== pause),
+        (ownerLivePauses.get(workspace.workspaceId) ?? []).filter(
+          (row) => row.pauseId !== pause.pauseId,
+        ),
       );
       notifyRenderer({ workspaceId: workspace.workspaceId });
       return pause.cause;

@@ -588,7 +588,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
       return resumed.already
         ? `${lineSafe(resumed.path)} was already live.`
-        : `Resuming live editing for ${lineSafe(resumed.path)}`;
+        : resumed.ended
+          ? `${lineSafe(resumed.path)} was moved, deleted or replaced, so live editing stays off. Its pause has ended.`
+          : `Resuming live editing for ${lineSafe(resumed.path)}`;
     }
     case "liveStop": {
       const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
