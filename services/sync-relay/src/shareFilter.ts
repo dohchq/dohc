@@ -1228,6 +1228,14 @@ function withholdIn(value: unknown, covers: (path: string) => boolean): unknown 
 // files cover; a share without files covers none. The relay applies it on
 // every read of every stored message. Appends are stored as written: the
 // owner reads them whole.
+//
+// A link may name a folder. A member's level at a path reads it as a file in
+// its parent folder, so the folder's own rule must also let them see it.
+function coversLink(files: ShareSelector | null, path: string): boolean {
+  if (!shareCoversLinkPath(files, path)) return false;
+  return !(files && "reach" in files && files.reach && files.reach.folderLevel(path) === null);
+}
+
 function withheldLinks(
   decision: ShareOpDecision,
   opKind: string,
@@ -1236,7 +1244,7 @@ function withheldLinks(
   if (!decision.allowed || !Object.hasOwn(CHAT_TEXT_FIELDS, opKind)) return decision;
   const served = asRecord(decision.payload);
   if (!served) return decision;
-  const covers = (path: string) => shareCoversLinkPath(files, path);
+  const covers = (path: string) => coversLink(files, path);
   const payload = { ...served };
   for (const field of CHAT_TEXT_FIELDS[opKind]!) {
     if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
@@ -1269,7 +1277,7 @@ export function shareLabelFor(
       : selector?.kind === "workspace" && readerFiles
         ? { ...readerFiles, ruleFiles: undefined }
         : null;
-  const covered = withholdChatFileLinks(label, (path) => shareCoversLinkPath(files, path));
+  const covered = withholdChatFileLinks(label, (path) => coversLink(files, path));
   if (reader === "member" || files === null) return covered;
   const projection = createAccountlessPathProjection(files);
   return projectChatFileLinks(covered, (path) => projection.projectPath(path));

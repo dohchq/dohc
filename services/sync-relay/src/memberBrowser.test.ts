@@ -520,20 +520,22 @@ describe("a member reads the workspace through the link read routes", () => {
     await ownerWrite(h, "hidden/x.md", "hidden work");
     storage.setShareLabels(
       ana.shareId,
-      { subjectName: "Community @[docs/plan.md] @[hidden/x.md] @[hidden/access.yaml]" },
+      {
+        subjectName: "Community @[docs/plan.md] @[hidden] @[hidden/x.md] @[hidden/access.yaml]",
+      },
       0,
     );
     const subject = async () =>
       (await json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"))).subjectName;
     expect(await subject()).toBe(
-      "Community @[docs/plan.md] (a file not shared here) (a file not shared here)",
+      "Community @[docs/plan.md] (a file not shared here) (a file not shared here) (a file not shared here)",
     );
     const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
       role: "admin",
     });
     expect(role.status, await role.clone().text()).toBe(200);
     expect(await subject()).toBe(
-      "Community @[docs/plan.md] @[hidden/x.md] (a file not shared here)",
+      "Community @[docs/plan.md] @[hidden] @[hidden/x.md] (a file not shared here)",
     );
   });
 });
@@ -715,6 +717,26 @@ describe("a member's Chats in a browser", () => {
         parentMessageId: "msg-chat",
       }),
     ]);
+  });
+
+  it("withholds a Group message's link to a folder the member can't see", async () => {
+    const { h, storage } = await seed();
+    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    await ownerAppend(h, [
+      laneThread("t-links", GROUP),
+      message("msg-links", "t-links", "see @[hidden] and @[docs/plan.md]"),
+    ]);
+    const ana = await member(h, storage, "ana");
+    const page = await json(
+      await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana"),
+    );
+    expect(page.messages).toContainEqual(
+      expect.objectContaining({
+        messageId: "msg-links",
+        body: "see (a file not shared here) and @[docs/plan.md]",
+      }),
+    );
   });
 
   it("starts a post, replies in a reached Group's threads, and refuses a reply to a thread outside the Group", async () => {
