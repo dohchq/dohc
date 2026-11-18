@@ -79,7 +79,11 @@ export function registerCloudIpcHandlers<
   syncPauseFor(workspace: RegistryEntry): SyncStatusResult["syncPause"];
   reconcileCloud(): void;
   notifyCloudSessionChanged(phase: "changing" | "ready"): void;
-  notifyCloudSessionChangedWithKey(key: string | null, phase: "changing" | "ready"): void;
+  // One session change's two broadcasts. `sessionKey`: the incoming session's.
+  cloudSessionChange(sessionKey: () => string | null): {
+    notifySessionChanging(): void;
+    notifyCloudSessionChanged(): void;
+  };
   notifyRenderer(): void;
   findWorkspace(workspaceId: string): RegistryEntry | null;
   engineDaemonStartup(): Promise<unknown>;
@@ -145,7 +149,7 @@ export function registerCloudIpcHandlers<
     syncPauseFor,
     reconcileCloud,
     notifyCloudSessionChanged,
-    notifyCloudSessionChangedWithKey,
+    cloudSessionChange,
     notifyRenderer,
     findWorkspace,
     engineDaemonStartup,
@@ -204,8 +208,7 @@ export function registerCloudIpcHandlers<
         reconcileCloud: () => {
           reconcileCloud();
         },
-        notifySessionChanging: () => notifyCloudSessionChangedWithKey(incomingKey, "changing"),
-        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+        ...cloudSessionChange(() => incomingKey),
       });
     }
     return CloudLoginPollResult.parse(result);

@@ -235,7 +235,7 @@ async function harness() {
   const notify = vi.fn(() => {
     steps.push("notify");
   });
-  const changing = vi.fn<Dependencies["notifyCloudSessionChangedWithKey"]>();
+  const changing = vi.fn<(key: string | null, phase: "changing") => void>();
   const ready = vi.fn<Dependencies["notifyCloudSessionChanged"]>();
   const createFolder = vi.fn(async (input: { workspaceId?: string; rootPath: string }) => {
     steps.push("create");
@@ -355,7 +355,10 @@ async function harness() {
       steps.push("reconcile");
     },
     notifyCloudSessionChanged: ready,
-    notifyCloudSessionChangedWithKey: changing,
+    cloudSessionChange: (key) => ({
+      notifySessionChanging: () => changing(key(), "changing"),
+      notifyCloudSessionChanged: () => ready("ready"),
+    }),
     notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
     engineDaemonStartup: daemonStartup,

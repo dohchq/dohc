@@ -144,7 +144,7 @@ it("opens no copy signed out while a session starts, and opens it again if that 
   const authorize = mocks.open.mock.calls[1]![0].assertOwner as () => void;
   // Another account starts signing in. Main has cleared the session but not
   // yet said whose the next one is.
-  f.registry.sessionChanging(true);
+  const signIn = f.registry.sessionChange();
   await expect(f.registry.signedOutOrigin(f.input.ownerKey)).rejects.toThrow(
     "Your server session is changing. Try again.",
   );
@@ -154,11 +154,26 @@ it("opens no copy signed out while a session starts, and opens it again if that 
   // The copy already open refuses each read too.
   expect(authorize).toThrow(/owner changed/);
   // The sign-in fails, so no account change follows: the copy reads again.
-  f.registry.sessionChanging(false);
+  signIn();
   expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
   expect(authorize).not.toThrow();
   expect(await f.registry.get({ ...f.input, lifetime: new AbortController().signal })).toBeTruthy();
   expect(kept).toBeTruthy();
+});
+it("opens no copy signed out until a sign-in ends, whatever other session event ends first", async () => {
+  const f = await fixture();
+  await f.registry.get(f.input);
+  await f.registry.credentialsChanged(null);
+  // Another account starts signing in, and an expired session's change starts and ends during it.
+  const signIn = f.registry.sessionChange(),
+    expired = f.registry.sessionChange();
+  expired();
+  expired();
+  await expect(f.registry.signedOutOrigin(f.input.ownerKey)).rejects.toThrow(
+    "Your server session is changing. Try again.",
+  );
+  signIn();
+  expect(await f.registry.signedOutOrigin(f.input.ownerKey)).toBe("https://relay");
 });
 it("after a restart while signed out, opens the copies of the account signed in last", async () => {
   const f = await fixture();
