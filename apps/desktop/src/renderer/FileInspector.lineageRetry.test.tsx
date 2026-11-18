@@ -149,3 +149,15 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
     REPLACED_HISTORY_DRAFT_NOTICE,
   );
 });
+
+it("keeps the caret in the editor when a replacement rebuilds it", async () => {
+  render(surface("ws-1"));
+  await screen.findByTestId("markdown-source-toggle");
+  const before = await screen.findByTestId("markdown-editor");
+  before.focus();
+  expect(document.activeElement).toBe(before);
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(screen.getByTestId("markdown-editor")).not.toBe(before));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("markdown-editor")));
+});

@@ -1114,9 +1114,29 @@ export function MarkdownView(props: {
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
   const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  // A replaced document mounts a new editor. If the old one had the caret and
+  // nothing else took focus since, the new one gets it back.
+  const documentKeyRef = useRef(props.documentKey);
+  documentKeyRef.current = props.documentKey;
+  const refocus = useRef<{ key: string; at: number } | null>(null);
   const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+    const previous = wysiwygRef.current;
     wysiwygRef.current = handle;
     if (onEditorReadyRef.current) setPageEditor(handle);
+    if (handle === null) {
+      const at = previous?.caret() ?? null;
+      if (at !== null) refocus.current = { key: documentKeyRef.current, at };
+      return;
+    }
+    const pending = refocus.current;
+    if (!pending) return;
+    const active = document.activeElement;
+    if (pending.key !== documentKeyRef.current || (active && active !== document.body)) {
+      refocus.current = null;
+      return;
+    }
+    handle.focus(pending.at);
+    if (handle.caret() !== null) refocus.current = null;
   }, []);
   useEffect(() => {
     if (!onEditorReady || opening) return;
