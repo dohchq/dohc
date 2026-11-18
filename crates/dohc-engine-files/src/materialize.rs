@@ -1922,6 +1922,13 @@ fn materialize_delete(
                 &std::io::Error::from(ErrorKind::CrossesDevices),
             ));
         }
+        // Across volumes a delete checks the bytes, then unlinks, so an edit
+        // between the two would go with no kept copy. A rule's removal waits,
+        // as it does for a rule that changed.
+        Stage::CrossVolume if job.job_id.starts_with("access-rule-remove_") => {
+            store.mark_materialization_conflict(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::Conflict);
+        }
         Stage::CrossVolume => return materialize_cross_volume(store, target, None, job, options),
         Stage::Conflict => {
             store.mark_materialization_conflict(&job.job_id, now_ms)?;
