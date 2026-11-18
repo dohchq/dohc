@@ -1764,6 +1764,7 @@ export interface SyncRelayStorage {
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
+    visible?: (path: string) => boolean;
   }): number | null;
   listLinkRevisionLogRows(input: {
     workspaceId: string;
@@ -1949,6 +1950,7 @@ export interface SyncRelayStorage {
   hasPendingInvite(email: string): boolean;
   // Workspace members (storage/workspaceMembers.ts).
   workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
+  workspaceMemberGrantRole: WorkspaceMembersMethod<"workspaceMemberGrantRole">;
   workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
   workspaceLevelChangedBy: WorkspaceMembersMethod<"workspaceLevelChangedBy">;
   readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;

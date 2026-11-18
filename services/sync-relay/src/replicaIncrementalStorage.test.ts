@@ -439,3 +439,31 @@ it("R2: the work migration preserves a standing orphan pin and cleans unreferenc
     { sha256: sha256("shared") },
   ]);
 });
+it("keeps a folder's rule file in the relay's cut and leaves it out of a recipient's listing", async () => {
+  const f = await fixture(1);
+  const rule = "members: view\n";
+  const ruleFile = {
+    ...f.view.files[0]!,
+    objectId: "o-rule",
+    path: "docs/access.yaml",
+    sha256: sha256(rule),
+    byteLength: rule.length,
+  };
+  expect(() =>
+    f.storage.storeReplicaCurrentView(f.lease, {
+      ...f.view,
+      revision: 2,
+      files: [...f.view.files, ruleFile],
+      texts: [...f.view.texts, { sha256: ruleFile.sha256, text: rule }],
+    }),
+  ).not.toThrow();
+  expect(f.storage.readReplicaCurrentView("w")?.files.map((file) => file.path)).toEqual([
+    "docs/000000.md",
+    "docs/access.yaml",
+  ]);
+  const listed = f.storage.listReplicaCurrentViewFiles(f.input);
+  expect(listed.status).toBe("ready");
+  expect(listed.status === "ready" && listed.files.map((file) => file.path)).toEqual([
+    "docs/000000.md",
+  ]);
+});

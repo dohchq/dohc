@@ -1949,6 +1949,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return workspaceMembersStorage.workspaceMemberGrantIsCurrent(this, ...args);
   }
+  workspaceMemberGrantRole(...args: Parameters<SyncRelayStorage["workspaceMemberGrantRole"]>) {
+    return workspaceMembersStorage.workspaceMemberGrantRole(this, ...args);
+  }
   workspaceRoleOf(...args: Parameters<SyncRelayStorage["workspaceRoleOf"]>) {
     return workspaceMembersStorage.workspaceRoleOf(this, ...args);
   }
@@ -2381,6 +2384,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
+    visible?: (path: string) => boolean;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }

@@ -30,6 +30,7 @@ import {
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import {
   workspaceFileReach,
+  workspaceFileWriteReach,
   workspaceGroupReach,
   workspaceGroupReachable,
   type StoredWorkspaceShareSelector,
@@ -124,13 +125,17 @@ export type StoredAnyShareSelector =
   | StoredGroupShareSelector
   | StoredWorkspaceShareSelector;
 
+// A workspace share's role decides whether its reach includes rule files.
+// Only share authorization knows it; a caller that passes none gets a
+// member's reach, which hides them.
 export function effectiveShareSelector(
   selector: StoredAnyShareSelector,
   access: unknown,
+  workspaceRole: "admin" | "member" = "member",
 ): AnyShareSelector | null {
   if ("kind" in selector) {
     if (selector.kind === "workspace")
-      return isShareAccessValue(access) ? { ...selector, access } : null;
+      return isShareAccessValue(access) ? { ...selector, access, role: workspaceRole } : null;
     return isChatShareAccessValue(access) ? { ...selector, access } : null;
   }
   return isShareAccessValue(access) ? { ...selector, access } : null;
@@ -188,6 +193,11 @@ export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   if (isGroupSelector(selector)) return fileHalfOfGroup(selector);
   if (isWorkspaceSelector(selector)) return workspaceFileReach(selector);
   return isChatChannelSelector(selector) ? null : selector;
+}
+
+/** The file side an edit is judged against. An admin reads rule files but writes none. */
+export function fileWriteSideOf(selector: AnyShareSelector): ShareSelector | null {
+  return isWorkspaceSelector(selector) ? workspaceFileWriteReach(selector) : fileSideOf(selector);
 }
 
 // A selector with ONE chat side: a chat grant, or a group's channel. A
@@ -1212,7 +1222,8 @@ export type ShareLabelReader = "owner" | "member" | "link";
 // A Group's name is also its share's label. Anyone but the owner reads it
 // with only the file links its share's files cover, as the name reads in
 // the chat, and a link reader reads those as its files show them. A selector
-// that does not parse covers none.
+// that does not parse covers none. A workspace label is read with a member's
+// reach, so a link to a rule file stays out of it even for an admin.
 export function shareLabelFor(
   selectorJson: string,
   label: string | null,
@@ -1223,7 +1234,7 @@ export function shareLabelFor(
   if (selector && !("kind" in selector)) return label;
   const files: ShareSelector | null =
     selector?.kind === "workspace"
-      ? workspaceFileReach({ ...selector, access: "view" })
+      ? workspaceFileReach({ ...selector, access: "view", role: "member" })
       : selector?.kind === "group"
         ? { paths: selector.paths, versionId: null, access: "view" }
         : null;
@@ -1583,7 +1594,7 @@ export function filterProposedChangeForShare(
   // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
   if (isWorkspaceSelector(selector))
-    return filterProposedChangeForShare(workspaceFileReach(selector), raw, chat);
+    return filterProposedChangeForShare(workspaceFileWriteReach(selector), raw, chat);
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     return filterProposedChangeForShare(fileHalfOfGroup(selector), raw, chat);
@@ -1735,7 +1746,7 @@ export function collectionEditSelector(
       : null;
   }
   if (isWorkspaceSelector(selector))
-    return collectionEditSelector(workspaceFileReach(selector), chat);
+    return collectionEditSelector(workspaceFileWriteReach(selector), chat);
   if (selector.access !== "edit" || selector.versionId !== null || !namesFiles(selector))
     return null;
   return selector;

@@ -66,7 +66,7 @@ import { createHash } from "node:crypto";
 import {
   type ShareSelector,
   type WorkspaceShareSelector,
-  fileSideOf,
+  fileWriteSideOf,
   isLiveEditShareSelector,
   pathVisibleThroughShare,
 } from "../shareFilter";
@@ -1867,11 +1867,11 @@ function bindLiveDocument(
   if (share.workspaceId !== document.workspaceId)
     return { kind: "refused", reason: "not-authorized" };
   const path = stored.binding.currentPath;
-  // A member sees the document through the workspace file reach, and the
-  // binding names only this document.
+  // A member edits the document through the workspace's write reach, and
+  // the binding names only this document.
   const reached =
     "kind" in selector
-      ? pathVisibleThroughShare(fileSideOf(selector)!, path)
+      ? pathVisibleThroughShare(fileWriteSideOf(selector)!, path)
       : canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
   if (!reached) return { kind: "refused", reason: "stale-selector" };
   const bound = bindRecordedLiveDocument(storage, document, stored);

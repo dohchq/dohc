@@ -1,4 +1,5 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { isAccessRuleRelatedPath } from "./accessRuleFiles";
 import { classifyEngineFilePath } from "./enginePathFloor";
 
 const preparedPaths = new WeakSet<PreparedSharePath>();
@@ -25,11 +26,16 @@ export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path
  * desktop keeps it as a membership's pin and sends it with each share RPC so
  * the engine applies the same reach; the relay never reads it from a client.
  * It names no paths and no version, or it selects nothing.
+ *
+ * No scope selects a folder's `access.yaml` or a copy of one, which names the
+ * people the folder is shared with, unless it has `ruleFiles`. Only the relay
+ * sets that, for an admin's workspace reach.
  */
 export interface ShareFileScope {
   paths: readonly string[];
   versionId: string | null;
   wholeWorkspace?: boolean;
+  ruleFiles?: true;
 }
 
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
@@ -41,6 +47,7 @@ export function visibleSharePath(
     typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
+  if (selector.ruleFiles !== true && isAccessRuleRelatedPath(normalized)) return null;
   if (selector.wholeWorkspace === true) {
     return selector.paths.length === 0 && selector.versionId === null ? normalized : null;
   }

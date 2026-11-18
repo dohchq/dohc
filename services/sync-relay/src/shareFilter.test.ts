@@ -145,15 +145,17 @@ describe("share selector validation", () => {
 
   it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
-    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit" })).toBe(true);
+    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit", role: "member" })).toBe(
+      true,
+    );
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
-      { kind: "workspace" as const, access: "view" as const },
-      { kind: "workspace" as const, access: "comment" as const },
+      { kind: "workspace" as const, access: "view" as const, role: "member" as const },
+      { kind: "workspace" as const, access: "comment" as const, role: "member" as const },
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -1967,7 +1969,7 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit" };
+  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit", role: "member" };
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
@@ -1999,9 +2001,10 @@ describe("a new page under Edit", () => {
 
   it("refuses View and Comment", () => {
     for (const access of ["view", "comment"] as const) {
-      expect(decide({ kind: "workspace", access }, [page("docs/idea.md")]), access).toEqual(
-        REFUSED,
-      );
+      expect(
+        decide({ kind: "workspace", access, role: "member" }, [page("docs/idea.md")]),
+        access,
+      ).toEqual(REFUSED);
     }
   });
 
@@ -2037,8 +2040,62 @@ describe("a new page under Edit", () => {
       expect(decision.allowed && decision.write.kind, path).toBe("new-page");
     }
     expect(
-      decide({ kind: "workspace", access: "comment" }, [page("drafts/idea.md")], true),
+      decide(
+        { kind: "workspace", access: "comment", role: "member" },
+        [page("drafts/idea.md")],
+        true,
+      ),
     ).toEqual(REFUSED);
+  });
+
+  it("refuses a member's change to a rule file or a copy of one, and serves the rule only to an admin", () => {
+    const change = (afterPath: string) => ({
+      basedOnPath: null,
+      basedOnBlobSha256: null,
+      operation: "write",
+      afterPath,
+      afterBlobSha256: sha(5),
+      afterContentKind: "text",
+      afterByteLength: 14,
+      recordedAtMs: 5,
+    });
+    for (const path of ["docs/access.yaml", "docs/ACCESS.YAML", "docs/access.yaml~"]) {
+      expect(filterProposedChangeForShare(member, change(path)).allowed, path).toBe(false);
+    }
+    expect(decide(member, [page("docs/access.yaml.md")])).toEqual(REFUSED);
+    const ruleWrite = JSON.stringify({
+      momentId: "m-rule",
+      versionId: "main",
+      objectId: "o-rule",
+      path: "docs/access.yaml",
+      recordedAtMs: 1,
+      operation: "write",
+      payloadBeforeBlobSha256: null,
+      payloadBeforePath: null,
+      payloadAfterBlobSha256: sha(6),
+      payloadAfterPath: "docs/access.yaml",
+      metadata: { origin: "user" },
+      beforePresent: "null",
+    });
+    expect(filterOpForShare(member, "moment.append", ruleWrite).allowed).toBe(false);
+    expect(filterOpForShare({ ...member, role: "admin" }, "moment.append", ruleWrite).allowed).toBe(
+      true,
+    );
+  });
+
+  it("serves an admin the rule but refuses their change to it through a proposal or a Collection write", () => {
+    const admin: WorkspaceShareSelector = { ...member, role: "admin" };
+    const change = page("docs/access.yaml", { afterContentKind: "text" });
+    expect(filterProposedChangeForShare(admin, change).allowed).toBe(false);
+    expect(decide(admin, [change], true)).toEqual(REFUSED);
+    expect(decide(admin, [page("docs/access.yaml.md")], true)).toEqual(REFUSED);
+    // The same ordinary file is still theirs to change.
+    expect(
+      filterProposedChangeForShare(
+        admin,
+        page("docs/plan.md", { basedOnPath: "docs/plan.md", basedOnBlobSha256: sha(3) }),
+      ).allowed,
+    ).toBe(true);
   });
 
   it("refuses a member's new Collection, which would create a folder, and takes an admin's", () => {

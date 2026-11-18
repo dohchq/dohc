@@ -18,10 +18,29 @@ export interface StoredWorkspaceShareSelector {
 
 export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
   access: ShareAccess;
+  role: "admin" | "member";
 }
 
-/** The file side: a scope only the relay builds, never stored or sent. */
+/**
+ * The file side: a scope only the relay builds, never stored or sent. Admins
+ * also reach rule files, which every other scope hides.
+ */
 export function workspaceFileReach(selector: WorkspaceShareSelector) {
+  return {
+    paths: [] as string[],
+    versionId: null,
+    access: selector.access,
+    wholeWorkspace: true as const,
+    ...(selector.role === "admin" ? { ruleFiles: true as const } : {}),
+  };
+}
+
+/**
+ * The file side a write is judged against. An admin reads rule files but
+ * can't write one through sync: the owner's engine refuses a rule it didn't
+ * write, so the relay's index would hold a rule the owner never kept.
+ */
+export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
   return {
     paths: [] as string[],
     versionId: null,

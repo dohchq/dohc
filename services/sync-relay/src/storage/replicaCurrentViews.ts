@@ -117,6 +117,8 @@ export function replicaCurrentViewSelectors(
       return [{ versionId: selector.versionId, paths: selector.paths }];
     });
 }
+// Which files the relay keeps. It keeps rule files too; each recipient's read
+// hides them unless that recipient is an admin.
 export function currentViewFileVisible(
   selectors: ReplicaCurrentViewSelector[],
   file: { versionId: string; path: string },
@@ -124,7 +126,7 @@ export function currentViewFileVisible(
   return selectors.some(
     (selector) =>
       file.versionId === targetVersionId(selector) &&
-      visibleSharePath(selector, file.path) === file.path,
+      visibleSharePath({ ...selector, ruleFiles: true }, file.path) === file.path,
   );
 }
 export function replicaFileFromRow(
@@ -808,6 +810,8 @@ export function readReplicaCurrentViewRowText(
     ? (chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks)).toString("utf8")
     : null;
 }
+// Retention-visible: it can return a rule file's text. A recipient's read
+// filters with that recipient's own selector first.
 export function readReplicaCurrentViewText(
   storage: StorageContext,
   workspace: string,
