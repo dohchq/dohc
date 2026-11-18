@@ -3833,6 +3833,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pause_at_a_save_the_note_has_passed_makes_its_copy() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        // The relay paused at its save 0, then took the owner's row at 4.
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        feed(
+            &mut store,
+            &observed,
+            4,
+            owner.richdoc_append_paragraph("Typed after the pause"),
+        );
+        let mut input = pause_input(&observed);
+        input.row_cursor = input.applied_cursor;
+        let stop = super::super::release::pause_cached(
+            &mut store,
+            &mut cache,
+            &input,
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
+        assert_eq!(stop.paused.map(|paused| paused.applied_cursor), Some(0));
+        assert!(stored_text(&store).contains("Typed after the pause"));
+    }
+
     /// A held note: the collaborator's committed row at 5, the owner's own
     /// paragraph, and the owner's words typed into the collaborator's row.
     fn held_note(
@@ -3840,11 +3868,11 @@ mod tests {
         cache: &mut crate::WriterDocCache,
         observed: &ObservedOwnerBinding,
         checkpoint: &[u8],
-    ) {
+    ) -> Vec<u8> {
         let collaborator = Ydoc::wire();
         collaborator.apply(checkpoint).unwrap();
         let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
-        put_committed_row(store, cache, &observed.binding, 5, row).unwrap();
+        put_committed_row(store, cache, &observed.binding, 5, row.clone()).unwrap();
         let shown = open_draft_cached(store, cache, &observed.binding, 1).unwrap();
         let owner = Ydoc::wire();
         owner.apply(&shown.initial_update).unwrap();
@@ -3862,6 +3890,7 @@ mod tests {
             )
             .unwrap();
         }
+        row
     }
 
     fn pause_input(observed: &ObservedOwnerBinding) -> super::super::release::OwnerPauseInput {
@@ -3871,6 +3900,7 @@ mod tests {
             row_cursor: 5,
             copy_path: "owner (unsaved edits).md".into(),
             kept_snapshot: None,
+            room_copy: None,
             now_ms: 20,
         }
     }
@@ -3892,6 +3922,47 @@ mod tests {
             .read_with(|conn| super::super::release::paused_copy_in(conn, &key))
             .unwrap()
             .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn a_pause_takes_the_rows_this_computer_never_received_from_the_room_copy() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        let row = held_note(&mut store, &mut cache, &observed, &checkpoint);
+        // The room took a collaborator's row and another after it; the relay
+        // paused before any save held them, and a restart lost the one this
+        // computer had.
+        let room = Ydoc::wire();
+        room.apply(&checkpoint).unwrap();
+        room.apply(&row).unwrap();
+        room.richdoc_append_paragraph("Only in the room");
+        let mut cache = crate::WriterDocCache::default();
+        let mut input = pause_input(&observed);
+        input.row_cursor = input.applied_cursor;
+        assert!(matches!(
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &input,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+        input.room_copy = Some(room.encode_full_state());
+
+        let stop = release::pause_cached(&mut store, &mut cache, &input, &NoFaults, |tx, pause| {
+            pause(tx)
+        })
+        .unwrap();
+        assert!(!stop.paused.unwrap().left_out);
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Owner says: Committed by a collaborator"));
+        assert!(copy.contains("Standalone owner paragraph"));
+        assert!(copy.contains("Only in the room"));
+        assert_eq!(entry_count(&store), 0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ description: Triage dohc's nightly verification run, run one by hand, or fix the
 # Triage verification runs
 
 The verification queue service runs local PR gates on this host. Its root is `C:\w\_verification`.
-Read [the verification procedure](../../../docs/engineering/verify-agent-work.md) for the queue, flaky tests, the [nightly run](../../../docs/engineering/verify-agent-work.md#nightly-run), and test times.
+Read [the verification queue](../../../docs/engineering/verification-queue.md) for the queue, shared failures, the [nightly run](../../../docs/engineering/verification-queue.md#nightly-run), and test times, and [the verification procedure](../../../docs/engineering/verify-agent-work.md#flaky-tests) for flaky tests.
 
 Both procedures follow these rules:
 
@@ -14,7 +14,7 @@ Both procedures follow these rules:
 - Create worktrees with `~/dev/garage/tools/worktree.mjs`. Remove your worktrees and processes when you finish.
 - Verify each PR with `pnpm verify:pr --base origin/main` through the queue, unless passing PR checks cover its head.
 - Owners take turns in the queue. You may move a waiting request with `pnpm verify:queue move` and a `--reason`.
-  Follow [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request): `--before` orders one owner's requests, and `--first` is only to unblock other work.
+  Follow [the procedure](../../../docs/engineering/verification-queue.md#move-a-waiting-request): `--before` orders one owner's requests, and `--first` is only to unblock other work.
 - Do not cancel, kill, or edit another request, or its files under `C:\w\_verification` or `C:\w\_locks`.
 - Do not stop another agent's run.
 

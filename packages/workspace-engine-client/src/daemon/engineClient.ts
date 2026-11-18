@@ -1377,6 +1377,8 @@ export class EngineClient implements EngineTransport {
       rowCursor: number;
       copyPath: string;
       keptSnapshot?: string;
+      /** The relay's copy of the paused room, as one update of its whole state. */
+      roomCopy?: Uint8Array;
     },
     signal?: AbortSignal,
   ) {
@@ -1399,6 +1401,15 @@ export class EngineClient implements EngineTransport {
         rowCursor: input.rowCursor,
         copyPath: input.copyPath,
         ...(input.keptSnapshot === undefined ? {} : { keptSnapshot: input.keptSnapshot }),
+        ...(input.roomCopy === undefined
+          ? {}
+          : {
+              roomCopyBase64: Buffer.from(
+                input.roomCopy.buffer,
+                input.roomCopy.byteOffset,
+                input.roomCopy.byteLength,
+              ).toString("base64"),
+            }),
       },
       signal,
     );

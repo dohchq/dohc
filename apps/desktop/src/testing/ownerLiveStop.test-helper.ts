@@ -13,7 +13,7 @@ export function pendingStopHarness(
   options: Partial<
     Pick<
       OwnerLiveDocumentActionDependencies<{ workspaceId: string }>,
-      "withoutEditors" | "ownerLiveQuarantines" | "liveChanges" | "person"
+      "withoutEditors" | "ownerLiveQuarantines" | "liveChanges" | "person" | "resumeOwnerLivePause"
     >
   > = {},
 ) {

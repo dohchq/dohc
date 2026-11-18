@@ -726,6 +726,150 @@ it("records the owner's typing while a resync is pending, and reads the queue ag
   await provider.evict();
 });
 
+it.each([
+  ["answers", false],
+  ["fails after the engine let go", true],
+] as const)(
+  "leaves live editing between the owner's edits when the pause %s, and shows the note once the engine no longer edits it live",
+  async (_name, failsAfter) => {
+    const engine = new YdocLoopbackEngine();
+    const path = "notes/owner.md";
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path,
+      objectId: "owner-object",
+      content: "seed",
+      contentKind: "richdoc",
+    });
+    const seedAdapter = new YdocLiveAdapter(engine);
+    const seed = await seedAdapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path,
+      contentKind: "richdoc",
+    });
+    engine.markSessionReplicated(seed.sessionId);
+    const objectId = seed.objectId;
+    await seed.close({ settle: false });
+    seedAdapter.dispose();
+    const claim = "a".repeat(64);
+    let live = true;
+    const draft = () => ({
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: VERSION,
+        objectId,
+        lineageClaimId: claim,
+        currentPath: path,
+        selectorPaths: [path],
+        restoreFenceGeneration: 0,
+      },
+      relayDatabaseNamespace: "relay",
+      revision: 1,
+      acceptedCursor: 1,
+      nativeHeadSequence: 1,
+      nativeUnsettled: false,
+      outboxId: "outbox",
+      pendingBytes: 0,
+      state: "active",
+    });
+    const recorded: string[] = [];
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          recorded.push((request.params as { updateBase64: string }).updateBase64);
+          const response = await recordUnderClaim(engine, request, claim);
+          if (!live) return response;
+          return {
+            ...response,
+            result: {
+              lineageClaimId: claim,
+              lineageOriginatedHere: false,
+              ownerDraft: {
+                outboxId: "outbox",
+                sequence: recorded.length,
+                deliveryId: "delivery",
+                updateDigest: "b".repeat(64),
+                pendingBytes: 10,
+                state: "active",
+              },
+            },
+          };
+        }
+        const response = await engine.sendRequest(request);
+        if (request.method !== YDOC_METHOD.open && request.method !== YDOC_METHOD.resync)
+          return response;
+        return {
+          ...response,
+          result: {
+            ...(response.result as Record<string, JsonValue>),
+            lineageClaimId: claim,
+            ...(live ? { ownerDraft: draft() } : {}),
+          },
+        };
+      },
+    };
+    const replacements: Y.Doc[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path,
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: settleScheduler().schedule,
+      onLineageReplaced: (doc) => replacements.push(doc),
+    });
+    await provider.applyLocalUpdate(
+      richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "sent before the pause"),
+    );
+
+    // The engine refuses to pause: the editor stays live, and its waiting edit is sent.
+    const refusal = new Error("owner-stop-conflict");
+    await expect(provider.leaveLiveEditing!(async () => Promise.reject(refusal))).rejects.toBe(
+      refusal,
+    );
+    await provider.applyLocalUpdate(
+      richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "sent after a refused pause"),
+    );
+    expect(recorded).toHaveLength(2);
+    expect(replacements).toEqual([]);
+
+    // An edit typed while the pause waits for the edits before it joins what it is given.
+    let unsent: Uint8Array | undefined;
+    const acknowledged = Y.encodeStateAsUpdate(provider.doc);
+    const lost = new Error("conflict-stale-target");
+    const left = provider.leaveLiveEditing!(async (edits) => {
+      unsent = edits;
+      live = false;
+      if (failsAfter) throw lost;
+      return "paused";
+    });
+    const typed = provider
+      .applyLocalUpdate(richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "typed while pausing"))
+      .catch((error: unknown) => error);
+    await (failsAfter ? expect(left).rejects.toBe(lost) : expect(left).resolves.toBe("paused"));
+    const given = new Y.Doc();
+    Y.applyUpdate(given, acknowledged);
+    Y.applyUpdate(given, unsent!);
+    expect(ydocProjection.yDocToMarkdown(given)).toContain("typed while pausing");
+    await expect(typed).resolves.toBeInstanceOf(Error);
+    await vi.waitFor(() => expect(replacements).toHaveLength(1));
+    // It never reaches the engine, and the editor shows the note.
+    expect(recorded).toHaveLength(2);
+    expect(ydocProjection.yDocToMarkdown(provider.doc)).not.toContain("typed while pausing");
+    expect(ydocProjection.yDocToMarkdown(provider.doc)).toContain("sent after a refused pause");
+    await provider.applyLocalUpdate(
+      richdocUpdate(Y.encodeStateAsUpdate(provider.doc), "typed in the note"),
+    );
+    expect(recorded).toHaveLength(3);
+    await provider.evict();
+  },
+);
+
 it("forwards settlement requests only to their open native session", async () => {
   const engine = seedPlaintextEngine("seed"),
     adapter = new YdocLiveAdapter(engine);

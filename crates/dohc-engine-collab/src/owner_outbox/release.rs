@@ -510,6 +510,10 @@ pub struct OwnerPauseInput {
     pub copy_path: String,
     /// The refused edits the desktop recorded as kept edits before the pause.
     pub kept_snapshot: Option<String>,
+    /// The relay's copy of the paused room: its whole state as one update,
+    /// holding the rows it took and no save holds, which this computer may
+    /// never have received.
+    pub room_copy: Option<Vec<u8>>,
     pub now_ms: i64,
 }
 
@@ -578,12 +582,13 @@ fn pause_in_tx(
     crate::live_update_application::require_restore_open(tx, &key)
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
-    // rows through N are here.
+    // rows through N are here. The note can hold more than A: the relay goes
+    // on taking the owner's own rows after it pauses.
     // Rows and saves share one count, so N == A means no row was sent. A row
     // below A may not be in that save; only the layer shows it is here.
     let rows_through_n = input.row_cursor == input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
-    if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
+    if observed.accepted_cursor < input.applied_cursor || !rows_through_n {
         return Err(OwnerOutboxError::AcceptedStateIncomplete);
     }
     // Unbinding would strand a ready settlement; let the delivery pass apply
@@ -622,7 +627,10 @@ fn pause_in_tx(
     if refused && input.kept_snapshot.is_none() {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    let mut parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    // After the rows held here, so a room copy that cannot render leaves
+    // out only what this computer never received.
+    parts.rows.extend(input.room_copy.clone());
     let (markdown, left_out) = copy_text(parts)?;
     // A blob holds at least one byte; an empty note's copy is an empty file.
     let copy_digest = if markdown.is_empty() {

@@ -2202,3 +2202,45 @@ it("successful eviction stays closed when checkpoint retirement fails", async ()
     editor.destroy();
   }
 });
+
+it("pauses an open editor behind the typing it already handed over, then shows the note", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    // The engine no longer edits the note live once it leaves.
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    typeIntoBody(editor, "Typed before the pause.");
+    const recordedAtPause: string[] = [];
+    await expect(
+      session.leaveLiveEditing!(async () => {
+        recordedAtPause.push(journalMarkdown());
+        return "paused";
+      }),
+    ).resolves.toBe("paused");
+    expect(recordedAtPause[0]).toContain("Typed before the pause.");
+    await vi.waitFor(() => expect(replacements).toHaveBeenCalledOnce());
+    expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain(
+      "Typed before the pause.",
+    );
+    expect(captureErrors).toEqual([]);
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});

@@ -7,6 +7,7 @@ import {
   type OwnerStopRetirementTarget,
 } from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
+import { settleOwnerLivePauses, type OwnerLivePause, type RelayLivePause } from "./ownerLivePause";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -131,6 +132,13 @@ export interface ServerOwnerDelivery {
      * change the server's answer.
      */
     open(path: string, signal: AbortSignal): Promise<"hosted" | "refused">;
+    /** The notes the server paused for good, oldest first. */
+    livePauses(signal: AbortSignal): Promise<RelayLivePause[]>;
+    /** A pause's copy of its room, read to the length its list gave. */
+    livePauseCopy(pauseId: string, byteLength: number, signal: AbortSignal): Promise<Uint8Array>;
+    /** The copy is written next to the note, so the server deletes its own. */
+    livePauseCopyWritten(pauseId: string, sha256: string, signal: AbortSignal): Promise<void>;
+    resumeLivePause(pauseId: string, signal: AbortSignal): Promise<void>;
   } | null>;
 }
 type ServerOwnerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
@@ -233,6 +241,12 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   ownerHasOpen?(workspaceId: string, path: string): boolean;
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
+  // Runs `leave` between the edits of the editors here that edit the note at `path` live, given their unsent edits.
+  leaveLiveEditing?<T>(
+    workspaceId: string,
+    path: string,
+    leave: (unsent: Uint8Array[]) => Promise<T>,
+  ): Promise<T>;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -307,6 +321,17 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     string,
     Map<string, { objectId: string; path: string; detail: string }>
   >();
+  // Notes the server paused for good that this computer holds as paused, from each
+  // workspace's last complete read. They take no room until their owner resumes them.
+  const ownerLivePauses = new Map<string, OwnerLivePause[]>();
+  const ownerLivePausesTried = new Set<string>();
+  // Counts each workspace's Resumes, so a pass that read the pauses before one keeps its answer to itself.
+  const ownerLivePauseResumes = new Map<string, number>();
+  // A note the server paused takes no room and no delivery turn until its owner resumes it.
+  const withoutServerPauses = (workspaceId: string, documents: ListedOwnerDeliveryDocument[]) => {
+    const paused = new Set((ownerLivePauses.get(workspaceId) ?? []).map((row) => row.objectId));
+    return documents.filter((document) => !paused.has(document.binding.objectId));
+  };
   // The ready documents from each workspace's last complete live-host list, for the move guard.
   const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();
   // The owner's open. Each workspace's documents its last list named live or
@@ -1024,12 +1049,64 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       check();
                       console.error("[desktop] server kept edits list failed:", error);
                     }
-                    const documents = readyOwnerDeliveryDocuments(response, workspaceId);
+                    const listed = readyOwnerDeliveryDocuments(response, workspaceId);
                     check();
-                    liveDocumentPaths.set(
-                      workspaceId,
-                      listedOwnerDeliveryPaths(response, documents),
-                    );
+                    liveDocumentPaths.set(workspaceId, listedOwnerDeliveryPaths(response, listed));
+                    try {
+                      const resumes = ownerLivePauseResumes.get(workspaceId) ?? 0;
+                      const pauses = await session.livePauses(signal);
+                      check();
+                      const { existsInWorkspace } = await import("./ownerLiveRecoveryCopy");
+                      await sessions.run(operation.workspace, async (binding) => {
+                        const client = daemon.currentClient();
+                        if (!(client instanceof EngineClient))
+                          throw new Error("Owner Stop requires the desktop daemon client.");
+                        const settled = await settleOwnerLivePauses({
+                          pauses,
+                          previous: ownerLivePauses.get(workspaceId) ?? [],
+                          tried: ownerLivePausesTried,
+                          documents: listed,
+                          client,
+                          workspaceHandle: binding.workspace,
+                          relay: {
+                            copy: (pause, copySignal) =>
+                              session.livePauseCopy(
+                                pause.pauseId,
+                                pause.copy?.byteLength ?? 0,
+                                copySignal,
+                              ),
+                            copyWritten: session.livePauseCopyWritten,
+                          },
+                          writes: {
+                            exists: existsInWorkspace(operation.workspace),
+                            create: (relative, text) =>
+                              createDurableFile(operation.workspace.rootPath, relative, text),
+                          },
+                          leaveLiveEditing: (path, leave) =>
+                            dependencies.leaveLiveEditing
+                              ? dependencies.leaveLiveEditing(workspaceId, path, leave)
+                              : leave([]),
+                          render: (state) =>
+                            dependencies.documentProjection.run({ kind: "file", state }),
+                          signal,
+                          onError: (pause, error) =>
+                            console.error("[desktop] a paused note could not be settled:", error),
+                        });
+                        check();
+                        if (
+                          resumes === (ownerLivePauseResumes.get(workspaceId) ?? 0) &&
+                          JSON.stringify(settled) !==
+                            JSON.stringify(ownerLivePauses.get(workspaceId) ?? [])
+                        ) {
+                          ownerLivePauses.set(workspaceId, settled);
+                          notifyRenderer({ workspaceId });
+                        }
+                      });
+                    } catch (error) {
+                      check();
+                      console.error("[desktop] paused notes discovery failed:", error);
+                    }
+                    const documents = withoutServerPauses(workspaceId, listed);
                     syncOwnerRooms(workspaceId, documents);
                     const { documents: rows, diverged } = response as {
                       documents: {
@@ -1310,9 +1387,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     if (generation !== ownerDeliveryGeneration || isQuitting())
                       throw new Error("This live editing session ended.");
                   };
-                  const documents = readyOwnerDeliveryDocuments(
-                    await session.documents(signal),
+                  const documents = withoutServerPauses(
                     workspaceId,
+                    readyOwnerDeliveryDocuments(await session.documents(signal), workspaceId),
                   );
                   check();
                   const native = (nativeOwnerDeliveryModule ??=
@@ -1925,6 +2002,44 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     ownerLiveStopFailures(workspaceId: string) {
       return [...(ownerStopFailures.get(workspaceId)?.values() ?? [])];
+    },
+    ownerLivePauses(workspaceId: string): OwnerLivePause[] {
+      return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId)
+        ? (ownerLivePauses.get(workspaceId) ?? [])
+        : [];
+    },
+    /**
+     * Ends the server's pause of the note at `path`, once its copy is written,
+     * so the server takes edits again. Resume then clears this computer's
+     * paused Stop as it clears any other. Returns the pause's cause, or null
+     * when the note is not paused.
+     */
+    async resumeOwnerLivePause(
+      workspace: EngineWorkspace,
+      path: string,
+    ): Promise<OwnerLivePause["cause"] | null> {
+      const pause = ownerLivePauses.get(workspace.workspaceId)?.find((row) => row.path === path);
+      if (!pause) return null;
+      ownerLivePauseResumes.set(
+        workspace.workspaceId,
+        (ownerLivePauseResumes.get(workspace.workspaceId) ?? 0) + 1,
+      );
+      await withServerSession(workspace.workspaceId, (session, signal) =>
+        session.resumeLivePause(pause.pauseId, signal),
+      );
+      // Again once it is done, for a pass that read the pauses while it ran.
+      ownerLivePauseResumes.set(
+        workspace.workspaceId,
+        (ownerLivePauseResumes.get(workspace.workspaceId) ?? 0) + 1,
+      );
+      ownerLivePauses.set(
+        workspace.workspaceId,
+        (ownerLivePauses.get(workspace.workspaceId) ?? []).filter(
+          (row) => row.pauseId !== pause.pauseId,
+        ),
+      );
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+      return pause.cause;
     },
     // A document's queue on this computer speaks for it before any the server
     // keeps. A record that can only be saved leaves the server's row its own.

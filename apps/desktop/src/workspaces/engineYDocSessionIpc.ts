@@ -1049,6 +1049,36 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     await settle;
   }
 
+  /**
+   * Runs `leave` between the edits of each editor here that edits the note
+   * at `path` live, given the edits the engine has not taken from them. Once
+   * it succeeds, those editors show the note as the engine holds it.
+   */
+  async leaveLiveEditing<T>(
+    workspaceId: string,
+    path: string,
+    leave: (unsent: Uint8Array[]) => Promise<T>,
+  ): Promise<T> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    const editors: ((next: (unsent: Uint8Array) => Promise<T>) => Promise<T>)[] = [];
+    try {
+      authority.assertCurrent();
+      if (!this.#isSharedView(authority.workspace))
+        this.#owner.forEachSessionUnderPath(authority.workspace.attachmentId, path, (session) => {
+          const { provider } = session;
+          if (provider.path === path && provider.ownerBound && provider.leaveLiveEditing)
+            editors.push((next) => provider.leaveLiveEditing!(next));
+        });
+    } finally {
+      authority.release();
+    }
+    const run = (unsent: Uint8Array[]): Promise<T> => {
+      const editor = editors[unsent.length];
+      return editor ? editor((edits) => run([...unsent, edits])) : leave(unsent);
+    };
+    return run([]);
+  }
+
   // Save it again, on a document whose file was deleted outside dohc. Its
   // session can outlive its tab: the close was refused, so the session still
   // holds the text, and saving lets that close finish.
