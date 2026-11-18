@@ -1,6 +1,6 @@
 import type { MemberFolders } from "../shareFilter";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
-import type { ShareLabelReader } from "../shareFilter";
+import type { ShareLabelReader, ShareSelector } from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
@@ -1990,7 +1990,11 @@ export interface SyncRelayStorage {
   setDirectBlock: DirectMessagesMethod<"setDirectBlock">;
   directRevision: DirectMessagesMethod<"directRevision">;
   shareHasActiveGrants(shareId: string): boolean;
-  getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
+  getShareLabels(
+    shareId: string,
+    reader: ShareLabelReader,
+    readerFiles?: ShareSelector | null,
+  ): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(

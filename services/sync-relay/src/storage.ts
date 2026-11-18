@@ -26,7 +26,7 @@ import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
-import type { ShareLabelReader } from "./shareFilter";
+import type { ShareLabelReader, ShareSelector } from "./shareFilter";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
@@ -2042,8 +2042,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .get(shareId);
   }
-  getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels {
-    return shareLabelsStorage.getShareLabels(this, shareId, reader);
+  getShareLabels(
+    shareId: string,
+    reader: ShareLabelReader,
+    readerFiles?: ShareSelector | null,
+  ): ShareLabels {
+    return shareLabelsStorage.getShareLabels(this, shareId, reader, readerFiles);
   }
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void {
     shareLabelsStorage.setShareLabels(this, shareId, labels, updatedAtMs);

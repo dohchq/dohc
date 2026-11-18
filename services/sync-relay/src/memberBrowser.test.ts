@@ -510,6 +510,32 @@ describe("a member reads the workspace through the link read routes", () => {
     await setLevel(h, "view");
     expect(history()).toEqual({ status: "denied" });
   });
+
+  // A workspace label is read with its reader's reach. A rule file stays out
+  // of it for everyone but the owner.
+  it("keeps the file links its reader reaches in the workspace's label", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, storage, "ana");
+    await ownerWrite(h, "hidden/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "hidden/x.md", "hidden work");
+    storage.setShareLabels(
+      ana.shareId,
+      { subjectName: "Community @[docs/plan.md] @[hidden/x.md] @[hidden/access.yaml]" },
+      0,
+    );
+    const subject = async () =>
+      (await json(await memberRead(h, "/sync/link/share", ana.grantId, "ana"))).subjectName;
+    expect(await subject()).toBe(
+      "Community @[docs/plan.md] (a file not shared here) (a file not shared here)",
+    );
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    expect(await subject()).toBe(
+      "Community @[docs/plan.md] @[hidden/x.md] (a file not shared here)",
+    );
+  });
 });
 
 function chat(h: SyncRelayHandler, path: string, userId: string, init: RequestInit = {}) {

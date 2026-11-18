@@ -18,7 +18,7 @@ import {
 import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
-import { pathLevel, targetVersionId } from "./shareFilter";
+import { pathLevel, targetVersionId, type ShareSelector } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES } from "./wireLimits";
@@ -84,8 +84,10 @@ export function createLinkReadRoutes(
       : {};
   };
   // A membership's share names its workspace; a link's share keeps its own label.
-  const subjectName = (shareId: string, request: Request) =>
-    storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link").subjectName ??
+  // A member reads the label's file links through their own fresh reach.
+  const subjectName = (shareId: string, request: Request, readerFiles: ShareSelector) =>
+    storage.getShareLabels(shareId, isMemberRequest(request) ? "member" : "link", readerFiles)
+      .subjectName ??
     (isMemberRequest(request)
       ? storage.getWorkspaceMembershipByShare(shareId)?.workspaceName
       : null) ??
@@ -136,7 +138,7 @@ export function createLinkReadRoutes(
           receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
           effectiveSelector: presentation.selector,
           access: fresh.access,
-          subjectName: subjectName(fresh.shareId, request),
+          subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
           ...linkChannel(fresh.grantId),
           ...freshness,
           // share-web learns a holder's grant at exchange. It learns an agent's
@@ -230,7 +232,7 @@ export function createLinkReadRoutes(
             ok: true,
             effectiveSelector: presentation.selector,
             access: fresh.access,
-            subjectName: subjectName(fresh.shareId, request),
+            subjectName: subjectName(fresh.shareId, request, fresh.effectiveSelector),
             ...linkChannel(fresh.grantId),
             files,
             nextCursor: snapshot.nextCursor,

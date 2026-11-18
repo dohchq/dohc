@@ -1,7 +1,7 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
-import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
+import { fileSideOf, filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
 
@@ -170,7 +170,11 @@ export function pushMessageAccess(
       place:
         found?.place ??
         pushPlainText(
-          storage.getShareLabels(authority.share.shareId, "member").subjectName,
+          storage.getShareLabels(
+            authority.share.shareId,
+            "member",
+            fileSideOf(authority.effectiveSelector),
+          ).subjectName,
           "a chat",
         ),
       channel: found?.channel ?? Boolean(channel),

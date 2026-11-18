@@ -1251,18 +1251,24 @@ export type ShareLabelReader = "owner" | "member" | "link";
 // A Group's name is also its share's label. Anyone but the owner reads it
 // with only the file links its share's files cover, as the name reads in
 // the chat, and a link reader reads those as its files show them. A selector
-// that does not parse covers none. A workspace label names no reader, and
-// each member's reach differs by folder, so it covers no file link.
+// that does not parse covers none. A workspace label covers what its reader's
+// own file side reaches, `readerFiles` from that reader's authorization, less
+// rule files. Without it, it covers no file link.
 export function shareLabelFor(
   selectorJson: string,
   label: string | null,
   reader: ShareLabelReader,
+  readerFiles?: ShareSelector | null,
 ): string | null {
   if (label === null || reader === "owner") return label;
   const selector = parseStoredAnyShareSelectorJson(selectorJson);
   if (selector && !("kind" in selector)) return label;
   const files: ShareSelector | null =
-    selector?.kind === "group" ? { paths: selector.paths, versionId: null, access: "view" } : null;
+    selector?.kind === "group"
+      ? { paths: selector.paths, versionId: null, access: "view" }
+      : selector?.kind === "workspace" && readerFiles
+        ? { ...readerFiles, ruleFiles: undefined }
+        : null;
   const covered = withholdChatFileLinks(label, (path) => shareCoversLinkPath(files, path));
   if (reader === "member" || files === null) return covered;
   const projection = createAccountlessPathProjection(files);
