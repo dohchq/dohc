@@ -1,4 +1,5 @@
 import { createChatLinksReader } from "../workspaces/chatLinks";
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { requestDeclaredTool } from "@dohc/mcp/tools";
 import { executeCli } from "@dohc/cli";
 import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "@dohc/cli/protocol";
@@ -1623,6 +1624,10 @@ describe("a joined workspace", () => {
       "You",
       "Alice Chen",
     ]);
+    // "You" wears the viewer's own colour, not the colour of the account key it was pulled under.
+    const own = ownActorPresentation("local-owner", null);
+    expect(listed.messages[0]!.presentation).toMatchObject({ self: true, hue: own.hue });
+    expect(listed.messages[1]!.presentation?.self).toBe(false);
   });
 
   it("keeps your own name in your own workspace", async () => {
