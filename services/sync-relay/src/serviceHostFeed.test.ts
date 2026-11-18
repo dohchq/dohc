@@ -1313,8 +1313,9 @@ it("answers a push with no rows before a long history is read, and holds a blob 
     const have = f
       .request("POST", "blobs/have", JSON.stringify({ sha256s: [A.sha256] }))
       .finally(() => (answered = true));
-    // Long enough for a check that did not wait to answer.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The read takes one turn of the loop for each page. A check that did not wait would answer within a few.
+    const sent = pages;
+    await vi.waitFor(() => expect(pages).toBeGreaterThan(sent + 100));
     expect(answered).toBe(false);
     ended = true;
     expect(await (await have).json()).toEqual({ ok: true, missing: [] });
