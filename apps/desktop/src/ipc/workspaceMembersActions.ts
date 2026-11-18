@@ -377,7 +377,7 @@ export function createOwnedWorkspaceGroupAction<Credentials>(dependencies: {
       (path, init) => dependencies.relayResponse(credentials, path, init),
       { workspaceId },
       input,
-      "your server does not know this workspace",
+      "this workspace has not synced to your server yet. Try again once it has",
     );
   };
 }

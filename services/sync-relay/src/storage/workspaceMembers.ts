@@ -1063,14 +1063,12 @@ export function createWorkspaceGroup(
   },
 ): CreateWorkspaceGroupResult {
   return storage.tx((): CreateWorkspaceGroupResult => {
-    const membership =
+    // The owner needs no membership record yet, so a hidden Group can exist before the first invite.
+    const workspaceId =
       input.shareId !== undefined
-        ? getWorkspaceMembershipByShare(storage, input.shareId)
-        : input.workspaceId !== undefined
-          ? getWorkspaceMembership(storage, input.workspaceId)
-          : null;
-    if (!membership) return { ok: false, reason: "not-found" };
-    const { workspaceId } = membership;
+        ? getWorkspaceMembershipByShare(storage, input.shareId)?.workspaceId
+        : input.workspaceId;
+    if (workspaceId === undefined) return { ok: false, reason: "not-found" };
     const actor = workspaceRoleOf(storage, workspaceId, input.actorUserId);
     if (!actor) return { ok: false, reason: "not-found" };
     if (actor.role === "member") return { ok: false, reason: "forbidden" };

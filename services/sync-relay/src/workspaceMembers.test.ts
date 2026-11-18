@@ -1897,6 +1897,23 @@ describe("a Group's rule", () => {
     expect(rebuilt).toContain("STAFF ONLY");
   });
 
+  it("lets the owner create a hidden Group before anyone is invited, and refuses anyone else", async () => {
+    const { h } = await seed();
+    expect(
+      (await post(h, "zed", "/sync/members/groups", { workspaceId: WORKSPACE, name: "Board" }))
+        .status,
+    ).toBe(404);
+    const created = await post(h, OWNER, "/sync/members/groups", {
+      workspaceId: WORKSPACE,
+      name: "Board",
+      level: "none",
+    });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const { channelWireId } = (await json(created)) as { channelWireId: string };
+    await invited(h, "ana");
+    expect(await pulledText(h, "ana", await shareIdOf(h, "ana"))).not.toContain(channelWireId);
+  });
+
   it("wakes held reads when a rule changes", async () => {
     const activity = new DiscussionActivityHub();
     const woken: string[] = [];

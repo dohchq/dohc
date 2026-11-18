@@ -569,7 +569,7 @@ describe("the owner's New group with a level", () => {
     const o = owned();
     o.relay.mockResolvedValueOnce(json({ error: "not_found" }, 404));
     await expect(o.create("ws-1", { name: "Team", level: "view" })).rejects.toThrow(
-      "dohc could not create Team because your server does not know this workspace.",
+      "dohc could not create Team because this workspace has not synced to your server yet. Try again once it has.",
     );
   });
 });
