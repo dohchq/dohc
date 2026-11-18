@@ -14,6 +14,7 @@ import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
+import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollections";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
@@ -66,7 +67,8 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
  * A signed-in account's reads, chat writes, read marks, wake retries,
  * conversation contexts, and a phone's page opens for live editing in a
  * workspace it owns, through this server's copy of it, while it shows on the
- * phone; its published apps (phoneApps.ts); its change feed, at
+ * phone; its published apps (phoneApps.ts); its transactional Collections
+ * (phoneCollections.ts); its change feed, at
  * `GET .../ops/changes?since=&hold=`; and its wake changes there, at
  * `GET .../ops/wakeChanges?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -96,6 +98,8 @@ export function createAccountOperationRoute(options: {
   serverUrl?: string;
   /** The workspace's published apps, their review and approval, and launch grants. */
   phoneApps?: PhoneApps;
+  /** The workspace's transactional Collections, read through the dataset host. */
+  phoneCollections?: PhoneCollections;
   /** Opens a page for the phone to edit live. Absent while this server hosts no live pages. */
   phonePages?: () => PhonePages | undefined;
 }) {
@@ -123,9 +127,11 @@ export function createAccountOperationRoute(options: {
       );
     }
     const app = options.phoneApps !== undefined && isPhoneAppOperation(route.operation);
-    // The feeds, the app operations, and a page open read only the relay's own tables and its live host; every other
-    // operation needs a copy.
-    if (!feed && !wakeFeed && !app && !page && options.copies() === undefined)
+    const collection =
+      options.phoneCollections !== undefined && isPhoneCollectionOperation(route.operation);
+    // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
+    // and its live host; every other operation needs a copy.
+    if (!feed && !wakeFeed && !app && !collection && !page && options.copies() === undefined)
       throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
@@ -140,6 +146,7 @@ export function createAccountOperationRoute(options: {
         feed ||
         wakeFeed ||
         app ||
+        collection ||
         write ||
         mark ||
         retry ||
@@ -207,6 +214,16 @@ export function createAccountOperationRoute(options: {
       return jsonResponse({
         ok: true,
         result: options.phoneApps!.run(caller, route.workspaceId, route.operation, args),
+      });
+    // A read checks the sign-in, the owner and Show on phone again after its wait, and before it answers.
+    if (collection)
+      return await options.phoneCollections!.respond({
+        caller,
+        workspaceId: route.workspaceId,
+        operation: route.operation,
+        args,
+        authorize,
+        signal: request.signal,
       });
     // A page open reads only the relay's own tables and the live host.
     if (page) {

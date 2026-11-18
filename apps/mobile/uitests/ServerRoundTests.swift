@@ -244,4 +244,26 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(containing(app.webViews.firstMatch, sentence.trimmingCharacters(in: .whitespaces)).waitForExistence(timeout: 60),
                   "After a relaunch, Plan should show the sentence typed on the phone")
   }
+
+  // Needs a seeded transactional Collection named in DOHC_SERVER_COLLECTION, whose first table has a record with the
+  // value in DOHC_SERVER_RECORD among its first 50, in a field its rows show. Home lists the Collection, the Collection
+  // shows the record's row, and the record shows the value.
+  @MainActor
+  func test9_readsACollection() throws {
+    let name = try need("DOHC_SERVER_COLLECTION")
+    let value = try need("DOHC_SERVER_RECORD")
+    let app = XCUIApplication()
+    app.launch()
+    tab(app, "Home")
+    let collection = app.buttons[name]
+    XCTAssertTrue(collection.waitForExistence(timeout: 30), "Home should list the Collection \(name)")
+    collection.tap()
+    let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
+    row.tap()
+    // In a field of the record's own screen, not the row it was opened from.
+    let field = app.otherElements.matching(identifier: "record-field")
+      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
+  }
 }

@@ -17,8 +17,12 @@ import {
   type WorkspaceApps,
 } from "../apps/appStore";
 import { canOpenApps } from "../apps/canOpenApps";
+import {
+  createWorkspaceCollections,
+  type WorkspaceCollections,
+} from "../collections/collectionStore";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
-import { createLivePages, type LivePages } from "../pages/pageLive";
+import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
@@ -59,8 +63,10 @@ interface AccountValue {
   readonly runner: AppRunner;
   /** The open workspace's published apps. */
   readonly apps: WorkspaceApps | null;
+  /** The open workspace's transactional Collections, read into memory only. */
+  readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
-  readonly livePages: LivePages;
+  readonly livePages: ScopedEnds;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -94,12 +100,14 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // asks again at once. Only where its Sign out delete stands reaches the screen, so the rest of its changes render
 // nothing.
 //
-// A running app (src/apps/appStore.ts) and a page edited live (src/pages/pageLive.ts) end before anything else happens
-// at Sign out, a sign-in change (a 401 included), a workspace switch and Show on phone off.
+// A running app (src/apps/appStore.ts), a page edited live (src/pages/pageLive.ts) and the Collections read
+// (src/collections/collectionStore.ts) end before anything else happens at Sign out, a sign-in change (a 401 included),
+// a workspace switch and Show on phone off.
 export function AccountProvider({ children }: { children: ReactNode }) {
   const [runner] = useState(createAppRunner);
-  const [livePages] = useState(createLivePages);
-  const [teardown] = useState(() => appTeardown(runner, livePages));
+  const [livePages] = useState(createScopedEnds);
+  const [collectionStores] = useState(createScopedEnds);
+  const [teardown] = useState(() => appTeardown(runner, livePages, collectionStores));
   // Sign out deletes the account's kept.db rows: the sign-in ends, and its token goes, once that delete has committed.
   // With phone writes off it sends nothing, not even records an earlier build kept. Both files open once per install.
   const [kept] = useState(createKeptDatabase);
@@ -169,6 +177,14 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [signIn, currentWorkspaceId, runner],
   );
   useEffect(() => () => apps?.stop(), [apps]);
+  const collections = useMemo(
+    () =>
+      signIn && currentWorkspaceId
+        ? createWorkspaceCollections(signIn, currentWorkspaceId, collectionStores)
+        : null,
+    [signIn, currentWorkspaceId, collectionStores],
+  );
+  useEffect(() => () => collections?.stop(), [collections]);
   useEffect(() => clearNoticeListsOnSignInChange(account, kept), [account, kept]);
   // As the open workspace's store: making one starts nothing, and the effect runs it.
   const notices = useMemo(
@@ -239,6 +255,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       wakes,
       runner,
       apps,
+      collections,
       livePages,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
@@ -260,6 +277,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       runner,
       teardown,
       apps,
+      collections,
       livePages,
       list,
       open,
