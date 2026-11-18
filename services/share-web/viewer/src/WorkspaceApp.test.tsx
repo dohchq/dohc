@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment, markdownToYDoc } from "@dohc/ydoc-projection";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -155,13 +155,16 @@ function server(
     history?: Record<string, unknown[]>;
     older?: Record<string, unknown[]>;
     postFails?: { status: number; code: string };
+    moderates?: boolean;
+    deleteFails?: number;
     openHeld?: boolean;
     user?: string;
     signOutFails?: boolean;
   } = {},
 ) {
   let signedIn = options.signedIn ?? true,
-    groupsFail = options.groupsFail ?? 0;
+    groupsFail = options.groupsFail ?? 0,
+    deleteFails = options.deleteFails ?? 0;
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
   const levelNow = () => options.level ?? "comment";
@@ -193,7 +196,12 @@ function server(
         signal,
         answer: (value, status = 200) => {
           held.splice(held.indexOf(item), 1);
-          resolve(jsonResponse(value, status));
+          // A chat follow page always lists the messages deleted since its cursor.
+          const page =
+            (path === "chat" || path === "comments") && status === 200
+              ? { deleted: [], ...(value as object) }
+              : value;
+          resolve(jsonResponse(page, status));
         },
       };
       held.push(item);
@@ -245,6 +253,7 @@ function server(
         userId: user(),
         maxPostBytes: 9000,
         maxBodyBytes: 8000,
+        moderates: options.moderates ?? false,
         channels: groups().map((group) => ({
           channelWireId: group.wire,
           name: group.name,
@@ -253,6 +262,18 @@ function server(
           access: access(),
         })),
       });
+    if (url.pathname === "/api/named-chat/messages/delete") {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      posts.push({ deleted: body });
+      if (deleteFails > 0) {
+        deleteFails -= 1;
+        return jsonResponse({ ok: false, error: "not found" }, 404);
+      }
+      return jsonResponse({
+        shareId: "share",
+        deleted: { messageId: body.messageId, threadId: body.threadId, deletedAtMs: 50_000 },
+      });
+    }
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       posts.push(body);
@@ -1784,4 +1805,77 @@ it("copies a toast's text with the Copy button beside it", async () => {
   expect(writeText).toHaveBeenCalledWith(
     'dohc could not open "plan.md" for editing\nThe owner paused live editing for this page. You can still read it.',
   );
+});
+
+describe("deleting a Group message", () => {
+  const history = {
+    "wire-plans": [chat(3, "Plans start here"), chat(4, "Mine to take back", "sam")],
+  };
+  const deletes = () => [
+    ...groupPanel().querySelectorAll<HTMLButtonElement>('button[aria-label="Delete message"]'),
+  ];
+  const dialog = () => container.querySelector<HTMLDialogElement>("dialog[open]");
+  const inDialog = (label: string) =>
+    [...dialog()!.querySelectorAll("button")].find((node) => node.textContent === label)!;
+  async function settledOpen() {
+    await settle(
+      () =>
+        text().includes("Mine to take back") &&
+        text().includes("Plans start here") &&
+        following("chat").length === 1,
+    );
+  }
+
+  it("lets a member delete only their own message, says why a refused delete failed, and leaves the line", async () => {
+    server({ history, deleteFails: 1 });
+    await render();
+    await settledOpen();
+    expect(deletes()).toHaveLength(1);
+    await act(async () => deletes()[0]!.click());
+    expect(dialog()?.textContent).toContain("Delete this message?");
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    await act(async () => inDialog("Delete").click());
+    await settle(() => dialog()?.querySelector('[role="alert"]') !== null);
+    expect(dialog()!.querySelector('[role="alert"]')?.textContent).toBe(
+      "Couldn't delete the message. You can no longer delete it.",
+    );
+    await act(async () => inDialog("Try again").click());
+    await settle(() => dialog() === null && !text().includes("Mine to take back"));
+    expect(posts.filter((post) => "deleted" in post)).toEqual([
+      { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
+      { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
+    ]);
+    expect(groupPanel().textContent).toContain("Message deleted");
+    expect(groupPanel().textContent).toContain("Plans start here");
+    expect(deletes()).toHaveLength(0);
+  });
+
+  it("offers Delete on every message to the owner or an admin, and Cancel deletes nothing", async () => {
+    server({ history, moderates: true });
+    await render();
+    await settledOpen();
+    expect(deletes()).toHaveLength(2);
+    await act(async () => deletes()[0]!.click());
+    await act(async () => inDialog("Cancel").click());
+    expect(dialog()).toBeNull();
+    expect(posts.filter((post) => "deleted" in post)).toEqual([]);
+    expect(text()).toContain("Plans start here");
+  });
+
+  it("removes a message another person deleted when the follow brings the delete", async () => {
+    server({ history });
+    await render();
+    await settledOpen();
+    await act(async () =>
+      following("chat")[0]!.answer({
+        shareId: "share",
+        nextCursor: 22,
+        hasMore: false,
+        messages: [],
+        deleted: [{ messageId: "m3", threadId: "t3", deletedAtMs: 21_000, relaySeq: 22 }],
+      }),
+    );
+    await settle(() => !text().includes("Plans start here"));
+    expect(groupPanel().textContent).toContain("Mine to take back");
+  });
 });

@@ -166,6 +166,15 @@ const SHAPES = {
       <path d="M8 16H3v5" />
     </>
   ),
+  trash: (
+    <>
+      <path d="M3 6h18" />
+      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+      <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </>
+  ),
   "panel-left": (
     <>
       <rect width="18" height="18" x="3" y="3" rx="2" />

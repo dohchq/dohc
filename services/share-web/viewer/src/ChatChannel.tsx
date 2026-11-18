@@ -17,6 +17,7 @@ import {
   mergeChatMessages,
   NamedChatError,
   type ChatPost,
+  type DeletedChatMessage,
   type GroupType,
   type NamedChatAccess,
   type NamedChatMessage,
@@ -33,6 +34,7 @@ const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
 const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
 const EMPTY = "No messages in this channel yet.";
+const DELETE_FAILED = "Couldn't delete the message.";
 
 /** A 401 or 404 ends the channel for this account; other failures leave it open. */
 export function ended(error: unknown): Ended | null {
@@ -99,10 +101,12 @@ function ChatMessage({
   message,
   replies,
   canReply,
+  onDelete,
 }: {
   message: NamedChatMessage;
   replies?: Replies;
   canReply: boolean;
+  onDelete?: () => void;
 }) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(
@@ -134,8 +138,21 @@ function ChatMessage({
         {message.authorKind === "link" && <LinkHolderMark />}
         {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
+        {onDelete && message.deletedAtMs === undefined && (
+          <button
+            type="button"
+            className="icon-button chat-delete"
+            aria-label="Delete message"
+            title="Delete message"
+            onClick={onDelete}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        )}
       </p>
-      {html === null ? (
+      {message.deletedAtMs !== undefined ? (
+        <p className="chat-body chat-body-omitted">Message deleted</p>
+      ) : html === null ? (
         <p className="chat-body chat-body-omitted">
           This message is too long to show in the browser.
         </p>
@@ -153,6 +170,65 @@ function ChatMessage({
         </button>
       )}
     </li>
+  );
+}
+
+/** A delete the reader asked for: asking, running, or refused with why. */
+type Removing = {
+  message: NamedChatMessage;
+  phase: "asking" | "deleting" | "failed";
+  why: string | null;
+};
+
+// The message stays as it is until the relay answers, so a refusal has nothing to restore.
+function DeleteMessage({
+  removing,
+  cancel,
+  confirm,
+}: {
+  removing: Removing;
+  cancel(): void;
+  confirm(): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+    return () => dialog.current?.close();
+  }, []);
+  const deleting = removing.phase === "deleting";
+  return (
+    <dialog
+      ref={dialog}
+      className="download-card"
+      aria-labelledby="chat-delete-title"
+      aria-describedby="chat-delete-body"
+      onCancel={(event) => {
+        // While the delete runs, only its answer closes the dialog.
+        event.preventDefault();
+        if (!deleting) cancel();
+      }}
+    >
+      <h2 id="chat-delete-title">Delete this message?</h2>
+      <p id="chat-delete-body">People who already read it may keep a copy.</p>
+      {removing.phase === "failed" && (
+        <p className="chat-delete-error" role="alert">
+          <Icon name="alert" size={14} />
+          <span>{removing.why ? `${DELETE_FAILED} ${removing.why}` : DELETE_FAILED}</span>
+        </p>
+      )}
+      <button
+        type="button"
+        autoFocus
+        className="handoff-button secondary"
+        disabled={deleting}
+        onClick={cancel}
+      >
+        Cancel
+      </button>
+      <button type="button" className="handoff-button danger" disabled={deleting} onClick={confirm}>
+        {deleting ? "Deleting…" : removing.phase === "failed" ? "Try again" : "Delete"}
+      </button>
+    </dialog>
   );
 }
 
@@ -230,8 +306,18 @@ export interface ChatChannelClient {
     since: number,
     holdMs: number,
     signal: AbortSignal,
-  ): Promise<{ messages: NamedChatMessage[]; nextCursor: number; hasMore: boolean }>;
+  ): Promise<{
+    messages: NamedChatMessage[];
+    deleted?: DeletedChatMessage[];
+    nextCursor: number;
+    hasMore: boolean;
+  }>;
   post(post: ChatPost, signal: AbortSignal): Promise<NamedChatMessage>;
+  /** Where the reader can delete: their own messages, or any for the owner or an admin. The relay decides. */
+  remove?: {
+    can(message: NamedChatMessage): boolean;
+    run(message: NamedChatMessage, signal: AbortSignal): Promise<DeletedChatMessage>;
+  };
   /** The body the relay stores, or null when it would refuse it. */
   normalize(text: string): string | null;
   tooLong(text: string): boolean;
@@ -307,6 +393,8 @@ export function ChannelView({
     setDraftText(text);
     if (composerKey !== null) writeDraft(composerKey, text);
   };
+  const [removing, setRemoving] = useState<Removing | null>(null),
+    remove = client.remove;
   const [posting, setPosting] = useState(false),
     [postError, setPostError] = useState<{ text: string; retry: boolean } | null>(null);
   const mounted = useRef<AbortController | null>(null),
@@ -336,8 +424,12 @@ export function ChannelView({
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
 
-  const receive = (incoming: NamedChatMessage[], own: boolean) => {
-    const merged = mergeChatMessages(messagesRef.current, incoming),
+  const receive = (
+    incoming: NamedChatMessage[],
+    own: boolean,
+    deleted: readonly DeletedChatMessage[] = [],
+  ) => {
+    const merged = mergeChatMessages(messagesRef.current, incoming, deleted),
       added = merged.length - messagesRef.current.length;
     messagesRef.current = merged;
     setMessages(merged);
@@ -366,7 +458,8 @@ export function ChannelView({
           hold = result.hasMore ? 0 : CHAT_FOLLOW_HOLD_MS;
           delay = RETRY_INITIAL_MS;
           setFollowing("live");
-          if (result.messages.length) receive(result.messages, false);
+          if (result.messages.length || result.deleted?.length)
+            receive(result.messages, false, result.deleted);
         } catch (error) {
           if (!current()) return;
           const reason = ended(error);
@@ -613,6 +706,39 @@ export function ChannelView({
       }
     }
   };
+  // The line changes from the relay's answer. Other open pages hear the delete from their follows.
+  const confirmRemove = async () => {
+    const controller = mounted.current,
+      target = removing;
+    if (!controller || !remove || !target || target.phase === "deleting") return;
+    setRemoving({ ...target, phase: "deleting", why: null });
+    try {
+      const deleted = await remove.run(target.message, controller.signal);
+      if (controller.signal.aborted) return;
+      receive([], false, [deleted]);
+      setRemoving(null);
+      scroller.current?.focus();
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const status = error instanceof NamedChatError ? error.status : 0;
+      if (status === 401) {
+        setRemoving(null);
+        onEndedRef.current("signed-out");
+        return;
+      }
+      // Every refusal reads as not-found, so a delete never confirms a hidden message.
+      setRemoving({
+        ...target,
+        phase: "failed",
+        why:
+          status === 404
+            ? "You can no longer delete it."
+            : status === 0
+              ? "Deleting needs a connection."
+              : null,
+      });
+    }
+  };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends with a keyboard. On a touch screen Enter adds a line and the Send button sends.
     if (
@@ -731,6 +857,11 @@ export function ChannelView({
                     message={message}
                     replies={view?.replies.get(message.relaySeq)}
                     canReply={access === "read-write"}
+                    {...(remove?.can(message)
+                      ? {
+                          onDelete: () => setRemoving({ message, phase: "asking", why: null }),
+                        }
+                      : {})}
                   />
                 ))}
               </ol>
@@ -860,6 +991,13 @@ export function ChannelView({
             )}
           </div>
         </form>
+      )}
+      {removing && (
+        <DeleteMessage
+          removing={removing}
+          cancel={() => setRemoving(null)}
+          confirm={() => void confirmRemove()}
+        />
       )}
     </section>
   );

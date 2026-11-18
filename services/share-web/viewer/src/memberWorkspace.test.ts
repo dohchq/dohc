@@ -45,6 +45,7 @@ it("opens every Group the member reaches, each with its own access", async () =>
       userId: "sam",
       maxPostBytes: 9000,
       maxBodyBytes: 8000,
+      moderates: false,
       channels: [
         {
           channelWireId: "wire-plans",
@@ -73,6 +74,7 @@ it("opens every Group the member reaches, each with its own access", async () =>
     userId: "sam",
     maxPostBytes: 9000,
     maxBodyBytes: 8000,
+    moderates: false,
     groups: [
       {
         shareId: "share",
@@ -104,6 +106,7 @@ it("opens every Group the member reaches, each with its own access", async () =>
         userId: "sam",
         maxPostBytes: 9000,
         maxBodyBytes: 8000,
+        moderates: false,
         channels: [
           {
             channelWireId: "wire-plans",
@@ -128,6 +131,7 @@ it("follows every Group in one request, each message naming its Group", async ()
       nextCursor: 12,
       hasMore: false,
       messages: [{ ...message(11, "Bring snacks"), channelWireId: "wire-food" }],
+      deleted: [{ messageId: "m9", threadId: "t9", deletedAtMs: 5, relaySeq: 11 }],
     }),
   );
   vi.stubGlobal("fetch", fetch);
@@ -143,6 +147,7 @@ it("follows every Group in one request, each message naming its Group", async ()
   expect(page).toEqual({
     nextCursor: 12,
     hasMore: false,
+    deleted: [{ messageId: "m9", threadId: "t9", deletedAtMs: 5 }],
     messages: [
       {
         channelWireId: "wire-food",
@@ -164,7 +169,11 @@ const group = (channelWireId: string): NamedChatChannel => ({
 type Held = {
   since: number;
   signal: AbortSignal;
-  answer(messages: Array<[string, number, string?]>, nextCursor: number): void;
+  answer(
+    messages: Array<[string, number, string?]>,
+    nextCursor: number,
+    deleted?: Array<{ messageId: string; threadId: string; deletedAtMs: number }>,
+  ): void;
   fail(error: unknown): void;
 };
 function heldFollows() {
@@ -182,10 +191,11 @@ function heldFollows() {
             held.splice(held.indexOf(item), 1);
             reject(error);
           },
-          answer: (messages, nextCursor) => {
+          answer: (messages, nextCursor, deleted = []) => {
             held.splice(held.indexOf(item), 1);
             resolve({
               nextCursor,
+              deleted,
               hasMore: false,
               messages: messages.map(([channelWireId, seq, author]) => ({
                 channelWireId,
@@ -211,8 +221,8 @@ it("serves each open Group from one follow, and counts others' messages in every
     onEnded: vi.fn(),
   });
   const signal = new AbortController().signal;
-  const plans = hub.client(group("wire-plans")),
-    food = hub.client(group("wire-food"));
+  const plans = hub.client(group("wire-plans"), false),
+    food = hub.client(group("wire-food"), false);
   const first = plans.follow(10, 30_000, signal);
   await vi.waitFor(() => expect(open()).toHaveLength(1));
   expect(open()[0]!.since).toBe(10);
@@ -227,6 +237,7 @@ it("serves each open Group from one follow, and counts others' messages in every
   expect(await first).toEqual({
     nextCursor: 14,
     hasMore: false,
+    deleted: [],
     messages: [expect.objectContaining({ relaySeq: 12 })],
   });
   expect(counted).toEqual([{ "wire-food": 1, "wire-plans": 1 }]);
@@ -234,6 +245,7 @@ it("serves each open Group from one follow, and counts others' messages in every
   expect(await food.follow(10, 30_000, signal)).toEqual({
     nextCursor: 14,
     hasMore: false,
+    deleted: [],
     messages: [
       expect.objectContaining({ relaySeq: 11 }),
       expect.objectContaining({ relaySeq: 13 }),
@@ -260,7 +272,7 @@ it("ends every Group when the member is removed, and pauses while the tab is hid
     onEnded,
   });
   const signal = new AbortController().signal;
-  const reading = hub.client(group("wire-plans")).follow(10, 30_000, signal);
+  const reading = hub.client(group("wire-plans"), false).follow(10, 30_000, signal);
   await vi.waitFor(() => expect(open()).toHaveLength(1));
   visibility = "hidden";
   document.dispatchEvent(new Event("visibilitychange"));
@@ -271,5 +283,49 @@ it("ends every Group when the member is removed, and pauses while the tab is hid
   open()[0]!.fail(new NamedChatError(404, "share_access_removed"));
   await expect(reading).rejects.toMatchObject({ status: 404 });
   expect(onEnded).toHaveBeenCalledWith("removed");
+  hub.close();
+});
+
+it("brings a delete to every Group's view that read before it", async () => {
+  const { follow, open } = heldFollows();
+  const hub = createGroupFollow({
+    shareId: "share",
+    userId: "sam",
+    follow,
+    onMessages: vi.fn(),
+    onEnded: vi.fn(),
+  });
+  const signal = new AbortController().signal;
+  const plans = hub.client(group("wire-plans"), false),
+    food = hub.client(group("wire-food"), false);
+  const waiting = plans.follow(10, 30_000, signal);
+  await vi.waitFor(() => expect(open()).toHaveLength(1));
+  const gone = { messageId: "m11", threadId: "t11", deletedAtMs: 5 };
+  open()[0]!.answer([], 12, [gone]);
+  expect(await waiting).toEqual({ nextCursor: 12, hasMore: false, deleted: [gone], messages: [] });
+  expect((await food.follow(10, 30_000, signal)).deleted).toEqual([gone]);
+  await vi.waitFor(() => expect(open()).toHaveLength(1));
+  const later = food.follow(12, 30_000, signal);
+  open()[0]!.answer([["wire-food", 13]], 14);
+  expect((await later).deleted).toEqual([]);
+  hub.close();
+});
+
+it("offers Delete on a member's own messages, and on every message to the owner or an admin", () => {
+  const { follow } = heldFollows();
+  const hub = createGroupFollow({
+    shareId: "share",
+    userId: "sam",
+    follow,
+    onMessages: vi.fn(),
+    onEnded: vi.fn(),
+  });
+  const own = { ...message(1, "mine", "sam"), linkAgent: false } as never,
+    other = { ...message(2, "theirs", "ana"), linkAgent: false } as never,
+    gone = { ...message(3, "", "sam"), body: null, linkAgent: false, deletedAtMs: 5 } as never;
+  const member = hub.client(group("wire-plans"), false).remove!,
+    admin = hub.client(group("wire-plans"), true).remove!;
+  expect([own, other, gone].map((item) => member.can(item))).toEqual([true, false, false]);
+  expect([own, other, gone].map((item) => admin.can(item))).toEqual([true, true, false]);
   hub.close();
 });

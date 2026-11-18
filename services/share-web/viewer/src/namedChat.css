@@ -42,6 +42,12 @@
 .chat-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .chat-body :is(th, td) { border: 1px solid var(--viewer-line); padding: 4px 8px; }
 .chat-body-omitted { margin: 0; color: var(--viewer-muted); font-size: 14px; font-style: italic; }
+/* A message's Delete shows on hover or focus, and always on a touch screen. */
+.chat-delete { align-self: center; min-width: 24px; height: 24px; margin-left: auto; padding: 0 4px; opacity: 0; }
+.chat-message:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
+@media (pointer: coarse) { .chat-delete { opacity: 1; } }
+.chat-delete-error { display: flex; align-items: flex-start; gap: 6px; color: var(--viewer-danger); }
+.chat-delete-error .icon { flex: none; margin-top: 3px; }
 
 .chat-jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--viewer-paper); }
 .handoff-button.secondary.chat-jump:hover { background: var(--viewer-panel); }

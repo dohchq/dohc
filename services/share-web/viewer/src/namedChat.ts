@@ -28,7 +28,7 @@ export interface NamedChatComments {
   maxPostBytes: number;
   maxBodyBytes: number;
 }
-type NamedChatPlace = NamedChatChannel | NamedChatComments;
+export type NamedChatPlace = NamedChatChannel | NamedChatComments;
 /** `body` is null when the relay left it out because it is too large for a browser response. */
 export interface NamedChatMessage {
   relaySeq: number;
@@ -192,7 +192,7 @@ export function chatMessage(value: unknown): NamedChatMessage {
   };
 }
 
-function deletedMessage(value: unknown): DeletedChatMessage {
+export function deletedMessage(value: unknown): DeletedChatMessage {
   if (
     !record(value) ||
     typeof value.messageId !== "string" ||
@@ -387,7 +387,9 @@ export function mergeChatMessages(
 ): NamedChatMessage[] {
   // The relay sequence is unique; a message ID can match an omission marker's `omitted:<relaySeq>`.
   const bySeq = new Map(current.map((item) => [item.relaySeq, item]));
-  for (const item of incoming) bySeq.set(item.relaySeq, item);
+  // A page read before a delete still carries the body; the deleted line stays.
+  for (const item of incoming)
+    if (bySeq.get(item.relaySeq)?.deletedAtMs === undefined) bySeq.set(item.relaySeq, item);
   // A delete names the message, not its coordinate: an open follow is already past it.
   const deletedAt = new Map(
     deleted.map((entry) => [JSON.stringify([entry.threadId, entry.messageId]), entry.deletedAtMs]),

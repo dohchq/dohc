@@ -114,7 +114,11 @@ function server(
           grant: String(container.querySelector("h1")?.textContent),
           since: url.searchParams.get("since")!,
           signal,
-          answer: (value, status = 200) => resolve(jsonResponse(value, status)),
+          // A follow page always lists the messages deleted since its cursor.
+          answer: (value, status = 200) =>
+            resolve(
+              jsonResponse(status === 200 ? { deleted: [], ...(value as object) } : value, status),
+            ),
         });
       });
     return jsonResponse(

@@ -225,7 +225,7 @@ export function MemberChats({
           {/* A Group's access is the member level, which the workspace reads again while it stays open. */}
           <ChannelView
             key={`${opened.shareId}\n${group.channelWireId}`}
-            client={hub.client({ ...group, access })}
+            client={hub.client({ ...group, access }, opened.moderates)}
             name={group.name}
             onEnded={(reason) => onEndedRef.current(reason)}
             readOnlyNote={READ_ONLY}
@@ -311,14 +311,17 @@ export function MemberComments({
   const client = useMemo(
     () =>
       opened &&
-      commentsClient({
-        shareId: opened.shareId,
-        userId: opened.userId,
-        path,
-        access,
-        maxPostBytes: opened.maxPostBytes,
-        maxBodyBytes: opened.maxBodyBytes,
-      }),
+      commentsClient(
+        {
+          shareId: opened.shareId,
+          userId: opened.userId,
+          path,
+          access,
+          maxPostBytes: opened.maxPostBytes,
+          maxBodyBytes: opened.maxBodyBytes,
+        },
+        opened.moderates,
+      ),
     [opened, path, access],
   );
   const name = path.split("/").at(-1) ?? path;

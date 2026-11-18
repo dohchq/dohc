@@ -107,7 +107,12 @@ function resultMatches(
     );
   if (channels)
     return (
-      Object.keys(value).sort().join() === "channels,maxBodyBytes,maxPostBytes,shareId,userId" &&
+      // A workspace share's listing says whether the reader may delete others' messages.
+      (typeof value.moderates === "boolean"
+        ? Object.keys(value).sort().join() ===
+          "channels,maxBodyBytes,maxPostBytes,moderates,shareId,userId"
+        : Object.keys(value).sort().join() ===
+          "channels,maxBodyBytes,maxPostBytes,shareId,userId") &&
       typeof value.userId === "string" &&
       Number.isSafeInteger(value.maxPostBytes) &&
       Number(value.maxPostBytes) > 0 &&

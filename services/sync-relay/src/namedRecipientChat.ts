@@ -493,11 +493,14 @@ export function createNamedRecipientChat(options: {
           };
           if (!chat) {
             const groups = storage.listChannelCreates(share.workspaceId);
+            const role = storage.workspaceRoleOf(share.workspaceId, actor.userId)?.role;
             const fresh = recheck().effectiveSelector;
             if (!isWorkspaceSelector(fresh)) throw notFound();
             const files = workspaceFileReach(fresh);
             return json({
               ...listing,
+              // The page offers Delete on others' messages; the delete route decides.
+              moderates: role === "owner" || role === "admin",
               channels: groups
                 .filter((group) => workspaceGroupReachable(fresh, group.channelWireId, resolver!))
                 .map((group) => ({
