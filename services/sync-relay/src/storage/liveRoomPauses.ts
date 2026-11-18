@@ -48,6 +48,11 @@ export interface LiveRoomPause {
   readonly pauseId: string;
   readonly objectId: string;
   readonly lineageClaimId: string;
+  /**
+   * The note's last path the relay knew. A note moved or deleted outside dohc keeps the path it
+   * had, so the owner's desktop can write the copy next to it.
+   */
+  readonly path: string;
   readonly pausedAtMs: number;
   /**
    * The journal cursor of the note's last save when it paused. The owner's computer has every
@@ -174,7 +179,7 @@ export function liveRoomPauses(storage: StorageContext, workspaceId: string): Li
     .readTx(() =>
       storage.db
         .prepare(
-          `SELECT pause_id,object_id,lineage_claim_id,paused_at_ms,saved_cursor,cause,refusal,named_json,copy_sha256,length(copy_bytes) AS copy_length FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? ORDER BY paused_at_ms,pause_id`,
+          `SELECT p.pause_id,p.object_id,p.lineage_claim_id,d.current_path,p.paused_at_ms,p.saved_cursor,p.cause,p.refusal,p.named_json,p.copy_sha256,length(p.copy_bytes) AS copy_length FROM ${LIVE_ROOM_PAUSES} p LEFT JOIN sync_relay_live_documents d USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.workspace_id=? ORDER BY p.paused_at_ms,p.pause_id`,
         )
         .all(workspaceId),
     )
@@ -184,10 +189,13 @@ export function liveRoomPauses(storage: StorageContext, workspaceId: string): Li
         throw new Error("live room pause is damaged");
       const named: unknown = JSON.parse(String(row.named_json));
       if (!Array.isArray(named)) throw new Error("live room pause is damaged");
+      // A pause is taken only for a live document, and those rows are never deleted.
+      if (row.current_path === null) throw new Error("live room pause is damaged");
       return {
         pauseId: String(row.pause_id),
         objectId: String(row.object_id),
         lineageClaimId: String(row.lineage_claim_id),
+        path: String(row.current_path),
         pausedAtMs: Number(row.paused_at_ms),
         savedCursor: Number(row.saved_cursor),
         cause: String(row.cause) as LiveRoomPauseCause,
