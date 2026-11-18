@@ -7996,7 +7996,9 @@ fn render_table_cell_block(
 
 /// Writes a break spelled in a cell's text as `<br>`, as the TypeScript
 /// writer does. A code span keeps its text as written, so a break spelled
-/// there stays. Both writers find code spans by the same rule.
+/// there stays. Both writers find code spans by the same rule, which doesn't
+/// skip link addresses, autolinks or raw HTML: a backtick in one of them can
+/// pair with a later code span's.
 fn write_table_cell_breaks(markdown: &str) -> String {
     let spelled = |text: &str| {
         text.replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)

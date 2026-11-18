@@ -1322,7 +1322,8 @@ export function writingTableCellTokens<T>(write: (markdown: string) => string, r
 // The importer represents those tags as text, so normalize them before the
 // table renderer measures the cell again. A code span keeps its text as
 // written, so a break spelled there stays. The engine's writer finds code
-// spans by the same rule.
+// spans by the same rule, which doesn't skip link addresses, autolinks or raw
+// HTML: a backtick in one of them can pair with a later code span's.
 function writeTableCellBreaks(markdown: string): string {
   const spelled = (text: string) =>
     text
@@ -1367,7 +1368,9 @@ function closingBacktickRun(markdown: string, from: number, length: number): num
 }
 
 function prepareRenderedTableCell(markdown: string): string {
-  markdown = writeTableCellBreaks(markdown);
+  // Tokens hide the text's backticks and backslashes, so a cell that holds
+  // tokens finds its code spans once they are written, as the engine does.
+  if (!writeTableCellTokens) markdown = writeTableCellBreaks(markdown);
   let output = "";
   let precedingBackslashes = 0;
 
