@@ -158,9 +158,8 @@ export function replacementAnswered(
   return { ...current, answer };
 }
 
-// Mentions, by the rules the desktop and the relay share (packages/workspace-contracts/src/chatMentions.ts). Choosing
-// someone only completes the text with their `@handle `: the body stays plain text, and the relay reads it as it reads
-// a typed handle. A handle two candidates share stays plain text, so the menu may list both, and either writes the same.
+// Mentions, by the rules the desktop and the relay share (packages/workspace-contracts/src/chatMentions.ts). A pick only
+// completes the text with `@handle `; the relay reads it as it reads a typed handle.
 
 /** Someone the composer offers, in the shared shape: a person is a `user`, and both kinds of agent are an `agent`. */
 export interface PhoneMention extends MentionCandidate {

@@ -166,6 +166,7 @@ export function Composer({
   const ready =
     text.trim().length > 0 &&
     !composing(field) &&
+    !replacePending(replacing) &&
     blocked === null &&
     !submitting &&
     status === "settled" &&

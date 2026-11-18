@@ -68,15 +68,11 @@ export function phoneChatWake(item: unknown): PhoneChatWake | null {
   };
 }
 
-/** Not empty, and at most `max` UTF-16 code units, as the contract's `Handle` and `Name` are. */
-const sized = (value: unknown, max: number): value is string =>
-  typeof value === "string" && value.length >= 1 && value.length <= max;
-
 /** One mention candidate as the contract's `PhoneMentionCandidate` has it, or null. */
 export function phoneMentionCandidate(item: unknown): PhoneMentionCandidate | null {
   if (!isFields(item)) return null;
   const { kind, handle, label } = item;
-  if (!sized(handle, 200) || !sized(label, 256)) return null;
+  if (!text(handle, 200) || !text(label, 256)) return null;
   if (kind === "person" || kind === "personalAgent")
     return Object.keys(item).length === 3 ? { kind, handle, label } : null;
   if (kind !== "agent" || Object.keys(item).length !== 4 || !Array.isArray(item.computers))

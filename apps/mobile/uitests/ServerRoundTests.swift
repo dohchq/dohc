@@ -269,7 +269,8 @@ final class ServerRoundTests: XCTestCase {
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
   // name differs by round, so the test takes the first name the menu offers for "@", types its first letters, and taps
-  // its row. The tap completes the text and keeps the keyboard up; the message sent shows the field's text exactly.
+  // its row. The tap must make the text exactly "Can @<handle> " and keep the keyboard up. The message must then show
+  // with exactly that text once nothing is left sending, and the round checks the server has the line it prints.
   @MainActor
   func test10_mentionsSomeone() throws {
     let app = XCUIApplication()
@@ -291,16 +292,26 @@ final class ServerRoundTests: XCTestCase {
     let row = app.buttons[label]
     XCTAssertTrue(row.waitForExistence(timeout: 10), "\(name) should still match its first letters")
     row.tap()
-    let completed = NSPredicate(format: "value MATCHES %@", "Can @\\S+ ")
+    // The handle `handleForName` makes of a plain name (packages/workspace-contracts/src/chatMentions.ts).
+    let allowed = CharacterSet.letters.union(.decimalDigits).union(.nonBaseCharacters).union(CharacterSet(charactersIn: "._-"))
+    let handle = String(String.UnicodeScalarView(name.unicodeScalars.filter { allowed.contains($0) }))
+      .trimmingCharacters(in: CharacterSet(charactersIn: "._-"))
+    XCTAssertFalse(handle.isEmpty, "\(name) should have a handle")
+    let completed = NSPredicate(format: "value == %@", "Can @\(handle) ")
     XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: completed, evaluatedWith: field)], timeout: 10), .completed,
-                   "The row should make the text \"Can @handle \"")
+                   "The row should make the text \"Can @\(handle) \", not \(String(describing: field.value))")
     XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should stay up after the tap")
     let tail = "join us? \(UUID().uuidString.prefix(8))"
     field.typeText(tail)
-    let body = try XCTUnwrap(field.value as? String, "The field should report its text")
-    XCTAssertTrue(body.hasSuffix(" \(tail)"), "Typing should go on after the mention, not \(body)")
+    let body = "Can @\(handle) \(tail)"
+    XCTAssertEqual(field.value as? String, body, "Typing should go on after the mention")
     app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
-    // The field's label is its placeholder, so only the message's text can match.
-    XCTAssertTrue(containing(app, body).waitForExistence(timeout: 60), "Planning should show the message exactly as sent: \(body)")
+    let sent = app.staticTexts.matching(NSPredicate(format: "label == %@", body)).firstMatch
+    XCTAssertTrue(sent.waitForExistence(timeout: 60), "Planning should show the message exactly as sent: \(body)")
+    // A message still on the phone says Sending, Still sending or Waiting to send; the server's copy says none of them.
+    let pending = app.staticTexts.matching(NSPredicate(format: "label IN %@", ["Sending", "Still sending", "Waiting to send"]))
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: pending)], timeout: 60),
+                   .completed, "The message should leave the phone for the server")
+    say("DOHC_MENTION_SENT \(body)")
   }
 }
