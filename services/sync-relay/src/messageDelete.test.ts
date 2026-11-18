@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
+  RELAY_EXCHANGE_KEY,
+  SHARE_WEB_ORIGIN,
   chatChannelCreate,
   chatMessageAppend,
   chatThreadCreate,
@@ -14,6 +16,7 @@ import {
   putBlob,
   request,
   resetOpSeq,
+  resolveTestActor,
   storagePath,
   testHandler,
   testStorage,
@@ -68,7 +71,23 @@ async function ownerAppend(h: SyncRelayHandler, ops: unknown[], originId = "orig
 async function seed(): Promise<{ storage: SyncRelayStorage; h: SyncRelayHandler }> {
   resetOpSeq();
   const storage = await testStorage();
-  const h = testHandler(storage, { lookupUserDisplayName: (userId: string) => `Name ${userId}` });
+  const h = testHandler(storage, {
+    lookupUserDisplayName: (userId: string) => `Name ${userId}`,
+    relayExchangeKey: RELAY_EXCHANGE_KEY,
+    namedBrowserSessionLimits: {
+      maxSessions: 8,
+      retentionMs: 60_000,
+      maxPendingRequests: 8,
+      maxRequestBytes: 100_000,
+      maxResponseBytes: 200_000,
+      timeoutMs: 1000,
+    },
+    // A browser call carries the share site's session cookie; the rest sign in.
+    resolveActor: (incoming, workspaceId) => {
+      const match = /^session=(\w+)$/u.exec(incoming.headers.get("cookie") ?? "");
+      return match ? { userId: match[1]!, workspaceId } : resolveTestActor(incoming, workspaceId);
+    },
+  });
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
   ).toBe(200);
@@ -162,6 +181,22 @@ function memberBatch(userId: string, messageId: string, body: string, seq: numbe
       },
     ],
   };
+}
+
+// A share-site page's call, as share-web forwards it.
+function browser(h: SyncRelayHandler, user: string, path: string, body?: Record<string, unknown>) {
+  return h(
+    new Request(`http://relay.test/sync/named-chat/${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        cookie: `session=${user}`,
+        origin: SHARE_WEB_ORIGIN,
+        "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }),
+  );
 }
 
 function push(h: SyncRelayHandler, userId: string, shareId: string, batch: unknown) {
@@ -463,5 +498,65 @@ describe("what only the relay writes", () => {
         expect(typeof value === "string" && /^[0-9a-f]{64}$/u.test(value), key).toBe(false);
       }
     }
+  });
+
+  it("shows a delete to a browser that already followed past the message, and holds a browser post retry on its line", async () => {
+    const { storage, h } = await seed();
+    const ana = await member(h, "ana");
+    const ben = await member(h, "ben");
+    const send = {
+      shareId: ana.shareId,
+      channelWireId: GROUP,
+      threadId: "t-team",
+      id: "request-1",
+      body: "ana's words",
+      authorKind: "human",
+    };
+    const posted = await browser(h, "ana", "messages", send);
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    const { messageId, threadId } = (await json(posted)).message as {
+      messageId: string;
+      threadId: string;
+    };
+    const history = `messages?shareId=${ben.shareId}&channelWireId=${GROUP}`;
+    const page = await json(await browser(h, "ben", history));
+    expect(page.messages).toContainEqual(
+      expect.objectContaining({ messageId, body: "ana's words" }),
+    );
+
+    const removed = await browser(h, "ana", "messages/delete", {
+      shareId: ana.shareId,
+      threadId,
+      messageId,
+    });
+    expect(removed.status, await removed.clone().text()).toBe(200);
+    const { deleted } = (await json(removed)) as { deleted: { deletedAtMs: number } };
+    expect(deleted).toMatchObject({ messageId, threadId });
+
+    const followed = await json(
+      await browser(h, "ben", `messages?shareId=${ben.shareId}&since=${page.nextCursor}`),
+    );
+
+    expect(followed.deleted).toEqual([
+      expect.objectContaining({ messageId, threadId, deletedAtMs: deleted.deletedAtMs }),
+    ]);
+    expect(JSON.stringify(followed)).not.toContain("ana's words");
+    const fresh = await json(await browser(h, "ben", history));
+    expect(fresh.messages).toContainEqual(
+      expect.objectContaining({ messageId, body: null, deletedAtMs: deleted.deletedAtMs }),
+    );
+    expect(JSON.stringify(fresh)).not.toContain("ana's words");
+
+    const retried = await browser(h, "ana", "messages", send);
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    expect((await json(retried)).message).toMatchObject({
+      messageId,
+      body: null,
+      deletedAtMs: deleted.deletedAtMs,
+    });
+    expect(rowsOf(storage, messageId).map((row) => row.op_kind)).toEqual([
+      "chat.message.tombstone",
+      "chat.message.delete",
+    ]);
   });
 });
