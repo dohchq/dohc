@@ -1870,10 +1870,12 @@ impl EngineService {
         };
         if diag_start.elapsed().as_millis() >= 200 {
             eprintln!(
-                "[diag-gap] recordUpdate waited {}ms for the session serial",
-                diag_start.elapsed().as_millis()
+                "[diag-gap] recordUpdate waited {}ms for the session serial; last held by {}",
+                diag_start.elapsed().as_millis(),
+                super::versions::diag_serial_holder()
             );
         }
+        super::versions::diag_serial_taken("ydoc.recordUpdate");
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         // A resync moves the session to a replacement claim before its reply
         // reaches the client. An edit made on the earlier claim's document

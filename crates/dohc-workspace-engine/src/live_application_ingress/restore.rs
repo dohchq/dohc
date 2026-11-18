@@ -143,6 +143,9 @@ pub(super) fn begin(
     }
     let mut bytes = Vec::new();
     let admission = (|| {
+        let diag_bytes = ingress
+            .restore_reservation(&config)
+            .ok_or_else(overloaded)?;
         let permit = Arc::new(Reservation {
             slot: Some(
                 ingress
@@ -155,14 +158,11 @@ pub(super) fn begin(
                 ingress
                     .budget
                     .clone()
-                    .try_acquire_many_owned(
-                        ingress
-                            .restore_reservation(&config)
-                            .ok_or_else(overloaded)?,
-                    )
+                    .try_acquire_many_owned(diag_bytes)
                     .map_err(|_| overloaded())?,
             ),
             released: ingress.released.clone(),
+            diag: super::diag_hold("restore", diag_bytes),
         });
         bytes
             .try_reserve_exact(params.byte_length)

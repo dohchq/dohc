@@ -468,13 +468,29 @@ impl EngineService {
         cancellation: &OperationCancellation,
         operation: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
-        tokio::select! {
+        // [diag-gap] Throwaway timing logs for one test run; never merged.
+        let diag_start = std::time::Instant::now();
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption(operation))
+                eprintln!(
+                    "[diag-gap] session serial wait cancelled after {}ms for {operation}; last held by {}",
+                    diag_start.elapsed().as_millis(),
+                    diag_serial_holder()
+                );
+                return Err(cancellation.interruption(operation));
             }
-            serial = Arc::clone(&open.session_ops).lock_owned() => Ok(serial),
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
+        };
+        if diag_start.elapsed().as_millis() >= 200 {
+            eprintln!(
+                "[diag-gap] session serial waited {}ms for {operation}; last held by {}",
+                diag_start.elapsed().as_millis(),
+                diag_serial_holder()
+            );
         }
+        diag_serial_taken(operation);
+        Ok(serial)
     }
 
     pub(super) async fn ensure_path_not_leased(
@@ -1850,3 +1866,26 @@ mod tests {
 #[cfg(test)]
 #[path = "link_rewrite_rpc_tests.rs"]
 mod link_rewrite_rpc_tests;
+
+// [diag-gap] Throwaway timing logs for one test run; never merged. The last
+// labelled taker of a session serial, across workspaces.
+static DIAG_SERIAL: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn diag_serial_taken(operation: &str) {
+    if let Ok(mut holder) = DIAG_SERIAL.lock() {
+        *holder = Some((operation.to_owned(), std::time::Instant::now()));
+    }
+}
+
+pub(crate) fn diag_serial_holder() -> String {
+    DIAG_SERIAL
+        .lock()
+        .ok()
+        .and_then(|holder| {
+            holder.as_ref().map(|(operation, since)| {
+                format!("{operation} {}ms ago", since.elapsed().as_millis())
+            })
+        })
+        .unwrap_or_else(|| "none".to_owned())
+}

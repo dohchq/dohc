@@ -252,14 +252,60 @@ struct Reservation {
     bytes: Option<OwnedSemaphorePermit>,
     slot: Option<OwnedSemaphorePermit>,
     released: Arc<Notify>,
+    diag: u64,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
         // Return the permits before waking owner work that waits for them.
         drop((self.bytes.take(), self.slot.take()));
+        diag_release(self.diag);
         self.released.notify_waiters();
     }
+}
+
+// [diag-gap] Throwaway timing logs for one test run; never merged.
+static DIAG_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+#[allow(clippy::type_complexity)]
+static DIAG_HOLDERS: std::sync::Mutex<Vec<(u64, &'static str, u32, Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn diag_hold(label: &'static str, bytes: u32) -> u64 {
+    let id = DIAG_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut holders) = DIAG_HOLDERS.lock() {
+        holders.push((id, label, bytes, Instant::now()));
+    }
+    id
+}
+
+fn diag_release(id: u64) {
+    let Ok(mut holders) = DIAG_HOLDERS.lock() else {
+        return;
+    };
+    if let Some(index) = holders.iter().position(|holder| holder.0 == id) {
+        let (_, label, bytes, since) = holders.swap_remove(index);
+        if since.elapsed().as_millis() >= 1000 {
+            eprintln!(
+                "[diag-gap] live budget released {label} {bytes}B after {}ms",
+                since.elapsed().as_millis()
+            );
+        }
+    }
+}
+
+fn diag_holders() -> String {
+    DIAG_HOLDERS
+        .lock()
+        .map(|holders| {
+            holders
+                .iter()
+                .map(|(_, label, bytes, since)| {
+                    format!("{label}:{bytes}B:{}ms", since.elapsed().as_millis())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -296,6 +342,7 @@ impl SettlementAdmission {
             bytes: Some(bytes),
             slot: Some(upload),
             released: self.released.clone(),
+            diag: diag_hold("settlement", self.bytes),
         }))
     }
 }
@@ -357,12 +404,14 @@ impl OwnerAdmission {
                         bytes: Some(bytes),
                         slot: None,
                         released: self.released.clone(),
+                        diag: diag_hold("owner", self.bytes),
                     }) as Arc<dyn Send + Sync>);
                 }
                 eprintln!(
-                    "[diag-gap] owner admission waits for room available={} wanted={}",
+                    "[diag-gap] owner admission waits for room available={} wanted={} holders=[{}]",
                     self.budget.available_permits(),
-                    self.bytes
+                    self.bytes,
+                    diag_holders()
                 );
                 tokio::select! {
                     biased;
@@ -727,6 +776,14 @@ impl LiveApplicationIngress {
         }
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(overloaded)?;
+        let diag_kind: &'static str = match &metadata {
+            Metadata::Replica { .. } => "upload replica",
+            Metadata::Owner(_) => "upload owner body",
+            Metadata::Sync(_) => "upload sync",
+            Metadata::Apply(_) => "upload apply",
+            Metadata::Bootstrap(_) => "upload bootstrap",
+            _ => "upload other",
+        };
         let mut bytes = Vec::new();
         let mut first_seen = Vec::new();
         let admission = (|| {
@@ -744,6 +801,7 @@ impl LiveApplicationIngress {
                         .map_err(|_| overloaded())?,
                 ),
                 released: self.released.clone(),
+                diag: diag_hold(diag_kind, reserved),
             });
             bytes
                 .try_reserve_exact(update.expected)
