@@ -1563,7 +1563,7 @@ Use describe to find approved operation IDs.
 - `expectedDatasetId`: `UUID`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true } }`.
+Returns `{ kind: "description", dataset, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }`.
 
 #### `dohc dataset history`
 
@@ -2006,7 +2006,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `idempotencyKey`: `string`. Required.
 - `invocationId`: `UUID`
 
-Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true } }` or `{ kind: "refused", code, message }`.
+Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host?, signedOut?: true, updateFailed?: true } }` or `{ kind: "refused", code, message }`.
 
 ### `dohc app`
 

@@ -650,6 +650,11 @@ export const DatasetCopyStatus = z
     host: z.string().min(1).max(260).optional(),
     /** No one is signed in: the owner's copy is read-only until someone signs in. */
     signedOut: z.literal(true).optional(),
+    /**
+     * The server answered, but this computer could not bring its copy up to
+     * date, as on a full disk. The copy is read-only until it can.
+     */
+    updateFailed: z.literal(true).optional(),
   })
   .strict();
 export type DatasetCopyStatus = z.infer<typeof DatasetCopyStatus>;

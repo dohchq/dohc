@@ -245,6 +245,7 @@ const VALUE_CHANGED =
 const CHANGE_GONE =
   "The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.";
 const SAVE_OFFLINE = "You can save this once the Collection is back online.";
+const SAVE_NOT_UPDATED = "You can save this once dohc can update this Collection on this device.";
 const EDIT_LEFT_OPEN = "This edit was still open, so dohc did not save it.";
 
 function undoFromReceipt(
@@ -1855,7 +1856,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       </section>
     );
   // Why the panel's new record can't be made, or why its buttons wait, over them.
-  const formBlocked = editor && !formOperation ? (offline ? SAVE_OFFLINE : CHANGE_GONE) : null;
+  const formBlocked =
+    editor && !formOperation
+      ? offline
+        ? props.copy?.updateFailed
+          ? SAVE_NOT_UPDATED
+          : SAVE_OFFLINE
+        : CHANGE_GONE
+      : null;
   const formProblem = formBlocked === SAVE_OFFLINE ? null : (formBlocked ?? formRefusal);
   const formNote =
     formProblem !== null ? (
@@ -2172,7 +2180,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         }
         footer={
           offline
-            ? "Offline copy · Read-only"
+            ? props.copy?.updateFailed
+              ? "Copy on this device · Read-only"
+              : "Offline copy · Read-only"
             : editableIds.length === 0 && recordActions.length === 0
               ? "No edit action is available for this record."
               : undefined
@@ -2258,9 +2268,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               ? "Offline · Saved pages only"
               : props.copy.signedOut
                 ? "Offline copy · Read-only until you connect your server"
-                : props.copy.offline
-                  ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
-                  : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
+                : props.copy.updateFailed
+                  ? "Copy on this device · Read-only until dohc can update it"
+                  : props.copy.offline
+                    ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
+                    : `${props.copy.host ? `On ${props.copy.host} · ` : ""}Saved on this device`}{" "}
             · {new Date(props.copy.savedAtMs).toLocaleString()}
           </span>
         ) : undefined

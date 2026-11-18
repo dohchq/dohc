@@ -2684,11 +2684,27 @@ describe("a Data Collection's record panel and forms", () => {
     expect(screen.queryByText("Alice")).toBeNull();
   });
   it.each([
-    ["with the server out of reach", {}, "Read-only until sync.example.test is reachable"],
-    ["signed out", { signedOut: true as const }, "Read-only until you connect your server"],
+    [
+      "with the server out of reach",
+      {},
+      "Offline copy · Read-only until sync.example.test is reachable",
+      "Offline copy · Read-only",
+    ],
+    [
+      "signed out",
+      { signedOut: true as const },
+      "Offline copy · Read-only until you connect your server",
+      "Offline copy · Read-only",
+    ],
+    [
+      "when this computer can't update its copy",
+      { updateFailed: true as const },
+      "Copy on this device · Read-only until dohc can update it",
+      "Copy on this device · Read-only",
+    ],
   ])(
-    "shows saved offline records %s with no way to change them, and refreshes the copy",
-    async (_kind, why, line) => {
+    "shows saved records %s with no way to change them, and refreshes the copy",
+    async (_kind, why, line, footer) => {
       const onRefresh = vi.fn();
       const { invoke } = setup({
         copy: { offline: true, savedAtMs: 1_700_000_000_000, host: "sync.example.test", ...why },
@@ -2697,7 +2713,7 @@ describe("a Data Collection's record panel and forms", () => {
       });
       await screen.findByText("Alice");
       expect(screen.getByRole("status").textContent).toBe(
-        `Offline copy · ${line} · ${new Date(1_700_000_000_000).toLocaleString()}`,
+        `${line} · ${new Date(1_700_000_000_000).toLocaleString()}`,
       );
       expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
       for (const field of ["Name", "Amount", "Status"]) {
@@ -2710,7 +2726,7 @@ describe("a Data Collection's record panel and forms", () => {
       expect(within(within(record).getByRole("heading")).queryByRole("button")).toBeNull();
       for (const field of ["Amount", "Status"])
         expect(within(property(field)).queryByRole("button")).toBeNull();
-      expect(within(record).getByText("Offline copy · Read-only")).toBeTruthy();
+      expect(within(record).getByText(footer)).toBeTruthy();
       fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
       fireEvent.click(command("Refresh"));
       expect(onRefresh).toHaveBeenCalledOnce();
