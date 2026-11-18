@@ -4,25 +4,25 @@ dohc is a local-first desktop app. People and their agents use it to build, shar
 
 dohc is an early alpha, released as nightly builds. There are no users outside the team yet.
 
-Treat this file as good defaults. The person you work with can override any of it. If a rule gets in the way of the task, say so and ask before you break it.
+Treat this file as good defaults. The person you work with can override any of it. If a rule gets in the way, say so and ask before you break it.
 
 ## What dohc stands for
 
-1. **Local first.** Local work needs no account or network. Sync and sharing add to it. People can read, export, and recover their data without dohc. Self-hosting is real, and dohc Drive never limits the local app.
-2. **Fast.** The desktop must feel native. Measure the startup and interactions you change. A slowdown is a bug.
-3. **Useful alone.** One person with their agents should get value from dohc. Routine work needs no programming or agent. Documents, Collections, and chat work without an app. Adding people continues the same work, with no export and no second system.
-4. **Built for people and agents.** Design each feature for both from the start. A share link gives a person or an agent the same access. Agents use the same operation through the CLI or MCP, not computer use.
-5. **Agent agnostic.** dohc does not provide or supervise agents, and it has no approval workflow. A control does the action it names. It never opens an agent prompt.
-6. **Chat is part of the workspace.** Chat links to files, data, and apps. A useful result can become real work outside the chat.
-7. **Apps are real web apps.** Their source lives and syncs in the workspace. They see only the data and capabilities their owner exposes. People without dohc can open a shared app by its URL.
-8. **Strict foundation, free workflow.** Ownership, sign-in, permissions, sync, history, and isolation are strict. Folders, tools, agents, and workflows are the user's choice. App source and Collection automations are files in the workspace that any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows, built-in business apps, or required templates.
+1. **Local first.** Local work needs no account or network. People can read, export, and recover their data without dohc. Self-hosting is real.
+2. **Fast.** The desktop must feel native. A slowdown is a bug.
+3. **Useful alone.** One person with their agents should get value from dohc. Routine work needs no programming or agent. Documents, Collections, and chat work without an app.
+4. **Built for people and agents.** Design each feature for both. Agents use the same operation through the CLI or MCP, not by clicking the screen.
+5. **Agent agnostic.** dohc doesn't provide or supervise agents. A control does the action it names. It never opens an agent prompt.
+6. **Chat is part of the workspace.** Chat links to files, data, and apps, and what it produces can become real work.
+7. **Apps are real web apps.** Their source lives in the workspace. They see only what their owner exposes. Anyone can open a shared app by its URL.
+8. **Strict foundation, free workflow.** Ownership, sign-in, permissions, sync, history, and isolation are strict. Everything else is the user's choice. App source and Collection automations are files any agent can edit. Changing sharing, apps, or chat never changes how the others store data. dohc ships no fixed workflows or built-in business apps.
 
 ### Jobs to test ideas against
 
-- **Plan a trip.** A group and their agents keep the trip app, files, and chat together, and continue from a phone or a browser.
-- **Run a fundraiser.** A signup app takes registrations through a share link. Organizers keep working on it in the event's workspace.
-- **Share work in progress.** The other person and their agents get the files, data, apps, chat, and history they need to continue. A zip file is not enough.
-- **Tailor the workspace.** People and agents change, copy, and share apps and automations to fit their work.
+- **Plan a trip.** A group and their agents keep the trip app, files, and chat together, from a phone or a browser.
+- **Run a fundraiser.** A signup app takes registrations through a share link, and organizers keep working on it.
+- **Share work in progress.** The other person and their agents get everything they need to continue. A zip file is not enough.
+- **Tailor the workspace.** People and agents change, copy, and share apps and automations.
 
 ## Invariants
 
@@ -30,60 +30,60 @@ Never weaken these for convenience.
 
 - **The server decides who someone is.** Never trust an identity the client sends.
 - **Everything belongs to one workspace.** People and agents go through the same storage, permissions, and sharing.
-- **Apps, sites, and HTML previews run in a sandbox.** They get only what they were granted. An app must be unable to ask for data its owner did not expose. A rule that says "don't" is not enough.
+- **Apps and previews run in a sandbox.** They get only what they were granted. Make it impossible for an app to ask for more. A rule that says "don't" is not enough.
 - **A live document's Y.Doc is the source of truth.** The engine writes the Markdown file when edits settle.
-- **A slow response for workspace A never changes workspace B.** In renderer components and hooks, read workspace data with `useWorkspaceQuery`. Guard other async results with a request token or an abort signal.
-- **Failures show as a toast and a Notices row**, with Try again and copy. A top bar is only for when the whole workspace is degraded.
+- **A slow answer for workspace A never changes workspace B.** In renderer components and hooks, read workspace data with `useWorkspaceQuery`. Guard other async results with a request token or an abort signal.
+- **Failures show as a toast and a Notices row**, with Try again and copy. A top bar is only for when the whole workspace is broken.
 - **Changes can be undone.** Show who made a change and how to undo it. Warn before anything that can't be undone.
-- **One operation per action.** Buttons, the CLI, and MCP call the same shared operation, and that operation checks permissions. Declare reads in `*Declarations.ts` and writes in `*WriteDeclarations.ts` in `packages/workspace-contracts/src`. Give each write a test that shows it refuses what it should. After you change a declaration, run `pnpm write:operation-pins` and read the diff.
-- **Measure before you add a limit.** Set the limit above healthy use. The error names the limit, its unit, and the actual usage.
+- **One operation per action.** Buttons, the CLI, and MCP call the same operation, and it checks permissions. Declare reads in `*Declarations.ts` and writes in `*WriteDeclarations.ts` in `packages/workspace-contracts/src`. Test that each write refuses what it should. After you change a declaration, run `pnpm write:operation-pins` and read the diff.
+- **Measure before you add a limit.** Set it above healthy use. The error names the limit, its unit, and the actual usage.
 
 ## Stay safe
 
-- **Use your own copy.** Work in your own worktree, build, profile, and workspace. Stop only processes you started. A newer build can upgrade a workspace so the installed app can't open it, so test on a new workspace or a copy.
-- **Never run code from a fork PR** on the shared Windows or Mac hosts, or on any machine with maintainer credentials. Ask a maintainer.
-- **Never run bare `cargo`.** Use the [rust-gate](.agents/skills/rust-gate/SKILL.md) skill. Read its summary, not its exit code.
+- **Use your own copy.** Work in your own worktree, build, profile, and workspace. Stop only processes you started. Test on a new workspace or a copy, because a newer build can upgrade a workspace past what the installed app can open.
+- **Never run code from a fork PR** on the shared hosts or any machine with maintainer credentials. Ask a maintainer.
+- **Never run bare `cargo`.** Use the [rust-gate](.agents/skills/rust-gate/SKILL.md) skill, and read its summary, not its exit code.
 
 ## Writing code
 
-- **No backward compatibility.** Replace old code, and update callers, tests, and docs in the same change. Remove fallbacks and dead paths. Add a migration only when asked. Engine migrations that already shipped are append-only.
-- **Keep it small.** Pick the simplest design that makes the right behavior obvious. Remove complexity you don't need.
+- **No backward compatibility.** Replace old code, and update callers, tests, and docs in the same change. Remove fallbacks and dead paths. Add a migration only when asked. Engine migrations that shipped are append-only.
+- **Keep it small.** Pick the simplest design that makes the right behavior obvious.
 - **No code comments.** If code needs a comment to make sense, change the code. [dohc-writing](.agents/skills/dohc-writing/SKILL.md#code-comments) lists the few exceptions.
-- **Effect** is for Electron main, services, and Node-only packages, where it replaces manual cancel, retry, or cleanup code. Keep it out of the renderer and preload. Effect timeouts don't stop native work, so keep native limits, wait for resources to close before you return, and report the first error, not a cleanup error.
+- **Effect** is for Electron main, services, and Node-only packages. Keep it out of the renderer and preload. Its timeouts don't stop native work, so keep native limits, wait for resources to close, and report the first error, not a cleanup error.
 
 ## Done means it works everywhere
 
-A change often works on the path you tried and nowhere else. Check each of these that applies:
+A change often works on the path you tried and nowhere else. Check each that applies:
 
 - **Every way in:** menus, shortcuts, links, and the CLI or MCP.
 - **Shared work:** offline use, and another person's permissions and sync.
 - **State:** saving, restarting, undo, failure, and switching workspaces.
-- **Platforms:** Windows, macOS, Linux, and `apps/mobile`. Say what you could not check.
+- **Platforms:** Windows, macOS, Linux, and `apps/mobile`. Say what you couldn't check.
 - **Finish:** loading, errors, empty states, both themes, keyboard use, and reduced motion.
 
 ## Verifying
 
-[Verify agent work](docs/engineering/verify-agent-work.md) has the full steps.
+[Verify desktop work](docs/engineering/verify-agent-work.md) has the full steps.
 
-- In a new worktree, run `pnpm setup:worktree`. Run `pnpm run doctor` to check it is ready.
+- In a new worktree, run `pnpm setup:worktree`, then `pnpm run doctor`.
 - While you work, run the typecheck and tests for the packages you changed.
 - After you change JavaScript or TypeScript, run `pnpm lint` and `pnpm fmt`.
 - For desktop changes, run `pnpm qa:smoke`, then watch your change work in the real app. Mocked tests don't prove a UI.
-- Test behavior that can break. Don't test what the types already guarantee.
-- For a bug fix, add a test that fails before the fix and passes after. For a visual fix, show before and after screenshots.
-- Wait for the real condition in tests. Never add a sleep.
+- Test behavior that can break, not what the types already guarantee.
+- A bug fix gets a test that fails before the fix and passes after. A visual fix gets before and after screenshots.
+- In tests, wait for the real condition. Never add a sleep.
 
 ## Pull requests
 
-- Use the [PR template](.github/pull_request_template.md). Say what was wrong, what changed, how you checked it, and what you could not check.
-- Open a PR when it is ready for review. Use a draft only when you need early feedback, and say what feedback you need.
+- Use the [PR template](.github/pull_request_template.md): what was wrong, what changed, how you checked it, and what you couldn't check.
+- Open a PR when it is ready for review. Use a draft only to ask for early feedback, and say what you need.
 - Passing PR checks on the latest commit replace a local `pnpm verify:pr`. A missing, cancelled, or failed run is not a pass.
 - Non-trivial code gets a review from a different model family. Security, privacy, data loss, and migration changes get a second reviewer.
 - Check each review finding against the code. Fix real problems. Decline the rest with a reason.
 
 ## Docs
 
-- Most changes need no new doc. The code and tests already describe them.
+- Most changes need no new doc. The code and tests describe them.
 - `docs/` is for users, app authors, and agents. `docs/engineering/` is for maintainers.
 - Put plans, notes, and measurements in the ignored `.agent-artifacts/` folder, and delete them when you finish.
 

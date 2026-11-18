@@ -16,9 +16,7 @@ Follow Orwell's six rules from "Politics and the English Language".
 
 ## Procedures
 
-Write runbooks, skills, and the steps inside any document as controlled English, in the spirit of ASD-STE100: one instruction per sentence, the condition first ("If you changed a crate, rebuild the engine."), and a named actor. End a procedure with how the reader knows it worked.
-
-Use this for steps only. Explanations, reasons, and notes keep their natural voice.
+Write steps as one instruction per sentence, with the condition first: "If you changed a crate, rebuild the engine." End with how the reader knows it worked. Explanations and reasons keep their natural voice.
 
 ## Code comments
 
@@ -32,7 +30,7 @@ Keep only these:
 - A link to an issue or RFC that explains a constraint the code can't express.
 - Lint suppressions for a rule that is wrong for that line or only about style. If the rule protects correctness or safety, fix the code instead.
 
-A long comment that justifies a workaround means the code is wrong. Words like `IMPORTANT` or "do not remove" don't make a comment a keeper. If a constraint matters, enforce it with a type, a test, or a lint rule.
+A long comment that defends a workaround means the code is wrong. `IMPORTANT` or "do not remove" doesn't save a comment. If a rule matters, enforce it with a type, a test, or a lint rule.
 
 ## House style
 
@@ -58,6 +56,6 @@ A long comment that justifies a workaround means the code is wrong. Words like `
 
 ## Last pass
 
-Cut hype words, "not just X, but Y", trailing "-ing" clauses that claim a result, lists of three made for rhythm, and filler such as "Here's the thing." Leave code, identifiers, commands, and quotations unchanged.
+Cut hype words, "not just X, but Y", "-ing" clauses tacked on to claim a result, lists of three made for rhythm, and filler such as "Here's the thing." Leave code, commands, and quotes as they are.
 
 You are done when the prose is very easy to understand and 100% clear.
