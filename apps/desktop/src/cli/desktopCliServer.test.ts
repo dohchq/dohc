@@ -2306,11 +2306,16 @@ function liveChangeRecord() {
 }
 
 async function liveDocumentsFixture(
-  options: { caller?: string; record?: ReturnType<typeof liveChangeRecord>["record"] } = {},
+  options: {
+    caller?: string;
+    record?: ReturnType<typeof liveChangeRecord>["record"];
+    paused?: "refused" | "failing";
+  } = {},
 ) {
   const f = await keptEditsFixture(options);
   const h = pendingStopHarness("workspace", "notes/plan.md", "object-plan", {
     ownerLiveQuarantines: () => f.kept.workspace ?? [],
+    ...(options.paused ? { resumeOwnerLivePause: async () => options.paused! } : {}),
     ...(options.record
       ? {
           liveChanges: options.record,
@@ -2568,6 +2573,16 @@ describe.each(["mcp"] as const)("who stopped or resumed live editing, through %s
     });
     expect(changes.last.get("object-plan")).toMatchObject({ action: "resumed", author: agent });
     expect(changes.pending.size).toBe(0);
+  });
+  it("credits a Resume that ended the server's pause, though the server never stopped hosting the note", async () => {
+    const changes = liveChangeRecord(),
+      f = await liveDocumentsFixture({ record: changes.record, paused: "refused" });
+    f.answer.changed = false;
+    expect(await f.doors[door].resume("notes/plan.md")).toEqual({
+      ok: true,
+      path: "notes/plan.md",
+    });
+    expect(changes.last.get("object-plan")).toMatchObject({ action: "resumed", author: agent });
   });
   it("never settles a change this dohc is still making, and never credits one an interrupted action left", async () => {
     const changes = liveChangeRecord(),

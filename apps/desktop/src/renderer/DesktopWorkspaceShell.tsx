@@ -3848,8 +3848,7 @@ export function DesktopWorkspaceShell(props: {
             if (!current()) return;
             void resumeLiveDocument(workspaceId, row.path).then(
               () => {
-                if (current() && row.cause !== "ended")
-                  showSuccessNotice("Live editing resumed from the last save.");
+                if (current() && row.cause !== "ended") showSuccessNotice("Live editing resumed.");
               },
               (error: unknown) => {
                 if (current())

@@ -164,6 +164,10 @@ export interface EngineYdocProviderSession {
   // Resolves once the engine's current state has landed. When the engine
   // holds another history, `onLineageReplaced` has announced it by then.
   resync?(): Promise<void>;
+  // Runs `leave` between this document's edits, given the edits the engine
+  // has not acknowledged. Once it succeeds, `onLineageReplaced` announces the
+  // engine's state in place of this document.
+  leaveLiveEditing?<T>(leave: (unsent: Uint8Array) => Promise<T>): Promise<T>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
   settleNow(options?: {
     summary?: string;
@@ -523,6 +527,12 @@ export async function openEngineYdocProviderSession(
     async resync() {
       if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
       await session.resync();
+    },
+
+    leaveLiveEditing(leave) {
+      if (closed)
+        return Promise.reject(new Error(`Y.Doc provider session for ${options.path} is closing.`));
+      return session.leaveLiveEditing(leave);
     },
 
     async adoptCollectionRecord() {

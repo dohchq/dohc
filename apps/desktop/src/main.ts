@@ -7458,6 +7458,8 @@ const desktopEngine = createDesktopEngine({
   notifyOwnerDraftsChanged: (workspaceId) => ownerPendingShare.refresh(workspaceId),
   ownerPendingPaths: (workspaceId) => ownerPendingShare.paths(workspaceId),
   ownerHasOpen: (workspaceId, path) => engineYDocSessionIpc.ownerHasOpen(workspaceId, path),
+  leaveLiveEditing: (workspaceId, path, leave) =>
+    engineYDocSessionIpc.leaveLiveEditing(workspaceId, path, leave),
   notifyOwnerLiveStopped: (workspaceId, objectId, path) => {
     sendRendererActivity({ workspaceId, liveDocumentStopped: objectId });
     void engineYDocSessionIpc

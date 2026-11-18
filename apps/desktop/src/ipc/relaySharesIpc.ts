@@ -782,7 +782,8 @@ export function createOwnerLiveDocumentActions<
             })
             .parse(result);
           // Credit only the document this request resumed, and only when the server's answer says it did.
-          const answer = changedBy(result);
+          // Ending the server's pause resumed it, though the server never stopped hosting it.
+          const answer = paused ? "applied" : changedBy(result);
           if (named)
             await finishChange(
               operation,

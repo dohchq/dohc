@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import { settleOwnerLivePauses, type OwnerLivePause, type RelayLivePause } from "./ownerLivePause";
 
 const binding = {
@@ -11,7 +12,11 @@ const binding = {
   restoreFenceGeneration: 0,
   selectorPaths: [],
 } as never;
-const roomCopy = Uint8Array.of(1, 2, 3);
+const roomCopy = (() => {
+  const doc = new Y.Doc();
+  doc.getText("t").insert(0, "Ana");
+  return Y.encodeStateAsUpdate(doc);
+})();
 const sha256 = createHash("sha256").update(roomCopy).digest("hex");
 const pause: RelayLivePause = {
   pauseId: "pause",
@@ -32,7 +37,7 @@ const pause: RelayLivePause = {
 };
 const document = { mainVersionId: "main", objectId: "note", currentPath: "notes/plan.md" };
 
-type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean };
+type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean; appliedCursor?: number };
 
 /** An engine that holds one paused Stop once paused, and a folder of files. */
 function fixture() {
@@ -40,15 +45,17 @@ function fixture() {
   const files = new Map<string, string>([["notes/plan (unsaved edits).md", "older"]]);
   const held = () =>
     stop && {
-      stop: { document, paused: { ...stop } },
+      stop: { document, binding, paused: { ...stop } },
       bytes: Buffer.from("Ana's words and the owner's"),
     };
   const client = {
     ownerYDocPausedCopy: vi.fn(async () => held()),
-    ownerYDocPause: vi.fn(async (_request: unknown, input: { copyPath: string }) => {
-      stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true };
-      return {};
-    }),
+    ownerYDocPause: vi.fn(
+      async (_request: unknown, input: { copyPath: string; roomCopy?: Uint8Array }) => {
+        stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true, appliedCursor: 7 };
+        return {};
+      },
+    ),
     ownerYDocPausedCopyWritten: vi.fn(
       async (_request: unknown, _document: unknown, copyPath: string) => {
         stop = { ...stop!, copyPath, copyWritten: true };
@@ -76,6 +83,9 @@ function fixture() {
     markdown: "The room's words",
     leftOut: false,
   }));
+  const leaveLiveEditing = vi.fn(
+    (_path: string, pause: (unsent: Uint8Array[]) => Promise<unknown>) => pause([]),
+  );
   const errors: unknown[] = [];
   const settle = (
     pauses = [pause],
@@ -90,6 +100,8 @@ function fixture() {
       relay,
       writes,
       render,
+      leaveLiveEditing: <T>(path: string, pause: (unsent: Uint8Array[]) => Promise<T>) =>
+        leaveLiveEditing(path, pause) as Promise<T>,
       signal: new AbortController().signal,
       onError: (_pause, error) => errors.push(error),
     });
@@ -98,6 +110,7 @@ function fixture() {
     relay,
     files,
     render,
+    leaveLiveEditing,
     errors,
     settle,
     setStop: (value: Stop | null) => (stop = value),
@@ -136,6 +149,38 @@ describe("settleOwnerLivePauses", () => {
     // The Stop stays while the server holds the pause.
     expect(f.client.ownerYDocStopClear).not.toHaveBeenCalled();
     expect(f.errors).toEqual([]);
+  });
+
+  it("pauses between the open editor's edits, so the copy takes the ones it hasn't sent", async () => {
+    const f = fixture();
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, roomCopy);
+    editor.getText("t").insert(3, " and the owner");
+    const unsent = Y.encodeStateAsUpdate(editor, Y.encodeStateVectorFromUpdate(roomCopy));
+    f.leaveLiveEditing.mockImplementationOnce(async (_path, run) => {
+      expect(f.client.ownerYDocPause).not.toHaveBeenCalled();
+      return run([unsent]);
+    });
+    await f.settle();
+    expect(f.leaveLiveEditing).toHaveBeenCalledWith("notes/plan.md", expect.any(Function));
+    const [, input] = f.client.ownerYDocPause.mock.calls[0]!;
+    const copy = new Y.Doc();
+    Y.applyUpdate(copy, input.roomCopy!);
+    expect(copy.getText("t").toString()).toBe("Ana and the owner");
+  });
+
+  it("writes one copy when the pause was made but its answer failed", async () => {
+    const f = fixture();
+    f.client.ownerYDocPause.mockImplementationOnce(async (_request, input) => {
+      f.setStop({ copyPath: input.copyPath, copyWritten: false, leftOut: true, appliedCursor: 7 });
+      throw new Error("conflict-stale-target");
+    });
+    expect(await f.settle()).toEqual([]);
+    expect(await f.settle()).toMatchObject([{ copyPath: "notes/plan (unsaved edits 2).md" }]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana's words and the owner's");
+    expect(f.render).not.toHaveBeenCalled();
+    expect(f.files.has("notes/plan (unsaved edits 3).md")).toBe(false);
+    expect(f.relay.copyWritten).toHaveBeenCalledOnce();
   });
 
   it("writes an earlier Stop's copy and the server's in files of their own, since the Stop may hold an earlier pause", async () => {

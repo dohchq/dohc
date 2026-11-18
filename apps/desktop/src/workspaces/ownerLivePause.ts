@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as Y from "yjs";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { ListedOwnerDeliveryDocument } from "./serverOwnerDelivery";
@@ -112,6 +113,11 @@ export async function settleOwnerLivePauses(input: {
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
+  /**
+   * Runs `pause` between the edits of the editors open on the note at `path`,
+   * given the edits they have not sent. Once it succeeds, they show the note.
+   */
+  leaveLiveEditing<T>(path: string, pause: (unsent: Uint8Array[]) => Promise<T>): Promise<T>;
   /** The note's file text from its whole state, and whether it leaves some out. */
   render(state: Uint8Array): Promise<{ markdown: string; leftOut: boolean }>;
   signal: AbortSignal;
@@ -141,20 +147,31 @@ export async function settleOwnerLivePauses(input: {
     const document = { mainVersionId: "main", objectId: pause.objectId };
     try {
       let held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
-      // Only a pause made here and now holds the relay's copy. A Stop held from
-      // before may be an earlier pause's, so the relay's copy then gets a file of its own.
-      let joined = false;
+      // Only this pause's Stop holds the relay's copy: one made now, or one made at
+      // this pause's save whose copy no pass has written. A Stop held from an
+      // earlier pause leaves the relay's copy a file of its own.
+      let joined =
+        held !== null &&
+        !held.stop.paused.copyWritten &&
+        held.stop.paused.appliedCursor === pause.savedCursor &&
+        held.stop.binding?.lineageClaimId === pause.lineageClaimId;
       if (!held && listed && pause.copy) {
-        await input.client.ownerYDocPause(
-          request(),
-          {
-            binding: listed.binding,
-            appliedCursor: pause.savedCursor,
-            rowCursor: pause.savedCursor,
-            copyPath: await freeName(pause.path, input.writes),
-            roomCopy: await relayCopy(input.relay, pause, input.signal),
-          },
-          input.signal,
+        const roomCopy = await relayCopy(input.relay, pause, input.signal);
+        const copyPath = await freeName(pause.path, input.writes);
+        // The owner's open editor waits while the note pauses, so the copy takes
+        // what it shows, and then it shows the note.
+        await input.leaveLiveEditing(listed.binding.currentPath, (unsent) =>
+          input.client.ownerYDocPause(
+            request(),
+            {
+              binding: listed.binding,
+              appliedCursor: pause.savedCursor,
+              rowCursor: pause.savedCursor,
+              copyPath,
+              roomCopy: unsent.length === 0 ? roomCopy : Y.mergeUpdates([roomCopy, ...unsent]),
+            },
+            input.signal,
+          ),
         );
         held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
         if (!held) throw new Error("The paused note's copy is missing.");

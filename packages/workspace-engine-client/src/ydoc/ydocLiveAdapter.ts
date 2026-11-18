@@ -563,6 +563,8 @@ interface LocalUpdateRecord {
 
 const LINEAGE_CHANGED_WHILE_RECORDING =
   "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.";
+const LIVE_EDITING_LEFT =
+  "Live editing of this document ended while the edit was being recorded. The edit remains in this editor and was not applied to the document.";
 
 export function isLineageChange(error: unknown): boolean {
   return error instanceof YdocAdapterError && error.code === "lineage-changed";
@@ -1343,6 +1345,43 @@ export class YdocAdapterSession {
     if (this.resyncPending) return this.resyncPending;
     this.resyncPending = this.readResyncState();
     return this.resyncPending;
+  }
+
+  /**
+   * Runs `leave` between this document's edits, given the edits the engine
+   * has not acknowledged. Once the engine no longer edits this document live,
+   * no edit made on it reaches the engine, and the engine's state replaces
+   * it, as on a lineage change: its edits can build on collaborators' edits
+   * that the file never took.
+   */
+  async leaveLiveEditing<T>(leave: (unsent: Uint8Array) => Promise<T>): Promise<T> {
+    const operation = this.recordChain.then(async () => {
+      this.assertRecordable();
+      let left: T;
+      try {
+        left = await leave(
+          Y.encodeStateAsUpdate(this.activeDoc, Y.encodeStateVector(this.acknowledgedDoc)),
+        );
+      } catch (error) {
+        // Live editing can end before an answer that fails.
+        await this.requestResyncState();
+        if (this.ownerDraft === undefined)
+          this.refuseGeneration(this.generation, LIVE_EDITING_LEFT);
+        throw error;
+      }
+      this.refuseGeneration(this.generation, LIVE_EDITING_LEFT);
+      return left;
+    });
+    this.recordChain = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await operation;
+    } finally {
+      if (this.generation.refusal !== undefined)
+        void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+    }
   }
 
   // Reads state and head again, once more if a resync is already reading.
