@@ -160,6 +160,15 @@ export async function startTestRelay() {
   return {
     origin,
     host: new URL(origin).host,
+    /** The server's latest revision of an app approved on the owner's computer, which the app's requests name. */
+    appRevision: (appId: string) =>
+      Number(
+        f.storage.db
+          .prepare(
+            "SELECT authority_revision FROM sync_relay_local_dataset_apps WHERE workspace_id='w' AND app_id=?",
+          )
+          .get(appId)?.authority_revision ?? 1,
+      ),
     /** Creates the Collection on the server, as the owner. */
     activate: () =>
       host.activate(
