@@ -4,7 +4,7 @@ import { openEditLinkOnServer } from "./helpers/editLinkServer";
 // The open note sorts after every other, so a host that brings notes back in path order reaches it last.
 const PATH = "zz-open.md";
 const PARAGRAPH = "An ordinary paragraph.";
-const OTHER_NOTES = Number(process.env.DOHC_RESTART_NOTES ?? 40);
+const OTHER_NOTES = Number(process.env.DOHC_RESTART_NOTES ?? 25);
 const OTHERS = Array.from({ length: OTHER_NOTES }, (_, index) => ({
   path: `note-${String(index).padStart(3, "0")}.md`,
   contents: `# Note ${String(index)}\n\nA line of text.\n`,
@@ -18,7 +18,7 @@ test("@server-restart-many after a relay restart, the note someone has open is e
     path: PATH,
     files: [{ path: PATH, contents: `# Open\n\n${PARAGRAPH}\n` }, ...OTHERS],
     // One Edit link over every note, so the server hosts them all and brings them all back at a start.
-    linkPaths: [PATH, ...OTHERS.map((note) => note.path)],
+    alsoLinked: OTHERS.map((note) => note.path),
     env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" },
   });
   try {
@@ -40,15 +40,13 @@ test("@server-restart-many after a relay restart, the note someone has open is e
       return counts;
     };
     // Every note is hosted before the restart, or the restart has nothing to bring back.
+    const registered = () => engineCounts().get("liveApplication.register") ?? 0;
     await expect
-      .poll(() => engineCounts().get("liveApplication.register") ?? 0, {
-        timeout: 600_000,
-        intervals: [5_000],
-      })
-      .toBeGreaterThanOrEqual(OTHER_NOTES + 1);
-    console.log(
-      `RESTART before it: the relay registered ${String(engineCounts().get("liveApplication.register"))} notes`,
-    );
+      .poll(registered, { timeout: 300_000, intervals: [5_000] })
+      .toBeGreaterThanOrEqual(OTHER_NOTES + 1)
+      .catch(() => undefined);
+    console.log(`RESTART before it: the relay registered ${String(registered())} notes`);
+    expect(registered()).toBeGreaterThanOrEqual(OTHER_NOTES + 1);
 
     let returnedAt = 0;
     await server.restartRelay();

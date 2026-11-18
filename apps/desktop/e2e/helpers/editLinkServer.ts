@@ -55,8 +55,11 @@ export async function openEditLinkOnServer(input: {
   owner: string;
   /** The note both people open. */
   path: string;
-  /** What the Edit link covers. Without it, the note alone. A folder makes every note in it one the server hosts. */
-  linkPaths?: string[];
+  /**
+   * More notes the Edit link covers. The owner opens each one first, since the server hosts a linked note only
+   * once its owner's desktop has taken it live.
+   */
+  alsoLinked?: string[];
   files: Array<{ path: string; contents: string }>;
   /** Added to the desktop's and the relay engine's environment. */
   env?: Record<string, string>;
@@ -139,9 +142,24 @@ export async function openEditLinkOnServer(input: {
       "true",
       { timeout: 30_000 },
     );
+    const editable = () =>
+      expect(ownerPage.getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true", {
+        timeout: 30_000,
+      });
+    for (const other of input.alsoLinked ?? []) {
+      await expect
+        .poll(async () => (await pathsOnServer()).has(other), { timeout: 120_000 })
+        .toBe(true);
+      await explorerRow(ownerPage, other).click({ timeout: 15_000 });
+      await editable();
+    }
+    if (input.alsoLinked?.length) {
+      await explorerRow(ownerPage, path).click({ timeout: 15_000 });
+      await editable();
+    }
     const created = await relayJson(relay.baseUrl, token, `/sync/${workspaceId}/shares/links`, {
       method: "POST",
-      body: JSON.stringify({ paths: input.linkPaths ?? [path], access: "edit" }),
+      body: JSON.stringify({ paths: [path, ...(input.alsoLinked ?? [])], access: "edit" }),
     });
     expect(created.status, created.body).toBe(200);
     const link = JSON.parse(created.body) as { url: string };
@@ -155,8 +173,10 @@ export async function openEditLinkOnServer(input: {
               }),
             workspaceId,
           );
-          return listed.documents.some(
-            (document) => document.path === path && document.status === "ready",
+          return [path, ...(input.alsoLinked ?? [])].every((linked) =>
+            listed.documents.some(
+              (document) => document.path === linked && document.status === "ready",
+            ),
           );
         },
         { timeout: 180_000, intervals: [1000] },
