@@ -6,8 +6,19 @@ Read this before changing anything a person sees in the phone app.
 
 The phone uses the desktop's words and behaviour, which the dohc-interface skill gives (`.agents/skills/dohc-interface/SKILL.md`).
 Take shared words from `@dohc/interface-words`. Never copy them.
-[The phone app](../../.agents/skills/dohc-interface/phone.md#the-phone-app) in the skill lists what the phone does differently from the desktop.
-If a phone word or behaviour differs from the desktop, add it to that list, with its reason, in the PR that introduces it.
+The phone differs from the desktop on purpose in these ways:
+
+- Touch targets are at least 44 pt.
+- Use the system's tab bar, navigation, large titles, sheets, and haptics on iOS, and Material's on Android.
+- Body text is 17 pt, with Dynamic Type, in the system font.
+- Use SF Symbols only where iOS draws the control. Use lucide for dohc's own content.
+- A confirmation is an action sheet or a system alert, with the desktop's words. Delete, Forget, Leave, and Remove use the destructive style.
+- Every swipe and long-press has a visible control that does the same thing.
+- Toasts sit at the bottom, above the tab bar or the composer, with a visible ×.
+- The composer docks to the keyboard.
+- There are no tooltips.
+
+If a phone word or behaviour differs from the desktop in another way, say why in the PR.
 If a difference changes what another surface shows, get Ice's decision first.
 
 ## Screenshot comparisons
