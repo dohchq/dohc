@@ -660,6 +660,17 @@ describe("a record's change", () => {
     expect(collections.changes().get(KEY)?.change.value).toBe("Ana");
   });
 
+  it("opens no editor while the record's change is saving", async () => {
+    const { server, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", EDIT, () => held.promise);
+    change(collections, "f-name", "Maya");
+    expect(collections.edit("f-name")).toBeNull();
+    held.resolve(ok({ saved: { version: 2 } }));
+    await answered(collections);
+    expect(collections.edit("f-name")).not.toBeNull();
+  });
+
   it("takes Reload's file names, and clears the view's problem", async () => {
     const { server, collections } = await onRecord();
     server.on("POST", `${OPS}/collectionRecords`, "offline");

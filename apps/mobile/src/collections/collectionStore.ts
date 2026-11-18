@@ -342,7 +342,15 @@ export function createWorkspaceCollections(
       const field = description?.tables
         .find((table) => table.tableId === opened?.tableId)
         ?.fields.find((field) => field.fieldId === fieldId);
-      if (!view || !opened || !description || !field?.editable || opened.record.version === null)
+      if (
+        !view ||
+        !opened ||
+        !description ||
+        !field?.editable ||
+        opened.record.version === null ||
+        changes.get(recordKey(view.datasetId, opened.tableId, opened.record.id))?.state.kind ===
+          "saving"
+      )
         return null;
       return {
         field,
