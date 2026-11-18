@@ -92,7 +92,8 @@ async function ownerAppend(h: SyncRelayHandler, ops: unknown[]) {
   expect(response.status, await response.clone().text()).toBe(200);
 }
 
-async function ownerWrite(h: SyncRelayHandler, path: string, text: string) {
+// `before` is the content a write replaces.
+async function ownerWrite(h: SyncRelayHandler, path: string, text: string, before?: string) {
   const sha = await putBlob(h, OWNER, WORKSPACE, text);
   const seq = ownerSeq++;
   await ownerAppend(h, [
@@ -103,12 +104,12 @@ async function ownerWrite(h: SyncRelayHandler, path: string, text: string) {
       path,
       recordedAtMs: 1000 + seq,
       operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
+      payloadBeforeBlobSha256: before === undefined ? null : sha256(before),
+      payloadBeforePath: before === undefined ? null : path,
       payloadAfterBlobSha256: sha,
       payloadAfterPath: path,
       metadata: { origin: "user" },
-      beforePresent: "null",
+      beforePresent: before === undefined ? "null" : "present",
     }),
   ]);
   return sha;
@@ -209,7 +210,7 @@ function memberRead(
 const refusalBytes = async (response: Response) => `${response.status}:${await response.text()}`;
 
 describe("a member reads the workspace through the link read routes", () => {
-  it("reads the workspace's name, reached files, and history at View, Comment and Edit", async () => {
+  it("reads the workspace's name, reached files, and log at View, Comment and Edit", async () => {
     const { h, storage, planSha } = await seed();
     const ana = await member(h, storage, "ana");
     for (const level of ["view", "comment", "edit"] as const) {
@@ -405,6 +406,45 @@ describe("a member reads the workspace through the link read routes", () => {
         await memberRead(h, `/sync/link/blobs/${sha256("never stored")}`, ana.grantId, "ana"),
       ),
     ).toBe(unknown);
+  });
+
+  // docs/engineering/security-boundaries.md, "Share history needs Edit".
+  it("reads a file's earlier versions only where the member has Edit on it, on every route", async () => {
+    const { h, storage, planSha } = await seed();
+    const ana = await member(h, storage, "ana");
+    await ownerWrite(h, "docs/plan.md", "the new plan", "the plan");
+    await ownerWrite(h, "view/access.yaml", "members: view\n");
+    const viewOld = await ownerWrite(h, "view/a.md", "view old");
+    const viewCurrent = await ownerWrite(h, "view/a.md", "view current", "view old");
+    const routes = {
+      named: (path: string) => h(request("ana", `/sync/shares/${ana.shareId}/${path}`)),
+      link: (path: string) => memberRead(h, `/sync/link/${path}`, ana.grantId, "ana"),
+    };
+    const reads = async () =>
+      Object.fromEntries(
+        await Promise.all(
+          Object.entries(routes).map(async ([name, read]) => {
+            const log = await read("log?since=0&limit=500");
+            expect(log.status, name).toBe(200);
+            const text = await log.text();
+            const blobs = [];
+            for (const sha of [planSha, viewOld, viewCurrent])
+              blobs.push((await read(`blobs/${sha}`)).status);
+            return [name, { old: text.includes(planSha), viewOld: text.includes(viewOld), blobs }];
+          }),
+        ),
+      );
+    const history = { old: true, viewOld: false, blobs: [200, 404, 200] };
+    const current = { old: false, viewOld: false, blobs: [404, 404, 200] };
+    await setLevel(h, "edit");
+    expect(await reads()).toEqual({ named: history, link: history });
+    await setLevel(h, "view");
+    expect(await reads()).toEqual({ named: current, link: current });
+    const role = await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, {
+      role: "admin",
+    });
+    expect(role.status, await role.clone().text()).toBe(200);
+    expect((await reads()).named).toMatchObject({ old: true, blobs: [200, 200, 200] });
   });
 });
 

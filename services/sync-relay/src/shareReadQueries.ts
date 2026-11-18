@@ -17,6 +17,7 @@ import {
   fileSideOf,
   isGroupSelector,
   parseShareOpPayloadWithReferencedPaths,
+  pathLevel,
   pathVisibleThroughShare,
   targetVersionId,
   type AnyShareSelector,
@@ -161,15 +162,24 @@ export function createShareReadQueries(
       relaySeq: row.relaySeq,
     });
 
-  // A member's reach has a level per folder, so it reads as below Edit.
-  const belowEdit = (selector: ShareSelector) =>
-    ("access" in selector ? selector.access : null) !== "edit";
+  // History needs Edit on the file. A member's level differs by folder, so
+  // it is judged at each path, never once for the reader.
+  const editAt = (selector: ShareSelector, path: unknown) =>
+    typeof path === "string" && pathLevel(selector, path) === "edit";
+  const momentAtEdit = (selector: ShareSelector, served: Record<string, unknown>) =>
+    editAt(selector, served.path) &&
+    [served.payloadBeforePath, served.payloadAfterPath].every(
+      (path) => path == null || editAt(selector, path),
+    );
+  // One level everywhere: a named path share or a link.
+  const levelEverywhere = (selector: ShareSelector) =>
+    "access" in selector && !selector.levelAt ? selector.access : null;
 
-  // Rewrites a served file op for a recipient below Edit, or drops it. A
-  // replaced write is dropped. A replaced rename becomes a delete of its old
+  // Rewrites a served file op where the recipient is below Edit, or drops it.
+  // A replaced write is dropped. A replaced rename becomes a delete of its old
   // path, so a recipient that already holds that path loses it. A delete is
   // served without content: the engine records the deleted content as its
-  // after-hash. No served op keeps a before-hash.
+  // after-hash. No such op keeps a before-hash.
   const currentFilesOp = (
     workspaceId: string,
     selector: ShareSelector,
@@ -178,12 +188,14 @@ export function createShareReadQueries(
   ): Record<string, unknown> | null => {
     if (row.opKind === "version.create") {
       const snapshots = Array.isArray(served.forkSnapshots) ? served.forkSnapshots : [];
-      served.forkSnapshots = snapshots.filter((snapshot: Record<string, unknown>) =>
-        isCurrentState(workspaceId, selector, row, snapshot.path),
+      served.forkSnapshots = snapshots.filter(
+        (snapshot: Record<string, unknown>) =>
+          editAt(selector, snapshot.path) ||
+          isCurrentState(workspaceId, selector, row, snapshot.path),
       );
       return served;
     }
-    if (row.opKind !== "moment.append") return served;
+    if (row.opKind !== "moment.append" || momentAtEdit(selector, served)) return served;
     served.payloadBeforeBlobSha256 = null;
     if (served.operation === "delete") {
       delete served.payloadAfterBlobSha256;
@@ -246,8 +258,12 @@ export function createShareReadQueries(
           ? createAccountlessPathProjection(fileSelector)
           : null;
       const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
+      // A named recipient and a member's browser read history only where they
+      // have Edit. A link keeps its own revision rule.
       const currentFilesSelector =
-        audience === "authenticated" && fileSelector && belowEdit(fileSelector)
+        fileSelector &&
+        levelEverywhere(fileSelector) !== "edit" &&
+        (audience === "authenticated" || (!currentOnly && "reach" in fileSelector))
           ? fileSelector
           : null;
       return scanFilteredLog(
@@ -452,10 +468,10 @@ export function createShareReadQueries(
   };
 
   // A named recipient's blob: the after-content of an op the log would serve.
-  // Edit reads any op the filter admits. Below Edit the op must have produced
-  // a current file, so the search starts from the current files: a cap on
-  // historical candidates could hide a current file whose bytes many newer
-  // objects once held, and the recipient's pull would stop at it.
+  // Every readable level reads a current file, so the search starts from the
+  // current files: a cap on historical candidates could hide a current file
+  // whose bytes many newer objects once held, and the recipient's pull would
+  // stop at it. An earlier version needs Edit where the op wrote it.
   const namedShareBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
@@ -472,7 +488,8 @@ export function createShareReadQueries(
     selector = fileSelector;
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
-    if (belowEdit(selector)) {
+    const level = levelEverywhere(selector);
+    if (level !== "edit") {
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
         const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
@@ -494,9 +511,10 @@ export function createShareReadQueries(
           ...(afterPath === undefined ? {} : { afterPath }),
         });
         if (page.some(produced)) return storage.getBlob(workspaceId, sha256);
-        if (page.length < SHARED_BLOB_CANDIDATE_LIMIT) return null;
+        if (page.length < SHARED_BLOB_CANDIDATE_LIMIT) break;
         afterPath = page.at(-1)!.path;
       }
+      if (level !== null) return null;
     }
     const candidates = [
       ...storage.listObjectMomentLogRowsByBlob({
@@ -512,7 +530,15 @@ export function createShareReadQueries(
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const reachable = candidates.some((row) => {
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      return decision.allowed && decision.blobSha256s.includes(sha256);
+      if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
+      if (level === "edit") return true;
+      const served = decision.payload as Record<string, unknown>;
+      return row.opKind === "version.create"
+        ? (Array.isArray(served.forkSnapshots) ? served.forkSnapshots : []).some(
+            (snapshot: Record<string, unknown>) =>
+              snapshot.blobSha256 === sha256 && editAt(selector, snapshot.path),
+          )
+        : momentAtEdit(selector, served);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
