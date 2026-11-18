@@ -1379,6 +1379,22 @@ it("keeps a pipe in code in a table cell and after the table", () => {
   ]);
 });
 
+// #4126: a code span keeps its text as written, so a break it spells is text.
+it("keeps a break spelled in code in a table cell as the code's text", () => {
+  const document = parseRichdocMarkdown(
+    "| a |\n|---|\n| `&lt;br&gt;` |\n| `&amp;lt;br&amp;gt;` |\n| ``x`&lt;br&gt;`` y&lt;br&gt;z |\n",
+  );
+  const cells = document.content?.[0]?.content?.slice(1).map((row) => row.content?.[0]);
+  expect(cells?.map((cell) => cell?.content?.[0]?.content?.[0])).toEqual([
+    { type: "text", text: "&lt;br&gt;", marks: [{ type: "code" }] },
+    { type: "text", text: "&amp;lt;br&amp;gt;", marks: [{ type: "code" }] },
+    { type: "text", text: "x`&lt;br&gt;", marks: [{ type: "code" }] },
+  ]);
+  expectSavedAsTheSameDocument(document);
+  // Outside the code, the spelled break is still the cell's <br>.
+  expect(serializeRichdocBody(document)).toContain("``x`&lt;br&gt;`` y<br>z");
+});
+
 it("keeps a definition and the table after it apart", () => {
   const source = '[x]: u "a\n| b |"\n| c |\n| - |\n| d |';
   const document = parseRichdocMarkdown(source);

@@ -24,6 +24,6 @@
   ]
  },
  "expected": {
-  "markdown": "| head                     |\n| ------------------------ |\n| a&#160;b                 |\n| x&#13;y                  |\n| a<br>&#9;b               |\n| [](a&b)                  |\n| [](a b)                  |\n| a&amp;b &lt;c&gt;        |\n| [](a \"x<br>y\")           |\n| [](a<br>b)               |\n| [](a<br>b)               |\n| `<br>`                   |\n| `<br>`                   |\n| \\| a\\|b \\|<br>\\| ---- \\| |\n"
+  "markdown": "| head                     |\n| ------------------------ |\n| a&#160;b                 |\n| x&#13;y                  |\n| a<br>&#9;b               |\n| [](a&b)                  |\n| [](a b)                  |\n| a&amp;b &lt;c&gt;        |\n| [](a \"x<br>y\")           |\n| [](a<br>b)               |\n| [](a<br>b)               |\n| `&lt;br&gt;`             |\n| `&amp;lt;br&amp;gt;`     |\n| \\| a\\|b \\|<br>\\| ---- \\| |\n"
  }
 }

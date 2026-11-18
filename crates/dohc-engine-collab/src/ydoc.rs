@@ -7994,10 +7994,61 @@ fn render_table_cell_block(
     )
 }
 
+/// Writes a break spelled in a cell's text as `<br>`, as the TypeScript
+/// writer does. A code span keeps its text as written, so a break spelled
+/// there stays. Both writers find code spans by the same rule.
+fn write_table_cell_breaks(markdown: &str) -> String {
+    let spelled = |text: &str| {
+        text.replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+            .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
+    };
+    let bytes = markdown.as_bytes();
+    let mut output = String::with_capacity(markdown.len());
+    let (mut plain, mut at) = (0, 0);
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'`' => {
+                let opened = at;
+                while bytes.get(at) == Some(&b'`') {
+                    at += 1;
+                }
+                if let Some(close) = closing_backtick_run(bytes, at, at - opened) {
+                    output.push_str(&spelled(&markdown[plain..opened]));
+                    output.push_str(&markdown[opened..close]);
+                    at = close;
+                    plain = close;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    output.push_str(&spelled(&markdown[plain..]));
+    output
+}
+
+/// The end of the first run of exactly `length` backticks from `from`, which
+/// closes a code span.
+fn closing_backtick_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
+    let mut at = from;
+    while at < bytes.len() {
+        if bytes[at] != b'`' {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while bytes.get(at) == Some(&b'`') {
+            at += 1;
+        }
+        if at - start == length {
+            return Some(at);
+        }
+    }
+    None
+}
+
 fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
-    let normalized = markdown
-        .replace("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
-        .replace("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+    let normalized = write_table_cell_breaks(markdown);
     let mut output = ProjectionBuffer::new();
     let mut preceding_backslashes = 0usize;
     for character in normalized.chars() {
