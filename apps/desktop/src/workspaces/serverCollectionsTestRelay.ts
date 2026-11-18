@@ -259,7 +259,10 @@ export async function startTestRelay() {
       const savedList = join(home, "list.json");
       const saved = {
         read: async () => JSON.parse(await readFile(savedList, "utf8")) as unknown,
-        write: (value: unknown) => writeFile(savedList, JSON.stringify(value)),
+        update: async (change: (value: unknown) => unknown) => {
+          const next = change(await readFile(savedList, "utf8").then(JSON.parse, () => undefined));
+          if (next !== undefined) await writeFile(savedList, JSON.stringify(next));
+        },
       };
       const data = createServerHomeData({
         host: new URL(origin).host,

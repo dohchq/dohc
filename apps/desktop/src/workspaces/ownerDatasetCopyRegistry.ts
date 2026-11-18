@@ -188,6 +188,8 @@ export function createOwnerDatasetCopyRegistry(options: {
     accountOrigin: string | null = null;
   // Folders of copies that did not close. They go when dohc next starts.
   const held = new Set<string>();
+  // The saved list changes under way, by list.
+  const listUpdates = new Map<string, Promise<void>>();
   let ownerKey: string | null = null,
     stopped = false,
     // Sessions starting: main has cleared the credentials but not yet
@@ -439,17 +441,31 @@ export function createOwnerDatasetCopyRegistry(options: {
         await stillMine(folder);
         return { folder, path: join(resolve(await realpath(folder)), "list.json") };
       };
+      const read = async () => {
+        const { path } = await file();
+        const text = await readFile(path, "utf8");
+        mine();
+        return JSON.parse(text) as unknown;
+      };
+      const write = async (value: unknown) => {
+        const { folder, path } = await file();
+        await atomicWriteFile(path, JSON.stringify(value));
+        await stillMine(folder);
+      };
       return {
-        read: async () => {
-          const { path } = await file();
-          const text = await readFile(path, "utf8");
-          mine();
-          return JSON.parse(text) as unknown;
-        },
-        write: async (value) => {
-          const { folder, path } = await file();
-          await atomicWriteFile(path, JSON.stringify(value));
-          await stillMine(folder);
+        read,
+        // One change at a time, so a change never writes over another it did not read.
+        update: (change) => {
+          const run = (listUpdates.get(key) ?? Promise.resolve()).then(async () => {
+            const next = change(await read().catch(() => undefined));
+            if (next !== undefined) await write(next);
+          });
+          const settled = run.catch(() => undefined);
+          listUpdates.set(key, settled);
+          void settled.then(() => {
+            if (listUpdates.get(key) === settled) listUpdates.delete(key);
+          });
+          return run;
         },
       };
     },
