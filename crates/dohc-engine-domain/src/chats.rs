@@ -27,6 +27,7 @@
 //!   JSON `[createdAtMs, messageId]` body. A TS-minted cursor round-trips; any
 //!   decode/shape failure fails closed as `invalid-follow-target`.
 
+mod deleted;
 mod dispatch;
 mod pending_replay;
 mod reactions;
@@ -34,6 +35,11 @@ mod receipts;
 mod stream;
 mod thread_projection;
 
+pub use deleted::{
+    DeletedMessageLine, MESSAGE_DELETE_OP_KIND, MESSAGE_DELETE_ORIGIN_PREFIX,
+    MESSAGE_TOMBSTONE_OP_KIND, deleted_message, erase_deleted_message, insert_deleted_message,
+    record_message_delete,
+};
 pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
@@ -442,6 +448,8 @@ pub struct ChatMessage {
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
+    /// When the relay deleted the message. A deleted message has an empty body.
+    pub deleted_at_ms: Option<i64>,
 }
 
 /// The caller's authorization result for naming a linked file in a read-only
@@ -744,6 +752,8 @@ pub struct ChannelOpeningMessage {
     pub author_agent_id: Option<String>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
+    /// When the relay deleted the message.
+    pub deleted_at_ms: Option<i64>,
 }
 
 /// The full aggregate consumed by desktop and MCP channel listings.
@@ -3807,6 +3817,7 @@ impl<'a> LinkedChatStore<'a> {
                 author_reported: author_reported.clone(),
                 work: work.clone(),
                 attachments: message_attachments,
+                deleted_at_ms: None,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>((thread, message))
@@ -4198,6 +4209,7 @@ impl<'a> LinkedChatStore<'a> {
                 author_reported: author_reported.clone(),
                 work: work.clone(),
                 attachments: message_attachments,
+                deleted_at_ms: None,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>(message)
@@ -4631,7 +4643,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -4679,6 +4691,7 @@ impl<'a> LinkedChatStore<'a> {
                         link_author: message.link_author,
                         author_reported: message.author_reported,
                         author_agent_id: message.author_agent_id,
+                        deleted_at_ms: message.deleted_at_ms,
                     });
                 summaries.push(ChannelThreadSummary {
                     work: work.remove(&thread.thread_id),
@@ -5221,7 +5234,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -9089,7 +9102,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -9109,7 +9122,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -9330,6 +9343,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         Ok(work) => work,
         Err(error) => return Ok(Err(error)),
     };
+    let deleted_at_ms: Option<i64> = row.get(21)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -9338,6 +9352,8 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         _ => None,
     };
     // The table pairs both ids with the link kind, and an agent connection only with them.
+    // A deleted link message a copy first saw as a tombstone has empty ids:
+    // the tombstone names no link.
     let link_author = match (link_grant_id, link_principal_id) {
         (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
             grant_id,
@@ -9367,6 +9383,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             author_reported,
             work,
             attachments: Vec::new(),
+            deleted_at_ms,
         }),
     )
 }

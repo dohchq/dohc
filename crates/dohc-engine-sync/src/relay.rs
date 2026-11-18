@@ -4517,10 +4517,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     break 'pages;
                 };
                 if local_op.origin_seq != shared_prefix_length
-                    || local_op.op_kind != op.op_kind
-                    || local_op.recorded_at_ms != op.recorded_at_ms
-                    || !replication_payloads_match(&op.op_kind, &local_op.payload, &op.payload)
-                        .map_err(local)?
+                    || !relay_op_matches_journal(
+                        &local_op.op_kind,
+                        &local_op.payload,
+                        local_op.recorded_at_ms,
+                        &op,
+                    )
+                    .map_err(local)?
                 {
                     break 'pages;
                 }
@@ -6441,6 +6444,33 @@ pub(crate) fn without_recording_claim(
     let mut stored = payload.clone();
     stored.as_object_mut()?.remove("authorContext");
     Some(stored)
+}
+
+/// Whether the relay's op at a coordinate holds the op this journal wrote
+/// there: the same op, or the relay's tombstone of a journaled message.
+/// Only the relay writes a tombstone, and it keeps the append's coordinate and
+/// time. Recovery and redelivery both ask, so a deleted message neither ends
+/// the shared prefix nor reads as a diverged coordinate.
+pub(crate) fn relay_op_matches_journal(
+    journaled_kind: &str,
+    journaled_payload: &serde_json::Value,
+    journaled_recorded_at_ms: i64,
+    relay: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    if journaled_recorded_at_ms != relay.recorded_at_ms {
+        return Ok(false);
+    }
+    if journaled_kind == relay.op_kind {
+        return replication_payloads_match(&relay.op_kind, journaled_payload, &relay.payload);
+    }
+    Ok(journaled_kind == "chat.message.append"
+        && relay.op_kind == dohc_engine_domain::chats::MESSAGE_TOMBSTONE_OP_KIND
+        && ["messageId", "threadId"].iter().all(|key| {
+            journaled_payload
+                .get(key)
+                .is_some_and(serde_json::Value::is_string)
+                && journaled_payload.get(key) == relay.payload.get(key)
+        }))
 }
 
 pub(crate) fn replication_payloads_match(

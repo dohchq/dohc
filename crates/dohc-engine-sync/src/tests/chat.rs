@@ -5320,3 +5320,444 @@ fn the_owner_private_kinds_match_the_relay_registry() {
         assert!(crate::router::routes_to_chat(kind), "{kind}");
     }
 }
+
+/// The relay's origin for a moderator's delete.
+const DELETE_ORIGIN: &str = "relay:message-delete:actor-1";
+
+fn message_append(message_id: &str, thread_id: &str, body: &str) -> serde_json::Value {
+    json!({
+        "messageId": message_id,
+        "threadId": thread_id,
+        "authorKind": "human",
+        "authorDisplayName": "Ada",
+        "body": body,
+        "createdAtMs": 30
+    })
+}
+
+/// The line the relay keeps at a deleted append's coordinate.
+fn message_tombstone(message_id: &str, thread_id: &str) -> serde_json::Value {
+    json!({
+        "messageId": message_id,
+        "threadId": thread_id,
+        "authorKind": "human",
+        "authorDisplayName": "Ada",
+        "createdAtMs": 30,
+        "deletedAtMs": 50
+    })
+}
+
+fn message_delete(message_id: &str, thread_id: &str) -> serde_json::Value {
+    json!({ "messageId": message_id, "threadId": thread_id, "deletedAtMs": 50 })
+}
+
+fn message_attachment(message_id: &str, thread_id: &str) -> serde_json::Value {
+    json!({
+        "attachmentId": attachment_id_for(message_id, "object", None, None),
+        "threadId": thread_id,
+        "messageId": message_id,
+        "targetKind": "file",
+        "objectId": "object",
+        "createdAtMs": 31
+    })
+}
+
+/// A stored message's body and delete time, and how many mention,
+/// attachment and search rows it has.
+fn stored_message(engine: &EngineStore, message_id: &str) -> (String, Option<i64>, i64, i64, i64) {
+    engine
+        .read_with(|conn| {
+            let (body, deleted_at_ms) = conn.query_row(
+                "SELECT body, deleted_at_ms FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id=?1",
+                [message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let count = |table: &str| {
+                conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE workspace_id='ws' AND message_id=?1"
+                    ),
+                    [message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            };
+            Ok::<_, rusqlite::Error>((
+                body,
+                deleted_at_ms,
+                count("chat_mentions")?,
+                count("chat_attachments")?,
+                count("engine_search_chat_messages_fts")?,
+            ))
+        })
+        .expect("stored message")
+}
+
+fn thread_search_header(engine: &EngineStore, thread_id: &str) -> String {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id=?1 AND message_id=?2",
+                params![thread_id, CHAT_THREAD_HEADER_MESSAGE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("thread search header")
+}
+
+#[test]
+fn a_relay_delete_clears_the_message_its_mentions_attachment_and_search() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let applied = ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
+    for op in [
+        envelope(
+            "peer",
+            3,
+            "chat.thread.create",
+            json!({
+                "threadId": "thread-untitled",
+                "title": "",
+                "createdAtMs": 25,
+                "channelSlug": "imported",
+                "channelWireId": "channel-imported"
+            }),
+        ),
+        envelope(
+            "peer",
+            4,
+            "chat.message.append",
+            message_append("message-secret", "thread-untitled", "Quasar plans @ice"),
+        ),
+        envelope(
+            "peer",
+            5,
+            "chat.attachment.add",
+            message_attachment("message-secret", "thread-untitled"),
+        ),
+    ] {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, &op, &NoFaults).expect(&op.op_kind),
+            applied
+        );
+    }
+    assert_eq!(
+        stored_message(&engine, "message-secret"),
+        ("Quasar plans @ice".to_owned(), None, 1, 1, 1)
+    );
+    assert_eq!(
+        thread_search_header(&engine, "thread-untitled"),
+        "Quasar plans @ice"
+    );
+
+    let delete = envelope(
+        DELETE_ORIGIN,
+        0,
+        "chat.message.delete",
+        message_delete("message-secret", "thread-untitled"),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &delete, &NoFaults).expect("delete"),
+        applied
+    );
+    assert_eq!(
+        stored_message(&engine, "message-secret"),
+        (String::new(), Some(50), 0, 0, 0)
+    );
+    assert_eq!(
+        thread_search_header(&engine, "thread-untitled"),
+        dohc_engine_domain::chats::chat_thread_display_title("", None)
+    );
+    let read = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "message-secret")
+        .expect("read the deleted message");
+    assert_eq!(
+        (
+            read.body.as_str(),
+            read.deleted_at_ms,
+            read.author_display_name.as_str()
+        ),
+        ("", Some(50), "Ada")
+    );
+
+    // A delete that names another thread than the stored message's changes nothing.
+    let elsewhere = envelope(
+        DELETE_ORIGIN,
+        1,
+        "chat.message.delete",
+        message_delete("message-imported", "thread-untitled"),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &elsewhere, &NoFaults));
+    assert_eq!(
+        stored_message(&engine, "message-imported"),
+        ("Opening".to_owned(), None, 0, 0, 1)
+    );
+}
+
+#[test]
+fn a_delete_before_its_append_or_a_parked_append_stores_the_message_deleted() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let ops = [
+        envelope(
+            DELETE_ORIGIN,
+            0,
+            "chat.message.delete",
+            message_delete("message-early", "thread-imported"),
+        ),
+        envelope(
+            "peer",
+            3,
+            "chat.message.append",
+            message_append("message-early", "thread-imported", "Early secret @ice"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            1,
+            "chat.message.delete",
+            message_delete("message-parked", "late-thread"),
+        ),
+        envelope(
+            "peer",
+            4,
+            "chat.message.append",
+            message_append("message-parked", "late-thread", "Parked secret @ice"),
+        ),
+    ];
+    for op in &ops {
+        apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+    }
+    assert_eq!(
+        stored_message(&engine, "message-early"),
+        (String::new(), Some(50), 0, 0, 0)
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let thread = envelope(
+        "late-peer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "channelSlug": "imported"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        stored_message(&engine, "message-parked"),
+        (String::new(), Some(50), 0, 0, 0)
+    );
+}
+
+#[test]
+fn a_fresh_copy_shows_a_tombstone_as_a_deleted_line_with_its_replies() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let reply = |message_id: &str| {
+        let mut payload = message_append(message_id, "thread-imported", "A reply");
+        payload["parentMessageId"] = json!("message-gone");
+        payload
+    };
+    // A reply can arrive before the message it answers.
+    let ops = [
+        envelope("ana", 0, "chat.message.append", reply("reply-first")),
+        envelope(
+            "peer",
+            3,
+            "chat.message.tombstone",
+            message_tombstone("message-gone", "thread-imported"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            0,
+            "chat.message.delete",
+            message_delete("message-gone", "thread-imported"),
+        ),
+        envelope("ana", 1, "chat.message.append", reply("reply-after")),
+    ];
+    for op in &ops {
+        apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+    }
+    assert_eq!(
+        stored_message(&engine, "message-gone"),
+        (String::new(), Some(50), 0, 0, 0)
+    );
+    let chats = LinkedChatStore::new(&mut engine);
+    let gone = chats
+        .get_message("ws", "message-gone")
+        .expect("deleted line");
+    assert_eq!(
+        (
+            gone.author_kind,
+            gone.author_display_name.as_str(),
+            gone.created_at_ms,
+            gone.deleted_at_ms
+        ),
+        (ChatActorKind::Human, "Ada", 30, Some(50))
+    );
+    for id in ["reply-first", "reply-after"] {
+        let reply = chats.get_message("ws", id).expect(id);
+        assert_eq!(
+            reply.parent_message_id.as_deref(),
+            Some("message-gone"),
+            "{id}"
+        );
+        assert_eq!(reply.deleted_at_ms, None, "{id}");
+    }
+}
+
+#[test]
+fn a_tombstone_over_its_journaled_append_is_accepted_and_a_delete_comes_only_from_the_relay() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                automation: None,
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "message-own".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: None,
+                parent_message_id: None,
+                origin: None,
+                body: "Mine to take back".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+                now_ms: 30,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("local message");
+    let (origin_id, origin_seq, recorded_at_ms): (String, i64, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id, origin_seq, recorded_at_ms FROM replication_log \
+                 WHERE workspace_id='ws' AND op_kind='chat.message.append' \
+                   AND json_extract(payload_json, '$.messageId')='message-own'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("journaled append");
+    let tombstone = ReplicationEnvelope {
+        recorded_at_ms,
+        ..envelope(
+            &origin_id,
+            origin_seq,
+            "chat.message.tombstone",
+            message_tombstone("message-own", "thread-imported"),
+        )
+    };
+    let mut other = tombstone.clone();
+    other.payload["messageId"] = json!("message-imported");
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &other, &NoFaults),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &tombstone, &NoFaults).expect("tombstone"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(
+        stored_message(&engine, "message-own"),
+        (String::new(), Some(50), 0, 0, 0)
+    );
+
+    // Only the relay's delete origin deletes, and it carries nothing else.
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    for op in [
+        envelope(
+            "peer",
+            3,
+            "chat.message.delete",
+            message_delete("message-imported", "thread-imported"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            0,
+            "chat.message.append",
+            message_append("message-forged", "thread-imported", "Forged"),
+        ),
+    ] {
+        assert_invalid_refusal!(apply_replication_envelope(
+            &mut engine,
+            &mut cache,
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        ));
+    }
+    assert_eq!(
+        stored_message(&engine, "message-imported"),
+        ("Opening".to_owned(), None, 0, 0, 1)
+    );
+}
+
+#[test]
+fn an_attachment_after_the_delete_adds_nothing() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    // One attachment arrives after its deleted message, one before it.
+    let ops = [
+        envelope(
+            "peer",
+            3,
+            "chat.message.append",
+            message_append("message-attached", "thread-imported", "See the file"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            0,
+            "chat.message.delete",
+            message_delete("message-attached", "thread-imported"),
+        ),
+        envelope(
+            "peer",
+            4,
+            "chat.attachment.add",
+            message_attachment("message-attached", "thread-imported"),
+        ),
+        envelope(
+            "ana",
+            0,
+            "chat.attachment.add",
+            message_attachment("message-later", "thread-imported"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            1,
+            "chat.message.delete",
+            message_delete("message-later", "thread-imported"),
+        ),
+        envelope(
+            "peer",
+            5,
+            "chat.message.append",
+            message_append("message-later", "thread-imported", "See the file"),
+        ),
+    ];
+    for op in &ops {
+        apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    for id in ["message-attached", "message-later"] {
+        assert_eq!(
+            stored_message(&engine, id),
+            (String::new(), Some(50), 0, 0, 0),
+            "{id}"
+        );
+    }
+}

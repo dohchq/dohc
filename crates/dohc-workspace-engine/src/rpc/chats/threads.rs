@@ -263,6 +263,8 @@ struct OpeningMessageWire<'a> {
     author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_agent_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +309,7 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
                 automation: opening.automation.as_ref().map(AutomationWire::from),
                 author_reported: opening.author_reported.as_ref(),
                 author_agent_id: opening.author_agent_id.as_deref(),
+                deleted_at_ms: opening.deleted_at_ms,
             }),
     })
 }
@@ -767,6 +770,7 @@ mod tests {
             author_agent_id: None,
             body_snippet: "hello".to_owned(),
             reactions: Vec::new(),
+            deleted_at_ms: None,
         };
         let summary = ChannelThreadSummary {
             work: None,

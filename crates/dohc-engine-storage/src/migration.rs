@@ -3769,6 +3769,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("access_rule_holds.sql"),
         sets_user_version: None,
     },
+    // A message the relay deleted, and the line it leaves.
+    Migration {
+        ordinal: 107,
+        id: "v2-chat-deleted-messages",
+        sql: include_str!("chat_deleted_messages.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5756,6 +5763,10 @@ mod tests {
             (
                 "v2-access-rule-holds",
                 "6f2ba17f8a826ebe0c14b9d7bd6d89a3f708f789bf99489512f5379349f621a6",
+            ),
+            (
+                "v2-chat-deleted-messages",
+                "9d8802c0f5572c45eecf7dc8224163cc3cccee3cbc814a4e8a213be1debc0a3c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

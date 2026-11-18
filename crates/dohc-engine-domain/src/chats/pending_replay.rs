@@ -1,13 +1,15 @@
 use super::{
-    AccountThreadReadCell, FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution,
-    PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal, PendingChatReplay,
-    ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution,
-    bump_chat_conversation_revision, index_replicated_chat_message_search_rows, is_agent_id,
+    AccountThreadReadCell, DeletedMessageLine, FeedCoordinateResolution, FollowTargetKind,
+    FollowTargetResolution, PENDING_CHAT_WORKSPACE_EXISTS_SQL, PendingChatRefusal,
+    PendingChatReplay, ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution,
+    bump_chat_conversation_revision, deleted_message, erase_deleted_message,
+    index_replicated_chat_message_search_rows, insert_deleted_message, is_agent_id,
     mark_live_bookmarks_pending, merge_account_thread_read, normalize_agent_owner_name,
     normalize_author_user_id, normalize_body, normalize_display_name, normalize_reported_agent,
-    normalize_work_report, parse_mention_handles, personal_agent_may_post_in, reported_agent_json,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    resolve_thread_read_coordinate, validate_replicated_link_author, work_report_json,
+    normalize_work_report, parse_mention_handles, personal_agent_may_post_in,
+    record_message_delete, reported_agent_json, resolve_feed_coordinate, resolve_follow_target,
+    resolve_thread_message, resolve_thread_read_coordinate, validate_replicated_link_author,
+    work_report_json,
 };
 use crate::AutomationClaim;
 use crate::automations::{AutomationGroupMessage, claim_group_message_in_tx};
@@ -87,6 +89,22 @@ struct PendingMessageAppend {
     author_reported: Option<serde_json::Value>,
     #[serde(default)]
     work: Option<serde_json::Value>,
+}
+
+/// A parked tombstone: the line the relay keeps at a deleted message's
+/// coordinate. Sync apply checked it before parking it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingMessageTombstone {
+    message_id: String,
+    thread_id: String,
+    author_kind: String,
+    author_display_name: String,
+    author_owner_display_name: Option<String>,
+    author_user_id: Option<String>,
+    parent_message_id: Option<String>,
+    created_at_ms: i64,
+    deleted_at_ms: i64,
 }
 
 #[derive(Debug)]
@@ -527,6 +545,12 @@ fn replay_pending_chat_operation(
                 ThreadMessageResolution::DifferentThread => Ok(PendingReplayOutcome::Refused(
                     "chat attachment target message belongs to another thread",
                 )),
+                // A deleted message keeps no attachment.
+                ThreadMessageResolution::Present
+                    if deleted_message(tx, workspace_id, &payload.message_id)?.is_some() =>
+                {
+                    Ok(PendingReplayOutcome::Applied)
+                }
                 ThreadMessageResolution::Present => {
                     let inserted = tx
                         .execute(
@@ -594,6 +618,27 @@ fn replay_pending_chat_operation(
                 )?;
                 return Ok(PendingReplayOutcome::Deferred);
             }
+            if let Some((thread_id, deleted_at_ms)) =
+                deleted_message(tx, workspace_id, &payload.message_id)?
+            {
+                return replay_deleted_message(
+                    tx,
+                    workspace_id,
+                    PendingMessageTombstone {
+                        message_id: payload.message_id,
+                        thread_id: payload.thread_id,
+                        author_kind: payload.author_kind,
+                        author_display_name: payload.author_display_name,
+                        author_owner_display_name: payload.author_owner_display_name,
+                        author_user_id: payload.author_user_id,
+                        parent_message_id: payload.parent_message_id,
+                        created_at_ms: payload.created_at_ms,
+                        deleted_at_ms,
+                    },
+                    Some(thread_id),
+                    payload.author_agent_id.as_deref(),
+                );
+            }
             apply_pending_message(
                 tx,
                 workspace_id,
@@ -604,10 +649,104 @@ fn replay_pending_chat_operation(
                 automation_claims,
             )
         }
+        "chat.message.tombstone" => {
+            let payload: PendingMessageTombstone =
+                serde_json::from_value(operation.payload.clone()).map_err(|_| {
+                    DomainError::StateCorrupt {
+                        reason: "pending chat message tombstone is corrupt",
+                    }
+                })?;
+            let thread_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chat_threads \
+                     WHERE workspace_id=?1 AND thread_id=?2)",
+                    params![workspace_id, payload.thread_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if !thread_exists {
+                park_pending_chat_operation(
+                    tx,
+                    workspace_id,
+                    operation,
+                    "message-thread",
+                    &payload.thread_id,
+                )?;
+                return Ok(PendingReplayOutcome::Deferred);
+            }
+            replay_deleted_message(tx, workspace_id, payload, None, None)
+        }
         _ => Ok(PendingReplayOutcome::Refused(
             "pending chat operation kind is invalid",
         )),
     }
+}
+
+/// Stores a parked message the relay deleted, in a thread that exists, as its
+/// line. `held_thread` is the thread a recorded delete named, for an append;
+/// a tombstone records its own.
+fn replay_deleted_message(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: PendingMessageTombstone,
+    held_thread: Option<String>,
+    author_agent_id: Option<&str>,
+) -> Result<PendingReplayOutcome, DomainError> {
+    const OTHER_THREAD: PendingReplayOutcome =
+        PendingReplayOutcome::Refused("a message delete names another thread");
+    let (Ok(owner_name), Ok(author_display_name), Ok(author_user_id)) = (
+        normalize_agent_owner_name(
+            payload.author_kind != "human",
+            payload.author_owner_display_name.as_deref(),
+        ),
+        normalize_display_name(&payload.author_display_name),
+        normalize_author_user_id(payload.author_user_id.as_deref()),
+    ) else {
+        return Ok(PendingReplayOutcome::Refused(
+            "pending deleted chat message is invalid",
+        ));
+    };
+    match held_thread {
+        Some(thread_id) if thread_id != payload.thread_id => return Ok(OTHER_THREAD),
+        Some(_) => {}
+        None => {
+            if !record_message_delete(
+                tx,
+                workspace_id,
+                &payload.thread_id,
+                &payload.message_id,
+                payload.deleted_at_ms,
+            )? {
+                return Ok(OTHER_THREAD);
+            }
+        }
+    }
+    insert_deleted_message(
+        tx,
+        workspace_id,
+        &DeletedMessageLine {
+            thread_id: &payload.thread_id,
+            message_id: &payload.message_id,
+            author_kind: &payload.author_kind,
+            author_display_name: &author_display_name,
+            author_user_id: author_user_id.as_deref(),
+            author_owner_display_name: owner_name.as_deref(),
+            author_agent_id,
+            parent_message_id: payload.parent_message_id.as_deref(),
+            created_at_ms: payload.created_at_ms,
+            deleted_at_ms: payload.deleted_at_ms,
+        },
+    )?;
+    if !erase_deleted_message(
+        tx,
+        workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        payload.deleted_at_ms,
+    )? {
+        return Ok(OTHER_THREAD);
+    }
+    Ok(PendingReplayOutcome::Applied)
 }
 
 /// The parked message's report, checked as sync apply checks it. `None` means
@@ -977,7 +1116,8 @@ fn changed_chat_dependencies(
                 }
             }
         }
-        "chat.message.append" => {
+        // A tombstone stores the message's line, which a parked read waits for.
+        "chat.message.append" | "chat.message.tombstone" => {
             if let Some(message_id) = payload.get("messageId").and_then(serde_json::Value::as_str) {
                 for kind in ["feed-message", "attachment-message", "thread-read-message"] {
                     dependencies.push(PendingChatDependency {

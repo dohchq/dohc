@@ -216,6 +216,7 @@ mod tests {
                 author_reported: None,
                 work: None,
                 attachments: Vec::new(),
+                deleted_at_ms: None,
             },
             thread: ChatThread {
                 workspace_id: "workspace".to_owned(),

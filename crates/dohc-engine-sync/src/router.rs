@@ -70,6 +70,10 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("chat.channel.create", OwnedRoute::Chat),
     ("chat.thread.create", OwnedRoute::Chat),
     ("chat.message.append", OwnedRoute::Chat),
+    // Only the relay writes these: a deleted message's line at its coordinate,
+    // and the delete from a `relay:message-delete:` origin.
+    ("chat.message.tombstone", OwnedRoute::Chat),
+    ("chat.message.delete", OwnedRoute::Chat),
     ("chat.decision.set", OwnedRoute::Chat),
     ("chat.attachment.add", OwnedRoute::Chat),
     ("chat.reaction.set", OwnedRoute::Chat),
@@ -189,11 +193,15 @@ pub(crate) fn apply_replication_envelope_in_batch(
         .starts_with(dohc_engine_domain::chats::PERSONAL_AGENT_ORIGIN_PREFIX)
         && !matches!(
             envelope.op_kind.as_str(),
-            "chat.channel.create" | "chat.thread.create" | "chat.message.append"
+            "chat.channel.create"
+                | "chat.thread.create"
+                | "chat.message.append"
+                | "chat.message.tombstone"
         )
     {
         // A personal agent's origin carries only its DM, its new threads and
-        // its posts; chat apply checks each of those against the origin.
+        // its posts, which the relay can delete; chat apply checks each of
+        // those against the origin.
         return plain(crate::apply_envelope_with(
             store,
             envelope,
@@ -201,6 +209,23 @@ pub(crate) fn apply_replication_envelope_in_batch(
             |_tx, _op| {
                 Err(SyncError::InvalidInput {
                     reason: "personal agent origin carries only its chat",
+                })
+            },
+        ));
+    }
+    if dohc_engine_domain::chats::replicated_source_origin(&envelope.origin_id)
+        .starts_with(dohc_engine_domain::chats::MESSAGE_DELETE_ORIGIN_PREFIX)
+        != (envelope.op_kind == dohc_engine_domain::chats::MESSAGE_DELETE_OP_KIND)
+    {
+        // The relay's delete origin carries only deletes, and a delete comes
+        // only from it.
+        return plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::InvalidInput {
+                    reason: "only the relay's delete origin deletes a message",
                 })
             },
         ));
