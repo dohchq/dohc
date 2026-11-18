@@ -150,6 +150,11 @@ import {
   authorizeAutomationReplication,
 } from "./automationReplicaCredential";
 import { serverLogLine } from "./serverLogWords";
+import { createStartTimeline } from "./startTimeline";
+
+// Node starting, and every module above loading.
+const startTimeline = createStartTimeline();
+startTimeline.done("code");
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test"
@@ -488,6 +493,7 @@ const accountResolvers: {
         credentialFence,
       };
     })();
+startTimeline.done("accounts");
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
 const resolvePhoneCapableAccountSession = accountResolvers.phoneCapableSession;
@@ -518,6 +524,7 @@ const documentProjection = projectionExecutable
       fatal(`FATAL: Document projection could not start: ${serverLogLine(error)}`),
     )
   : undefined;
+startTimeline.done("engine check");
 const storageOptions = {
   workspaceQuotaBytes,
   pushConfigured: Boolean(pool && pushConfig),
@@ -527,6 +534,7 @@ const deployment = deploymentConfig
   ? openRelayDeployment(deploymentConfig, storageOptions)
   : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
+startTimeline.done("database");
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
 const datasetDirectory =
   deployment?.datasetDirectory ?? (await mkdtemp(join(tmpdir(), "dohc-relay-datasets-")));
@@ -858,7 +866,9 @@ const deletions = createAccountDeletionRoute({
     await datasetHost.deleteWorkspaces(manifest.datasets);
   },
 });
+startTimeline.done("collections");
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
+startTimeline.done("account deletions");
 const signUpInvites =
   secret.length >= 32
     ? createSignUpInviteRoute({ storage, key: signUpInviteKey(secret) })
@@ -1515,6 +1525,7 @@ if (namedLiveConfig) {
   process.once("SIGINT", namedLive.close);
   process.once("SIGTERM", namedLive.close);
 }
+startTimeline.done("live host");
 const publicationOperator = await startPublicationOperator(
   storage,
   operatorSocketPath(),
@@ -1604,6 +1615,7 @@ copies =
       })
     : undefined);
 
+startTimeline.done("apps and automations");
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
 // pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
 const pushQuery = (text: string, values: unknown[]): QueryConfig & { query_timeout: number } => ({
@@ -1647,6 +1659,8 @@ process.once("SIGINT", stopJournalCheck);
 process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
+  // First, so the work this callback starts is not counted as binding the port.
+  startTimeline.done("listening");
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   pushSender.start();
   void (async () => {
@@ -1658,6 +1672,7 @@ server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
   console.log(`[sync-relay] listening on ${host}:${actualPort}`);
+  console.log(`[sync-relay] ${startTimeline.line()}`);
   console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
 });
