@@ -104,7 +104,7 @@ General is each workspace's personal chat. In a community, people may expect a "
 
 ## Moderation
 
-The owner and admins can delete any message in a Group and remove a member. Anyone can delete their own messages. A deleted message leaves a "Message deleted" line. Copies already on people's computers are the same as in [Copies on people's computers](#copies-on-peoples-computers). Reports, timeouts, and bans of people who are not members are not in this version.
+The owner and admins can delete any message in a Group or in a file's Comments, and remove a member. Anyone can delete their own messages there. General, direct messages, and chats with agents have no Delete. A deleted message leaves a "Message deleted" line. The relay deletes the message and stops serving its text, so Delete needs a workspace that syncs and a connection. Copies already on people's computers are the same as in [Copies on people's computers](#copies-on-peoples-computers). Reports, timeouts, and bans of people who are not members are not in this version.
 
 ## Members' agents
 
@@ -134,7 +134,7 @@ dohc already has email invites, the three access levels, grants with revocation,
 - **One reachable set per member, used everywhere.** Files, search, History, links, Collections, chats, Notices, presence, and agent tools all read through it. Piece 1 builds this set before any rule exists, so the access rule pieces do not have to change every surface again.
 - **New Markdown pages under Edit.** The checked write path that creates Collection records today also creates pages in folders where the person has Edit.
 - **Sign-up through an invite link.** On a server with closed sign-up, only an email the operator listed or one with a pending invite can create an account today (`services/workspace-api/src/signUpAdmission.ts`). The invite link is a new way in, so the server gets a setting that turns it off. The setting is on by default.
-- **Deleting Group messages.** Only share discussion messages can be deleted today (`services/sync-relay/src/discussionRoutes.ts`).
+- **Deleting messages in Groups and Comments.** Only share discussion messages can be deleted today (`services/sync-relay/src/discussionRoutes.ts`).
 - **Chat limits for a community.** The relay holds at most 128 signed-in browser follow requests for a workspace's chats at once (`MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE` in `services/sync-relay/src/namedRecipientChat.ts`). Each request follows one Group, so 100 members online who each follow 10 Groups need about 1,000. Piece 2 gives each member one follow request for all their Groups, or raises the cap to fit. The relay also allows 32 follow requests per person. Each live connection is one open live document, and a workspace allows 96, of which 80 are for everyone but the owner (`services/sync-relay/src/selfHostLiveProfile.ts`). 100 members with a document open do not fit, so piece 2 raises that cap. The share-link caps do not apply to signed-in members.
 - **Agent reach in workspaces the person does not own** (`services/sync-relay/src/storage/personalAgents.ts`).
 
@@ -153,7 +153,7 @@ Each piece is one pull request, in this order:
    - **4a1r.** The owner's engine sends a folder's rule before its files, and holds a rule it cannot read.
    - **4a3.** The member's copy follows a rule change and keeps unsent work in a recovery folder.
    - **4c.** Rules on Groups, the move warning, and the warning before hiding an item.
-5. **Moderation.** Deleting Group messages. Removal ships in piece 1.
+5. **Moderation.** Deleting messages in Groups and in files' Comments. Removal ships in piece 1.
 6. **Members' agents.** Agent reach in workspaces where its person is a member.
 
 ## Delivery
