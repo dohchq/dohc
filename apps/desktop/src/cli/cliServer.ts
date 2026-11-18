@@ -1,3 +1,4 @@
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
@@ -545,6 +546,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     name: string;
     purpose?: string;
     type?: ChatChannelType;
+    level?: GroupRuleLevel;
   }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
@@ -3101,9 +3103,7 @@ async function membersGroup(
     wireId === GENERAL_CHANNEL_WIRE_ID ||
     agentIdForChannelWireId(wireId) !== null
   )
-    throw new CliCommandError(
-      `${channel.cli.name} has no access of its own. General, direct messages and agents' chats follow the member level.`,
-    );
+    throw new CliCommandError(`${channel.cli.name} has no Group access rule.`);
   return { name: channel.cli.name, wireId };
 }
 
@@ -4440,6 +4440,7 @@ async function dispatchWorkspace(
         name: request.args.name,
         ...(request.args.purpose !== undefined ? { purpose: request.args.purpose } : {}),
         ...(request.args.type ? { type: request.args.type } : {}),
+        ...(request.args.level ? { level: request.args.level } : {}),
       });
       await notifyWrite(options, context);
       return { group: groupForCli(channel) };

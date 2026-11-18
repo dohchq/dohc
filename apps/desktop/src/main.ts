@@ -7336,6 +7336,20 @@ const { startDesktopCliServer } = createDesktopCliServer({
         assertCurrent,
       )
     ).channel,
+  createOwnedGroupWithLevel: async (workspace, store, input, assertCurrent) =>
+    (
+      await createJoinedGroup(
+        {
+          createJoinedWorkspaceGroup: (_view, groupInput) =>
+            createOwnedWorkspaceGroup(workspace.workspaceId, groupInput),
+          subscribeChatWrites,
+          pullJoinedWorkspace: async (workspaceId) => activity.queueCloudSync(workspaceId),
+        },
+        { workspace, store },
+        input,
+        assertCurrent,
+      )
+    ).channel,
   joinedPages: {
     role: memberRoleOf,
     folderHoldsFile: async (workspaceId, folder) =>

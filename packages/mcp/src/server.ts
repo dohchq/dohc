@@ -980,11 +980,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_group",
     {
       description:
-        "Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.",
+        "Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. `level` sets what members can do in it as it is made: comment lets them post, view lets them read, none hides it from them. A group made with a level has no folder, and needs a connection. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.",
       inputSchema: {
         name: z.string().min(1).max(80),
         purpose: z.string().max(200).optional(),
         type: z.enum(["posts", "chat", "both"]).optional(),
+        level: z.enum(["comment", "view", "none"]).optional(),
       },
     },
     async (args) => text(await createGroup(ctx, args)),

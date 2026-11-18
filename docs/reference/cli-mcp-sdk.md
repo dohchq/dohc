@@ -699,13 +699,14 @@ Returns `{ ok: true, groups: { kind, id, channelWireId?, name, slug, purpose?, t
 
 ### `dohc_create_group`
 
-Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.
+Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. `level` sets what members can do in it as it is made: comment lets them post, view lets them read, none hides it from them. A group made with a level has no folder, and needs a connection. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `name`: `string`. Required.
 - `purpose`: `string`
 - `type`: `"posts" | "chat" | "both"`
+- `level`: `"comment" | "view" | "none"`
 
 Returns `{ ok: true, group: { id, name, slug, kind, purpose? } }`.
 
@@ -1467,10 +1468,11 @@ dohc chat create-group <name> [options]
 
 Create a Group and its folder, as New group does.
 
-The folder is the Group's name as a slug. A Group with the same name is refused.
+The folder is the Group's name as a slug. A Group with the same name is refused. A Group made with --level has no folder. Choosing a level needs a connection.
 
 - `--purpose <text>`: Say what the Group is for, in up to 200 characters.
 - `--type <posts|chat|both>`: Choose what the Group holds. The default is both.
+- `--level <post|view|none>`: Set what members can do in the Group as it is made. With none, members never see it.
 
 With `--json`, prints `{ schemaVersion, group: { kind, id, name, slug, purpose? } }`.
 

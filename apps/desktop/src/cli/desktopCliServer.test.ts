@@ -311,6 +311,10 @@ function fixture(
       async (_workspace, _store, input) =>
         ({ id: "channel_wire_joined", name: input.name }) as never,
     ),
+    createOwnedGroupWithLevel: vi.fn(
+      async (_workspace, _store, input) =>
+        ({ id: "channel_wire_owned", name: input.name }) as never,
+    ),
     joinedPages: {
       role: vi.fn(() => undefined),
       folderHoldsFile: vi.fn(async () => true),
@@ -3241,6 +3245,19 @@ describe("a joined workspace through the CLI", () => {
     expect(workspace).toMatchObject({ workspaceId: "workspace", shareView: f.shareView });
     expect(store).toBe(f.dependencies.linkedChatStoreFor(f.joined));
     expect(input).toEqual({ name: "Kai group", type: "posts" });
+  });
+
+  // The owner's Group made with a level comes from the relay with its rule,
+  // so members never see it before the rule applies.
+  it("creates the owner's Group with a level through the relay", async () => {
+    const f = fixture();
+    const context = await f.create().openCliWorkspace(f.workspace);
+    await expect(context.createGroup!({ name: "Board", level: "none" })).resolves.toMatchObject({
+      name: "Board",
+    });
+    const [workspace, , input] = vi.mocked(f.dependencies.createOwnedGroupWithLevel).mock.calls[0]!;
+    expect(workspace).toMatchObject({ workspaceId: f.workspace.workspaceId });
+    expect(input).toEqual({ name: "Board", level: "none" });
   });
 
   it("names the level below Edit", async () => {

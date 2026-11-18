@@ -241,6 +241,27 @@ describe("dohc members", () => {
 `);
   });
 
+  // New group with a level, for agents: the stored level goes to the same relay create.
+  it("creates a Group with a level", () => {
+    expect(
+      parseCliArguments(["chat", "create-group", "Board", "--level", "post"], {}),
+    ).toMatchObject({
+      verb: "groupCreate",
+      name: "Board",
+      level: "comment",
+    });
+    expect(
+      parseCliArguments(["chat", "create-group", "Board", "--level", "none"], {}),
+    ).toMatchObject({
+      verb: "groupCreate",
+      name: "Board",
+      level: "none",
+    });
+    expect(() =>
+      parseCliArguments(["chat", "create-group", "Board", "--level", "edit"], {}),
+    ).toThrow("--level must be post, view or none");
+  });
+
   it("pins results to the contract", () => {
     expect(parseCliResult("members", { status: "done" })).toEqual({ status: "done" });
     expect(parseCliResult("members", { status: "ready", view })).toMatchObject({ status: "ready" });

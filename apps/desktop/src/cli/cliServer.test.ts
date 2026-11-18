@@ -1470,7 +1470,7 @@ describe("CLI socket server", () => {
     });
     expect(asked).toEqual([{ action: "group", group: teamWire, level: "view" }]);
     await expect(members({ action: "group", group: "general" })).rejects.toThrow(
-      "has no access of its own",
+      "has no Group access rule",
     );
     expect(asked).toHaveLength(1);
   });

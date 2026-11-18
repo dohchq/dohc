@@ -34,6 +34,7 @@ import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { AgentMembersRequest } from "./members";
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -102,7 +103,13 @@ type CliCommandBody =
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
-  | { verb: "groupCreate"; name: string; purpose?: string; type?: "posts" | "chat" | "both" }
+  | {
+      verb: "groupCreate";
+      name: string;
+      purpose?: string;
+      type?: "posts" | "chat" | "both";
+      level?: GroupRuleLevel;
+    }
   | { verb: "threads"; group: string }
   | {
       verb: "watch";
@@ -976,8 +983,16 @@ const CHAT_VERBS = {
         value: "posts|chat|both",
         text: "Choose what the Group holds. The default is both.",
       },
+      {
+        name: "--level",
+        value: "post|view|none",
+        text: "Set what members can do in the Group as it is made. With none, members never see it.",
+      },
     ],
-    notes: ["The folder is the Group's name as a slug. A Group with the same name is refused."],
+    notes: [
+      "The folder is the Group's name as a slug. A Group with the same name is refused.",
+      "A Group made with --level has no folder. Choosing a level needs a connection.",
+    ],
     parse: (input) => {
       const [name, ...extra] = input.operands;
       if (!name) fail("create-group requires a name");
@@ -986,11 +1001,16 @@ const CHAT_VERBS = {
       if (type !== undefined && type !== "posts" && type !== "chat" && type !== "both")
         fail("--type must be posts, chat or both");
       const purpose = lastValue(input, "--purpose");
+      const word = lastValue(input, "--level");
+      const level =
+        word === undefined ? undefined : GROUP_LEVEL_WORDS[word as keyof typeof GROUP_LEVEL_WORDS];
+      if (word !== undefined && level === undefined) fail("--level must be post, view or none");
       return {
         verb: "groupCreate",
         name,
         ...(purpose !== undefined ? { purpose } : {}),
         ...(type !== undefined ? { type } : {}),
+        ...(level !== undefined ? { level } : {}),
       };
     },
   },

@@ -219,6 +219,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   ],
   "create-group": [
     ["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"],
+    ["chat", "create-group", "board", "--level", "none"],
   ],
   threads: [["chat", "threads", "general"]],
   watch: [
