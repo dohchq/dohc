@@ -4270,9 +4270,10 @@ export function ChatsView(props: {
             className="mx-auto w-full max-w-[640px] px-3 pt-2 sm:px-4"
           />
           {threadLocked ? (
+            // With no composer, the note lines up with the posts above, which sit 8px further in.
             <ComposerNotice
               testId="chats-readonly-note"
-              className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-3 sm:px-4"
+              className="mx-auto w-full max-w-[640px] px-5 pb-4 pt-3 sm:px-6"
             >
               {threadJoined?.ended ? endedGroupNotice(threadJoined) : lockedLineFor(nav.channel)}
             </ComposerNotice>
