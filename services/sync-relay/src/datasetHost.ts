@@ -95,6 +95,9 @@ export function datasetReferenceReadContainsRecord(
 }
 
 /** The existing relay connection owns every authoritative dataset transaction. */
+/** What an app's row on the server holds besides the app itself, counted as a binding's is. */
+const localAppBytes = (appId: string) => Buffer.byteLength(appId) + 256;
+
 export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   const { storage, limits, publicEditRelease } = options,
     nowMs = options.nowMs ?? Date.now;
@@ -131,6 +134,31 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     PRIMARY KEY(workspace_id,app_id),
     FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`),
   );
+  // Apps approved on owners' computers before the server counted them toward storage are counted
+  // once, so withdrawing one gives back only what was counted.
+  storage.tx(() => {
+    const marker = "local-dataset-app-storage-v1";
+    if (storage.db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker))
+      return;
+    for (const row of storage.db
+      .prepare("SELECT workspace_id,dataset_id,app_id,candidate FROM sync_relay_local_dataset_apps")
+      .all()) {
+      const bytes = localAppBytes(String(row.app_id)) + Buffer.byteLength(String(row.candidate));
+      storage.db
+        .prepare(
+          "UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?",
+        )
+        .run(bytes, row.workspace_id, row.dataset_id);
+      storage.db
+        .prepare(
+          "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?",
+        )
+        .run(bytes, row.workspace_id);
+    }
+    storage.db
+      .prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+      .run(marker, Date.now());
+  });
   // The relay's own private folder, which it keeps at the path it was given.
   await mkdir(options.directory, { recursive: true });
   const workers = await realpath(options.directory);
@@ -1322,20 +1350,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
               "UPDATE sync_relay_local_dataset_apps SET candidate='' WHERE workspace_id=? AND dataset_id=? AND app_id=?",
             )
             .run(...scope);
-          // An app approved before its bytes were counted gives back no more than is counted.
-          const counted = storage.db
-            .prepare(
-              "SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?",
-            )
-            .get(input.workspaceId, input.datasetId);
-          account(
-            input.workspaceId,
-            input.datasetId,
-            -Math.min(
-              Buffer.byteLength(String(row.candidate)),
-              Number(counted?.storage_bytes ?? 0),
-            ),
-          );
+          account(input.workspaceId, input.datasetId, -Buffer.byteLength(String(row.candidate)));
         });
       },
       /** Approves, or approves again, an app on the owner's computer over this Collection. */
@@ -1387,11 +1402,13 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
               .get(input.workspaceId, appId);
             authorityRevision = row ? Number(row.authority_revision) + 1 : 1;
             const kept = JSON.stringify(candidate);
-            // The server keeps the app, so the workspace's storage counts it.
+            // The server keeps the app, so the workspace's storage counts it. The app's row stays
+            // after a withdrawal, until its Collection goes, so it counts from its first approval.
             account(
               input.workspaceId,
               input.datasetId,
-              Buffer.byteLength(kept) - Buffer.byteLength(String(row?.candidate ?? "")),
+              Buffer.byteLength(kept) -
+                (row ? Buffer.byteLength(String(row.candidate)) : -localAppBytes(appId)),
             );
             storage.db
               .prepare(

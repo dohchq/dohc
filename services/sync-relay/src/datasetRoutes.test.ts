@@ -521,7 +521,7 @@ it("runs an app on the owner's computer as that app, within its approval, for th
   expect((await call("read", "owner", 1)).status).toBe(404);
 });
 
-it("counts an app approved on the owner's computer toward the workspace's storage until it is withdrawn, and never below zero", async () => {
+it("counts an app approved on the owner's computer toward the workspace's storage, gives its bytes back when it is withdrawn, and counts apps approved before once", async () => {
   const f = await httpFixture();
   await f.activate();
   const { candidate: published } = f.storage.readAppPublication({
@@ -557,26 +557,58 @@ it("counts an app approved on the owner's computer toward the workspace's storag
   });
   const approve = () => f.http(`${f.path}/binding`, { localApp: candidate });
   const withdraw = () => f.http(`${f.path}/binding`, { publicationId: appId, enabled: false });
+  const app = Buffer.byteLength(JSON.stringify(candidate));
+  // The app's row stays after a withdrawal, so it counts from the first approval on.
+  const row = Buffer.byteLength(appId) + 256;
+  const plus = (bytes: number) => ({
+    workspace: before.workspace + bytes,
+    collection: before.collection + bytes,
+  });
   const before = usage();
   expect((await approve()).status).toBe(200);
   const approved = usage();
-  expect(approved.workspace - before.workspace).toBeGreaterThan(
-    Buffer.byteLength(JSON.stringify(candidate)),
-  );
-  // Withdrawn, it gives back all it took.
+  expect(approved.workspace - before.workspace).toBeGreaterThan(app + row);
+  // Withdrawn, it gives back the app and its binding, and approved again, it takes them again.
   expect((await withdraw()).status).toBe(200);
-  expect(usage()).toEqual(before);
-  // An app approved before its bytes were counted, in a Collection that counts fewer bytes than the app
-  // has, is withdrawn too, and the count stops at zero.
+  expect(usage()).toEqual(plus(row));
   expect((await approve()).status).toBe(200);
-  const binding =
-    approved.collection - before.collection - Buffer.byteLength(JSON.stringify(candidate));
-  f.storage.db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=?").run(binding + 10);
+  expect(usage()).toEqual(approved);
+
+  // A server from before apps were counted held this app without counting it. Started again,
+  // it counts it once.
+  const uncount = (bytes: number) => {
+    f.storage.db
+      .prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes-?")
+      .run(bytes);
+    f.storage.db
+      .prepare(
+        "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id='w'",
+      )
+      .run(bytes);
+  };
+  uncount(app + row);
   f.storage.db
-    .prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='w'")
-    .run(before.workspace - before.collection + binding + 10);
+    .prepare("DELETE FROM sync_relay_migrations WHERE migration_id='local-dataset-app-storage-v1'")
+    .run();
+  const start = async () => {
+    const directory = await mkdtemp(join(tmpdir(), "relay-dataset-restart-"));
+    const host = await f.storage.createDatasetHost({
+      publicEditRelease: undefined,
+      directory,
+      limits,
+      onShutdownError(error) {
+        throw error;
+      },
+    });
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  };
+  await start();
+  expect(usage()).toEqual(approved);
+  await start();
+  expect(usage()).toEqual(approved);
   expect((await withdraw()).status).toBe(200);
-  expect(usage().collection).toBe(0);
+  expect(usage()).toEqual(plus(row));
 });
 
 it("runs an app on the owner's computer on a server that publishes no apps", async () => {
