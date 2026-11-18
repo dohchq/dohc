@@ -1,4 +1,9 @@
 import type { MemberFolders } from "./shareFilter";
+import { memberReach } from "./storage/memberReach";
+import { currentAccessRuleSet } from "./storage/accessRules";
+import type { AccessRuleSet } from "@dohc/security-contract/access-rules";
+import { accountEmail, refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
+import { normalizeRuleEmail } from "@dohc/security-contract/access-rules";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
@@ -21,7 +26,7 @@ import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
-import type { ShareLabelReader } from "./shareFilter";
+import type { ShareLabelReader, ShareSelector } from "./shareFilter";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
@@ -2037,8 +2042,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .get(shareId);
   }
-  getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels {
-    return shareLabelsStorage.getShareLabels(this, shareId, reader);
+  getShareLabels(
+    shareId: string,
+    reader: ShareLabelReader,
+    readerFiles?: ShareSelector | null,
+  ): ShareLabels {
+    return shareLabelsStorage.getShareLabels(this, shareId, reader, readerFiles);
   }
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void {
     shareLabelsStorage.setShareLabels(this, shareId, labels, updatedAtMs);
@@ -2269,6 +2278,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
    * changed the schema or a table in `LIVE_AUTHORITY_TABLES`.
    */
   tx<T>(run: () => T, scope?: RelayWriteScope): T {
+    const operation = run;
+    run = () => this.withTransactionRules(operation);
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db
       .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
@@ -2304,7 +2315,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.captureStanding();
     this.db.exec("BEGIN");
     try {
-      const result = run();
+      const result = this.withTransactionRules(run);
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
@@ -2420,6 +2431,56 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     relaySeq: number;
   }): boolean {
     return currentFilesStorage.isCurrentFileState(this, input);
+  }
+
+  memberReach(
+    workspaceId: string,
+    userId: string,
+    role: "admin" | "member",
+    level: import("@dohc/security-contract/share-selector").ShareAccess,
+  ) {
+    return this.readShareTx(() =>
+      memberReach(this.db, workspaceId, userId, role, level, this.transactionRules(workspaceId)),
+    );
+  }
+
+  // Each workspace's rules, read once per transaction until a write lands.
+  private openRules: Map<string, { changes: number; rules: AccessRuleSet }> | null = null;
+  private withTransactionRules<T>(run: () => T): T {
+    this.openRules = new Map();
+    try {
+      return run();
+    } finally {
+      this.openRules = null;
+    }
+  }
+  private transactionRules(workspaceId: string): AccessRuleSet | undefined {
+    if (!this.openRules) return undefined;
+    const changes = Number(this.db.prepare("SELECT total_changes() AS changes").get()!.changes);
+    const held = this.openRules.get(workspaceId);
+    if (held?.changes === changes) return held.rules;
+    const rules = currentAccessRuleSet(this.db, workspaceId);
+    this.openRules.set(workspaceId, { changes, rules });
+    return rules;
+  }
+
+  readShareTx<T>(read: () => T): T {
+    return this.db.isTransaction ? read() : this.readTx(read);
+  }
+
+  refreshAccountEmail(userId: string, email: AccountEmail | null, nowMs: number): void {
+    // Most refreshes find the same email; skip the write transaction for those.
+    const stored = this.readShareTx(() => accountEmail(this.db, userId));
+    const normalized = email && {
+      verifiedEmail: email.verifiedEmail === null ? null : normalizeRuleEmail(email.verifiedEmail),
+    };
+    if (
+      stored === null
+        ? normalized === null
+        : normalized !== null && stored.verifiedEmail === normalized.verifiedEmail
+    )
+      return;
+    this.tx(() => refreshAccountEmail(this.db, userId, email, nowMs));
   }
 
   currentObjectFile(input: {

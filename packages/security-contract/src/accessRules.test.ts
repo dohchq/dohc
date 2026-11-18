@@ -44,8 +44,7 @@ const rules = (entries: Record<string, string | null>): AccessRuleSet =>
 const member = (
   level: "view" | "comment" | "edit",
   verifiedEmail: string | null = null,
-  unverifiedEmail: string | null = null,
-): ReachViewer => ({ role: "member", level, verifiedEmail, unverifiedEmail });
+): ReachViewer => ({ role: "member", level, verifiedEmail });
 
 describe("parseAccessRule", () => {
   it("reads members and people, normalizing emails", () => {
@@ -164,9 +163,9 @@ describe("folderLevel and fileLevel", () => {
     expect(fileLevel(rules({ "": "members: view\n" }), member("edit"), "a/b.md")).toBe("view");
   });
 
-  it("lets an unverified email narrow but never widen", () => {
-    expect(folderLevel(set, member("comment", null, "sam@example.com"), "Drafts")).toBe("view");
-    expect(folderLevel(set, member("view", null, "sam@example.com"), "Reader")).toBe("view");
+  it("gives a member with no verified email the Members level, whatever entry names their address", () => {
+    expect(folderLevel(set, member("comment"), "Drafts")).toBe("view");
+    expect(folderLevel(set, member("view"), "Reader")).toBe("edit");
   });
 
   it("never limits owners and admins", () => {

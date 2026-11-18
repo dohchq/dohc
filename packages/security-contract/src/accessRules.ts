@@ -1,6 +1,6 @@
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { accessRuleFolder, isAccessRuleRelatedPath } from "./accessRuleFiles";
-import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareSelector";
+import { SHARE_ACCESS_VALUES, type ShareAccess } from "./shareSelector";
 
 export {
   ACCESS_RULE_FILE,
@@ -181,15 +181,10 @@ export function formatAccessRule(rule: AccessRule): string | null {
   return reread && sameRule(reread, rule) ? text : null;
 }
 
-function lower(a: ShareAccess | null, b: ShareAccess | null): ShareAccess | null {
-  if (a === null || b === null) return null;
-  return shareAccessRank(a) <= shareAccessRank(b) ? a : b;
-}
-
 /**
  * Who is asking. Owners and admins always have Edit. A member carries their
- * member level and, when their account has one, its verified email; an
- * unverified email can only narrow what a rule gives them.
+ * member level and, when their account has one, its verified email. Only a
+ * verified email matches a person entry.
  */
 export type ReachViewer =
   | { readonly role: "owner" | "admin" }
@@ -197,7 +192,6 @@ export type ReachViewer =
       readonly role: "member";
       readonly level: ShareAccess;
       readonly verifiedEmail: string | null;
-      readonly unverifiedEmail: string | null;
     };
 
 /**
@@ -231,14 +225,11 @@ export function ruleLevel(
   viewer: Extract<ReachViewer, { role: "member" }>,
 ): ShareAccess | null {
   if (rule === null) return null;
-  if (viewer.verifiedEmail !== null) {
-    return rule.people.get(normalizeRuleEmail(viewer.verifiedEmail)) ?? rule.members;
-  }
-  const unverified =
-    viewer.unverifiedEmail === null
+  return (
+    (viewer.verifiedEmail === null
       ? undefined
-      : rule.people.get(normalizeRuleEmail(viewer.unverifiedEmail));
-  return unverified === undefined ? rule.members : lower(unverified, rule.members);
+      : rule.people.get(normalizeRuleEmail(viewer.verifiedEmail))) ?? rule.members
+  );
 }
 
 function folderChain(folder: string): string[] {

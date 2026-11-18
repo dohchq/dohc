@@ -104,6 +104,7 @@ export function createLinkChatRoutes(options: {
   storage: Pick<
     SyncRelayStorage,
     | "appendLinkChatPost"
+    | "readShareTx"
     | "fetchChatMessages"
     | "fetchChannelMessages"
     | "findChannelCreateKind"
@@ -296,13 +297,14 @@ export function createLinkChatRoutes(options: {
         await readSharedChannelPage({
           storage,
           resolver: options.reads.chatResolverFor(share.workspaceId),
-          selector: authority.effectiveSelector,
           workspaceId: share.workspaceId,
           shareId: share.shareId,
           channelWireId,
           query: url.searchParams,
-          recheck: () => {
-            if (current().effectiveSelector.channelWireId !== channelWireId) throw notFound();
+          authorize: () => {
+            const fresh = current().effectiveSelector;
+            if (fresh.channelWireId !== channelWireId) throw notFound();
+            return fresh;
           },
           activity: options.activity,
           waiter: `link:${capability.callerKey}`,

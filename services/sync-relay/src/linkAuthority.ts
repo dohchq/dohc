@@ -6,7 +6,12 @@ import { invalidLinkCapability, relayError } from "./errors";
 import { hashAgentCredential, servableFiles, type ValidatedLinkCapability } from "./linkSecurity";
 import type { PersonalAgents } from "./personalAgents";
 import { authorizeLinkShareAction, authorizeShareGrantAction } from "./shareAuthorization";
-import { fileSideOf, isWorkspaceSelector, type ShareSelector } from "./shareFilter";
+import {
+  fileSideOf,
+  isWorkspaceSelector,
+  type ShareSelector,
+  type PathShareSelector,
+} from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 import type { AgentAccessCheck, AgentConnectionRow } from "./storage/agentConnections";
 
@@ -36,7 +41,7 @@ export interface LinkAuthority {
   shareId: string;
   grantId: string;
   generation: number;
-  access: ShareSelector["access"];
+  access: PathShareSelector["access"];
   effectiveSelector: ShareSelector;
   /** Rate limits and held waits count per caller: the capability's hash, the agent's connection, or the member's account. */
   callerKey: string;
@@ -234,7 +239,7 @@ export function createLinkAuthorityResolver(input: {
   const member = (
     userId: string,
     grantId: string,
-    expected?: { shareId: string; generation: number },
+    expected?: Pick<LinkAuthority, "shareId" | "generation" | "effectiveSelector">,
   ): LinkAuthority => {
     const authorized = authorizeShareGrantAction({
       storage,
@@ -257,11 +262,19 @@ export function createLinkAuthorityResolver(input: {
     ) {
       throw invalidLinkCapability();
     }
+    if (
+      expected &&
+      "reach" in expected.effectiveSelector &&
+      expected.effectiveSelector.reach &&
+      (!("reach" in files) ||
+        files.reach?.signature() !== expected.effectiveSelector.reach.signature())
+    )
+      throw invalidLinkCapability();
     return {
       shareId: authorized.share.shareId,
       grantId,
       generation: authorized.grant.generation,
-      access: files.access,
+      access: authorized.effectiveSelector.reach.evaluated.level,
       effectiveSelector: files,
       callerKey: `member:${userId}`,
       credential: { kind: "member", userId },

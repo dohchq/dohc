@@ -1,7 +1,7 @@
 import { RelayError, relayError } from "./errors";
 import { readBoundedJson } from "@dohc/service-http";
-import { isAccessRuleRelatedPath } from "@dohc/security-contract/access-rules";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedLiveBrowserResolver } from "./namedLiveBrowserAuth";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
@@ -112,7 +112,7 @@ export function createNamedRecipientDocuments(options: {
           if (
             file.contentKind !== "text" ||
             !/\.md$/i.test(file.path) ||
-            isAccessRuleRelatedPath(file.path)
+            visibleSharePath(authority.effectiveSelector, file.path) === null
           )
             continue;
           const objectId = storage.objectIdAtPathInVersion({

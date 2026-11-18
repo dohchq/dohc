@@ -313,10 +313,17 @@ it.each(["Sam"])(
     );
     const queries = createShareReadQueries(f.storage, 500);
     const selector = { paths: ["responses"], versionId: null, access: "view" as const };
-    const authenticated = queries.filteredLogPage("w", "s", selector, since, 10, "authenticated");
+    const authenticated = queries.filteredLogPage(
+      "w",
+      "s",
+      () => selector,
+      since,
+      10,
+      "authenticated",
+    );
     expect(authenticated.ops).toHaveLength(1);
     expect(authenticated.ops[0]!.payload).toMatchObject({ authors });
-    const accountless = queries.filteredLogPage("w", "s", selector, since, 10, "accountless");
+    const accountless = queries.filteredLogPage("w", "s", () => selector, since, 10, "accountless");
     expect(accountless.ops).toHaveLength(1);
     expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
     expect(accountless.ops[0]).not.toHaveProperty("originId");
@@ -348,9 +355,13 @@ it("keeps private grant metadata out of app-created share blobs", () => {
   const queries = createShareReadQueries(f.storage, 500);
   const selector = { paths: ["responses"], versionId: null, access: "view" as const };
   for (const audience of ["authenticated", "accountless"] as const) {
-    const page = queries.filteredLogPage("w", "s", selector, 1, 10, audience);
+    const page = queries.filteredLogPage("w", "s", () => selector, 1, 10, audience);
     const payload = page.ops[0]!.payload as Record<string, unknown>;
-    const blob = queries.namedShareBlob("w", selector, String(payload.payloadAfterBlobSha256));
+    const blob = queries.namedShareBlob(
+      "w",
+      () => selector,
+      String(payload.payloadAfterBlobSha256),
+    );
     expect(blob).not.toBeNull();
     expect(parseCollectionRecordFields(Buffer.from(blob!).toString())).not.toHaveProperty(
       "grant_id",

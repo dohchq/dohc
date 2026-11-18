@@ -11,7 +11,7 @@ import type { StorageContext } from "./storage/context";
 import type { ReplicaWatches } from "./replicaWatches";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { notFound, relayError } from "./errors";
-import { fileSideOf } from "./shareFilter";
+import { fileSideOf, pathLevel } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 
 export type ReplicaChangedObject = { versionId: string; objectId: string; path: string };
@@ -139,7 +139,9 @@ export function createReplicaLinkReadService(
         (s) => {
           if (
             s.files.some((f) => f.status !== "ready") ||
-            (fileSideOf(s.authorized.effectiveSelector)!.access === "edit" &&
+            (("access" in s.authorized.effectiveSelector
+              ? s.authorized.effectiveSelector.access
+              : null) === "edit" &&
               s.view.logCursor < storage.getEpochLogFloor(s.workspace))
           )
             throw relayError("link_read_rate_limited");
@@ -182,7 +184,7 @@ export function createReplicaLinkReadService(
         return {
           ok: true,
           effectiveSelector: createAccountlessPathProjection(selector).selector,
-          access: selector.access,
+          access: s.authorized.grant.access,
           subjectName: storage.getShareLabels(s.authorized.share.shareId, "link").subjectName,
           files: s.files.map((f) => {
             const current = file(s, f.path),
@@ -193,19 +195,24 @@ export function createReplicaLinkReadService(
               ...(requestedFolder != null && f.path === `${requestedFolder}/automations.yaml`
                 ? {
                     automationSwitchable:
-                      selector.access === "edit" &&
+                      pathLevel(selector, row.path) === "edit" &&
                       selector.versionId === null &&
-                      selector.paths.some(
-                        (root) => folder === root || row.path.startsWith(`${root}/`),
-                      ) &&
+                      (selector.wholeWorkspace === true ||
+                        selector.paths.some(
+                          (root) => folder === root || row.path.startsWith(`${root}/`),
+                        )) &&
                       storage.automationSwitchableFolder(s.workspace, folder),
                   }
                 : {}),
             };
           }),
-          nextCursor: selector.access === "edit" ? s.view.logCursor : state.head,
+          nextCursor: s.authorized.grant.access === "edit" ? s.view.logCursor : state.head,
           epochLogFloor,
-          ...newestFilteredOpFreshness(s.workspace, s.authorized.effectiveSelector, epochLogFloor),
+          ...newestFilteredOpFreshness(
+            s.workspace,
+            () => s.authorized.effectiveSelector,
+            epochLogFloor,
+          ),
         };
       });
     },

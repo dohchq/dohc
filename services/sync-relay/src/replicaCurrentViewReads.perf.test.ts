@@ -177,7 +177,7 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")(
         selectorPaths: selector.paths,
         limit: 20_001,
       });
-      const freshness = queries.newestFilteredOpFreshness("w", selector, state.epochLogFloor);
+      const freshness = queries.newestFilteredOpFreshness("w", () => selector, state.epochLogFloor);
       const projection = createAccountlessPathProjection(authorize());
       return {
         files: state.files.map((f) => ({ ...f, path: projection.projectPath(f.path) })),

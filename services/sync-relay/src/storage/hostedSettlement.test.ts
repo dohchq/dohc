@@ -634,7 +634,7 @@ it.each(["bytes"])(
       const shared = createShareReadQueries(f.storage, 500).filteredLogPage(
         "workspace",
         "share",
-        { paths: [first.record.binding.currentPath], versionId: null, access: "view" },
+        () => ({ paths: [first.record.binding.currentPath], versionId: null, access: "view" }),
         0,
         100,
         "authenticated",

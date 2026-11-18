@@ -1,6 +1,10 @@
 import { type StorageContext } from "./context";
 import { type ShareProposalOpRow, type ShareProposalRow, type ShareProposalState } from "./types";
 import { rowToProposalRow, rowToProposalOpRow } from "./rows";
+import { authorizeShareAction } from "../shareAuthorization";
+import { filterProposedChangeForShare, isWorkspaceSelector } from "../shareFilter";
+import { assertMemberChanges } from "../memberActions";
+import { relayError } from "../errors";
 
 export function insertShareProposal(
   storage: StorageContext,
@@ -21,6 +25,35 @@ export function insertShareProposal(
     // re-run under the write lock, so a revoke or a level narrowed
     // mid-flight loses the race rather than slipping a submit through.
     input.guard?.();
+    const authorized = authorizeShareAction({
+      storage,
+      shareId: input.shareId,
+      actorUserId: input.proposedByUserId,
+      action: "propose",
+    });
+    if (!authorized.ok || authorized.share.workspaceId !== input.workspaceId)
+      throw relayError("share_op_rejected");
+    assertMemberChanges(
+      storage,
+      authorized.effectiveSelector,
+      input.proposedByUserId,
+      input.ops,
+      input.createdAtMs,
+    );
+    for (const op of input.ops) {
+      if (
+        !filterProposedChangeForShare(authorized.effectiveSelector, op, {
+          channelKind: (wire) => storage.findChannelCreateKind(input.workspaceId, wire),
+        }).allowed
+      )
+        throw relayError("share_op_rejected");
+      if (
+        isWorkspaceSelector(authorized.effectiveSelector) &&
+        op.basedOnObjectId !== null &&
+        !authorized.effectiveSelector.reach.objectVisible(op.basedOnObjectId)
+      )
+        throw relayError("share_op_rejected");
+    }
     const existing = storage.db
       .prepare(
         "SELECT proposal_id FROM sync_relay_share_proposals WHERE share_id = ? AND submit_id = ?",

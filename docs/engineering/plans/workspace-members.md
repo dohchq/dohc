@@ -88,7 +88,7 @@ When an item is hidden from a member, or a member is removed, the copies already
 ## What a member sees
 
 - The workspace opens as its own workspace in the member's app, and in a browser. It does not open as a read-only folder inside another workspace, because Comment and Edit would not work there.
-- A new member sees everything they can reach, including messages and History from before they joined.
+- A new member sees everything they can reach, including messages from before they joined. Where they have Edit on a file, they also see its History from before they joined. Elsewhere they see current files only.
 - Members see the names and roles of everyone in the workspace. The owner and admins also see emails.
 - A member gets a Notice for a mention, a reply to their message, or a direct message. Other Group messages show as unread.
 

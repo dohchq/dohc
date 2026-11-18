@@ -28,6 +28,8 @@ import type { LiveUpdateJournalCut, LiveUpdateJournalCommitInput } from "./stora
 import { queueLiveHostRequests } from "./liveHostRequests.js";
 
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
+import { observeRelayWrites } from "./relayWriteChanges.js";
+import type { StorageContext } from "./storage/context.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {
@@ -1017,4 +1019,80 @@ it("wakes only the listeners on a changed document, a relay write's documents, o
       changes.notifyHost([binding.workspaceId]);
     }),
   ).toEqual(["applied", "object", "other applied", "other standing", "standing", "waiting object"]);
+});
+
+it("keeps a member's live reads after an Edit drop, refuses submissions, and closes after reach loss", async () => {
+  const f = await setup();
+  f.capture.close();
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+    .run(JSON.stringify({ kind: "workspace" }), scope.shareId);
+  f.raw
+    .prepare(
+      "INSERT INTO sync_relay_workspace_memberships (workspace_id,share_id,member_level,workspace_name,created_at_ms) VALUES (?,?,'edit','Workspace',0)",
+    )
+    .run(scope.workspaceId, scope.shareId);
+  f.raw
+    .prepare(`INSERT INTO sync_relay_workspace_members (member_id,workspace_id,grant_id,user_id,email,role,state,invited_at_ms,joined_at_ms)
+    VALUES ('member',?,?,?,NULL,'member','active',0,0)`)
+    .run(scope.workspaceId, scope.grantId, scope.userId);
+  const tickets = createLiveTickets({
+    storage: f.storage,
+    audience,
+    key,
+    hostReports: { currentBinding: async () => report },
+  });
+  const minted = await tickets.mint({ objectId: binding.objectId }, scope);
+  const ticket = await tickets.redeem(minted!.token, scope);
+  const capture = captureNamedLiveFrameHost({
+    ticket: ticket!,
+    actor: liveBrowserActor(scope),
+    storage: f.storage,
+    validate: f.validate,
+    native: f.native,
+    bounds: f.bounds,
+  });
+  cleanup.push(async () => capture.close());
+  const stop = observeRelayWrites(f.storage, (documents) => f.changes.notifyWrite(documents));
+  cleanup.push(async () => stop());
+  const context = f.storage as StorageContext;
+  context.tx(() =>
+    context.db
+      .prepare(
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','members: view',100,NULL)`,
+      )
+      .run(scope.workspaceId),
+  );
+  expect(() => capture.assertCurrent()).not.toThrow();
+  expect(
+    f.storage.resolveCurrentLiveDocumentBinding({
+      document: {
+        workspaceId: binding.workspaceId,
+        mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      },
+      actor: liveBrowserActor(scope),
+    }).kind,
+  ).toBe("refused");
+  expect(capture.invalidated.aborted).toBe(false);
+  const sync = await capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  expect([...sync.missingStateUpdate]).toEqual([0, 0]);
+  expect(
+    await capture.submit(
+      { deliveryId: "after-drop", updateDigest: hash(bytes), updateBytes: bytes },
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "refused", reason: "authority-refused" });
+  expect(f.validate).not.toHaveBeenCalled();
+  // The shared live room writes through its sender, not `submit`.
+  expect(capture.room.sender(undefined)).toBeNull();
+  expect(capture.invalidated.aborted).toBe(false);
+  context.tx(() =>
+    context.db
+      .prepare("UPDATE sync_relay_access_rules SET rule_text='' WHERE workspace_id=?")
+      .run(scope.workspaceId),
+  );
+  await vi.waitFor(() => expect(capture.invalidated.aborted).toBe(true));
+  sync.close();
 });

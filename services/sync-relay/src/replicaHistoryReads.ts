@@ -7,6 +7,7 @@ import type { StorageContext } from "./storage/context";
 import { readReplicaText } from "./storage/replicaTextStorage";
 import { replicaViewReachesFloor } from "./storage/replicaGrantFloors";
 import { replicaStatement as statement } from "./storage/replicaStatements";
+import { isWorkspaceSelector } from "./shareFilter";
 
 export interface ReplicaHistoryPin {
   pinId: string;
@@ -35,7 +36,7 @@ function readHistory<T>(
     storage,
     input,
     source,
-    ({ rows, workspace, visiblePath, floor }) => {
+    ({ rows, workspace, visiblePath, floor, authorized }) => {
       if (!floor) return read([], workspace);
       // An uncollected replacement must not pass as an unsuperseded pin.
       const cut = statement(
@@ -59,8 +60,18 @@ function readHistory<T>(
         `SELECT * FROM sync_relay_history_pins WHERE workspace_id=?
       ${pinId === undefined ? "" : "AND pin_id=?"} ORDER BY pinned_at_ms DESC,pin_id`,
       ).all(workspace, ...(pinId === undefined ? [] : [pinId]));
+      const member = isWorkspaceSelector(authorized.effectiveSelector)
+        ? authorized.effectiveSelector.reach
+        : undefined;
       const visible = pins.flatMap((row) => {
-        if (!currentObjects.has(JSON.stringify([row.version_id, row.object_id]))) return [];
+        // A pin is an earlier version: a member needs Edit at its path.
+        if (
+          member
+            ? !member.objectVisible(String(row.object_id)) ||
+              member.levelAt(String(row.path)) !== "edit"
+            : !currentObjects.has(JSON.stringify([row.version_id, row.object_id]))
+        )
+          return [];
         const path = visiblePath(String(row.version_id), String(row.path));
         if (path === null) return [];
         const pin: ReplicaHistoryPin = {

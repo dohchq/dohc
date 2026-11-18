@@ -9,7 +9,7 @@ import {
   type BinaryLike,
 } from "node:crypto";
 import { authorizeLinkShareAction } from "./shareAuthorization";
-import { isLiveEditShareSelector, type ShareSelector } from "./shareFilter";
+import { isLiveEditShareSelector, type PathShareSelector } from "./shareFilter";
 import type { PublicEditRelease } from "@dohc/security-contract";
 import type {
   SyncRelayLinkSessionRow,
@@ -294,9 +294,9 @@ export interface ValidatedLinkCapability {
   shareId: string;
   grantId: string;
   generation: number;
-  access: ShareSelector["access"];
+  access: PathShareSelector["access"];
   // The link's files. On a Group share, its folder.
-  effectiveSelector: ShareSelector;
+  effectiveSelector: PathShareSelector;
 }
 
 export function validateLinkCapability(input: {
@@ -357,7 +357,7 @@ export function authorizeLinkSession(
 }
 
 // A link serves the access its files carry: its own, or a Group folder's.
-export function servableFiles(selector: ShareSelector, release?: PublicEditRelease): boolean {
+export function servableFiles(selector: PathShareSelector, release?: PublicEditRelease): boolean {
   return (
     isPublicLinkAccess(selector.access, release) &&
     (selector.access !== "edit" || isLiveEditShareSelector(selector))

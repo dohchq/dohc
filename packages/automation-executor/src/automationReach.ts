@@ -1,3 +1,4 @@
+import { accessRuleSet, fileLevel } from "@dohc/security-contract/access-rules";
 import {
   isSharedWithMePath,
   stripWindowsAliasSuffix,
@@ -5,7 +6,7 @@ import {
 } from "@dohc/workspace-core";
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import { hidesRuleFile, type ShareAccess } from "@dohc/security-contract/share-selector";
 import { datasetOperationLabel } from "./datasetOperationLabel";
 
 // The reach check (ADR 0012). An automation belongs to its Collection, and
@@ -31,7 +32,7 @@ export interface RosterGrant {
   recipientEmail: string | null;
   // The files the grant covers. A path covers itself and everything beneath
   // it. A grant with no paths covers a whole saved version, and no files
-  // anyone can change. A workspace membership covers every file on main.
+  // anyone can change. A workspace membership carries its evaluated folder rules.
   // Null for a grant on a chat alone.
   files: (FileScope & { access: ShareAccess }) | null;
   // The chat the grant covers: one channel for a Group or chat grant, every
@@ -45,11 +46,15 @@ export type RosterChat =
   // Piece 4 (access rules) replaces this with each Group's own rule.
   | { kind: "groups"; canPost: boolean };
 
-/** The files a grant covers: its paths, or with `wholeWorkspace` every file on main. */
+/** The paths a grant covers, or a member's evaluated folder rules. */
 export interface FileScope {
   paths: readonly string[];
   versionId: string | null;
-  wholeWorkspace?: true;
+  memberReach?: {
+    role: "admin" | "member";
+    level: ShareAccess;
+    rules: readonly (readonly [string, ShareAccess | null])[];
+  };
 }
 
 /** Why the owner's computer does not know who can edit the workspace. */
@@ -270,25 +275,47 @@ function looseKey(path: string): string {
     .join("/");
 }
 
+function memberLevel(files: FileScope, path: string): ShareAccess | null {
+  const reach = files.memberReach;
+  if (!reach || hidesRuleFile(files, path)) return null;
+  const rules = accessRuleSet(
+    reach.rules.map(
+      ([folder, level]) =>
+        [folder, level === null ? null : { members: level, people: new Map() }] as const,
+    ),
+  );
+  return fileLevel(
+    rules,
+    reach.role === "admin"
+      ? { role: "admin" }
+      : { role: "member", level: reach.level, verifiedEmail: null },
+    path,
+  );
+}
+
 function canEdit(person: Person, path: string): boolean {
   const key = looseKey(path);
   return person.grants.some(
-    (grant) =>
-      grant.files?.access === "edit" &&
-      (grant.files.wholeWorkspace === true ||
-        grant.files.paths.some((granted) => within(key, looseKey(granted)))),
+    ({ files }) =>
+      files !== null &&
+      (files.memberReach
+        ? memberLevel(files, path) === "edit"
+        : files.access === "edit" && files.paths.some((granted) => within(key, looseKey(granted)))),
   );
 }
 
 function reaches(person: Person, path: string, access: "edit" | "view"): boolean {
-  return person.grants.some(
-    (grant) =>
-      grant.files !== null &&
-      grant.files.versionId === null &&
-      (access === "view" || grant.files.access === "edit") &&
-      (grant.files.wholeWorkspace === true ||
-        grant.files.paths.some((granted) => within(path, granted))),
-  );
+  return person.grants.some(({ files }) => {
+    if (files === null || files.versionId !== null) return false;
+    if (files.memberReach) {
+      const level = memberLevel(files, `${path}/collection.yaml`);
+      return level !== null && (access === "view" || level === "edit");
+    }
+    return (
+      (access === "view" || files.access === "edit") &&
+      files.paths.some((granted) => within(path, granted))
+    );
+  });
 }
 
 // Whether a person holds a current data grant, through any of their share
@@ -427,7 +454,11 @@ function formerEditorsOf(
             };
       return { evidence: `${former.grantId}#${former.generation}`, ...person };
     })
-    .filter((person) => sources.some((path) => canEdit(person, path)));
+    .filter(
+      (person) =>
+        person.grants.some((grant) => grant.files?.memberReach !== undefined) ||
+        sources.some((path) => canEdit(person, path)),
+    );
 }
 
 function nameOf(person: Person): string {
@@ -625,6 +656,18 @@ export function checkAutomationReach(
         : null;
     const targetProblem = target && pathProblem(target.path, target.name, "target");
     if (targetProblem) return stop(targetProblem);
+    const member = editors.find((person) =>
+      person.grants.some((grant) => grant.files?.memberReach?.role === "member"),
+    );
+    const memberFiles = member?.grants.find(
+      (grant) => grant.files?.memberReach?.role === "member",
+    )?.files;
+    const rule =
+      memberFiles &&
+      [...sources, ...(target ? [target.path] : [])].find((path) =>
+        hidesRuleFile(memberFiles, path),
+      );
+    if (member && rule) return stop(`${nameOf(member)} cannot edit ${rule}.`, nameOf(member));
     if (roster.kind === "owner") {
       const reach = checkOwnerStep(roster, collection, step, people, editors);
       if (!reach.allowed || former.length === 0) return reach;

@@ -1,6 +1,6 @@
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type { ChatShareAccess } from "@dohc/security-contract/share-grant";
+import type { MemberReach } from "./storage/memberReach";
 
 // What a person in a workspace reaches through the workspace share. Every
 // surface asks these functions and nothing else, so access rules (piece 4 of
@@ -16,9 +16,11 @@ export interface StoredWorkspaceShareSelector {
   kind: "workspace";
 }
 
+// Only share authorization builds one, with the reach it evaluated for this
+// member, so every level a member holds comes from `reach`.
 export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
-  access: ShareAccess;
   role: "admin" | "member";
+  reach: MemberReach;
 }
 
 /**
@@ -27,10 +29,7 @@ export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
  */
 export function workspaceFileReach(selector: WorkspaceShareSelector) {
   return {
-    paths: [] as string[],
-    versionId: null,
-    access: selector.access,
-    wholeWorkspace: true as const,
+    ...workspaceFileWriteReach(selector),
     ...(selector.role === "admin" ? { ruleFiles: true as const } : {}),
   };
 }
@@ -44,8 +43,9 @@ export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
   return {
     paths: [] as string[],
     versionId: null,
-    access: selector.access,
     wholeWorkspace: true as const,
+    reach: selector.reach,
+    levelAt: selector.reach.levelAt,
   };
 }
 
@@ -61,8 +61,11 @@ export function workspaceGroupReachable(
 }
 
 /** View reads a Group. Comment and Edit read and post. */
-export function workspaceChatAccess(selector: WorkspaceShareSelector): ChatShareAccess {
-  return selector.access === "view" ? "read-only" : "read-write";
+export function workspaceChatAccess(
+  selector: WorkspaceShareSelector,
+  channelWireId: string,
+): ChatShareAccess {
+  return selector.reach.groupLevel(channelWireId) === "view" ? "read-only" : "read-write";
 }
 
 /** The chat side for one Group, or null when the workspace share does not reach it. */
@@ -72,6 +75,6 @@ export function workspaceGroupReach(
   chat: { channelKind(channelWireId: string): string | null | undefined } | undefined,
 ): { kind: "chat"; channelWireId: string; access: ChatShareAccess } | null {
   return workspaceGroupReachable(channelWireId, chat)
-    ? { kind: "chat", channelWireId, access: workspaceChatAccess(selector) }
+    ? { kind: "chat", channelWireId, access: workspaceChatAccess(selector, channelWireId) }
     : null;
 }

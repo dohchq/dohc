@@ -1,4 +1,4 @@
-import { isChatShareAccessValue, isShareAccessValue } from "@dohc/security-contract";
+import { isShareAccessValue } from "@dohc/security-contract";
 import {
   chatSideOf,
   groupChannelIsOrdinary,
@@ -7,6 +7,7 @@ import {
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
   type ShareLabelReader,
+  storedSelectorReadable,
   type StoredAnyShareSelector,
 } from "./shareFilter";
 import type {
@@ -47,14 +48,9 @@ export function showsGranterEmail(selectorJson: string): boolean {
 }
 
 // A workspace share's grants carry a file level; chat and Group grants carry a chat level.
-function readableAccess(selector: StoredAnyShareSelector, access: string): boolean {
-  return "kind" in selector && selector.kind !== "workspace"
-    ? isChatShareAccessValue(access)
-    : isShareAccessValue(access);
-}
-
 export function createShareSummaries(
-  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf">,
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf"> &
+    Partial<Pick<SyncRelayStorage, "memberReach">>,
   labels: (
     shareId: string,
     reader: ShareLabelReader,
@@ -112,7 +108,9 @@ export function createShareSummaries(
     // stored selector and grant access form a readable row. Every listing
     // caller gets the same damage classification.
     const selector =
-      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
+      storedSelector && storedSelectorReadable(storedSelector, grant.access)
+        ? storedSelector
+        : null;
     return {
       shareId: share.shareId,
       ...labels(share.shareId, reader),
@@ -157,6 +155,25 @@ export function createShareSummaries(
     return {
       ...base,
       ...ownerMembershipRole(row, base.selector),
+      ...(storage.memberReach &&
+      roster &&
+      selector &&
+      "kind" in selector &&
+      selector.kind === "workspace" &&
+      isShareAccessValue(grant.access)
+        ? {
+            memberReach: storage.memberReach(
+              share.workspaceId,
+              grant.principalUserId ?? `pending:${grant.grantId}`,
+              (grant.principalUserId
+                ? storage.workspaceRoleOf(share.workspaceId, grant.principalUserId)?.role
+                : null) === "admin"
+                ? "admin"
+                : "member",
+              grant.access,
+            ).evaluated,
+          }
+        : {}),
       ...(roster
         ? {
             granterUserId: share.granterUserId,
@@ -314,7 +331,9 @@ export function createShareSummaries(
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector =
-      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
+      storedSelector && storedSelectorReadable(storedSelector, grant.access)
+        ? storedSelector
+        : null;
     return {
       shareId: share.shareId,
       grantId: grant.grantId,

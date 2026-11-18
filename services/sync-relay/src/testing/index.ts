@@ -21,6 +21,7 @@ import {
   type SyncRelayShareGrantRow,
   type SyncRelayStorage,
 } from "../storage";
+import type { SqliteDb } from "../storage/types";
 
 export const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 export const RELAY_EXCHANGE_KEY = "share-web-relay-exchange-key-at-least-32";
@@ -196,6 +197,29 @@ export function interceptStorage(
     },
   });
 }
+
+/**
+ * Runs a racing write where another request's write could land: now, or
+ * right after the transaction the caller is inside ends. A read holds its
+ * transaction across synchronous work, so nothing can write inside it.
+ */
+export function writeAfterTransaction(storage: SyncRelayStorage, write: () => void): void {
+  const db = (storage as unknown as { db: SqliteDb }).db;
+  if (!db.isTransaction) return write();
+  const queued = writesAfterTransaction.get(db);
+  if (queued) return void queued.push(write);
+  const writes = [write];
+  writesAfterTransaction.set(db, writes);
+  const exec = db.exec;
+  db.exec = function (this: SqliteDb, sql: string) {
+    exec.call(this, sql);
+    if (this.isTransaction) return;
+    db.exec = exec;
+    writesAfterTransaction.delete(db);
+    for (const queuedWrite of writes) queuedWrite();
+  };
+}
+const writesAfterTransaction = new WeakMap<SqliteDb, Array<() => void>>();
 
 /** Counts calls to one storage method; the calls themselves go through. */
 export function countStorageCalls<M extends StorageMethod>(

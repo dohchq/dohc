@@ -1,7 +1,13 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { authorizeShareAction } from "./shareAuthorization";
 import { linkChatOrigin } from "./relayLogInputs";
-import { filterOpForShare, type ChatShareThreadResolver } from "./shareFilter";
+import {
+  fileSideOf,
+  filterOpForShare,
+  withheldLinkText,
+  type ChatShareThreadResolver,
+  type ShareSelector,
+} from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
 
@@ -94,6 +100,8 @@ export interface ChatMessageAccess {
   dm: boolean;
   /** The share the recipient reads the message through, or null for the owner. */
   shareId: string | null;
+  /** The message's body as that share serves it. Absent for the owner, who reads it whole. */
+  body?: string;
 }
 
 // The channel's name, or the name of the file the thread is on. Null when
@@ -102,6 +110,8 @@ function chatPlace(
   storage: StorageContext,
   message: PushMessage,
   resolver: ChatShareThreadResolver,
+  // A member's file side; the owner, who passes none, reads the name whole.
+  files?: ShareSelector | null,
 ): { place: string; channel: boolean } | null {
   const { workspaceId, threadId } = message;
   const channel = resolver.threadChannelWireId(threadId);
@@ -120,7 +130,11 @@ function chatPlace(
     AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
         .get(workspaceId, channel)
     : undefined;
-  const name = row ? (JSON.parse(String(row.payload_json)) as { name?: unknown }).name : undefined;
+  const stored = row
+    ? (JSON.parse(String(row.payload_json)) as { name?: unknown }).name
+    : undefined;
+  const name =
+    typeof stored === "string" && files !== undefined ? withheldLinkText(stored, files) : stored;
   return {
     place: pushPlainText(name ?? filePath?.split("/").at(-1)?.replace(/\.md$/iu, ""), "a chat"),
     channel: Boolean(channel),
@@ -155,27 +169,34 @@ export function pushMessageAccess(
       shareId: String(row.share_id),
       action: "read",
     });
-    if (
-      !authority.ok ||
-      !filterOpForShare(
-        authority.effectiveSelector,
-        "chat.message.append",
-        message.payloadJson,
-        resolver,
-      ).allowed
-    )
-      continue;
-    const found = Number(row.membership) === 1 ? chatPlace(storage, message, resolver) : null;
+    if (!authority.ok) continue;
+    const served = filterOpForShare(
+      authority.effectiveSelector,
+      "chat.message.append",
+      message.payloadJson,
+      resolver,
+    );
+    if (!served.allowed) continue;
+    const body = (served.payload as { body?: unknown } | undefined)?.body;
+    const found =
+      Number(row.membership) === 1
+        ? chatPlace(storage, message, resolver, fileSideOf(authority.effectiveSelector))
+        : null;
     return {
       place:
         found?.place ??
         pushPlainText(
-          storage.getShareLabels(authority.share.shareId, "member").subjectName,
+          storage.getShareLabels(
+            authority.share.shareId,
+            "member",
+            fileSideOf(authority.effectiveSelector),
+          ).subjectName,
           "a chat",
         ),
       channel: found?.channel ?? Boolean(channel),
       dm,
       shareId: authority.share.shareId,
+      ...(typeof body === "string" ? { body } : {}),
     };
   }
   return null;
