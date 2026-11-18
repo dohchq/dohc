@@ -143,9 +143,16 @@ async function computerWithApp(latencyMs = 0) {
     ((await (await relay.computer()).read()).result as Array<{ name: string }>).map(
       (row) => row.name,
     );
-  // What the server answers a change sent to it directly, as the app: "ran", or the refusal's status.
+  // A change sent to the server directly, as the app at the server's latest approval of it.
+  const serverChange = () =>
+    server.request(
+      published.publicationId,
+      "invoke",
+      submit("Drew", relay.appRevision(published.publicationId)),
+    );
+  // What the server answers that change: "ran", or the refusal's status.
   const serverRuns = () =>
-    server.request(published.publicationId, "invoke", submit("Drew", 1)).then(
+    serverChange().then(
       () => "ran",
       (error: Error) => error.message.slice(0, 3),
     );
@@ -175,6 +182,7 @@ async function computerWithApp(latencyMs = 0) {
     answered,
     gate,
     deliveries,
+    serverChange,
     serverRuns,
     hold,
   };
@@ -251,14 +259,7 @@ it("after a restart, gives the server this computer's approval again before the 
 it("withdrawing the app on this computer withdraws it on the server", async () => {
   const f = await computerWithApp();
   await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
-  await expect
-    .poll(() =>
-      f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
-        () => "ran",
-        (error: Error) => error.message.slice(0, 3),
-      ),
-    )
-    .toBe("404");
+  await expect.poll(f.serverRuns).toBe("404");
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
@@ -270,16 +271,7 @@ it("withdraws the app on the server once it can be reached, after a withdrawal t
     throw new TypeError("fetch failed");
   };
   await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
-  await expect
-    .poll(
-      () =>
-        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
-          () => "ran",
-          (error: Error) => error.message.slice(0, 3),
-        ),
-      { timeout: 15_000, interval: 1_000 },
-    )
-    .toBe("404");
+  await expect.poll(f.serverRuns, { timeout: 15_000, interval: 1_000 }).toBe("404");
 }, 60_000);
 
 it("runs no change from an app withdrawn here while the change was on its way, and does not approve it again", async () => {
@@ -304,9 +296,7 @@ it("runs no change from an app withdrawn here while the change was on its way, a
   await expect(change).rejects.toThrow();
   expect(await f.names()).toEqual([]);
   // The server still refuses the app: nothing approved it again.
-  await expect(
-    f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)),
-  ).rejects.toThrow(/^404/);
+  await expect(f.serverChange()).rejects.toThrow(/^404/);
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
@@ -338,16 +328,7 @@ it("withdraws the app on the server after an approval that was on its way when t
     .toBe(true);
   release();
   await expect(change).rejects.toThrow();
-  await expect
-    .poll(
-      () =>
-        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
-          () => "ran",
-          (error: Error) => error.message.slice(0, 3),
-        ),
-      { timeout: 10_000 },
-    )
-    .toBe("404");
+  await expect.poll(f.serverRuns, { timeout: 10_000 }).toBe("404");
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
@@ -490,16 +471,7 @@ it("withdraws the app on the server after every approval on its way, when two ch
   await expect.poll(() => count(f.answered) >= (count(f.trips) === 2 ? 1 : 2)).toBe(true);
   releases[0]!();
   for (const change of changes) await expect(change).rejects.toThrow();
-  await expect
-    .poll(
-      () =>
-        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
-          () => "ran",
-          (error: Error) => error.message.slice(0, 3),
-        ),
-      { timeout: 10_000 },
-    )
-    .toBe("404");
+  await expect.poll(f.serverRuns, { timeout: 10_000 }).toBe("404");
   expect(await f.names()).toEqual([]);
 }, 60_000);
 
