@@ -27,9 +27,9 @@ export interface OwnerLivePause {
   readonly cause: "refused" | "failing" | "ended";
   /** The people whose edits were in the refused save. */
   readonly names: string[];
-  /** Null when the copy was written before this desktop started and can't be named. */
+  /** Null when this desktop hasn't written the copy since it started, so it can't name it. */
   readonly copyPath: string | null;
-  /** Some edits could not be shown as text, so the copy leaves them out. */
+  /** The copy is known to leave out edits that could not be shown as text. */
   readonly leftOut: boolean;
 }
 
@@ -112,8 +112,8 @@ export async function settleOwnerLivePauses(input: {
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
-  /** The note's Markdown from its whole state. */
-  render(state: Uint8Array): Promise<string>;
+  /** The note's file text from its whole state, and whether it leaves some out. */
+  render(state: Uint8Array): Promise<{ markdown: string; leftOut: boolean }>;
   signal: AbortSignal;
   onError(pause: RelayLivePause, error: unknown): void;
 }): Promise<OwnerLivePause[]> {
@@ -160,16 +160,21 @@ export async function settleOwnerLivePauses(input: {
         if (!held) throw new Error("The paused note's copy is missing.");
         joined = true;
       }
-      // After a restart only a Stop paused at this pause's save can name its copy.
+      // Only a copy written for this pause names it. A held Stop may be an earlier pause's.
       let copy: { copyPath: string | null; leftOut: boolean } | null =
-        input.previous.find((told) => told.pauseId === pause.pauseId) ??
-        (held?.stop.paused.appliedCursor === pause.savedCursor ? held.stop.paused : null);
-      if (held && !held.stop.paused.copyWritten) copy = await writeHeld(held, pause.path);
+        input.previous.find((told) => told.pauseId === pause.pauseId) ?? null;
+      if (held && !held.stop.paused.copyWritten) {
+        const written = await writeHeld(held, pause.path);
+        if (joined) copy = written;
+      }
       if (pause.copy && !joined) {
-        const text = await input.render(await relayCopy(input.relay, pause, input.signal));
+        const file = await input.render(await relayCopy(input.relay, pause, input.signal));
         copy = {
-          copyPath: await input.writes.create(await freeName(pause.path, input.writes), text),
-          leftOut: false,
+          copyPath: await input.writes.create(
+            await freeName(pause.path, input.writes),
+            file.markdown,
+          ),
+          leftOut: file.leftOut,
         };
       }
       if (pause.copy) await input.relay.copyWritten(pause.pauseId, pause.copy.sha256, input.signal);

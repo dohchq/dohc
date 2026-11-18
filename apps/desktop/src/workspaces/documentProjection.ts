@@ -21,7 +21,8 @@ import { recoveredDocument, type RecoveredDocument } from "./recoveredDocument";
 
 export type DocumentProjectionRequest =
   | { kind: "read"; state: Uint8Array }
-  // The note's file text, keeping the source a file read records.
+  // The note's file text, keeping the source a file read records, as the
+  // engine writes a paused note's copy.
   | { kind: "file"; state: Uint8Array }
   | { kind: "read-settled"; markdown: string }
   // `refuseLossy` names the note, which refuses here if it is a lossy note
@@ -45,11 +46,16 @@ type DocumentProjectionResult<Request extends DocumentProjectionRequest> = Reque
   kind: "recover";
 }
   ? RecoveredDocument | null
-  : Request extends { kind: "edit" | "create" }
-    ? Uint8Array | null
-    : Request extends { kind: "lossy" }
-      ? boolean
-      : string;
+  : Request extends { kind: "file" }
+    ? NoteFile
+    : Request extends { kind: "edit" | "create" }
+      ? Uint8Array | null
+      : Request extends { kind: "lossy" }
+        ? boolean
+        : string;
+
+/** A note's file text, and whether it leaves out edits the state holds. */
+export type NoteFile = { markdown: string; leftOut: boolean };
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -76,12 +82,16 @@ export function transferList(value: unknown): ArrayBuffer[] {
 }
 
 type WorkerMessage =
-  | { id: number; ok: true; result: string | Uint8Array | boolean | RecoveredDocument | null }
+  | {
+      id: number;
+      ok: true;
+      result: string | Uint8Array | boolean | RecoveredDocument | NoteFile | null;
+    }
   | { id: number; ok: false; message: string };
 
 export function runDocumentProjection(
   request: DocumentProjectionRequest,
-): string | Uint8Array | boolean | RecoveredDocument | null {
+): string | Uint8Array | boolean | RecoveredDocument | NoteFile | null {
   switch (request.kind) {
     case "read":
       return documentMarkdown(request.state);
@@ -89,7 +99,12 @@ export function runDocumentProjection(
       const doc = new Y.Doc();
       try {
         Y.applyUpdate(doc, request.state);
-        return yDocToArtifactMarkdown(doc);
+        // An edit that waits for one the state lacks is not in the text.
+        const waits = doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
+        return { markdown: yDocToArtifactMarkdown(doc), leftOut: waits };
+      } catch {
+        // Like the engine's copy, a state that can't be shown as text leaves everything out.
+        return { markdown: "", leftOut: true };
       } finally {
         doc.destroy();
       }
@@ -171,7 +186,7 @@ export function createDocumentProjectionWorker(
 
   function send(
     request: DocumentProjectionRequest,
-  ): Promise<string | Uint8Array | boolean | RecoveredDocument | null> {
+  ): Promise<string | Uint8Array | boolean | RecoveredDocument | NoteFile | null> {
     const current = started();
     const id = nextId++;
     return new Promise((resolve, reject) => {

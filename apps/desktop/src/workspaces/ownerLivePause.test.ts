@@ -32,7 +32,7 @@ const pause: RelayLivePause = {
 };
 const document = { mainVersionId: "main", objectId: "note", currentPath: "notes/plan.md" };
 
-type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean; appliedCursor?: number };
+type Stop = { copyPath: string; copyWritten: boolean; leftOut: boolean };
 
 /** An engine that holds one paused Stop once paused, and a folder of files. */
 function fixture() {
@@ -46,7 +46,7 @@ function fixture() {
   const client = {
     ownerYDocPausedCopy: vi.fn(async () => held()),
     ownerYDocPause: vi.fn(async (_request: unknown, input: { copyPath: string }) => {
-      stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true, appliedCursor: 7 };
+      stop = { copyPath: input.copyPath, copyWritten: false, leftOut: true };
       return {};
     }),
     ownerYDocPausedCopyWritten: vi.fn(
@@ -72,7 +72,10 @@ function fixture() {
       return path;
     }),
   };
-  const render = vi.fn(async (_state: Uint8Array) => "The room's words");
+  const render = vi.fn(async (_state: Uint8Array) => ({
+    markdown: "The room's words",
+    leftOut: false,
+  }));
   const errors: unknown[] = [];
   const settle = (
     pauses = [pause],
@@ -161,10 +164,16 @@ describe("settleOwnerLivePauses", () => {
 
   it("writes the server's copy of a note whose file was moved, deleted or replaced next to where it was", async () => {
     const f = fixture();
+    // An edit in the server's copy waits for one it lacks, so the text leaves it out.
+    f.render.mockResolvedValueOnce({ markdown: "The room's words", leftOut: true });
     const [told] = await f.settle([{ ...pause, refusal: "stale-binding" }], { listed: false });
     expect(f.client.ownerYDocPause).not.toHaveBeenCalled();
     expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("The room's words");
-    expect(told).toMatchObject({ cause: "ended", copyPath: "notes/plan (unsaved edits 2).md" });
+    expect(told).toMatchObject({
+      cause: "ended",
+      copyPath: "notes/plan (unsaved edits 2).md",
+      leftOut: true,
+    });
     expect(f.relay.copyWritten).toHaveBeenCalledWith("pause", sha256, expect.anything());
   });
 
@@ -184,19 +193,18 @@ describe("settleOwnerLivePauses", () => {
     expect(await f.settle([{ ...pause, copy: null }], { previous })).toMatchObject([
       { copyPath: "notes/plan (unsaved edits 4).md" },
     ]);
-    // After a restart only a Stop paused at this pause's save names its copy.
+    // After a restart nothing here names it. A held Stop may be an earlier pause's.
     expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([{ copyPath: null }]);
     f.setStop({ copyPath: "notes/plan (unsaved edits 5).md", copyWritten: true, leftOut: true });
-    expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([{ copyPath: null }]);
-    f.setStop({
-      copyPath: "notes/plan (unsaved edits 5).md",
-      copyWritten: true,
-      leftOut: true,
-      appliedCursor: 7,
-    });
     expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([
-      { copyPath: "notes/plan (unsaved edits 5).md", leftOut: true },
+      { copyPath: null, leftOut: false },
     ]);
+    // An earlier pause's unwritten copy is still written, but not named for this one.
+    f.setStop({ copyPath: "notes/plan (unsaved edits 6).md", copyWritten: false, leftOut: true });
+    expect(await f.settle([{ ...pause, copy: null }])).toMatchObject([
+      { copyPath: null, leftOut: false },
+    ]);
+    expect(f.files.get("notes/plan (unsaved edits 6).md")).toBe("Ana's words and the owner's");
     expect(f.relay.copy).not.toHaveBeenCalled();
     expect(f.relay.copyWritten).not.toHaveBeenCalled();
   });
