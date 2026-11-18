@@ -425,20 +425,39 @@ type AskNotVersioned = {
 
 const NOT_VERSIONED_ICON = { delete: Trash2, rename: PenLine, move: FolderInput } as const;
 
-// Moves main refused because the folder rules above them change: what to ask,
-// and the moves to run once the person agrees.
-type AskAccessChange = { workspaceId: string; warnings: string[]; go: () => void };
+// Moves main refused because the folders holding access rules above them
+// differ: what to ask, and the moves to run once the person agrees.
+type AskAccessChange = {
+  workspaceId: string;
+  moves: Array<{ fromPath: string; toPath: string }>;
+  go: () => void;
+};
 
-// One move asks with main's own sentence: its first sentence is the title.
-function accessChangeConfirmText(warnings: readonly string[]): { title: string; body: string } {
-  if (warnings.length === 1) {
-    const [warning = ""] = warnings;
-    const end = warning.indexOf(". ");
-    if (end > 0) return { title: warning.slice(0, end + 1), body: warning.slice(end + 2) };
+// main finds which folders above an item hold a rule but compares no rules,
+// so the words say the rules will apply, not that access will change.
+function accessChangeConfirmText(moves: AskAccessChange["moves"]): {
+  title: string;
+  body: string;
+} {
+  const [move] = moves;
+  if (moves.length !== 1 || !move) {
+    return {
+      title: `Move ${moves.length} items?`,
+      body: "They will follow the access rules where they land, which may change who can see them. People who could read them may keep a copy.",
+    };
   }
+  const name = basenameOf(move.fromPath);
+  const into = dirnameOf(move.toPath);
+  const from = dirnameOf(move.fromPath);
+  const keep = "People who could read it may keep a copy.";
+  if (into)
+    return {
+      title: `Move ${name} into ${basenameOf(into)}?`,
+      body: `It will follow the access rules for ${basenameOf(into)}, which may change who can see it. ${keep}`,
+    };
   return {
-    title: "Moving these items may change who can see them.",
-    body: "People who could read them may keep a copy.",
+    title: `Move ${name} out of ${basenameOf(from)}?`,
+    body: `It will no longer follow the access rules for ${basenameOf(from)}, which may change who can see it. ${keep}`,
   };
 }
 
@@ -1245,7 +1264,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         const unversioned: Array<{ change: PendingTreeChange; paths: string[] }> = [];
         // Moves main refused because they may change who can see an item.
         // They too ask once, together.
-        const accessChanged: Array<{ change: PendingTreeChange; warning: string }> = [];
+        const accessChanged: PendingTreeChange[] = [];
         let mayHaveRun = false;
         for (const change of changes) {
           try {
@@ -1263,9 +1282,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               unversioned.push({ change, paths: notVersioned });
               continue;
             }
-            const warning = options.accessConfirmed ? null : accessChangeWarning(cause);
-            if (warning) {
-              accessChanged.push({ change, warning });
+            if (!options.accessConfirmed && accessChangeWarning(cause)) {
+              accessChanged.push(change);
               continue;
             }
             if (options.mayHaveRun?.(cause)) mayHaveRun = true;
@@ -1330,13 +1348,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           });
         }
         if (accessChanged.length > 0) {
-          const asked = accessChanged.map(({ change }) => change);
           setAccessAsk({
             workspaceId,
-            warnings: [...new Set(accessChanged.map(({ warning }) => warning))],
+            moves: accessChanged.map((change) => ({
+              fromPath: sourcePath(change),
+              toPath: "toPath" in change ? change.toPath : sourcePath(change),
+            })),
             go: () =>
               void runChangesOnce(
-                asked.map((change) => ({ ...change, id: nextChangeId() })),
+                accessChanged.map((change) => ({ ...change, id: nextChangeId() })),
                 run,
                 { ...options, accessConfirmed: true },
               ),
@@ -2992,7 +3012,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
       {accessAsk ? (
         <ConfirmDialog
-          title={accessChangeConfirmText(accessAsk.warnings).title}
+          title={accessChangeConfirmText(accessAsk.moves).title}
           icon={FolderInput}
           confirmLabel="Move"
           testId="access-change-confirm"
@@ -3004,7 +3024,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             accessAsk.go();
           }}
         >
-          {accessChangeConfirmText(accessAsk.warnings).body}
+          {accessChangeConfirmText(accessAsk.moves).body}
         </ConfirmDialog>
       ) : null}
 
