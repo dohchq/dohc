@@ -927,6 +927,8 @@ export interface ChannelThreadSummary {
     authorAgentId?: string;
     // Only active reactions belonging to this opening message.
     reactions: ChatReaction[];
+    // Set once the relay deleted the message. The snippet is then empty.
+    deletedAtMs?: number;
   };
   // The thread's Work card. Absent when no agent reported work in it.
   work?: ChatThreadWork;
@@ -1045,6 +1047,9 @@ export interface ChatMessage {
   // Thread and stream reads name each open agent request: one per agent that
   // was asked to answer this message and has not finished. Absent when none.
   agentRequests?: ChatStreamAgentRequest[];
+  // Set once the relay deleted the message. The body is then empty, and a
+  // link author a copy first saw deleted has empty link ids.
+  deletedAtMs?: number;
 }
 
 // Where one agent's request to answer a message stands. A failure carries its
