@@ -453,6 +453,21 @@ fn leaves_out(
         .is_some_and(|&rule| rule_level(rule, email).is_none())
 }
 
+/// The people named in `folders`, from each folder's people in `named`,
+/// taking the work of reading each name before it keeps any.
+fn named_in<'a, 'f>(
+    named: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+    folders: impl IntoIterator<Item = &'f str>,
+    work: &mut RuleOrderWork,
+) -> Option<BTreeSet<&'a str>> {
+    let found: Vec<&BTreeSet<&'a str>> = folders
+        .into_iter()
+        .filter_map(|folder| named.get(folder))
+        .collect();
+    work.take(found.iter().map(|people| people.len()).sum())?;
+    Some(found.into_iter().flatten().copied().collect())
+}
+
 /// A rule file a change of many paths writes, with its bytes, or deletes.
 #[derive(Clone, Copy, Debug)]
 pub enum RuleFileStep<'a> {
@@ -576,6 +591,10 @@ struct Change<'a> {
 /// does, so a folder can pass any of those key groups and skip the rest.
 /// Only a step folder that leaves someone out before or after but not both,
 /// or that holds two steps, can take part.
+///
+/// The first case needs one twin and the second two on one key chain, so a
+/// point keeps an anchor for each group of its twins joined by key chains.
+/// Its people and its cost then grow with that group, not with every twin.
 struct Anchor<'a> {
     folder: &'a str,
     /// Each such step folder, with its key.
@@ -601,6 +620,23 @@ impl<'a> Change<'a> {
             movers.entry(steps[step].folder).or_default().push(step);
         }
         let (before, after) = (folder_rules(&start), folder_rules(&end));
+        // Each folder, with the people its rule files name before and after.
+        // Two files in one folder are one rule nobody can read, but partway
+        // either can stand alone, so the people each names need bounds too.
+        work.take(
+            start
+                .values()
+                .chain(end.values())
+                .map(|rule| rule.map_or(1, |rule| 1 + rule.people.len()))
+                .sum(),
+        )?;
+        let mut named: BTreeMap<&'a str, BTreeSet<&'a str>> = BTreeMap::new();
+        for (&path, &rule) in start.iter().chain(&end) {
+            named.entry(access_rule_folder(path)).or_default().extend(
+                rule.into_iter()
+                    .flat_map(|rule| rule.people.keys().map(String::as_str)),
+            );
+        }
         let candidates: BTreeSet<&'a str> = std::iter::once("")
             .chain(
                 start
@@ -633,17 +669,7 @@ impl<'a> Change<'a> {
             // A person no rule at or above this point names reaches what a
             // member no rule names does, in every state, so only those named
             // here need bounds of their own.
-            let rules: Vec<&'a AccessRule> = chain(point)
-                .flat_map(|folder| [before.get(folder), after.get(folder)])
-                .flatten()
-                .copied()
-                .flatten()
-                .collect();
-            work.take(rules.iter().map(|rule| rule.people.len()).sum())?;
-            let emails: BTreeSet<&'a str> = rules
-                .iter()
-                .flat_map(|rule| rule.people.keys().map(String::as_str))
-                .collect();
+            let emails = named_in(&named, chain(point), work)?;
             // Each bound walks the point's folders from the root.
             let walk = depth(point) + 1;
             work.take(2 * (emails.len() + 1) * walk + moved_by.len())?;
@@ -663,8 +689,8 @@ impl<'a> Change<'a> {
                 change.cost[step] += people * walk;
             }
         }
-        change.anchor(&candidates, &movers, &before, &after, work)?;
         (change.before, change.after) = (before, after);
+        change.anchor(steps, &candidates, &movers, &named, work)?;
         Some(change)
     }
 
@@ -672,27 +698,19 @@ impl<'a> Change<'a> {
     /// groups that can show someone a folder no version spells.
     fn anchor(
         &mut self,
+        steps: &[Step<'a>],
         points: &BTreeSet<&'a str>,
         movers: &BTreeMap<&'a str, Vec<usize>>,
-        before: &BTreeMap<&'a str, Option<&'a AccessRule>>,
-        after: &BTreeMap<&'a str, Option<&'a AccessRule>>,
+        named: &BTreeMap<&'a str, BTreeSet<&'a str>>,
         work: &mut RuleOrderWork,
     ) -> Option<()> {
+        let (before, after) = (&self.before, &self.after);
         let mut twins = Vec::new();
         for (&folder, moved) in movers {
-            let rules: Vec<&AccessRule> = [before.get(folder), after.get(folder)]
-                .into_iter()
-                .flatten()
-                .copied()
-                .flatten()
-                .collect();
-            let people = rules.iter().map(|rule| rule.people.len()).sum::<usize>();
-            work.take(people + depth(folder) + 1)?;
-            let emails = rules
-                .iter()
-                .flat_map(|rule| rule.people.keys().map(|email| Some(email.as_str())));
+            let emails = named_in(named, [folder], work)?;
+            work.take(depth(folder) + 1)?;
             let changes = std::iter::once(None)
-                .chain(emails)
+                .chain(emails.into_iter().map(Some))
                 .any(|email| leaves_out(before, folder, email) != leaves_out(after, folder, email));
             if moved.len() > 1 || changes {
                 twins.push((folder, path_collision_key(folder)));
@@ -700,6 +718,15 @@ impl<'a> Change<'a> {
         }
         if twins.is_empty() {
             return Some(());
+        }
+        // The twins by key chains, through one step of each.
+        let firsts: Vec<usize> = twins.iter().map(|(folder, _)| movers[folder][0]).collect();
+        let mut group_of = BTreeMap::new();
+        for (group, list) in independent_groups(steps, &firsts, work)?
+            .into_iter()
+            .enumerate()
+        {
+            group_of.extend(list.into_iter().map(|step| (step, group)));
         }
         // Each point by its key, then each twin under each point's key.
         let mut by_key: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
@@ -710,34 +737,29 @@ impl<'a> Change<'a> {
                 .or_default()
                 .push(point);
         }
-        let mut under: BTreeMap<&'a str, Vec<usize>> = BTreeMap::new();
+        // Each point's twins, by their group.
+        let mut under: BTreeMap<(&'a str, usize), Vec<usize>> = BTreeMap::new();
         for (index, (_, key)) in twins.iter().enumerate() {
             work.take(depth(key) + 1)?;
+            let group = group_of[&firsts[index]];
             for above in chain(key).filter(|above| above != key) {
                 for &point in by_key.get(above).into_iter().flatten() {
                     // Charged before it is kept: many spellings of one key
                     // above many twins would otherwise grow this unbounded.
                     work.take(1)?;
-                    under.entry(point).or_default().push(index);
+                    under.entry((point, group)).or_default().push(index);
                 }
             }
         }
-        for (folder, found) in under {
+        for ((folder, _), found) in under {
             // A person no rule here names reaches what a member none names
             // does. Each found twin was charged once when it was kept.
             work.take(2 * (depth(folder) + 1) + found.len())?;
-            let rules: Vec<&'a AccessRule> = chain(folder)
-                .chain(found.iter().map(|&twin| twins[twin].0))
-                .flat_map(|at| [before.get(at), after.get(at)])
-                .flatten()
-                .copied()
-                .flatten()
-                .collect();
-            work.take(rules.iter().map(|rule| rule.people.len()).sum())?;
-            let emails: BTreeSet<&'a str> = rules
-                .iter()
-                .flat_map(|rule| rule.people.keys().map(String::as_str))
-                .collect();
+            let emails = named_in(
+                named,
+                chain(folder).chain(found.iter().map(|&twin| twins[twin].0)),
+                work,
+            )?;
             let walk = depth(folder) + 1;
             let judging: usize = walk
                 + found
@@ -2471,11 +2493,17 @@ mod tests {
         spelled
     }
 
+    /// Another spelling of `folder`'s rule file. Beside the first, the two
+    /// are one rule nobody can read.
+    fn second_rule_in(folder: &str) -> String {
+        rule_in(folder).replace("access.yaml", "ACCESS.yaml")
+    }
+
     /// Small pseudo-random rule changes in folders whose names fold to other
-    /// depths, judged with the relay's reach after every step on every
-    /// spelling of every folder, most of which no version holds. Each order
-    /// the planner gives, and each order the check accepts, reaches no more
-    /// there than before and after.
+    /// depths, some holding two rule files, judged with the relay's reach
+    /// after every step on every spelling of every folder, most of which no
+    /// version holds. Each order the planner gives, and each order the check
+    /// accepts, reaches no more there than before and after.
     #[test]
     fn generated_changes_never_reach_more_on_a_spelling_no_version_holds() {
         let texts = [
@@ -2513,10 +2541,18 @@ mod tests {
                 if next(2) == 0 {
                     main.insert(rule_in(folder), texts[next(texts.len())].to_owned());
                 }
+                if next(6) == 0 {
+                    main.insert(second_rule_in(folder), texts[next(texts.len())].to_owned());
+                }
             }
             let mut after = main.clone();
             for _ in 0..2 + next(2) {
-                let path = rule_in(folders[next(folders.len())]);
+                let folder = folders[next(folders.len())];
+                let path = if next(4) == 0 {
+                    second_rule_in(folder)
+                } else {
+                    rule_in(folder)
+                };
                 if after.contains_key(&path) && next(4) == 0 {
                     after.remove(&path);
                 } else {
@@ -2615,6 +2651,57 @@ mod tests {
         );
         eprintln!("128 folders of 1,000 people: {:?}", started.elapsed());
         assert_eq!(safe_writes(order), [1, 0]);
+    }
+
+    /// Opus's case from review: a Version makes 60 sibling folders private,
+    /// each naming two people, with or without narrowing the root. Every
+    /// folder is a twin under the root, and one anchor holding all 60 cost
+    /// about the square of their count for each. No two of them are on one
+    /// key chain, so each is judged apart.
+    #[test]
+    fn making_many_sibling_folders_private_is_ordered() {
+        let paths: Vec<String> = (0..60)
+            .map(|index| format!("team{index}/access.yaml"))
+            .collect();
+        let texts: Vec<String> = (0..60)
+            .map(|index| {
+                format!(
+                    "people:
+  a{index}@example.com: edit
+  b{index}@example.com: edit
+"
+                )
+            })
+            .collect();
+        let mut files = vec![(
+            "access.yaml",
+            "members: edit
+",
+        )];
+        files.extend(paths.iter().map(|path| (path.as_str(), VIEW_TEXT)));
+        let before = rule_files(&files);
+        let mut writes: Vec<(&str, &str)> = paths
+            .iter()
+            .zip(&texts)
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        for root in [false, true] {
+            if root {
+                writes.push(("access.yaml", VIEW_TEXT));
+            }
+            let started = std::time::Instant::now();
+            let order = safe_writes(plan(&before, &writes));
+            eprintln!(
+                "60 folders made private, root {root}: {:?}",
+                started.elapsed()
+            );
+            // The merge's own check of that order fits the allowance too.
+            let steps: Vec<(&str, Option<&str>)> = in_order(&writes, &order)
+                .into_iter()
+                .map(|(path, text)| (path, Some(text)))
+                .collect();
+            assert!(checked(&before, &steps, &[]), "root {root}");
+        }
     }
 
     /// Preparing the bounds takes its share of the work before it keeps

@@ -4654,3 +4654,62 @@ fn a_folder_no_version_holds_is_judged_by_its_twins_hide() {
         assert_eq!(main_rules(&f)[&twin_rule], VIEW, "{twin}");
     }
 }
+
+/// Opus's case from review: Main's `q` holds two rule files, so the relay
+/// hides it from everyone. A Version repairs it by deleting both, so `q`
+/// takes the root's View. Deleting the second spelling first leaves the
+/// first alone, which shows p@example.com `q` at Edit. The bounds took
+/// people only from rules the relay could read, so nobody bounded p and the
+/// writer accepted that order. The planner deletes the file naming p first.
+#[test]
+fn a_folder_with_two_rule_files_bounds_the_people_each_names() {
+    const NAMED: &str = "people:\n  p@example.com: edit\n";
+    for second in ["ACCESS.yaml", "access.yaml\u{ff0e}"] {
+        let f = Fixture::new();
+        let second = format!("q/{second}");
+        f.versioned_write(write("access.yaml", VIEW, "m-root"))
+            .unwrap();
+        f.versioned_write(write("q/doc.md", "doc", "m-doc"))
+            .unwrap();
+        f.versioned_write(write("q/access.yaml", NAMED, "m-named"))
+            .unwrap();
+        f.versioned_write(write(&second, VIEW, "m-second")).unwrap();
+        create_version(&f, "feature");
+        for (path, moment) in [("q/access.yaml", "v-named"), (second.as_str(), "v-second")] {
+            f.versioned_delete(DeleteTextFile {
+                version_id: "feature".to_owned(),
+                ..delete(path, moment)
+            })
+            .unwrap();
+        }
+        let wider_first = [second.as_str(), "q/access.yaml"];
+        let journal = f.journal();
+        let refused = merge_rule(&f, "feature", &owned(&wider_first), 40);
+        assert!(
+            matches!(refused, Err(RuntimeError::RuleMergeOrderChanged)),
+            "{second}: {refused:?}"
+        );
+        assert_eq!(f.journal(), journal, "{second}");
+        // The relay shows the widening that first delete would make.
+        let before = main_rules(&f);
+        let mut between = before.clone();
+        between.remove(&second);
+        let mut after = between.clone();
+        after.remove("q/access.yaml");
+        assert!(
+            relay_reach::widening(&before, &between, &after, &["q"]).is_some(),
+            "{second}"
+        );
+        let order = rule_order(&f, "feature", &[], &wider_first);
+        assert_eq!(
+            order,
+            RuleMergeOrder::Ordered {
+                writes: Vec::new(),
+                deletes: owned(&["q/access.yaml", second.as_str()]),
+            },
+            "{second}"
+        );
+        merge_judged(&f, "feature", order, &["q", "Q/x"]);
+        assert_eq!(main_rules(&f), after, "{second}");
+    }
+}
