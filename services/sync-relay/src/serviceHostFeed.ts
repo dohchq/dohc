@@ -2,9 +2,10 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { jsonResponse } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { badRequest, notFound, relayError } from "./errors";
+import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
+import { serverLogLine } from "./serverLogWords";
 import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
@@ -430,7 +431,19 @@ export function createServiceHostFeed(
         storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
-          await warmReach(workspaceId);
+          // A push with no rows names no blob, and a host sends one at each start to confirm its origin. In a
+          // new process the reach is not built, and building it reads every shared document's history. So that
+          // push starts the build and does not wait for it. The first request that checks a blob waits.
+          const warming = warmReach(workspaceId);
+          if (ops.length > 0) await warming;
+          else
+            void warming.catch((error: unknown) => {
+              // A workspace with no scope fails the build, and `currentScope` below gives this push the same
+              // answer. Any other failure reaches the next request that checks a blob. It is logged here in
+              // case none follows.
+              if (!(error instanceof RelayError && error.code === "not_found"))
+                console.error("[sync-relay] hosted blob reach", serverLogLine(error));
+            });
           guard();
           pushOrigin = originId;
           const scope = currentScope(workspaceId),
