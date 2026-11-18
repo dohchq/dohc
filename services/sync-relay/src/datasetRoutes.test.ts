@@ -430,7 +430,16 @@ it("approves an app on the owner's computer whose candidate is up to the publica
   };
   const approve = async (bytes: number) =>
     (await f.http(`${f.path}/binding`, { localApp: sized(bytes) })).status;
+  const usage = () =>
+    Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    );
+  const before = usage();
   expect(await approve(200 * 1024)).toBe(200);
+  // The server keeps the candidate, so the workspace's quota counts it.
+  expect(usage() - before).toBeGreaterThanOrEqual(200 * 1024);
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES)).toBe(200);
   // Over the bound the candidate is refused, by its parser and then by the body limit.
   expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 1)).toBe(400);
@@ -508,6 +517,66 @@ it("runs an app on the owner's computer as that app, within its approval, for th
   // Approved again after its withdrawal, it runs again.
   const again = (await (await register()).json()) as { authorityRevision: number };
   expect((await call("read", "owner", again.authorityRevision)).status).toBe(200);
+  // A change sent under the approval it withdrew does not run under the new one.
+  expect((await call("read", "owner", 1)).status).toBe(404);
+});
+
+it("counts an app approved on the owner's computer toward the workspace's storage until it is withdrawn, and never below zero", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  const candidate = { ...published, capabilities: [capability] };
+  const appId = createHash("sha256")
+    .update(JSON.stringify(["dohc-local-dataset-app-v1", "w", candidate]))
+    .digest("hex");
+  const usage = () => ({
+    workspace: Number(
+      f.storage.db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='w'")
+        .get()!.usage_bytes,
+    ),
+    collection: Number(
+      f.storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage").get()!
+        .storage_bytes,
+    ),
+  });
+  const approve = () => f.http(`${f.path}/binding`, { localApp: candidate });
+  const withdraw = () => f.http(`${f.path}/binding`, { publicationId: appId, enabled: false });
+  const before = usage();
+  expect((await approve()).status).toBe(200);
+  const approved = usage();
+  expect(approved.workspace - before.workspace).toBeGreaterThan(
+    Buffer.byteLength(JSON.stringify(candidate)),
+  );
+  // Withdrawn, it gives back all it took.
+  expect((await withdraw()).status).toBe(200);
+  expect(usage()).toEqual(before);
+  // An app approved before its bytes were counted, in a Collection that counts fewer bytes than the app
+  // has, is withdrawn too, and the count stops at zero.
+  expect((await approve()).status).toBe(200);
+  const binding =
+    approved.collection - before.collection - Buffer.byteLength(JSON.stringify(candidate));
+  f.storage.db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=?").run(binding + 10);
+  f.storage.db
+    .prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='w'")
+    .run(before.workspace - before.collection + binding + 10);
+  expect((await withdraw()).status).toBe(200);
+  expect(usage().collection).toBe(0);
 });
 
 it("runs an app on the owner's computer on a server that publishes no apps", async () => {

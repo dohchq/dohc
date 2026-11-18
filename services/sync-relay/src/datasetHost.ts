@@ -383,7 +383,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         "SELECT candidate,authority_revision,owner_user_id FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
       )
       .get(auth.workspaceId, appId);
-    if (!row) return null;
+    // A withdrawn app keeps its row with no app in it.
+    if (!row || row.candidate === "") return null;
     if (auth.grantId || row.owner_user_id !== auth.userId) throw notFound();
     const authority = owner(auth, auth.workspaceId);
     return {
@@ -1306,13 +1307,36 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth: AppBackendAuth,
         input: { workspaceId: string; datasetId: string; publicationId: string },
       ): void {
-        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null }, () =>
+        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null }, () => {
+          const scope = [input.workspaceId, input.datasetId, input.publicationId] as const;
+          const row = storage.db
+            .prepare(
+              "SELECT candidate FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            )
+            .get(...scope);
+          if (!row || row.candidate === "") return;
+          // The app goes, and its row stays with its revision, so approving it again gives the
+          // next one, and a change sent under this approval never runs under that one.
           storage.db
             .prepare(
-              "DELETE FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+              "UPDATE sync_relay_local_dataset_apps SET candidate='' WHERE workspace_id=? AND dataset_id=? AND app_id=?",
             )
-            .run(input.workspaceId, input.datasetId, input.publicationId),
-        );
+            .run(...scope);
+          // An app approved before its bytes were counted gives back no more than is counted.
+          const counted = storage.db
+            .prepare(
+              "SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?",
+            )
+            .get(input.workspaceId, input.datasetId);
+          account(
+            input.workspaceId,
+            input.datasetId,
+            -Math.min(
+              Buffer.byteLength(String(row.candidate)),
+              Number(counted?.storage_bytes ?? 0),
+            ),
+          );
+        });
       },
       /** Approves, or approves again, an app on the owner's computer over this Collection. */
       approveLocalApp(
@@ -1358,22 +1382,22 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
           () => {
             const row = storage.db
               .prepare(
-                "SELECT authority_revision FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
+                "SELECT authority_revision,candidate FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
               )
               .get(input.workspaceId, appId);
             authorityRevision = row ? Number(row.authority_revision) + 1 : 1;
+            const kept = JSON.stringify(candidate);
+            // The server keeps the app, so the workspace's storage counts it.
+            account(
+              input.workspaceId,
+              input.datasetId,
+              Buffer.byteLength(kept) - Buffer.byteLength(String(row?.candidate ?? "")),
+            );
             storage.db
               .prepare(
                 "INSERT INTO sync_relay_local_dataset_apps VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,app_id) DO UPDATE SET candidate=excluded.candidate,authority_revision=excluded.authority_revision",
               )
-              .run(
-                input.workspaceId,
-                appId,
-                input.datasetId,
-                auth.userId,
-                JSON.stringify(candidate),
-                authorityRevision,
-              );
+              .run(input.workspaceId, appId, input.datasetId, auth.userId, kept, authorityRevision);
           },
         );
         return { publicationId: appId, authorityRevision };
