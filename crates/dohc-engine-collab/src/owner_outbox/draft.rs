@@ -3833,6 +3833,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pause_at_a_save_the_note_has_passed_makes_its_copy() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        // The relay paused at its save 0, then took the owner's row at 4.
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        feed(
+            &mut store,
+            &observed,
+            4,
+            owner.richdoc_append_paragraph("Typed after the pause"),
+        );
+        let mut input = pause_input(&observed);
+        input.row_cursor = input.applied_cursor;
+        let stop = super::super::release::pause_cached(
+            &mut store,
+            &mut cache,
+            &input,
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
+        assert_eq!(stop.paused.map(|paused| paused.applied_cursor), Some(0));
+        assert!(stored_text(&store).contains("Typed after the pause"));
+    }
+
     /// A held note: the collaborator's committed row at 5, the owner's own
     /// paragraph, and the owner's words typed into the collaborator's row.
     fn held_note(

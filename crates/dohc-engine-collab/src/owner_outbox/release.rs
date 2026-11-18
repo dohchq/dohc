@@ -582,12 +582,13 @@ fn pause_in_tx(
     crate::live_update_application::require_restore_open(tx, &key)
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
-    // rows through N are here.
+    // rows through N are here. The note can hold more than A: the relay goes
+    // on taking the owner's own rows after it pauses.
     // Rows and saves share one count, so N == A means no row was sent. A row
     // below A may not be in that save; only the layer shows it is here.
     let rows_through_n = input.row_cursor == input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
-    if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
+    if observed.accepted_cursor < input.applied_cursor || !rows_through_n {
         return Err(OwnerOutboxError::AcceptedStateIncomplete);
     }
     // Unbinding would strand a ready settlement; let the delivery pass apply
