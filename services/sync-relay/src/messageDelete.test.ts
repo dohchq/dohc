@@ -9,6 +9,7 @@ import {
   chatMessageAppend,
   chatThreadCreate,
   closeTestStorages,
+  expectNoDeletedDigest,
   inspect,
   json,
   jsonBody,
@@ -491,7 +492,7 @@ describe("what only the relay writes", () => {
   });
 
   it("serves a new member the tombstone and the delete, with no body and no attachment", async () => {
-    const { h } = await seed();
+    const { storage, h } = await seed();
     await ownerAppend(h, [
       ownerMessage("m-pic", "t-team", "look at this"),
       logOp("chat.attachment.add", {
@@ -514,12 +515,7 @@ describe("what only the relay writes", () => {
     const about = ops.filter((op) => op.payload.messageId === "m-pic");
     expect(about.map((op) => op.opKind)).toEqual(["chat.message.tombstone", "chat.message.delete"]);
     expect(JSON.stringify(ops)).not.toContain("look at this");
-    for (const op of about) {
-      for (const [key, value] of Object.entries(op.payload)) {
-        expect(key.endsWith("Sha256"), key).toBe(false);
-        expect(typeof value === "string" && /^[0-9a-f]{64}$/u.test(value), key).toBe(false);
-      }
-    }
+    expectNoDeletedDigest(storagePath(storage), ops);
   });
 
   it("shows a delete to a browser that already followed past the message, and holds a browser post retry on its line", async () => {
@@ -568,6 +564,7 @@ describe("what only the relay writes", () => {
       expect.objectContaining({ messageId, body: null, deletedAtMs: deleted.deletedAtMs }),
     );
     expect(JSON.stringify(fresh)).not.toContain("ana's words");
+    expectNoDeletedDigest(storagePath(storage), [followed, fresh]);
 
     const retried = await browser(h, "ana", "messages", send);
     expect(retried.status, await retried.clone().text()).toBe(200);

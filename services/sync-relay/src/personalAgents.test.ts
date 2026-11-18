@@ -46,6 +46,7 @@ import {
   closeTestStorage,
   closeTestStorages,
   createShare,
+  expectNoDeletedDigest,
   inspect,
   inspectDatabase,
   json,
@@ -1959,6 +1960,31 @@ describe("a personal agent's wait", () => {
     const answer = (await ok(await answering)) as WaitAnswer;
     expect(ids(answer)).toEqual(["kept"]);
     expect(JSON.stringify(answer)).not.toContain("the deleted words");
+  });
+
+  it("reads a deleted message in a channel as its line, with no body and no digest", async () => {
+    const f = await fixture();
+    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
+    chats(f, WS_A, agent.agentId);
+    fromComputer(f, WS_A, [ownerSays("gone", "thread-team", "the deleted words")]);
+    expect(
+      f.storage.deleteWorkspaceMessage({
+        workspaceId: WS_A,
+        threadId: "thread-team",
+        messageId: "gone",
+        actor: { kind: "account", userId: OWNER },
+        nowMs: 5000,
+      }).ok,
+    ).toBe(true);
+
+    const page = await ok(
+      await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-team" }),
+    );
+    expect(page.messages).toEqual([
+      expect.objectContaining({ messageId: "gone", deletedAtMs: 5000 }),
+    ]);
+    expect(JSON.stringify(page)).not.toContain("the deleted words");
+    expectNoDeletedDigest(f.dbPath, page);
   });
 
   it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {
