@@ -386,6 +386,8 @@ export function createWorkspaceCollections(
       const { tableId } = opened;
       const id = opened.record.id;
       const key = recordKey(datasetId, tableId, id);
+      // Reload clears the change it was asked for, never one made while it read.
+      const asked = changes.get(key);
       const request = recordReads.next();
       const lands = () =>
         isLive() &&
@@ -418,7 +420,7 @@ export function createWorkspaceCollections(
             ? { ...view.opened, record, files: record === held ? view.opened.files : read.files }
             : null,
         });
-        if (changes.get(key)?.state.kind !== "saving") setChange(key, null);
+        if (asked && changes.get(key) === asked) setChange(key, null);
         return record !== null;
       } catch (error) {
         const cause = shownProblem(error);

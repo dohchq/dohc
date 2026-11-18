@@ -642,6 +642,24 @@ describe("a record's change", () => {
     expect(version()).toBe(8);
   });
 
+  it("keeps a change made while Reload reads", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, ok({ refused: { code: "stale_record", message: "Changed." } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    const reload = collections.reloadRecord();
+    await sent(server, 5);
+    server.on("POST", EDIT, "offline");
+    change(collections, "f-name", "Ana");
+    await answered(collections);
+    held.resolve(page([{ id: "a0", version: 1, values: { "f-name": "a0" } }]));
+    expect(await reload).toBe(true);
+    expect(state(collections)).toEqual({ kind: "failed", problem: "offline" });
+    expect(collections.changes().get(KEY)?.change.value).toBe("Ana");
+  });
+
   it("takes Reload's file names, and clears the view's problem", async () => {
     const { server, collections } = await onRecord();
     server.on("POST", `${OPS}/collectionRecords`, "offline");
