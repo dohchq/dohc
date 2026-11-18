@@ -1517,6 +1517,7 @@ export async function startServiceLiveHost(options: {
           parking.delete(key);
           idle.delete(key);
           unloading.delete(key);
+          wanted.delete(key);
           keeping.delete(key);
           grantsEnded.delete(key);
           heldOf.delete(key);
@@ -3241,6 +3242,10 @@ export async function startServiceLiveHost(options: {
                 wanted.has(targetKey(target)),
               );
               const visit = async (target: ServiceActivationTarget) => {
+                // A mark buys one visit, and it is spent here, before the visit's work. A note still not ready after
+                // it, as while it backs off or its restore runs, goes back to its turn. An open that arrives during
+                // the visit marks the note again, and that mark stands for the next pass.
+                wanted.delete(targetKey(target));
                 const timed: SlowPassTarget = {
                     object:
                       hosted
@@ -3283,9 +3288,6 @@ export async function startServiceLiveHost(options: {
                   noteWaiting(target, outcome);
                 } finally {
                   timed.ms = Math.round(now() - startedAt);
-                  // A mark buys one visit. A note still not ready, as while it backs off or its restore runs,
-                  // goes back to its turn, and the next open marks it again.
-                  wanted.delete(targetKey(target));
                 }
               };
               // A wanted note that fails does not cost the others their turn in this pass.
