@@ -7190,6 +7190,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
   onLiveEditsPaused: (workspaceId, path) =>
     desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
+  livePaused: (workspaceId, objectId) =>
+    desktopEngine.ownerLivePauses(workspaceId).some((pause) => pause.objectId === objectId),
   onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
   onOwnerEdit: (workspaceId) => desktopEngine.ownerEditLanded(workspaceId),
   sessionFor: (sender) => rendererWorkspaceSessions.current(sender as WebContents),
