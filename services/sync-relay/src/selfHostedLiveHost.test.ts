@@ -769,6 +769,14 @@ it("hosts no note its live room paused until its owner resumes it", async () => 
   expect(paused.departing).toEqual([
     { workspaceId: scope.workspaceId, objectId: binding.objectId, path: binding.currentPath },
   ]);
+  // Once its replica drained, the workspace detaches and stays detached while the note is paused.
+  await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), { timeout: 10_000 });
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.workspaces).toEqual([]);
+  expect(f.events).toEqual([
+    `detach ${scope.workspaceId}`,
+    `release ${binding.objectId} attached=false store=true`,
+  ]);
   resume(pauseId);
   await f.waitUpdate(["docs/a.md"]);
   // A pause fences a hosted activation in its own transaction, as an owner's Pause does. One on an ended lineage fences nothing.

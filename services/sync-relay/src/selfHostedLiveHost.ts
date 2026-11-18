@@ -116,26 +116,30 @@ export function selectHostedDocuments(
     storage.verifyWorkspaceIdentity(row) === "matched";
   // A release applies to the document: it was stopped, paused by its owner or its live room, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
-  const departs = (row: ServiceHostEnrollment, covered: boolean) =>
+  const released = (row: ServiceHostEnrollment, covered: boolean) =>
     row.retired ||
     !covered ||
     row.ownerStop !== null ||
-    storage.serviceActivationRetirement(row) !== null ||
-    liveRoomPaused(storage as StorageContext, row);
+    storage.serviceActivationRetirement(row) !== null;
   const page = storage.listUndrainedServiceHostEnrollments(cursor);
   const targets: ServiceHostEnrollment[] = [],
     departing: ServiceHostEnrollment[] = [],
     obsolete: ServiceHostEnrollment[] = [],
-    away: ServiceHostEnrollment[] = [];
+    away: ServiceHostEnrollment[] = [],
+    resting: ServiceHostEnrollment[] = [];
   for (const row of page.documents) {
     const holds = storage.serviceHostEnrollmentCovered(row);
     // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
     // opens here, before any update lets the document go, so the host retires its activation.
     if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
-    if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
-    else if (matching(row)) (atPath(storage, row) ? targets : away).push(row);
+    if (released(row, holds)) (matching(row) ? departing : obsolete).push(row);
+    else if (!matching(row)) continue;
+    // A note its live room paused keeps its enrollment, so once its replica let it go nothing selects it until Resume.
+    else if (liveRoomPaused(storage as StorageContext, row))
+      (moved.has(movedKey(row)) ? resting : departing).push(row);
+    else (atPath(storage, row) ? targets : away).push(row);
   }
-  const still = new Set(away.map(movedKey));
+  const still = new Set([...away, ...resting].map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
   departing.push(
     ...away.filter((row) => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)),
