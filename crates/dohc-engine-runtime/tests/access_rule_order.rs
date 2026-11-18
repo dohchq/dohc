@@ -4595,3 +4595,62 @@ fn a_rule_change_in_a_folder_whose_name_folds_to_another_depth_is_refused() {
         );
     }
 }
+
+/// Opus's cases from review. No version holds `team` or `a/x`, but a member
+/// can make either. The relay hides it while the twin's rule leaves members
+/// out, and otherwise gives it the level above, not the twin's. Writing the
+/// twin's new rule first showed it at Edit, where members had nothing before
+/// and View after. The writer refuses that order, and the planner writes
+/// the narrowing above first.
+#[test]
+fn a_folder_no_version_holds_is_judged_by_its_twins_hide() {
+    let inside = |folder: &str, name: &str| {
+        if folder.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{folder}/{name}")
+        }
+    };
+    for (twin, above, spelled) in [("Team", "", "team"), ("a\u{ff0f}x", "a", "a/x")] {
+        let f = Fixture::new();
+        let (twin_rule, above_rule) = (inside(twin, "access.yaml"), inside(above, "access.yaml"));
+        f.versioned_write(write(&twin_rule, "people:\n", "m-twin"))
+            .unwrap();
+        f.versioned_write(write(&above_rule, EDIT, "m-above"))
+            .unwrap();
+        f.versioned_write(write(&inside(twin, "doc.md"), "doc", "m-doc"))
+            .unwrap();
+        create_version(&f, "feature");
+        version_write(&f, "feature", &twin_rule, VIEW, "v-twin");
+        version_write(&f, "feature", &above_rule, VIEW, "v-above");
+        let given = [twin_rule.as_str(), above_rule.as_str()];
+        let journal = f.journal();
+        let refused = merge_rule(&f, "feature", &owned(&given), 50);
+        assert!(
+            matches!(refused, Err(RuntimeError::RuleMergeOrderChanged)),
+            "{twin}: {refused:?}"
+        );
+        assert_eq!(f.journal(), journal, "{twin}");
+        // The relay shows the widening that first write would make.
+        let before = main_rules(&f);
+        let mut between = before.clone();
+        between.insert(twin_rule.clone(), VIEW.to_owned());
+        let mut after = between.clone();
+        after.insert(above_rule.clone(), VIEW.to_owned());
+        assert!(
+            relay_reach::widening(&before, &between, &after, &[spelled]).is_some(),
+            "{twin}"
+        );
+        let order = rule_order(&f, "feature", &given, &[]);
+        assert_eq!(
+            order,
+            RuleMergeOrder::Ordered {
+                writes: owned(&[above_rule.as_str(), twin_rule.as_str()]),
+                deletes: Vec::new(),
+            },
+            "{twin}"
+        );
+        merge_judged(&f, "feature", order, &[spelled]);
+        assert_eq!(main_rules(&f)[&twin_rule], VIEW, "{twin}");
+    }
+}
