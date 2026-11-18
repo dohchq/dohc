@@ -346,7 +346,6 @@ function jsonValue(value: CollectionValue): AppBackendJson | undefined {
   }
   return items;
 }
-/** Whether a cell already holds a value. Nothing typed is the same nothing, however the field stores it. */
 /** What a cell shows: a change's value, or for one the Collection refused, the stored value. */
 function cellValue(
   status: TableCellStatus | undefined,
@@ -356,6 +355,7 @@ function cellValue(
   if (status.state !== "refused" || !status.stored) return status.value as AppBackendJson;
   return status.stored === true ? stored : (status.stored.value as AppBackendJson);
 }
+/** Whether a cell already holds a value. Nothing typed is the same nothing, however the field stores it. */
 const sameValue = (a: AppBackendJson, b: AppBackendJson) =>
   JSON.stringify(a) === JSON.stringify(b) || (isEmptyValue(a) && isEmptyValue(b));
 
@@ -1594,8 +1594,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!now || !row || !field) return queue.skip();
       const shown = view.statuses.get(recordKey, fieldId),
         refused = shown?.state === "refused";
+      // A held draft compares with the record, not with its own text.
       const current =
-        shown && !refused ? (shown.value as AppBackendJson) : (row.values[fieldId] ?? null);
+        (refused && !shown.stored ? row.values[fieldId] : cellValue(shown, row.values[fieldId])) ??
+        null;
       // The same value saves nothing, and takes back a value dohc did not save.
       if (value !== undefined && sameValue(value, current)) {
         if (refused) queue.dismiss(recordKey, fieldId);
