@@ -44,6 +44,7 @@ import {
   TableView,
   type CollectionCellChange,
   type TableAbandonedDraft,
+  type TableCellStatus,
   type TableFieldMark,
   type TableHostCell,
   type TableNewRecord,
@@ -344,6 +345,15 @@ function jsonValue(value: CollectionValue): AppBackendJson | undefined {
     items.push(item);
   }
   return items;
+}
+/** What a cell shows: a change's value, or for one the Collection refused, the stored value. */
+function cellValue(
+  status: TableCellStatus | undefined,
+  stored: AppBackendJson | undefined,
+): AppBackendJson | undefined {
+  if (!status) return stored;
+  if (status.state !== "refused" || !status.stored) return status.value as AppBackendJson;
+  return status.stored === true ? stored : (status.stored.value as AppBackendJson);
 }
 /** Whether a cell already holds a value. Nothing typed is the same nothing, however the field stores it. */
 const sameValue = (a: AppBackendJson, b: AppBackendJson) =>
@@ -1584,8 +1594,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!now || !row || !field) return queue.skip();
       const shown = view.statuses.get(recordKey, fieldId),
         refused = shown?.state === "refused";
+      // A held draft compares with the record, not with its own text.
       const current =
-        shown && !refused ? (shown.value as AppBackendJson) : (row.values[fieldId] ?? null);
+        (refused && !shown.stored ? row.values[fieldId] : cellValue(shown, row.values[fieldId])) ??
+        null;
       // The same value saves nothing, and takes back a value dohc did not save.
       if (value !== undefined && sameValue(value, current)) {
         if (refused) queue.dismiss(recordKey, fieldId);
@@ -1631,16 +1643,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!field) return;
       const shown = view.statuses.get(draft.recordId, draft.field);
       // Text the cell shows already is no change to keep.
-      if (
-        row &&
-        draft.text ===
-          display(
-            shown && !(shown.state === "refused" && shown.stored)
-              ? (shown.value as AppBackendJson)
-              : row.values[draft.field],
-          )
-      )
-        return;
+      if (row && draft.text === display(cellValue(shown, row.values[draft.field]))) return;
       queue.hold(
         { id: JSON.parse(draft.recordId) as string | number },
         field,
@@ -1767,10 +1770,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
               // A record that does not exist yet has no file to download, and takes a value in each field its create does.
               const unmade = record.id === NEW_RECORD;
               const status = view.statuses.get(record.id, field.fieldId);
-              const value =
-                status && !(status.state === "refused" && status.stored)
-                  ? (status.value as AppBackendJson)
-                  : now.rows.get(record.id)?.values[field.fieldId];
+              const value = cellValue(status, now.rows.get(record.id)?.values[field.fieldId]);
               const readFile = now.resources.readFile;
               return (
                 <ResourceCell
@@ -2066,11 +2066,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const nameText = !details
       ? undefined
       : nameField
-        ? display(
-            nameStatus && !(nameStatus.state === "refused" && nameStatus.stored)
-              ? (nameStatus.value as AppBackendJson)
-              : details.values[nameField.fieldId],
-          )
+        ? display(cellValue(nameStatus || undefined, details.values[nameField.fieldId]))
         : "";
     // An offline copy lists no action, as it takes no change.
     const recordActions =

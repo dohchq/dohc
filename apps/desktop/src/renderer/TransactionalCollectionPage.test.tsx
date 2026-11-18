@@ -872,6 +872,33 @@ describe("a Data Collection's table", () => {
     expect(cell("Name").textContent).toBe("Alice");
   });
 
+  it("sends the value from before a saved change when a later change to that cell is refused", async () => {
+    const reread = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn(
+      async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+        if (request.operationId === read)
+          return sent(invoke, read).length === 1 ? { result: page() } : reread.promise;
+        if (sent(invoke, edit).length === 1) return { result: receipt() };
+        throw Object.assign(new Error("This record changed. Refresh the table."), {
+          code: "operation_refused",
+        });
+      },
+    );
+    setup({ invoke });
+    await screen.findByText("Alice");
+    type("Name", "Alicia");
+    type("Name", "Alina");
+    await waitFor(() => expect(mark("Name")).toBe("refused"));
+    // The read that would show the saved change has not answered, so the record still holds the value from before it.
+    expect(cell("Name").textContent).toContain("Alicia");
+    fireEvent.click(cell("Name"));
+    expect(editorInput().value).toBe("Alina");
+    fireEvent.change(editorInput(), { target: { value: "Alice" } });
+    fireEvent.keyDown(editorInput(), { key: "Enter" });
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(3));
+    expect(sent(invoke, edit)[2]!.input).toMatchObject({ values: { [name]: "Alice" } });
+  });
+
   it("does not send a value its field can't take, and says what to enter on the cell", async () => {
     const { invoke } = setup();
     await screen.findByText("Alice");
