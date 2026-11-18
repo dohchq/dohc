@@ -380,10 +380,14 @@ export function chatBodyTooLong(text: string, channel: NamedChatPlace): boolean 
   );
 }
 
+/**
+ * `deleted` holds every delete the conversation has heard, not only the
+ * latest page's: an older page read before a delete still carries the text.
+ */
 export function mergeChatMessages(
   current: readonly NamedChatMessage[],
   incoming: readonly NamedChatMessage[],
-  deleted: readonly DeletedChatMessage[] = [],
+  deleted: readonly DeletedChatMessage[],
 ): NamedChatMessage[] {
   // The relay sequence is unique; a message ID can match an omission marker's `omitted:<relaySeq>`.
   const bySeq = new Map(current.map((item) => [item.relaySeq, item]));
