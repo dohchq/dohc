@@ -45,9 +45,14 @@ export class CredentialSessionCache<Credentials> {
    * error when the store can't be read, so a caller doesn't take it as a sign-out.
    */
   async read(load: () => Promise<Credentials | null>): Promise<Credentials | null> {
-    const unreadable = await this.warm(load);
-    if (unreadable) throw unreadable.error;
-    return this.credentials;
+    for (;;) {
+      const waited = this.warm(load);
+      const unreadable = await waited;
+      if (unreadable) throw unreadable.error;
+      // A refresh, set, or clear replaced the load this read waited on. Read
+      // what replaced it, not the null a refresh shows while it reads.
+      if (this.ready === waited) return this.credentials;
+    }
   }
 
   refresh(load: () => Promise<Credentials | null>): Promise<void> {

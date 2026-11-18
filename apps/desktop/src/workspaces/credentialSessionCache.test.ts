@@ -102,6 +102,35 @@ describe("CredentialSessionCache", () => {
     expect(attempts).toBe(2);
   });
 
+  it("reads the load a refresh started, not the null it shows while that load reads the store", async () => {
+    const cache = new CredentialSessionCache<string>();
+    let finishFirst: (value: string | null) => void = () => {};
+    let finishSecond: (value: string | null) => void = () => {};
+    const reading = cache.read(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishFirst = resolve;
+        }),
+    );
+    const refreshing = cache.refresh(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishSecond = resolve;
+        }),
+    );
+    finishFirst("first-session");
+    let settled = false;
+    void reading.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishSecond("second-session");
+    await refreshing;
+    await expect(reading).resolves.toBe("second-session");
+  });
+
   it("tells each warm caller why the load it waited on failed, even after a later load starts", async () => {
     const cache = new CredentialSessionCache<string>();
     const unreadable = new Error("EACCES: credentials.json");
