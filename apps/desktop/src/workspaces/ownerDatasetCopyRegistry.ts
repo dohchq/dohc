@@ -412,6 +412,17 @@ export function createOwnerDatasetCopyRegistry(options: {
         if (!owns(input.ownerKey))
           throw Error("The Collection owner changed. Reopen the workspace.");
       };
+      // An account change that looked before this folder existed did not
+      // see it, so a list read or saved meanwhile removes its folder itself.
+      // A sign-in under way or a stop replaced no account, so the list stays.
+      const stillMine = async (folder: string) => {
+        if (
+          departed.has(ownerTag(input.ownerKey)) ||
+          (ownerKey !== null && ownerKey !== input.ownerKey)
+        )
+          await removeFolder(folder);
+        mine();
+      };
       const file = async () => {
         await barrier.catch(() => undefined);
         mine();
@@ -425,15 +436,21 @@ export function createOwnerDatasetCopyRegistry(options: {
           "copies",
           key,
         );
-        return join(resolve(await realpath(folder)), "list.json");
+        await stillMine(folder);
+        return { folder, path: join(resolve(await realpath(folder)), "list.json") };
       };
       return {
         read: async () => {
-          const text = await readFile(await file(), "utf8");
+          const { path } = await file();
+          const text = await readFile(path, "utf8");
           mine();
           return JSON.parse(text) as unknown;
         },
-        write: async (value) => atomicWriteFile(await file(), JSON.stringify(value)),
+        write: async (value) => {
+          const { folder, path } = await file();
+          await atomicWriteFile(path, JSON.stringify(value));
+          await stillMine(folder);
+        },
       };
     },
     async get(input: {
