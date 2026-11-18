@@ -40,6 +40,7 @@ import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import type { MemberReach } from "./storage/memberReach";
+import { StaleReferenceCollection } from "./storage/workReferences";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 /** How old a member's stored account email may be when their feed or browser reads. */
@@ -227,10 +228,15 @@ export function createNamedShareTransportRoutes(
       let reach: MemberReach | undefined;
       let logHead = 0;
       const signed = () => (reach ? { reach: reach.listed(reachKey), logHead } : {});
+      // What the page's read decided by, as one value. The selector holds the
+      // member's evaluated reach, so a level or Group rule change moves it.
+      const markOf = (selector: AnyShareSelector) => JSON.stringify({ selector });
+      let pageMark = "";
       const authorizeRead = () => {
         const selector = requireShareAction(route.shareId, actor.userId, "read").effectiveSelector;
         reach = isWorkspaceSelector(selector) ? selector.reach : undefined;
         if (reach) logHead = storage.shareLogHead(share.workspaceId);
+        pageMark = markOf(selector);
         return pullSelector(selector);
       };
       let page = filteredLogPage(
@@ -243,9 +249,6 @@ export function createNamedShareTransportRoutes(
         half,
         ["user", actor.userId],
       );
-      // The selector that filtered the page being returned. A held read
-      // refilters with the grant's level at each wake.
-      let pageSelector = readSelector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       // A held read names the level its reader knew, so a change that landed
       // while no read waited still ends the next hold. The stored grant
@@ -300,7 +303,6 @@ export function createNamedShareTransportRoutes(
             half,
             ["user", actor.userId],
           );
-          pageSelector = pullSelector(fresh.effectiveSelector);
           return next;
         };
         while (!request.signal.aborted && Date.now() < deadline) {
@@ -345,44 +347,72 @@ export function createNamedShareTransportRoutes(
           });
         }
       }
-      // Re-check revocation immediately before returning the body: a revoke
-      // that raced with this in-flight read (after the entry check, while
-      // the page was assembled) must abort the response, not leak a final
-      // filtered page. Re-loading the share throws the same generic 404.
-      requireShareAction(route.shareId, actor.userId, "read");
-      const mappings =
-        !identityKey || url.searchParams.get("includeReferences") === "false" || page.hasMore
-          ? { references: [], nextAfter: null, hasMore: false }
-          : await storage.listWorkReferences({
-              workspaceId: share.workspaceId,
-              reader: { kind: "user", userId: actor.userId, grantId: authorized.grant.grantId },
-              identityKey,
-              after: url.searchParams.get("referenceAfter") || undefined,
-            });
-      const ops = isWorkspaceSelector(share.selector)
-        ? await nameAuthorsByAccount(page.ops, lookupUserDisplayName)
-        : page.ops;
-      const latest = requireShareAction(route.shareId, actor.userId, "read");
-      const latestSelector = JSON.stringify(latest.effectiveSelector);
-      if (
-        latestSelector !== JSON.stringify(authorized.effectiveSelector) ||
-        JSON.stringify(pullSelector(latest.effectiveSelector)) !== JSON.stringify(pageSelector)
-      )
-        throw notFound();
-      return jsonResponse({
-        ok: true,
-        ...(mappings.references.length || mappings.nextAfter
-          ? {
-              workReferences: mappings.references,
-              nextReferenceAfter: mappings.nextAfter,
-              referenceHasMore: mappings.hasMore,
-            }
-          : {}),
-        ...page,
-        ops,
-        ownOriginId,
-        ...signed(),
-      });
+      const referenceAfter = url.searchParams.get("referenceAfter") || undefined;
+      // Builds the answer from `held`, a page already read, after its last
+      // await. Throws not-found when the share or the pulled channel is gone;
+      // returns null when the reader still holds it but what decided the page
+      // changed while it was assembled.
+      const buildAnswer = async (held: typeof page): Promise<Response | null> => {
+        const mark = pageMark;
+        const stillHeld = () => {
+          const latest = requireShareAction(route.shareId, actor.userId, "read");
+          pullSelector(latest.effectiveSelector);
+          return latest;
+        };
+        let mappings: Awaited<ReturnType<typeof storage.listWorkReferences>>;
+        try {
+          mappings =
+            !identityKey || url.searchParams.get("includeReferences") === "false" || held.hasMore
+              ? { references: [], nextAfter: "", hasMore: false }
+              : await storage.listWorkReferences({
+                  workspaceId: share.workspaceId,
+                  reader: { kind: "user", userId: actor.userId, grantId: authorized.grant.grantId },
+                  identityKey,
+                  after: referenceAfter,
+                });
+        } catch (error) {
+          if (!(error instanceof StaleReferenceCollection)) throw error;
+          stillHeld();
+          return null;
+        }
+        const ops = isWorkspaceSelector(share.selector)
+          ? await nameAuthorsByAccount(held.ops, lookupUserDisplayName)
+          : held.ops;
+        if (markOf(stillHeld().effectiveSelector) !== mark) return null;
+        return jsonResponse({
+          ok: true,
+          ...(mappings.references.length || mappings.nextAfter
+            ? {
+                workReferences: mappings.references,
+                nextReferenceAfter: mappings.nextAfter,
+                referenceHasMore: mappings.hasMore,
+              }
+            : {}),
+          ...held,
+          ops,
+          ownOriginId,
+          ...signed(),
+        });
+      };
+      // A change while the answer was assembled drops all of it. The rerun
+      // reads from the client's cursor with no hold, so no earlier window is
+      // reused. A second change answers busy, and nothing from either read leaves.
+      const answer =
+        (await buildAnswer(page)) ??
+        (await buildAnswer(
+          filteredLogPage(
+            share.workspaceId,
+            share.shareId,
+            authorizeRead,
+            since,
+            limit,
+            "authenticated",
+            half,
+            ["user", actor.userId],
+          ),
+        ));
+      if (!answer) throw relayError("server_busy");
+      return answer;
     }
 
     // Member append: the first place a non-owner writes into an owner's
