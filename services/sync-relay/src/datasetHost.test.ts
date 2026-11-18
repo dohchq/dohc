@@ -9,6 +9,8 @@ import { type AppDatasetBinding, type DatasetDefinition } from "@dohc/security-c
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
 import { fixture as appFixture, limits, owner, pushFile } from "./datasetTestFixture";
 import type { AppBackendAuth } from "./appBackendAuthority";
+import type { AppBackendAction } from "./appBackendRoutes";
+import type { AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import type { PublicEditRelease } from "@dohc/security-contract";
 import {
   createRelayDatasetHost,
@@ -179,12 +181,6 @@ async function fixture(
     );
   }
   function publish(operationIds = [id(5)], linkReads?: AppDatasetBinding["linkReads"]) {
-    const previous = base.storage.readAppPublication({
-      ...scope,
-      publicationId: base.publicationId,
-      ownerUserId: "owner",
-      limits,
-    });
     const capability = resolveAppDatasetCapability(
       {
         kind: "dataset",
@@ -196,9 +192,21 @@ async function fixture(
       },
       revision,
     );
+    const publicationId = publishWith([capability]);
+    host.bindPublication(owner, { ...scope, publicationId });
+    return publicationId;
+  }
+  /** Publishes the fixture's app again, requesting `capabilities`. */
+  function publishWith(capabilities: AppPublicationCandidate["capabilities"]) {
+    const previous = base.storage.readAppPublication({
+      ...scope,
+      publicationId: base.publicationId,
+      ownerUserId: "owner",
+      limits,
+    });
     const candidate = {
       ...previous.candidate,
-      capabilities: [capability],
+      capabilities,
       files: previous.candidate.files.filter((file) => file.path === "bundle.js"),
     };
     const digest = (domain: string, value: unknown) =>
@@ -223,7 +231,6 @@ async function fixture(
       limits,
       nowMs: 10,
     });
-    host.bindPublication(owner, { ...scope, publicationId: result.publicationId });
     return result.publicationId;
   }
   // These tests move the clock by minutes, so their link sessions outlast it.
@@ -240,6 +247,7 @@ async function fixture(
     activate,
     invoke,
     publish,
+    publishWith,
     addHelper,
     async reopen() {
       await host.close();
@@ -533,6 +541,109 @@ it("rechecks app access after the account sender lookup", async () => {
     route(
       new Request("https://relay.test/summary"),
       { route: "app-backend", action: "summary", publicationId, workspaceId: "w" },
+      helper,
+    ),
+  ).rejects.toThrow();
+});
+
+it("serves an app that requests nothing in the workspace its files, and no backend", async () => {
+  const f = await fixture();
+  f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {
+    nowMs: () => 10,
+    publications: true,
+    shareSenderLabel: async () => "Ana (owner@dohc.test)",
+  });
+  const call = (
+    auth: AppBackendAuth,
+    action: AppBackendAction,
+    { publicationId = f.publicationId, sha256 = "", query = "" } = {},
+  ) =>
+    route(
+      new Request(
+        `https://relay.test/${action}${query}`,
+        action === "descriptor" || action === "summary" || action === "blob"
+          ? {}
+          : { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+      ),
+      { route: "app-backend", action, publicationId, workspaceId: "w", ...(sha256 && { sha256 }) },
+      auth,
+    );
+  const { authorityRevision, candidate } = f.storage.readAppPublication({
+    ...scope,
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const file = candidate.files[0]!;
+  const blob = (auth: AppBackendAuth, revision = authorityRevision) =>
+    call(auth, "blob", { sha256: file.sha256, query: `?authorityRevision=${revision}` });
+
+  for (const auth of [owner, helper]) {
+    expect(await (await call(auth, "descriptor")).json()).toEqual({
+      publicationId: f.publicationId,
+      authorityRevision,
+      files: candidate.files,
+    });
+    expect(await (await blob(auth)).text()).toBe("document.body.textContent='app'");
+    await expect(blob(auth, authorityRevision + 1)).rejects.toThrow();
+  }
+  expect(await (await call(owner, "summary")).json()).toEqual({
+    subjectName: "app",
+    sharerName: null,
+    access: "owner",
+  });
+  expect(await (await call(helper, "summary")).json()).toMatchObject({
+    sharerName: "Ana (owner@dohc.test)",
+    access: "view",
+  });
+  for (const action of ["activate", "invoke", "upload", "file", "attempt"] as const)
+    await expect(call(owner, action)).rejects.toThrow();
+
+  // Nobody else reads its files: a stranger, a link visitor, or a member whose grant was revoked.
+  await expect(
+    call({ kind: "named", workspaceId: "w", userId: "stranger" }, "descriptor"),
+  ).rejects.toThrow();
+  await expect(call(f.link("visitor"), "descriptor")).rejects.toThrow();
+  f.storage.revokeShareGrant({ shareId: "s", grantId: "helper-grant", revokedAtMs: 11 });
+  await expect(call(helper, "descriptor")).rejects.toThrow();
+  await expect(blob(helper)).rejects.toThrow();
+
+  // An app that requests a Collection is not one that requests nothing, before or without its approval.
+  const collectionApp = f.publishWith([
+    {
+      kind: "collection-create",
+      collectionPath: "responses",
+      schemaSha256: "f".repeat(64),
+      allowedFields: ["name"],
+      requiredFields: ["name"],
+      readFields: ["name"],
+    },
+  ]);
+  expect(f.host.servedPublication(owner, collectionApp)).toBeNull();
+  await expect(call(owner, "descriptor", { publicationId: collectionApp })).rejects.toThrow();
+});
+
+it("rechecks access to an app that requests nothing after the account sender lookup", async () => {
+  const f = await fixture();
+  f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {
+    nowMs: () => 10,
+    publications: true,
+    shareSenderLabel: async () => {
+      f.storage.revokeShareGrant({ shareId: "s", grantId: "helper-grant", revokedAtMs: 11 });
+      return "Ana (owner@dohc.test)";
+    },
+  });
+  await expect(
+    route(
+      new Request("https://relay.test/summary"),
+      {
+        route: "app-backend",
+        action: "summary",
+        publicationId: f.publicationId,
+        workspaceId: "w",
+      },
       helper,
     ),
   ).rejects.toThrow();
