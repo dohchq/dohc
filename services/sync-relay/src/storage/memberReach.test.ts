@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
+import { accessRuleSet, parseAccessRule } from "@dohc/security-contract/access-rules";
 import { groupRuleText, insertCreatedGroupRule } from "./groupRules";
 import { memberReach } from "./memberReach";
 import { initializeSyncRelaySchema } from "./schema";
@@ -73,6 +74,21 @@ describe("a Group's rule in a member's reach", () => {
       expect(after.visibilitySignature()).toBe(before.visibilitySignature());
       expect(after.listed("key").groups).toEqual([{ channelWireId: TEAM, level: "view" }]);
       expect(after.listed("key").groupDefault).toBe("comment");
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("changes the signature when the member level moves the Groups no rule names", () => {
+    const r = relay();
+    try {
+      // The root rule sets every folder's level, so only the Groups follow the member level.
+      const rules = accessRuleSet([["", parseAccessRule("members: view\n")]]);
+      const at = (level: "comment" | "edit") =>
+        memberReach(r.storageDb, "ws", "ana", "member", level, rules);
+      expect(at("edit").groupLevel(TEAM)).toBe("edit");
+      expect(at("edit").levelAt("Plan.md")).toBe(at("comment").levelAt("Plan.md"));
+      expect(at("edit").signature()).not.toBe(at("comment").signature());
     } finally {
       r.db.close();
     }

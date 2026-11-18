@@ -182,6 +182,7 @@ export function memberReach(
           ? []
           : [[folder, atFolder(folder)]],
       ),
+      groupDefault,
       ruledGroups.map(([id]) => [id, groupLevel(id)]),
     ]);
   // A hidden folder hides all under it, so reach can only stop at a ruled
