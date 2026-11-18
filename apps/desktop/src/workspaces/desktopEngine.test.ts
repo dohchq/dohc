@@ -318,6 +318,15 @@ beforeEach(() => {
 });
 
 type ServerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
+// A server with no paused notes.
+const noLivePauses = {
+  livePauses: async () => [],
+  livePauseCopy: async (): Promise<Uint8Array> => {
+    throw new Error("Unexpected paused note copy request.");
+  },
+  livePauseCopyWritten: async () => {},
+  resumeLivePause: async () => {},
+};
 const unexpectedKeptEdits = async (): Promise<unknown> => {
   throw new Error("Unexpected kept edits request.");
 };
@@ -394,6 +403,7 @@ async function quarantinedOwner(
         refusals: async () => {},
         keptEdits: server.keptEdits ?? unexpectedKeptEdits,
         keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
+        ...noLivePauses,
         open: server.open ?? unexpectedOpen,
         documents: async (_signal, fresh) => {
           const answer = {
@@ -1259,6 +1269,7 @@ describe("server owner peer lifecycle", () => {
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,
+        ...noLivePauses,
         open: unexpectedOpen,
         documents: async () => ({
           ok: true,
@@ -2283,6 +2294,7 @@ describe("server owner peer lifecycle", () => {
           refusals: async () => {},
           keptEdits: unexpectedKeptEdits,
           keptEditsPage: unexpectedKeptEdits,
+          ...noLivePauses,
           open: unexpectedOpen,
           documents: async () => ({ ok: true, documents: rows() }),
         }),
@@ -2405,6 +2417,7 @@ describe("server owner peer lifecycle", () => {
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,
+        ...noLivePauses,
         open: unexpectedOpen,
         documents: async () => ({ ok: true, diverged, documents: rows }),
       }),

@@ -3768,6 +3768,7 @@ const activity = {
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
+      ownerLivePauses: desktopEngine.ownerLivePauses(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
@@ -9223,6 +9224,8 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceOperation["workspace"]
   > = {
     person: () => ({ kind: "person", personId: localInstallationId() }),
+    resumeOwnerLivePause: (workspace, path) =>
+      desktopEngine.resumeOwnerLivePause(workspace, path),
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,

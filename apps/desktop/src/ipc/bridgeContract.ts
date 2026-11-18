@@ -1705,6 +1705,21 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLiveStopFailures: z
     .array(z.object({ objectId: z.string().min(1), path: SAFE_RELATIVE_PATH, detail: z.string() }))
     .optional(),
+  // Notes the server paused for good, each with its copy written next to it.
+  ownerLivePauses: z
+    .array(
+      z.object({
+        pauseId: z.string().min(1),
+        objectId: z.string().min(1),
+        path: SAFE_RELATIVE_PATH,
+        cause: z.enum(["refused", "failing", "moved"]),
+        names: z.array(z.string()).max(256),
+        copyPath: SAFE_RELATIVE_PATH,
+        leftOut: z.boolean(),
+      }),
+    )
+    .max(64)
+    .optional(),
   ownerLiveQuarantines: z
     .array(OwnerLiveQuarantine)
     .max(256 + RESTORE_FENCED_RECOVERY_LIMIT)

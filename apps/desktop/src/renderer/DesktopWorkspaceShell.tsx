@@ -416,6 +416,7 @@ import type { SharingFocus } from "./workbench/SharingView";
 import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
+import { livePauseMessage } from "./livePauseMessage";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -3813,6 +3814,69 @@ export function DesktopWorkspaceShell(props: {
       return saving;
     };
   }, [openFile, showSuccessNotice, showWarningNotice, reportShellError]);
+  // A note the server paused for good. Its copy is written next to it, and
+  // Resume starts it again from its last save.
+  const shownLivePauses = useRef({ workspaceId, shown: new Set<string>() });
+  useEffect(() => {
+    if (captureDecidedFor !== workspaceId || syncStatus === null) return;
+    if (shownLivePauses.current.workspaceId !== workspaceId)
+      shownLivePauses.current = { workspaceId, shown: new Set() };
+    const shown = shownLivePauses.current.shown;
+    const rows = syncStatus.ownerLivePauses ?? [];
+    const identityOf = (pauseId: string) => `owner-live-pause:${workspaceId}:${pauseId}`;
+    const listed = new Set(rows.map((row) => identityOf(row.pauseId)));
+    for (const identity of [...shown]) {
+      if (listed.has(identity)) continue;
+      shown.delete(identity);
+      clearIdentity(identity);
+    }
+    const current = () => workspaceIdRef.current === workspaceId;
+    for (const row of rows) {
+      const identity = identityOf(row.pauseId);
+      if (shown.has(identity)) continue;
+      shown.add(identity);
+      reportShellFailure({
+        identity,
+        title: `Live editing paused for ${row.path}`,
+        tone: "warning",
+        message: livePauseMessage(row),
+        action: {
+          label: "Resume",
+          run: () => {
+            if (!current()) return;
+            void resumeLiveDocument(workspaceId, row.path).then(
+              () => {
+                if (current()) showSuccessNotice("Live editing resumed from the last save.");
+              },
+              (error: unknown) => {
+                if (current())
+                  reportShellError(`dohc could not resume live editing of ${row.path}.`, error);
+              },
+            );
+          },
+          additional: [
+            {
+              label: "Open copy",
+              run: () => {
+                if (current()) openFile(row.copyPath);
+              },
+            },
+          ],
+        },
+        target: { to: "file", path: row.copyPath },
+      });
+    }
+  }, [
+    captureDecidedFor,
+    syncStatus,
+    workspaceId,
+    clearIdentity,
+    reportShellFailure,
+    reportShellError,
+    resumeLiveDocument,
+    showSuccessNotice,
+    openFile,
+  ]);
   // A held file can't go live again, so Live documents offers a copy beside
   // it. Opening the copy starts its live editing.
   const liveCopies = useRef(new Map<string, Promise<void>>());

@@ -1,4 +1,5 @@
-import { readBoundedJson } from "@dohc/service-http";
+import { readBoundedBytes, readBoundedJson } from "@dohc/service-http";
+import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { selfHostedLiveProfile } from "@dohc/sync-relay/self-host-live-profile";
@@ -11,6 +12,8 @@ import { OwnerLiveRefusalsResult } from "../ipc/bridgeContract";
 import { ServerKeptEditsConflict, ServerRecoveryCopyRefusedError } from "./ownerLiveQuarantine";
 import { OwnerJournalPage } from "./ownerJournal";
 import { z } from "zod";
+
+const LIVE_PAUSE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // A list page holds up to 256 rows of edits the server kept. A row is at most
 // about 13 KiB: its 4096-character path alone can take 12 KiB of UTF-8.
@@ -126,6 +129,35 @@ export function createServerOwnerConnection(options: {
         ) {
           throw new Error("Owner delivery connection changed.");
         }
+      };
+      /** One of the owner's paused-note routes; a refusal throws. */
+      const pauseRoute = async (
+        path: string,
+        method: "GET" | "POST",
+        attempt: AbortSignal,
+        body?: object,
+      ) => {
+        assertCurrent();
+        const requestSignal = AbortSignal.any([signal, attempt]);
+        const response = await options.fetch(
+          `${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-pauses${path}`,
+          {
+            method,
+            headers: {
+              authorization: `Bearer ${session.value.token}`,
+              ...(body ? { "content-type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+            signal: requestSignal,
+            redirect: "error",
+          },
+        );
+        assertCurrent();
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error("dohc could not reach this workspace's paused notes on the server.");
+        }
+        return response;
       };
       return {
         bearer: session.value.token,
@@ -362,6 +394,56 @@ export function createServerOwnerConnection(options: {
             .parse(value);
           discovery.delete(workspace.workspaceId);
           return retired.acceptedCursor;
+        },
+        async livePauses(attempt) {
+          const response = await pauseRoute("", "GET", attempt);
+          const value = z
+            .object({
+              pauses: z
+                .array(
+                  z.object({
+                    pauseId: z.string().regex(LIVE_PAUSE_ID),
+                    objectId: z.string().min(1),
+                    lineageClaimId: z.string().min(1),
+                    pausedAtMs: z.number(),
+                    savedCursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+                    cause: z.enum(["refused", "failing"]),
+                    refusal: z.string().nullable(),
+                    named: z.array(z.unknown()),
+                    copy: z
+                      .object({
+                        sha256: z.string().regex(/^[0-9a-f]{64}$/),
+                        byteLength: z.number().int().nonnegative(),
+                      })
+                      .nullable(),
+                  }),
+                )
+                .max(64),
+            })
+            .parse(await readBoundedJson(response, 4 * 1024 * 1024, attempt));
+          assertCurrent();
+          return value.pauses.map(({ pausedAtMs: _, ...pause }) => ({
+            ...pause,
+            named: pause.named.map(parseLiveAuthorSnapshot),
+          }));
+        },
+        async livePauseCopy(pauseId, byteLength, attempt) {
+          const response = await pauseRoute(`/${pauseId}/copy`, "GET", attempt);
+          const bytes = await readBoundedBytes(response, byteLength, attempt);
+          assertCurrent();
+          return bytes;
+        },
+        async livePauseCopyWritten(pauseId, sha256, attempt) {
+          const response = await pauseRoute(`/${pauseId}/copy-written`, "POST", attempt, {
+            sha256,
+          });
+          await response.body?.cancel();
+          assertCurrent();
+        },
+        async resumeLivePause(pauseId, attempt) {
+          const response = await pauseRoute(`/${pauseId}/resume`, "POST", attempt, {});
+          await response.body?.cancel();
+          assertCurrent();
         },
         async journal(binding, after, attempt) {
           assertCurrent();
