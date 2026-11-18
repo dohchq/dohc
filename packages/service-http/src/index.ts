@@ -6,6 +6,7 @@ export {
   RefusedRequest,
   serveFetchHandler,
   type ServeFetchHandlerOptions,
+  waitsOnHold,
 } from "./serveFetchHandler";
 export { carryRequestMark, createRequestLog, type RequestLog } from "./requestLog";
 export { DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";

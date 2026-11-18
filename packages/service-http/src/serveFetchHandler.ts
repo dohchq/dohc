@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { Readable } from "node:stream";
 import { DRAIN_TIMEOUT_HEADER, pipeResponseBody } from "./pipeResponseBody";
 import type { RequestLog } from "./requestLog";
@@ -28,6 +29,11 @@ export interface ServeFetchHandlerOptions {
    * upload it carries stays unread.
    */
   streamBody?: (url: URL, method: string) => boolean;
+  /**
+   * Whether a request only waits for news, as a long poll does. A shutdown closes its connection at once.
+   * Any other request gets the grace period to finish.
+   */
+  waits?: (url: URL, method: string) => boolean;
   /** The answer to an upload that crosses the cap; the socket closes after it flushes. */
   oversized: (url: URL) => Response;
   /** The answer when the handler throws. */
@@ -64,6 +70,21 @@ const REFUSAL_LINGER_MS = 2_000;
 const READ_FIRST_BYTES = 64 * 1024;
 
 /**
+ * Whether a request is a read that waits for news. The relay and the share service take the longest time
+ * such a read may wait in its `hold` query, in milliseconds.
+ */
+export const waitsOnHold = (url: URL, method: string): boolean =>
+  method === "GET" && Number(url.searchParams.get("hold")) > 0;
+
+// The connections of requests that only wait, for each server.
+const waitingConnections = new WeakMap<Server, Set<Socket>>();
+
+/** Closes the connection of every request that only waits. `closeServer` calls it once the server has stopped listening. */
+export function closeWaitingConnections(server: Server): void {
+  for (const socket of waitingConnections.get(server) ?? []) socket.destroy();
+}
+
+/**
  * How long a connection may wait between requests. A gateway in front keeps its connections to a server
  * and sends later requests on them. If the server closes one first, the gateway can already have sent a
  * request on it. That request is lost and the gateway answers 502. Caddy keeps an unused connection for two
@@ -85,6 +106,7 @@ const IDLE_CONNECTION_MS = 150_000;
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   let bytesInFlight = 0;
   const callerBytesInFlight = new Map<string, number>();
+  const waiting = new Set<Socket>();
   // Headers stay bounded to 60s; the adapter or a streaming handler bounds the body.
   const server = createServer(
     { requestTimeout: 0, headersTimeout: 60_000, keepAliveTimeout: IDLE_CONNECTION_MS },
@@ -98,6 +120,11 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       }
       const arrivedAtMs = Date.now();
       const method = incoming.method ?? "GET";
+      if (options.waits?.(url, method)) {
+        const { socket } = incoming;
+        waiting.add(socket);
+        outgoing.once("close", () => waiting.delete(socket));
+      }
       let answered = false;
       let reserved = 0;
       let caller = "";
@@ -259,6 +286,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       } else start(body);
     },
   );
+  waitingConnections.set(server, waiting);
   return server;
 }
 

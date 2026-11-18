@@ -1,5 +1,6 @@
 import { writeSync } from "node:fs";
 import type { Server } from "node:http";
+import { closeWaitingConnections } from "./serveFetchHandler";
 
 /** Writes `message` to stderr synchronously and exits 1. */
 export function fatal(message: string): never {
@@ -25,18 +26,28 @@ export function parseGracePeriodMs(value: string | undefined, fallback: number):
  * never told to close its connection: a client may already have sent its next
  * request on it. Requests that keep arriving on open connections can still use
  * the whole grace period.
+ *
+ * A request that only waits for news, as a long poll does, has no work to
+ * finish. Its connection is closed as soon as the server stops listening, and
+ * so is one that arrives later. Otherwise each would hold the server open for
+ * as long as its client was willing to wait.
  */
 export function closeServer(server: Server, gracePeriodMs: number): Promise<void> {
   return new Promise((resolve) => {
-    const closeIdle = setInterval(() => server.closeIdleConnections(), 100);
-    closeIdle.unref();
+    const closeQuiet = setInterval(() => {
+      server.closeIdleConnections();
+      closeWaitingConnections(server);
+    }, 100);
+    closeQuiet.unref();
     const forceClose = setTimeout(() => server.closeAllConnections(), gracePeriodMs);
     forceClose.unref();
     server.close(() => {
       clearTimeout(forceClose);
-      clearInterval(closeIdle);
+      clearInterval(closeQuiet);
       resolve();
     });
+    // After `close`, so the request's signal aborts as a shutdown does and not as a client that left.
+    closeWaitingConnections(server);
   });
 }
 

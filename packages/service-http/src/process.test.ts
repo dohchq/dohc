@@ -2,7 +2,7 @@ import { Agent, request as httpRequest, type IncomingMessage } from "node:http";
 import { connect } from "node:net";
 import { describe, expect, it } from "vitest";
 import { closeServer, parseGracePeriodMs } from "./process";
-import { serveFetchHandler } from "./serveFetchHandler";
+import { ClientClosedRequest, serveFetchHandler } from "./serveFetchHandler";
 
 describe("parseGracePeriodMs", () => {
   it("accepts a non-negative integer and falls back otherwise", () => {
@@ -103,6 +103,65 @@ describe("closeServer", () => {
     await Promise.all([closing, ended]);
     expect(answered.match(/^HTTP\/1\.1 200/gmu)).toHaveLength(3);
     expect(answered).toContain("/third");
+  });
+
+  it("closes at once the connection of a request that only waits, and lets one that works finish", async () => {
+    let waitingArrived = () => {},
+      workingArrived = () => {},
+      release = () => {};
+    const bothArrived = Promise.all([
+      new Promise<void>((resolve) => (waitingArrived = resolve)),
+      new Promise<void>((resolve) => (workingArrived = resolve)),
+    ]);
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let endedAs: unknown = "still waiting";
+    const server = serveFetchHandler({
+      waits: (url) => url.pathname === "/wait",
+      handler: async (request) => {
+        if (new URL(request.url).pathname === "/wait") {
+          waitingArrived();
+          // A long poll: it answers only when there is news, and there is none.
+          await new Promise<void>((resolve) =>
+            request.signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          endedAs = request.signal.reason;
+          return new Response(null, { status: 204 });
+        }
+        workingArrived();
+        await held;
+        return new Response("done");
+      },
+      maxBodyBytes: () => 1024,
+      oversized: () => new Response(null, { status: 413 }),
+      failure: () => new Response(null, { status: 500 }),
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no TCP port");
+    const get = (path: string) =>
+      new Promise<number | "closed">((resolve) => {
+        httpRequest({ host: "127.0.0.1", port: address.port, path }, (response) => {
+          response.resume();
+          response.once("end", () => resolve(response.statusCode ?? 0));
+        })
+          .once("error", () => resolve("closed"))
+          .end();
+      });
+    const waiting = get("/wait");
+    const working = get("/work");
+    await bothArrived;
+
+    const startedAt = Date.now();
+    const closing = closeServer(server, 5_000);
+    expect(await waiting).toBe("closed");
+    // Well under the 5 s grace period, which the waiting request would have used up.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    // The handler sees a shutdown, not a client that left.
+    expect(endedAs).not.toBeInstanceOf(ClientClosedRequest);
+    release();
+    expect(await working).toBe(200);
+    await closing;
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 
   it("force-closes a stalled response after the grace period", async () => {
