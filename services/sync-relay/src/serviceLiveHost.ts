@@ -9,6 +9,7 @@ import {
   type ServiceActivationTarget,
   type ServiceCatchUp,
 } from "./serviceActivationDriver";
+import { passOrder } from "./servicePassOrder";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
 import { untilAborted } from "./namedLiveFrameHost.js";
@@ -659,6 +660,8 @@ export async function startServiceLiveHost(options: {
     idle = new Map<string, { due: number; generation: number }>();
   // Hosted documents whose idle unload is running, or was sent and got no reply.
   const unloading = new Set<string>();
+  // Notes an open asked for before the host had made them ready. A pass takes them first. See `passOrder`.
+  const wanted = new Set<string>();
   let generation = 0;
   const hostedKey = (document: { workspaceId: string; objectId: string }) => {
     for (const [key, row] of hosted)
@@ -2229,7 +2232,15 @@ export async function startServiceLiveHost(options: {
           const key = hostedKey(document);
           if (!key) return;
           touch(key);
-          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
+          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) {
+            // Awake, and not ready yet: after a start no note is. The next pass takes this one first, so whoever
+            // is opening it does not wait for its turn behind every other note. A note that is ready gets no mark.
+            if (!activation!.completed(hosted.get(key)!.target) && !wanted.has(key)) {
+              wanted.add(key);
+              nudgePass();
+            }
+            return;
+          }
           await exclusive(
             () =>
               withLiveHostSignal(signal, callerSignal, async (joined) => {
@@ -3219,15 +3230,19 @@ export async function startServiceLiveHost(options: {
               });
               // Targets with no owner share one catch-up pull of their workspace a pass.
               const catchUp: ServiceCatchUp = new Map();
+              const targetKey = (target: ServiceActivationTarget) =>
+                JSON.stringify([target.workspaceId, target.path]);
+              // A mark also ends when its note is hosted no longer, or became ready some other way.
+              for (const key of [...wanted]) {
+                const row = hosted.get(key);
+                if (!row || activation!.completed(row.target)) wanted.delete(key);
+              }
+              const order = passOrder(targets, index, bounds.maxDocumentsPerPass, (target) =>
+                wanted.has(targetKey(target)),
+              );
+              index = order.next;
               await step(async () => {
-                for (
-                  let visited = 0;
-                  visited < Math.min(bounds.maxDocumentsPerPass, targets.length);
-                  visited++
-                ) {
-                  index %= targets.length;
-                  const target = targets[index]!;
-                  index = (index + 1) % targets.length;
+                for (const target of order.visit) {
                   const timed: SlowPassTarget = {
                       object:
                         hosted
@@ -3271,6 +3286,9 @@ export async function startServiceLiveHost(options: {
                     noteWaiting(target, outcome);
                   } finally {
                     timed.ms = Math.round(now() - startedAt);
+                    // A mark buys one visit. A note still not ready, as while it backs off or its restore runs,
+                    // goes back to its turn, and the next open marks it again.
+                    wanted.delete(targetKey(target));
                   }
                 }
               });

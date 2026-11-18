@@ -55,6 +55,8 @@ export async function openEditLinkOnServer(input: {
   owner: string;
   /** The note both people open. */
   path: string;
+  /** What the Edit link covers. Without it, the note alone. A folder makes every note in it one the server hosts. */
+  linkPaths?: string[];
   files: Array<{ path: string; contents: string }>;
   /** Added to the desktop's and the relay engine's environment. */
   env?: Record<string, string>;
@@ -139,7 +141,7 @@ export async function openEditLinkOnServer(input: {
     );
     const created = await relayJson(relay.baseUrl, token, `/sync/${workspaceId}/shares/links`, {
       method: "POST",
-      body: JSON.stringify({ paths: [path], access: "edit" }),
+      body: JSON.stringify({ paths: input.linkPaths ?? [path], access: "edit" }),
     });
     expect(created.status, created.body).toBe(200);
     const link = JSON.parse(created.body) as { url: string };
