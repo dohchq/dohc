@@ -42,14 +42,12 @@ export function workspaceAdminOrigin(memberId: string): string {
   return `${WORKSPACE_ADMIN_ORIGIN_PREFIX}${memberId}`;
 }
 
-// A message delete, one origin per account or personal agent that deletes.
-// Only the relay writes it, after it admits the deleter, and every copy
-// accepts the delete op only from this prefix.
+// A message delete. Only the relay writes it, after it admits the deleter,
+// and every copy accepts the delete op only from this prefix. Every delete in
+// a workspace shares one origin, so the op does not say who deleted;
+// `deleted_by` keeps that on the relay.
 export const MESSAGE_DELETE_ORIGIN_PREFIX = "relay:message-delete:";
-
-export function messageDeleteOrigin(actorKey: string): string {
-  return `${MESSAGE_DELETE_ORIGIN_PREFIX}${sha256Hex(actorKey)}`;
-}
+export const MESSAGE_DELETE_ORIGIN = `${MESSAGE_DELETE_ORIGIN_PREFIX}workspace`;
 
 // The kinds only the relay writes: a refusal at a client's coordinate, a
 // deleted message at its append's coordinate, and the delete itself.

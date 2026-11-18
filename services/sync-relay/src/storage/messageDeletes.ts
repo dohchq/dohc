@@ -4,8 +4,8 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import { stableJsonStringify } from "../canonicalJson";
 import {
   MESSAGE_DELETE_OP_KIND,
+  MESSAGE_DELETE_ORIGIN,
   MESSAGE_TOMBSTONE_OP_KIND,
-  messageDeleteOrigin,
   personalAgentOrigin,
 } from "../relayLogInputs";
 import { workspaceFileReach } from "../workspaceReach";
@@ -302,7 +302,7 @@ function memberReads(storage: StorageContext, workspaceId: string, place: Messag
   );
 }
 
-// The actor's key for `deleted_by` and the delete op's origin, or null when
+// The actor's key for `deleted_by`, or null when
 // the relay does not admit the actor to delete this message.
 function admittedActor(
   storage: StorageContext,
@@ -415,13 +415,12 @@ export function deleteWorkspaceMessage(
           nowMs,
         });
     }
-    const originId = messageDeleteOrigin(actorKey);
     appendLogBatchInTransaction(storage, {
       workspaceId,
-      originId,
+      originId: MESSAGE_DELETE_ORIGIN,
       ops: [
         {
-          originSeq: maxOriginSeq(storage, workspaceId, originId) + 1,
+          originSeq: maxOriginSeq(storage, workspaceId, MESSAGE_DELETE_ORIGIN) + 1,
           opKind: MESSAGE_DELETE_OP_KIND,
           payloadJson: stableJsonStringify({ messageId, threadId, deletedAtMs: nowMs }),
           recordedAtMs: nowMs,

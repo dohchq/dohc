@@ -290,12 +290,26 @@ describe("deleting a message", () => {
       "chat.message.delete",
     ]);
     expect(JSON.stringify(rows)).not.toContain("my secret");
-    expect(rows[1]!.origin_id.startsWith("relay:message-delete:")).toBe(true);
     expect(JSON.parse(rows[1]!.payload_json)).toEqual({
       messageId: "m-ana",
       threadId: "t-team",
       deletedAtMs: 2_000,
     });
+    // Every delete in the workspace comes from one origin, so it does not say who deleted.
+    expect((await deleteMessage(h, OWNER, "msg-team", "t-team")).status).toBe(200);
+    expect(
+      inspect(storagePath(storage), (db) =>
+        db
+          .prepare(
+            `SELECT origin_id, origin_seq FROM sync_relay_log
+             WHERE workspace_id = ? AND op_kind = 'chat.message.delete' ORDER BY relay_seq`,
+          )
+          .all(WORKSPACE),
+      ),
+    ).toEqual([
+      { origin_id: "relay:message-delete:workspace", origin_seq: 0 },
+      { origin_id: "relay:message-delete:workspace", origin_seq: 1 },
+    ]);
   });
 
   it("lets a member who dropped to View delete their own message, but not post or delete another's", async () => {
