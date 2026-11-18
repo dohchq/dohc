@@ -2,7 +2,7 @@
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -25,6 +25,7 @@ import {
   useDocumentSaveNotices,
 } from "./shell/useDocumentSaveNotices";
 import { useShellError } from "./shell/useShellError";
+import { useFocusSurface } from "./ui/focusReturn";
 
 setupFileInspectorTests();
 
@@ -150,8 +151,21 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   );
 });
 
+// The shell's editor group, which takes focus when its focused editor goes.
+function EditorGroup(props: { children: ReactNode }) {
+  const root = useRef<HTMLDivElement>(null);
+  useFocusSurface(root, () => null);
+  return (
+    <div ref={root}>
+      <section data-focus-surface="editor" data-active="true" tabIndex={-1}>
+        {props.children}
+      </section>
+    </div>
+  );
+}
+
 it("keeps the caret in the editor when a replacement rebuilds it", async () => {
-  render(surface("ws-1"));
+  render(<EditorGroup>{surface("ws-1")}</EditorGroup>);
   await screen.findByTestId("markdown-source-toggle");
   const before = await screen.findByTestId("markdown-editor");
   before.focus();

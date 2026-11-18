@@ -1115,7 +1115,9 @@ export function MarkdownView(props: {
   onEditorReadyRef.current = onEditorReady;
   const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
   // A replaced document mounts a new editor. If the old one had the caret and
-  // nothing else took focus since, the new one gets it back.
+  // focus went nowhere else since, the new one gets it back. Focus left on the
+  // page or on the surface holding this note (focusReturn.ts moves it there
+  // when the old editor goes) went nowhere else.
   const documentKeyRef = useRef(props.documentKey);
   documentKeyRef.current = props.documentKey;
   const refocus = useRef<{ key: string; at: number } | null>(null);
@@ -1131,7 +1133,12 @@ export function MarkdownView(props: {
     const pending = refocus.current;
     if (!pending) return;
     const active = document.activeElement;
-    if (pending.key !== documentKeyRef.current || (active && active !== document.body)) {
+    const view = viewRef.current;
+    const unclaimed =
+      !active ||
+      active === document.body ||
+      (active.hasAttribute("data-focus-surface") && view !== null && active.contains(view));
+    if (pending.key !== documentKeyRef.current || !unclaimed) {
       refocus.current = null;
       return;
     }
