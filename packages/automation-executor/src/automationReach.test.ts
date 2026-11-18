@@ -548,6 +548,7 @@ describe("Groups a workspace membership reaches", () => {
   function member(
     who: { userId: string; email: string },
     access: "view" | "comment" | "edit",
+    groups: [string, "view" | "comment" | "edit" | null][] = [],
   ): RosterGrant {
     return {
       grantId: `m-${who.userId}`,
@@ -559,9 +560,38 @@ describe("Groups a workspace membership reaches", () => {
         memberReach: { role: "member", level: access, rules: [] },
         access,
       },
-      chat: { kind: "groups", canPost: access !== "view" },
+      chat: { kind: "groups", level: access, groups },
     };
   }
+
+  it("stops a post in a Group whose rule is View only, and any step in one it hides", () => {
+    // Ben edits Trip through a file grant, and is a member at Comment.
+    const ben_ = (groups: [string, "view" | "comment" | "edit" | null][]) =>
+      owner(grant(ben, { paths: ["Trip"], access: "edit" }), member(ben, "comment", groups));
+    const announcements = ben_([["wire-news", "view"]]);
+    expect(check(announcements, post("wire-news", "Announcements"))).toEqual(
+      stopped("ben@dohc.test cannot post in Announcements."),
+    );
+    expect(check(announcements, readGroup("wire-news", "Announcements"))).toEqual(allowed);
+    expect(check(announcements, post("wire-family"))).toEqual(allowed);
+    const hidden = ben_([["wire-team", null]]);
+    expect(check(hidden, readGroup("wire-team", "Team"))).toEqual(
+      stopped("ben@dohc.test cannot read Team."),
+    );
+    expect(check(hidden, post("wire-team", "Team"))).toEqual(
+      stopped("ben@dohc.test cannot post in Team."),
+    );
+    // A rule that lets members post opens a Group their level wouldn't.
+    expect(
+      check(
+        owner(
+          grant(ben, { paths: ["Trip"], access: "edit" }),
+          member(ben, "view", [["wire-family", "comment"]]),
+        ),
+        post("wire-family"),
+      ),
+    ).toEqual(allowed);
+  });
 
   it("posts in a Group for members at Comment and Edit, and stops for a member at View", () => {
     expect(check(owner(member(ana, "edit")), post("wire-family"))).toEqual(allowed);
