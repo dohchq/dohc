@@ -726,9 +726,14 @@ describe("direct messages for the signed-in account", () => {
       object,
       { workspaceId: string; attachmentId: symbol; rootPath: string },
       Record<string, never>,
-      { workspaceId: string; attachmentId: symbol; isCurrent(): boolean }
+      { workspaceId: string; attachmentId: symbol; generation: number; isCurrent(): boolean }
     >({
-      currentSession: () => ({ workspaceId: "w", attachmentId, isCurrent: () => current }),
+      currentSession: () => ({
+        workspaceId: "w",
+        attachmentId,
+        generation: 1,
+        isCurrent: () => current,
+      }),
       withPhysicalOperation: async (_workspaceId, work) =>
         work({
           workspace: { workspaceId: "w", attachmentId, rootPath: "C:/w" },
