@@ -1536,7 +1536,7 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
        SET recipient_share_id = COALESCE(?, recipient_share_id),
            target_json = CASE WHEN ? IS NULL THEN NULL ELSE target_json END,
            title = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
-             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN 'No longer available' ELSE title END,
+             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN ? ELSE title END,
            body = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
              WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN '' ELSE body END,
            change_seq = ?
@@ -1563,10 +1563,14 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
         path === undefined || workspaceId === undefined || !threadReached
           ? null
           : reach.admitting(workspaceId, path);
+      // A row that named a thread says so, as Notices words a chat that is gone.
+      const goneTitle =
+        thread === undefined ? "No longer available" : "dohc could not find this chat.";
       move.run(
         movedTo,
         movedTo,
         movedTo,
+        goneTitle,
         movedTo,
         nextChangeSeq(storage, recipientUserId),
         recipientUserId,

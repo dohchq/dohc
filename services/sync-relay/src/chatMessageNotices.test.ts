@@ -416,7 +416,11 @@ describe("a Notice a member can no longer read", () => {
       expect(text, name).not.toContain("#events");
       expect(text, name).not.toContain("surprise");
       expect(read.notices, name).toEqual([
-        expect.objectContaining({ title: "No longer available", body: "", target: null }),
+        expect.objectContaining({
+          title: "dohc could not find this chat.",
+          body: "",
+          target: null,
+        }),
       ]);
     }
     expect(await s.notices("ben")).toEqual(ben0);
@@ -458,7 +462,11 @@ describe("a Notice a member can no longer read", () => {
         expect(text, `${how}, ${name}`).not.toContain("Budget");
         expect(text, `${how}, ${name}`).not.toContain("totals are off");
         expect(read.notices, `${how}, ${name}`).toEqual([
-          expect.objectContaining({ title: "No longer available", target: null }),
+          expect.objectContaining({
+            title: "dohc could not find this chat.",
+            body: "",
+            target: null,
+          }),
         ]);
       }
     },
