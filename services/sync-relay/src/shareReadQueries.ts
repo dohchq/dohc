@@ -247,7 +247,9 @@ export function createShareReadQueries(
           : null;
       const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
       const currentFilesSelector =
-        audience === "authenticated" && fileSelector && belowEdit(fileSelector) ? fileSelector : null;
+        audience === "authenticated" && fileSelector && belowEdit(fileSelector)
+          ? fileSelector
+          : null;
       return scanFilteredLog(
         storage,
         {
@@ -473,12 +475,7 @@ export function createShareReadQueries(
     if (belowEdit(selector)) {
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
-        const decision = filterOpForShare(
-          selector,
-          row.opKind,
-          row.payloadJson,
-          chatResolver,
-        );
+        const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
         if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
         const served = decision.payload as Record<string, unknown>;
         if (row.opKind === "version.create")
@@ -595,11 +592,7 @@ export function createShareReadQueries(
       readAuthorized(storage, authorize, (selector) =>
         newestFilteredOpFreshness(workspaceId, selector, epochLogFloor),
       ),
-    namedShareBlob: (
-      workspaceId: string,
-      authorize: () => AnyShareSelector,
-      sha256: string,
-    ) =>
+    namedShareBlob: (workspaceId: string, authorize: () => AnyShareSelector, sha256: string) =>
       readAuthorized(storage, authorize, (selector) =>
         namedShareBlob(workspaceId, selector, sha256),
       ),

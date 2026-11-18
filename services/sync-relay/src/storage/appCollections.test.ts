@@ -357,7 +357,11 @@ it("keeps private grant metadata out of app-created share blobs", () => {
   for (const audience of ["authenticated", "accountless"] as const) {
     const page = queries.filteredLogPage("w", "s", () => selector, 1, 10, audience);
     const payload = page.ops[0]!.payload as Record<string, unknown>;
-    const blob = queries.namedShareBlob("w", () => selector, String(payload.payloadAfterBlobSha256));
+    const blob = queries.namedShareBlob(
+      "w",
+      () => selector,
+      String(payload.payloadAfterBlobSha256),
+    );
     expect(blob).not.toBeNull();
     expect(parseCollectionRecordFields(Buffer.from(blob!).toString())).not.toHaveProperty(
       "grant_id",
