@@ -354,7 +354,7 @@ import { WhatsNewPage } from "./workbench/WhatsNewPage";
 import { openUnseenWhatsNewOnce } from "./whatsNew";
 import { ProposalReviewDialog, proposerName } from "./workbench/ProposalReviewDialog";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
-import type { ChatErrorNotice, ChatsInvitation } from "./workbench/ChatsView";
+import type { ChatErrorNotice, ChatsInvitation, JoinedGroupLevels } from "./workbench/ChatsView";
 import {
   INVITATION_WAIT_MS,
   invitationOutcome,
@@ -3503,10 +3503,29 @@ export function DesktopWorkspaceShell(props: {
       : shareAccess === "view"
         ? "Only people who can comment post here."
         : undefined;
+  // Groups follow their own levels: a View member may post in a Group whose
+  // rule is Can post, and a Comment member reads one at View only. Before the
+  // relay lists a reach, every Group takes the member level.
+  const groupsPostingClosed = shareViewEnded
+    ? shareEndedRefusal
+    : otherAccountApplies
+      ? "Only the account that joined posts here."
+      : undefined;
+  const storedGroupLevels = membershipView ? shareView?.groupLevels : undefined;
+  const joinedGroupLevels = useMemo<JoinedGroupLevels>(
+    () => ({
+      groupDefault: storedGroupLevels?.groupDefault ?? shareAccess ?? "view",
+      groups: new Map(
+        (storedGroupLevels?.groups ?? []).map((group) => [group.channelWireId, group.level]),
+      ),
+    }),
+    [storedGroupLevels, shareAccess],
+  );
   const chatsJoinedWorkspace = membershipView
     ? {
         joinedWorkspace: {
-          ...(membershipPostingClosed ? { postingClosed: membershipPostingClosed } : {}),
+          ...(groupsPostingClosed ? { postingClosed: groupsPostingClosed } : {}),
+          groupLevels: joinedGroupLevels,
           createsGroups: !shareViewEnded && membershipRole === "admin",
           ...(shareViewEnded ? { ended: true } : {}),
         },
@@ -5506,6 +5525,10 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb, workspaceId],
   );
+  const showFolderInExplorer = useCallback(
+    (path: string) => showPathInExplorer(path, true),
+    [showPathInExplorer],
+  );
 
   // Successful explorer moves/deletes re-project every path-keyed slice
   // (tabs, activeTab, pins, expansion) before the watcher refresh lands, so
@@ -7450,6 +7473,7 @@ export function DesktopWorkspaceShell(props: {
     onThreadStarted: onChatsThreadStarted,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
+    onShowFolder: showFolderInExplorer,
     onError: reportChatsError,
     onClearError: clearIdentity,
     onNotice: showSuccessNotice,
@@ -7491,6 +7515,7 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
+    onShowFolder: showFolderInExplorer,
     onError: reportChatsError,
     onNotice: chatsNavigatorNotice,
     onClearError: clearIdentity,

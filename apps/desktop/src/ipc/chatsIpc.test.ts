@@ -310,6 +310,11 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       channelWireId: "channel_wire_joined",
     }),
   );
+  const createOwnedWorkspaceGroup = vi.fn(
+    async (_workspaceId: string, _input: { name: string }) => ({
+      channelWireId: "channel_wire_joined",
+    }),
+  );
   const chatWriteListeners = new Set<() => void>();
   const pullJoinedWorkspace = vi.fn(async (_workspaceId: string) => undefined);
   const subscribeChatWrites = vi.fn((_workspaceId: string, listener: () => void) => {
@@ -465,6 +470,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     ensureGroupFolder,
     agentWaitsForTrust,
     createJoinedWorkspaceGroup,
+    createOwnedWorkspaceGroup,
     subscribeChatWrites,
     pullJoinedWorkspace,
   });
@@ -503,6 +509,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     agentWaitsForTrust,
     pushShareViewChat,
     createJoinedWorkspaceGroup,
+    createOwnedWorkspaceGroup,
     subscribeChatWrites,
     signalChatWrite: () => {
       for (const listener of [...chatWriteListeners]) listener();
@@ -1642,6 +1649,47 @@ describe("a joined workspace", () => {
     expect(test.ensureGroupFolder).not.toHaveBeenCalled();
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
     expect(test.requireEngineCapture).not.toHaveBeenCalled();
+  });
+
+  it("creates the owner's Group with a level through the relay, and syncs to bring it", async () => {
+    const test = fixture();
+    test.storeMethods.listChannels.mockResolvedValueOnce([]);
+    const created = test.invoke(chatOperations.createChatChannel.channel, {
+      workspaceId: "workspace",
+      name: "Team",
+      type: "both",
+      level: "none",
+    });
+    await vi.waitFor(() => expect(test.storeMethods.listChannels).toHaveBeenCalledOnce());
+    expect(test.activity.queueCloudSync).toHaveBeenCalledWith("workspace");
+    test.storeMethods.listChannels.mockResolvedValue([arrived]);
+    test.signalChatWrite();
+    await expect(created).resolves.toMatchObject({
+      channel: { id: "channel_wire_joined", name: "Team", wireId: "channel_wire_joined" },
+    });
+    expect(test.createOwnedWorkspaceGroup).toHaveBeenCalledWith("workspace", {
+      name: "Team",
+      type: "both",
+      level: "none",
+    });
+    expect(test.createJoinedWorkspaceGroup).not.toHaveBeenCalled();
+    expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(test.ensureGroupFolder).not.toHaveBeenCalled();
+  });
+
+  it("passes an admin's chosen level to the relay", async () => {
+    const test = fixture("member");
+    test.storeMethods.listChannels.mockResolvedValue([arrived]);
+    await test.invoke(chatOperations.createChatChannel.channel, {
+      workspaceId: "workspace",
+      name: "Team",
+      level: "view",
+    });
+    expect(test.createJoinedWorkspaceGroup).toHaveBeenCalledWith(test.workspace.shareView, {
+      name: "Team",
+      level: "view",
+    });
+    expect(test.createOwnedWorkspaceGroup).not.toHaveBeenCalled();
   });
 
   it("refuses a folder for a joined workspace's Group before asking the relay", async () => {

@@ -51,6 +51,41 @@ describe("ChatsView channels", () => {
       expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     });
 
+    // A Group's own rule decides its composer: View only reads, and Can post
+    // takes posts even from a member at View.
+    it.each([
+      ["comment", "view", "You can read this Group."],
+      ["view", "view", "Only people who can comment post here."],
+      ["view", "comment", null],
+    ] as const)(
+      "at %s with the Group at %s, shows the composer only where the Group takes posts",
+      async (member, level, note) => {
+        const team = channel({ id: "channel-team", name: "Team", wireId: "wire-team" });
+        bridgeMock.listChatChannels.mockResolvedValue({ channels: [team], fileThreads: [] });
+        bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+        bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+        renderView(vi.fn(), vi.fn(), {
+          joinedWorkspace: {
+            createsGroups: false,
+            groupLevels: {
+              groupDefault: member,
+              groups: new Map<string, "view" | "comment" | "edit">(
+                level === member ? [] : [["wire-team", level]],
+              ),
+            },
+          },
+        });
+        fireEvent.click(await screen.findByTestId("chats-channel"));
+        if (note === null) {
+          expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+          expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+        } else {
+          expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe(note);
+          expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+        }
+      },
+    );
+
     it("shows no Agents section and makes no saved-message calls", async () => {
       bridgeMock.listChatChannels.mockResolvedValue({
         channels: [channel({ name: "Launch team" })],

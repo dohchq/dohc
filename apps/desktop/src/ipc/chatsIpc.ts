@@ -1,5 +1,5 @@
 import type { createChatLinksReader } from "../workspaces/chatLinks";
-import { createJoinedGroup } from "../workspaces/joinedGroupCreate";
+import { createJoinedGroup, type JoinedGroupInput } from "../workspaces/joinedGroupCreate";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { CHATS_STOPPED, chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
@@ -264,7 +264,12 @@ export function registerChatsIpcHandlers<
   // owner's workspace and decides the role.
   createJoinedWorkspaceGroup(
     view: RegistryEntry["shareView"],
-    input: { name: string; type?: "posts" | "chat" | "both"; purpose?: string },
+    input: JoinedGroupInput,
+  ): Promise<{ channelWireId: string }>;
+  // The owner's New group with a level: the relay creates it with its rule.
+  createOwnedWorkspaceGroup(
+    workspaceId: string,
+    input: JoinedGroupInput,
   ): Promise<{ channelWireId: string }>;
   // Calls back after each write or pull that changed this workspace's chats.
   subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
@@ -297,6 +302,7 @@ export function registerChatsIpcHandlers<
     automationCollectionOf,
     agentWaitsForTrust,
     createJoinedWorkspaceGroup,
+    createOwnedWorkspaceGroup,
     subscribeChatWrites,
     pullJoinedWorkspace,
   } = dependencies;
@@ -1058,6 +1064,7 @@ export function registerChatsIpcHandlers<
           name: input.name,
           ...(input.type ? { type: input.type } : {}),
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          ...(input.level !== undefined ? { level: input.level } : {}),
         },
         () => operation.assertCurrent(),
       );
@@ -1067,6 +1074,32 @@ export function registerChatsIpcHandlers<
     }
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     assertWritableWorkspace(workspace);
+    if (input.level !== undefined) {
+      if (input.folderPath !== undefined)
+        throw new Error("A Group made with an access level has no folder of its own.");
+      const scope = await requireChatScope(input.workspaceId);
+      const { channel, channelWireId } = await createJoinedGroup(
+        {
+          createJoinedWorkspaceGroup: (_view, groupInput) =>
+            createOwnedWorkspaceGroup(workspace.workspaceId, groupInput),
+          subscribeChatWrites,
+          pullJoinedWorkspace: async (workspaceId) => {
+            activity.queueCloudSync(workspaceId);
+          },
+        },
+        scope,
+        {
+          name: input.name,
+          ...(input.type ? { type: input.type } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          level: input.level,
+        },
+        () => operation.assertCurrent(),
+      );
+      return CreateChatChannelResult.parse({
+        channel: { ...chatChannelForIpc(channel), wireId: channelWireId },
+      });
+    }
     const channel = await createGroup(
       linkedChatStoreFor(workspace),
       (folderPath) => ensureGroupFolder(workspace, folderPath),

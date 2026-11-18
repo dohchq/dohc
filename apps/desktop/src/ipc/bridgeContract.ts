@@ -59,6 +59,7 @@ import {
   shareAccessRank,
 } from "@dohc/security-contract/share-selector";
 import { isDirectId } from "@dohc/security-contract/direct-messages";
+import { GROUP_RULE_LEVELS } from "@dohc/security-contract/workspace-members";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -3243,6 +3244,9 @@ export const CreateChatChannelPayload = z.object({
   purpose: z.string().max(200).optional(),
   // The group's folder. When absent main derives it from the name.
   folderPath: PATH_STRING.optional(),
+  // The members' level, kept by the relay as the Group's rule. A level needs
+  // the relay, so the Group is made there and has no folder.
+  level: z.enum(GROUP_RULE_LEVELS).optional(),
 });
 export type CreateChatChannelPayload = z.infer<typeof CreateChatChannelPayload>;
 

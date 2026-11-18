@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import {
   createJoinedWorkspaceGroupAction,
+  createOwnedWorkspaceGroupAction,
   createWorkspaceMembersActions,
   MEMBERS_UNREACHABLE,
 } from "./workspaceMembersActions";
@@ -533,5 +534,42 @@ describe("an admin's New group in a joined workspace", () => {
     const g = group();
     g.relay.mockRejectedValueOnce(new TypeError("fetch failed"));
     await expect(g.create(membership, { name: "Team" })).rejects.toThrow(MEMBERS_UNREACHABLE);
+  });
+});
+
+describe("the owner's New group with a level", () => {
+  function owned() {
+    const relay = vi.fn(
+      async (_credentials: Credentials, _path: string, _init: RequestInit): Promise<Response> =>
+        json({ ok: true, channelWireId: "channel_wire_new", name: "Team" }),
+    );
+    const credentials = vi.fn(async (_workspaceId: string) => ({
+      userId: "u-owner",
+      token: "secret",
+    }));
+    const create = createOwnedWorkspaceGroupAction<Credentials>({
+      credentials,
+      relayResponse: relay,
+    });
+    return { create, relay, credentials };
+  }
+
+  it("asks the relay for the Group and its rule by the workspace's own id", async () => {
+    const o = owned();
+    await expect(o.create("ws-1", { name: "Team", type: "chat", level: "none" })).resolves.toEqual({
+      channelWireId: "channel_wire_new",
+    });
+    expect(o.credentials).toHaveBeenCalledWith("ws-1");
+    expect(calls(o.relay)).toEqual([
+      `POST /sync/members/groups {"workspaceId":"ws-1","name":"Team","type":"chat","level":"none"}`,
+    ]);
+  });
+
+  it("names a 404 as a workspace the server does not know", async () => {
+    const o = owned();
+    o.relay.mockResolvedValueOnce(json({ error: "not_found" }, 404));
+    await expect(o.create("ws-1", { name: "Team", level: "view" })).rejects.toThrow(
+      "dohc could not create Team because your server does not know this workspace.",
+    );
   });
 });

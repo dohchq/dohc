@@ -82,4 +82,57 @@ describe("NewGroupDialog", () => {
     fireEvent.click(screen.getByTestId("chats-new-channel-cancel"));
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("sends a picked Members level, and none while the Group follows the member level", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "comment" })}
+        onClose={vi.fn()}
+      />,
+    );
+    const post = await screen.findByRole("radio", { name: "Can post" });
+    expect(post.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
+      "Follows the member level.",
+    );
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+        level: "view",
+      }),
+    );
+  });
+
+  it("turns the picker off with no connection, and has none when no one else is here", async () => {
+    render(<NewGroupDialog onCreate={vi.fn()} access={async () => "offline"} onClose={vi.fn()} />);
+    expect((await screen.findByTestId("chats-new-channel-access-offline")).textContent).toBe(
+      "Choosing access needs a connection.",
+    );
+    for (const name of ["Can post", "View only", "No access"]) {
+      const radio = screen.getByRole("radio", { name }) as HTMLButtonElement;
+      expect(radio.disabled).toBe(true);
+      expect(radio.getAttribute("aria-checked")).toBe("false");
+    }
+    cleanup();
+    const alone = deferred<null>();
+    render(<NewGroupDialog onCreate={vi.fn()} access={() => alone.promise} onClose={vi.fn()} />);
+    alone.resolve(null);
+    await alone.promise;
+    expect(screen.queryByTestId("chats-new-channel-access")).toBeNull();
+  });
 });
