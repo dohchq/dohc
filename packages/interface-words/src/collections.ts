@@ -20,10 +20,6 @@ export const collectionWords = {
   rulesChanged:
     "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
   undoLastEdit: "Undo last edit",
-  // transactionalCollectionModel.ts
-  enterValue: (field: string) => `Enter ${field}.`,
-  enterNumber: "Enter a number.",
-  enterWebAddress: "Enter a web address.",
 
   // The phone's.
   /** A table whose Collection has no operation that reads it. */

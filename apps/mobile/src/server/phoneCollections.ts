@@ -19,12 +19,9 @@ export interface CollectionField {
   readonly fieldId: string;
   readonly name: string;
   readonly type: CollectionFieldType;
-  readonly required: boolean;
   /** A select's or a multi-select's choices, in order; empty for any other type. */
   readonly options: readonly string[];
-  /** The Collection has an edit for it, of a type the phone changes. */
   readonly editable: boolean;
-  /** Its edit can be undone. */
   readonly reversible: boolean;
 }
 
@@ -68,7 +65,6 @@ export interface CollectionRecord {
   readonly values: Readonly<Record<string, RecordValue>>;
 }
 
-/** One field's change to a record, as the phone sends it and sends it again. */
 export interface FieldChange extends RulesStamp {
   readonly datasetId: string;
   readonly tableId: string;
@@ -80,7 +76,6 @@ export interface FieldChange extends RulesStamp {
   readonly idempotencyKey: string;
 }
 
-/** The Collection's answer to a change. */
 export type ChangeAnswer =
   /** `priorValue` is absent when the edit gave none, so nothing can undo it. */
   | {
@@ -143,7 +138,6 @@ function readField(item: unknown): CollectionField | null {
     !text(item.name, 1024) ||
     typeof item.type !== "string" ||
     !TYPES.has(item.type) ||
-    typeof item.required !== "boolean" ||
     typeof item.editable !== "boolean" ||
     typeof item.reversible !== "boolean"
   )
@@ -156,7 +150,6 @@ function readField(item: unknown): CollectionField | null {
     fieldId: item.fieldId,
     name: item.name,
     type,
-    required: item.required,
     options,
     editable: item.editable,
     reversible: item.editable && item.reversible,
@@ -190,7 +183,6 @@ export function readDescription(result: unknown, datasetId: string): CollectionD
     : null;
 }
 
-/** The relay's answer to a change, or null. */
 export function readChangeAnswer(result: unknown): ChangeAnswer | null {
   if (!isFields(result)) return null;
   const { saved, refused } = result;
@@ -265,20 +257,24 @@ export function collectionOperations(
         (result) => readPage(result, table),
       ),
 
-    /** One record, read again by its key, or null when it is gone. */
+    /** One record, read again by its key, with its files' names, or null when it is gone. */
     record: (datasetId: string, table: CollectionTable, id: RecordId) =>
       run(
         "collectionRecords",
         { datasetId, tableId: table.tableId, recordId: id },
-        (result): { record: CollectionRecord | null } | null => {
+        (
+          result,
+        ): {
+          record: CollectionRecord | null;
+          files: Readonly<Record<string, string>>;
+        } | null => {
           const page = readPage(result, table);
           if (page?.status !== "ready" || page.rows.length > 1) return null;
           const record = page.rows[0];
-          return { record: record && record.id === id ? record : null };
+          return { record: record && record.id === id ? record : null, files: page.files };
         },
       ),
 
-    /** Sends a change. Try again sends the same one, key and stamp included. */
     change: (change: FieldChange) => run("collectionEdit", change, readChangeAnswer),
   };
 }

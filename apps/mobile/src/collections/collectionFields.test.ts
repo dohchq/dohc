@@ -80,12 +80,7 @@ describe("a value in a record's row", () => {
 });
 
 describe("a field's editor", () => {
-  const field = (type: CollectionFieldType, required = false, options: string[] = []) => ({
-    type,
-    name: "Status",
-    required,
-    options,
-  });
+  const field = (type: CollectionFieldType, options: string[] = []) => ({ type, options });
   const choices = ["Unpaid", "Paid", "Waived"];
 
   it("edits the types the phone has an editor for, and not a date, a relation or an attachment", () => {
@@ -107,34 +102,28 @@ describe("a field's editor", () => {
     expect(draftOf({ type: "multi-select" }, ["Paid", 3])).toEqual(["Paid"]);
   });
 
-  it("saves typed text as it is, and an empty field as null unless the field needs a value", () => {
+  it("saves typed text as it is, and an empty field as null", () => {
     expect(valueOf(field("text"), " Ana ")).toEqual({ value: " Ana " });
     expect(valueOf(field("text"), "")).toEqual({ value: null });
-    expect(valueOf(field("text", true), "")).toEqual({
-      problem: collectionWords.enterValue("Status"),
-    });
   });
 
-  it("saves a number as typed, with a decimal point or comma, and says when it isn't one", () => {
+  it("saves a number as typed, with a decimal point or comma, and nothing for text that isn't one", () => {
     expect(valueOf(field("number"), " 12.5 ")).toEqual({ value: 12.5 });
     expect(valueOf(field("number"), "-3")).toEqual({ value: -3 });
     expect(valueOf(field("number"), "2,5")).toEqual({ value: 2.5 });
     expect(valueOf(field("number"), "1e3")).toEqual({ value: 1000 });
     expect(valueOf(field("number"), "")).toEqual({ value: null });
-    for (const typed of ["12a", "1.2.3", "Infinity", "0x10", "1e999", "-"])
-      expect(valueOf(field("number"), typed), typed).toEqual({
-        problem: collectionWords.enterNumber,
-      });
+    // Never NaN, Infinity, or the null either would send as.
+    for (const typed of ["12a", "1.2.3", "Infinity", "NaN", "0x10", "1e999", "-"])
+      expect(valueOf(field("number"), typed), typed).toBeNull();
   });
 
-  it("saves a web address the Collection takes, and says when it isn't one", () => {
+  it("saves a web address as typed, for the Collection to check", () => {
     expect(valueOf(field("url"), " https://dohc.example/a?b ")).toEqual({
       value: "https://dohc.example/a?b",
     });
-    for (const typed of ["dohc.example", "ftp://dohc.example", "https://", "https://a b"])
-      expect(valueOf(field("url"), typed), typed).toEqual({
-        problem: collectionWords.enterWebAddress,
-      });
+    expect(valueOf(field("url"), "dohc.example")).toEqual({ value: "dohc.example" });
+    expect(valueOf(field("url"), " ")).toEqual({ value: null });
   });
 
   it("saves a switch as true or false", () => {
@@ -143,16 +132,13 @@ describe("a field's editor", () => {
   });
 
   it("saves one choice, or none, and several in the options' order", () => {
-    expect(valueOf(field("select", false, choices), ["Paid"])).toEqual({ value: "Paid" });
-    expect(valueOf(field("select", false, choices), [])).toEqual({ value: null });
-    expect(valueOf(field("select", true, choices), [])).toEqual({
-      problem: collectionWords.enterValue("Status"),
-    });
+    expect(valueOf(field("select", choices), ["Paid"])).toEqual({ value: "Paid" });
+    expect(valueOf(field("select", choices), [])).toEqual({ value: null });
     // A choice the field no longer has is left out.
-    expect(valueOf(field("select", false, choices), ["Gone"])).toEqual({ value: null });
-    expect(valueOf(field("multi-select", false, choices), ["Waived", "Unpaid"])).toEqual({
+    expect(valueOf(field("select", choices), ["Gone"])).toEqual({ value: null });
+    expect(valueOf(field("multi-select", choices), ["Waived", "Unpaid"])).toEqual({
       value: ["Unpaid", "Waived"],
     });
-    expect(valueOf(field("multi-select", true, choices), [])).toEqual({ value: [] });
+    expect(valueOf(field("multi-select", choices), [])).toEqual({ value: [] });
   });
 });

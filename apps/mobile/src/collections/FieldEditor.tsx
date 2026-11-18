@@ -3,7 +3,7 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import * as Haptics from "expo-haptics";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Check } from "lucide-react-native";
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import type { CollectionField, RecordValue } from "../server/phoneCollections";
@@ -13,33 +13,29 @@ import { ScreenFailure } from "../workspace/ListStates";
 import { draftOf, editorKind, valueOf, type Draft, type EditorKind } from "./collectionFields";
 
 // One field of the open record, changed in a sheet: Cancel and Save in its header, as iOS edits a value. Save sends the
-// change and closes the sheet; the record's screen shows it saving. A value that doesn't fit says why under the editor.
-
-const nothing = () => () => undefined;
+// change and closes the sheet; the record's screen shows it saving, or the Collection's refusal.
 
 /** `value` is the JSON of a value to start from instead of the record's: one a change the server refused held. */
 export function FieldEditorScreen() {
   const { field: fieldId, value } = useLocalSearchParams<{ field?: string; value?: string }>();
   const { collections } = useAccount();
-  const view = useSyncExternalStore(
-    collections?.subscribe ?? nothing,
-    useCallback(() => collections?.view() ?? null, [collections]),
-  );
-  const opened = view?.opened;
-  const field = view?.description?.tables
-    .find((table) => table.tableId === opened?.tableId)
-    ?.fields.find((field) => field.fieldId === fieldId);
-  const kind = field ? editorKind(field) : null;
-  if (!phoneWrites || !collections || !opened || !field?.editable || !kind)
+  // As it opens: Save names the record's version and the rules then, so a change made since answers as one.
+  const [opened] = useState(() => {
+    const edit = (fieldId && collections?.edit(fieldId)) || null;
+    return edit && collections ? { store: collections, edit } : null;
+  });
+  const kind = opened ? editorKind(opened.edit.field) : null;
+  if (!phoneWrites || !opened || !kind)
     return <ScreenFailure text={collectionWords.recordMissing} />;
-  const current = opened.record.values[field.fieldId] ?? null;
+  const { store, edit } = opened;
+  const current = edit.from.value;
   return (
     <Editor
-      field={field}
+      field={edit.field}
       kind={kind}
       start={value === undefined ? current : parsed(value, current)}
       current={current}
-      onSave={(next) => collections.change(field.fieldId, next)}
+      onSave={(next) => store.change(edit, next)}
     />
   );
 }
@@ -63,11 +59,10 @@ function Editor(props: {
   const theme = useTheme();
   const router = useRouter();
   const [draft, setDraft] = useState<Draft>(() => draftOf(field, props.start));
-  const [tried, setTried] = useState(false);
-  const result = valueOf(field, draft);
   const save = () => {
-    if ("problem" in result) {
-      setTried(true);
+    const result = valueOf(field, draft);
+    // Text that isn't a number stays to be corrected.
+    if (!result) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       return;
     }
@@ -85,8 +80,6 @@ function Editor(props: {
       }}
     />
   );
-  const problem = tried && "problem" in result ? result.problem : null;
-
   let editor;
   if (kind === "checkbox")
     editor = (
@@ -110,15 +103,8 @@ function Editor(props: {
           key={option}
           onPress={() => {
             void Haptics.selectionAsync();
-            // A choice taps off again unless the field needs one.
             setDraft(
-              many
-                ? on
-                  ? chosen.filter((item) => item !== option)
-                  : [...chosen, option]
-                : on && !field.required
-                  ? []
-                  : [option],
+              on ? chosen.filter((item) => item !== option) : many ? [...chosen, option] : [option],
             );
           }}
           style={({ pressed }) => [
@@ -152,7 +138,7 @@ function Editor(props: {
         style={[
           styles.input,
           kind === "text" ? styles.multiline : null,
-          { color: theme.ink, borderColor: problem ? theme.danger : theme.line },
+          { color: theme.ink, borderColor: theme.line },
         ]}
       />
     );
@@ -165,11 +151,6 @@ function Editor(props: {
     >
       {header}
       {editor}
-      {problem ? (
-        <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
-          {problem}
-        </Text>
-      ) : null}
     </ScrollView>
   );
 }
@@ -211,7 +192,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   multiline: { minHeight: 120, textAlignVertical: "top" },
-  problem: { fontSize: 15, lineHeight: 20 },
   headerButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 8 },
   headerLabel: { fontSize: 17 },
   strong: { fontWeight: "600" },

@@ -300,11 +300,10 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
   );
   // Names, IDs, types and the primary field of what each table's read gives, and which an edit changes; never a
   // button, a column, or an operation.
-  const field = (fieldId: string, name: string, type: string, required: boolean, edit = false) => ({
+  const field = (fieldId: string, name: string, type: string, edit = false) => ({
     fieldId,
     name,
     type,
-    required,
     editable: edit,
     reversible: edit,
   });
@@ -320,10 +319,10 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
           name: "People",
           primaryFieldId: KEY,
           fields: [
-            field(KEY, "ID", "text", true),
-            field(NAME, "Name", "text", true, true),
-            field(PAID, "Paid", "checkbox", false, true),
-            field(RECEIPT, "Receipt", "attachment", false),
+            field(KEY, "ID", "text"),
+            field(NAME, "Name", "text", true),
+            field(PAID, "Paid", "checkbox", true),
+            field(RECEIPT, "Receipt", "attachment"),
           ],
         },
         { tableId: NOTES, name: "Notes", primaryFieldId: null, fields: [] },
@@ -538,10 +537,16 @@ it("saves a field's change, replays its retry, and undoes it with the prior valu
     await edit(f, { value: "Person r01", expectedVersion: 2, idempotencyKey: id(101) }),
   ).toEqual(ok({ saved: { version: 3, priorValue: "Maya" } }));
   expect(await r01(f)).toMatchObject({ version: 3, values: { [NAME]: "Person r01" } });
-  // A checkbox takes a boolean.
+  // A checkbox takes a boolean, and an optional one null, which its Undo puts back.
   expect(
-    await edit(f, { fieldId: PAID, value: true, expectedVersion: 3, idempotencyKey: id(102) }),
+    await edit(f, { fieldId: PAID, value: null, expectedVersion: 3, idempotencyKey: id(102) }),
   ).toEqual(ok({ saved: { version: 4, priorValue: false } }));
+  expect(
+    await edit(f, { fieldId: PAID, value: true, expectedVersion: 4, idempotencyKey: id(103) }),
+  ).toEqual(ok({ saved: { version: 5, priorValue: null } }));
+  expect(
+    await edit(f, { fieldId: PAID, value: null, expectedVersion: 5, idempotencyKey: id(104) }),
+  ).toEqual(ok({ saved: { version: 6, priorValue: true } }));
 });
 
 it("answers a stale version with the record's refusal, and a field no edit changes before any invoke", async () => {
@@ -565,12 +570,13 @@ it("answers a stale version with the record's refusal, and a field no edit chang
       },
     }),
   );
-  // A value the field's type can't take, and a key that isn't random, go no further either.
-  expect((await edit(f, { fieldId: PAID, value: "yes", idempotencyKey: id(103) })).status).toBe(
-    400,
-  );
+  // Nor does a key that isn't random.
   expect((await edit(f, { idempotencyKey: "r01-name" })).status).toBe(400);
   expect(invoked).toBe(0);
+  // The operation refuses a value the field's type can't take.
+  expect(await edit(f, { fieldId: PAID, value: "yes", idempotencyKey: id(103) })).toEqual(
+    ok({ refused: { code: "invalid_input", message: "Check the fields and try again." } }),
+  );
   expect((await r01(f)).values).toMatchObject({ [NAME]: "Maya", [PAID]: false });
 });
 
@@ -578,8 +584,9 @@ it("answers a change made under rules the Collection has replaced as rules chang
   const f = await phone();
   const next = structuredClone(definition);
   next.operations.find((operation) => operation.operationId === EDIT)!.fieldIds.push(EMAIL);
-  next.schemaPath = "registrations/revision-2/schema.sql";
-  next.operationsPath = "registrations/revision-2/operations.js";
+  // Where the desktop puts a new revision, so the Collection's dataset.json stays in `registrations`.
+  next.schemaPath = `registrations/revisions/2-${id(99)}/schema.sql`;
+  next.operationsPath = `registrations/revisions/2-${id(99)}/operations.js`;
   const nextSource = generateDatasetOperations(next);
   const widened = describeDatasetRevision({
     definition: next,
@@ -603,9 +610,30 @@ it("answers a change made under rules the Collection has replaced as rules chang
   expect(await edit(f)).toEqual(ok({ rulesChanged: true }));
   expect((await r01(f)).values).toMatchObject({ [NAME]: "Person r01" });
   // Under the new rules' stamp, the same change saves.
+  const stamp = { revision: 2, revisionSha256: widened.revisionSha256 };
+  expect(await edit(f, { ...stamp, idempotencyKey: id(101) })).toEqual(
+    ok({ saved: { version: 2, priorValue: "Person r01" } }),
+  );
+  // The edit now changes Email too, but the read doesn't show it, so neither the description nor the edit offers it.
+  let invoked = 0;
+  f.during(() => void invoked++);
   expect(
-    await edit(f, { revision: 2, revisionSha256: widened.revisionSha256, idempotencyKey: id(101) }),
-  ).toEqual(ok({ saved: { version: 2, priorValue: "Person r01" } }));
+    await edit(f, {
+      ...stamp,
+      fieldId: EMAIL,
+      value: "maya@example.test",
+      expectedVersion: 2,
+      idempotencyKey: id(102),
+    }),
+  ).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
 });
 
 it("refuses a change from another account, with Show on phone off, a revoked sign-in, a fenced account, or an archived Collection", async () => {
@@ -627,13 +655,21 @@ it("refuses a change from another account, with Show on phone off, a revoked sig
   expect(await edit(archived)).toEqual(notFound);
 });
 
-it("refuses a change when Show on phone turns off as it starts, and its answer when it turns off after it ran", async () => {
+it("refuses a change when Show on phone turns off or its dataset.json goes as it starts, and its answer when it turns off after it ran", async () => {
   const before = await phone();
   before.during(() => before.showOnPhone(false));
   expect(await edit(before)).toEqual(notFound);
   before.during(() => undefined);
   before.showOnPhone(true);
   expect((await r01(before)).version).toBe(1);
+
+  // Its dataset.json gone as the edit starts: the edit's own guard refuses it, so nothing commits.
+  const gone = await phone();
+  gone.during(() => pushFile(gone.storage, "dataset", collectionFile, null));
+  expect(await edit(gone)).toEqual(notFound);
+  gone.during(() => undefined);
+  pushFile(gone.storage, "dataset-again", null, collectionFile);
+  expect((await r01(gone)).version).toBe(1);
 
   const after = await phone();
   let calls = 0;

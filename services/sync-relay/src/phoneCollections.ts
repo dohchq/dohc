@@ -36,14 +36,12 @@ export function isPhoneCollectionOperation(name: string): boolean {
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FILE_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
-/** The field types the phone edits: not a relation or an attachment, which need a picker it doesn't have. */
+/** Not a relation or an attachment, which need a picker the phone doesn't have. */
 const EDITABLE = new Set(["text", "number", "checkbox", "date", "select", "multi-select", "url"]);
 /** What the host says when a request names rules it has replaced: nothing ran, and the same request never can. */
 const RULES_REPLACED = "The Collection's rules changed. Its owner must approve this access again.";
 const RULES_DISALLOW =
   "The Collection's rules no longer allow this change, so dohc did not save it.";
-const MAX_TEXT = 16 * 1024;
 
 const isRecordId = (value: unknown): value is string | number =>
   (typeof value === "string" && value.length > 0 && value.length <= 1024) ||
@@ -52,43 +50,6 @@ const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 
 type DescribedField = DatasetDescription["tables"][number]["fields"][number];
-
-/** Whether `value` is one the field's type takes, as the generated operations check it. Null empties the field. */
-function fits(field: DescribedField, value: unknown): value is AppBackendJson {
-  if (field.type === "button") return false;
-  if (value === null) return field.type !== "checkbox";
-  const options = field.options ?? [];
-  switch (field.type) {
-    case "text":
-      return typeof value === "string" && value.length <= MAX_TEXT;
-    case "number":
-      return typeof value === "number" && Number.isFinite(value);
-    case "checkbox":
-      return typeof value === "boolean";
-    case "date":
-      return (
-        typeof value === "string" &&
-        DAY.test(value) &&
-        new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value
-      );
-    case "url":
-      return (
-        typeof value === "string" &&
-        value.length <= MAX_TEXT &&
-        /^https?:\/\/[^\s/?#]+(?:[/?#][^\s]*)?$/i.test(value)
-      );
-    case "select":
-      return typeof value === "string" && options.includes(value);
-    case "multi-select":
-      return (
-        Array.isArray(value) &&
-        value.every((item) => typeof item === "string" && options.includes(item)) &&
-        new Set(value).size === value.length
-      );
-    default:
-      return false;
-  }
-}
 
 function args(value: unknown, required: string[], optional: string[] = []) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -165,9 +126,11 @@ export function createPhoneCollections(options: {
       (operation) =>
         operation.tableId === tableId && operation.kind === "read" && operation.readOnly,
     );
-  // The desktop's choice: the first edit that changes the field. Only a field of a type the phone edits.
+  // The desktop's choice: the first edit that changes the field. Only a field the phone edits and the read shows.
   const editOperation = (description: DatasetDescription, tableId: string, field: DescribedField) =>
-    EDITABLE.has(field.type) && !("generated" in field && field.generated)
+    EDITABLE.has(field.type) &&
+    !("generated" in field && field.generated) &&
+    readOperation(description, tableId)?.fieldIds.includes(field.fieldId)
       ? description.operations.find(
           (operation) =>
             operation.tableId === tableId &&
@@ -201,13 +164,14 @@ export function createPhoneCollections(options: {
     const { caller, workspaceId, operation, authorize } = input;
     const userId = caller.userId;
     const host = options.host;
-    // The host checks this guard at admission and again inside the read.
-    const auth: AppBackendAuth = {
+    // The host checks the guard at admission and again inside the read or the commit.
+    const guarded = (check: () => void): AppBackendAuth => ({
       kind: "named",
       workspaceId,
       userId,
-      launch: { authorizeOperation: () => holds(userId, workspaceId), recheck: authorize },
-    };
+      launch: { authorizeOperation: check, recheck: authorize },
+    });
+    const auth = guarded(() => holds(userId, workspaceId));
     if (operation === "collections") {
       const { cursor: after } = args(input.args, [], ["cursor"]);
       if (after !== undefined) id(after);
@@ -250,9 +214,7 @@ export function createPhoneCollections(options: {
                 fieldId: field.fieldId,
                 name: field.name,
                 type: field.type,
-                required: field.required,
                 ...(field.options ? { options: field.options } : {}),
-                // Whether the phone can change it, and whether the change can be undone.
                 editable: edit !== undefined,
                 reversible: edit?.reversible === true,
               },
@@ -309,20 +271,30 @@ export function createPhoneCollections(options: {
       if (!field) throw notFound();
       const edit = editOperation(description, tableId, field);
       if (!edit) return { refused: { code: "forbidden", message: RULES_DISALLOW } };
-      if (!fits(field, value)) throw badRequest("Invalid Collection arguments.");
       let result: AppBackendJson;
       try {
-        // The phone's stamp, not the description's: a retry sends what its first try sent.
-        ({ result } = await host.invoke(auth, {
-          workspaceId,
-          datasetId,
-          revision,
-          revisionSha256,
-          operationId: edit.operationId,
-          input: { id: recordId, expectedVersion, values: { [fieldId]: value } },
-          idempotencyKey,
-          signal: input.signal,
-        }));
+        // The phone's stamp, not the description's: a retry sends what its first try sent. The operation checks the
+        // value, which the route read as JSON.
+        ({ result } = await host.invoke(
+          guarded(() => {
+            holds(userId, workspaceId);
+            if (!visible(workspaceId, datasetId)) throw notFound();
+          }),
+          {
+            workspaceId,
+            datasetId,
+            revision,
+            revisionSha256,
+            operationId: edit.operationId,
+            input: {
+              id: recordId,
+              expectedVersion,
+              values: { [fieldId]: value as AppBackendJson },
+            },
+            idempotencyKey,
+            signal: input.signal,
+          },
+        ));
       } catch (error) {
         if (isAppBackendRuntimeError(error)) {
           await answers(datasetId);

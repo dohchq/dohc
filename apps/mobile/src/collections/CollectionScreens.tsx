@@ -247,6 +247,7 @@ export function RecordScreen() {
     collections?.subscribe ?? nothing,
     useCallback(() => collections?.changes() ?? NO_CHANGES, [collections]),
   );
+  useEffect(() => () => collections?.closeRecord(), [collections]);
   const opened = view?.opened;
   const table = view?.description?.tables.find((table) => table.tableId === opened?.tableId);
   if (!collections || !view || !opened || !table)
@@ -263,14 +264,13 @@ export function RecordScreen() {
       pathname: "/collection-field",
       params: { field: fieldId, ...(value === undefined ? {} : { value: JSON.stringify(value) }) },
     });
-  // Reads the record again, then opens the editor with what the person entered, if the field still takes a change.
+  // Reads the record again, then opens the editor with what the person entered, if the same record is still open and
+  // its field still takes a change.
   const reload = async ({ change }: RecordChange) => {
     if (!(await collections.reloadRecord())) return;
-    const field = collections
-      .view()
-      ?.description?.tables.find((table) => table.tableId === change.tableId)
-      ?.fields.find((field) => field.fieldId === change.fieldId);
-    if (field?.editable) edit(change.fieldId, change.value);
+    const from = collections.edit(change.fieldId)?.from;
+    if (from && recordKey(from.datasetId, from.tableId, from.recordId) === key)
+      edit(change.fieldId, change.value);
   };
   const undo = phoneWrites && canUndo(last);
   return (

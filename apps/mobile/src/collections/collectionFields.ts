@@ -107,10 +107,8 @@ export function editorKind(field: Pick<CollectionField, "type">): EditorKind | n
   }
 }
 
-/** What an editor holds while a person changes it: typed text, a switch's state, or the chosen options. */
 export type Draft = string | boolean | readonly string[];
 
-/** A value as its editor starts. */
 export function draftOf(
   field: Pick<CollectionField, "type">,
   value: RecordValue | undefined,
@@ -129,33 +127,27 @@ export function draftOf(
   }
 }
 
-// The web addresses a url field takes, as the Collection's operations check them.
-const WEB_ADDRESS = /^https?:\/\/[^\s/?#]+(?:[/?#][^\s]*)?$/i;
 const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
 
-/** The value an editor saves, or what's wrong with it, in the desktop's words. Empty saves as null. */
+/**
+ * The value an editor saves, which the Collection checks; empty saves as null. Null for text that isn't a number, which
+ * the editor keeps rather than send as null and empty the field.
+ */
 export function valueOf(
-  field: Pick<CollectionField, "type" | "name" | "required" | "options">,
+  field: Pick<CollectionField, "type" | "options">,
   draft: Draft,
-): { readonly value: RecordValue } | { readonly problem: string } {
-  const empty = () =>
-    field.required ? { problem: collectionWords.enterValue(field.name) } : { value: null };
+): { readonly value: RecordValue } | null {
   if (field.type === "checkbox") return { value: draft === true };
   if (field.type === "select" || field.type === "multi-select") {
     const chosen = Array.isArray(draft) ? field.options.filter((item) => draft.includes(item)) : [];
-    if (field.type === "multi-select") return { value: chosen };
-    return chosen[0] === undefined ? empty() : { value: chosen[0] };
+    return { value: field.type === "multi-select" ? chosen : (chosen[0] ?? null) };
   }
-  if (typeof draft !== "string") return empty();
-  if (field.type === "text") return draft === "" ? empty() : { value: draft };
+  if (typeof draft !== "string") return { value: null };
+  if (field.type === "text") return { value: draft === "" ? null : draft };
   const typed = draft.trim();
-  if (typed === "") return empty();
-  if (field.type === "number") {
-    // A decimal comma, as some keyboards type it.
-    const number = typed.replace(",", ".");
-    return NUMBER.test(number) && Number.isFinite(Number(number))
-      ? { value: Number(number) }
-      : { problem: collectionWords.enterNumber };
-  }
-  return WEB_ADDRESS.test(typed) ? { value: typed } : { problem: collectionWords.enterWebAddress };
+  if (typed === "") return { value: null };
+  if (field.type !== "number") return { value: typed };
+  // A decimal comma, as some keyboards type it.
+  const number = typed.replace(",", ".");
+  return NUMBER.test(number) && Number.isFinite(Number(number)) ? { value: Number(number) } : null;
 }
