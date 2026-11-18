@@ -270,7 +270,7 @@ final class ServerRoundTests: XCTestCase {
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
   // name differs by round, so the test takes the first name the menu offers for "@", types its first letters, and taps
   // its row. The tap must make the text exactly "Can @<handle> " and keep the keyboard up. The message must then show
-  // with exactly that text once nothing is left sending, and the round checks the server has the line it prints.
+  // with exactly that text as the server's copy, and the round checks the server has the line it prints.
   @MainActor
   func test10_mentionsSomeone() throws {
     let app = XCUIApplication()
@@ -308,10 +308,17 @@ final class ServerRoundTests: XCTestCase {
     app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
     let sent = app.staticTexts.matching(NSPredicate(format: "label == %@", body)).firstMatch
     XCTAssertTrue(sent.waitForExistence(timeout: 60), "Planning should show the message exactly as sent: \(body)")
-    // A message still on the phone says Sending, Still sending or Waiting to send; the server's copy says none of them.
-    let pending = app.staticTexts.matching(NSPredicate(format: "label IN %@", ["Sending", "Still sending", "Waiting to send"]))
-    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: pending)], timeout: 60),
-                   .completed, "The message should leave the phone for the server")
+    // Only the server's copy of a message has Add reaction, right under its text; a copy still on the phone, waiting,
+    // withheld or refused, has none. The round then checks the server has the line printed below.
+    let reactable = NSPredicate { _, _ in
+      guard sent.exists, sent.label == body else { return false }
+      let text = sent.frame
+      return app.buttons.matching(NSPredicate(format: "label == %@", "Add reaction")).allElementsBoundByIndex.contains {
+        $0.frame.minY >= text.maxY && $0.frame.minY - text.maxY < 120
+      }
+    }
+    XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: reactable, evaluatedWith: app)], timeout: 60), .completed,
+                   "The server should have the message exactly as sent: \(body)")
     say("DOHC_MENTION_SENT \(body)")
   }
 }
