@@ -63,7 +63,7 @@ Most strings do one job:
 
 **Agents.** Finished work is past tense: `Updated 3 files`. Work in progress names the action: `Reading 40 files`, not `Working on it…`. Waiting names the reason: `Waiting for your review`. Say what the agent did, never that it thought. Never invent a count or a name.
 
-**Deletes** name the thing and the count: `Delete 12 files from Research?` Say how to get it back, after you check the code. A deleted workspace file goes to the system trash, or to `.dohc/local/trash` if the system trash refuses it. Write `This cannot be undone` only when it's true. The confirm button is a `DangerButton` with the verb. Never ask only `Are you sure?`.
+**Deletes and other actions that lose work** name the thing and the count: `Delete 12 files from Research?` Say how to get it back, after you check the code. A deleted workspace file goes to the system trash, or to `.dohc/local/trash` if the system trash refuses it. Write `This cannot be undone` only when it's true. The confirm button is a `DangerButton` with the verb. Never ask only `Are you sure?`.
 
 ## Where messages go
 
@@ -80,7 +80,7 @@ Don't add a new place.
 
 - Report errors through the shell's `reportError`.
 - Report each cause once. If the title bar says the server is down, features that need it say nothing more.
-- A dialog shows its own action's failure inside the dialog, above the button that retries it.
+- A dialog shows its own action's failure inside the dialog, above the button that retries it. It files a toast and a row only if the dialog closed first.
 - Anything the person can retry gets **Try again** on the toast and the row.
 - Put a Copy icon beside text a person might report. If the copy holds more than what shows, use a **Details** action instead.
 - A later success clears the failure's toast and row.
