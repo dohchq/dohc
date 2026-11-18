@@ -54,7 +54,7 @@ test("@server-restart-many measures how long an open note takes to be editable a
       .poll(registered, { timeout: 300_000, intervals: [5_000] })
       .toBeGreaterThanOrEqual(OTHER_NOTES + 1)
       .catch(() => undefined);
-    console.log(`RESTART before it: the relay registered ${String(registered())} notes`);
+    console.log(`RESTART before it: the relay made ${String(registered())} register requests`);
 
     // While the relay is away the page takes no typing, so the wait below measures a real return.
     await server.restartRelay(() =>
@@ -78,7 +78,7 @@ test("@server-restart-many measures how long an open note takes to be editable a
       .stderr.split("\n")
       .filter((line) => line.includes("Live host pass was slow")).length;
     console.log(
-      `RESTART with ${String(OTHER_NOTES + 1)} linked notes: the open note was editable ${String(editableAfterMs)} ms after the relay returned; the new relay registered ${String(registered())} notes; slow passes logged ${String(slow)}`,
+      `RESTART with ${String(OTHER_NOTES + 1)} linked notes: the open note was editable ${String(editableAfterMs)} ms after the relay returned; the new relay made ${String(registered())} register requests; slow passes logged ${String(slow)}`,
     );
     await expect(editor).toContainText("after");
   } finally {
