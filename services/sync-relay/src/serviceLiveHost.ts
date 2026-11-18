@@ -9,6 +9,7 @@ import {
   type ServiceActivationTarget,
   type ServiceCatchUp,
 } from "./serviceActivationDriver";
+import { passOrder } from "./servicePassOrder";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
 import { untilAborted } from "./namedLiveFrameHost.js";
@@ -659,6 +660,8 @@ export async function startServiceLiveHost(options: {
     idle = new Map<string, { due: number; generation: number }>();
   // Hosted documents whose idle unload is running, or was sent and got no reply.
   const unloading = new Set<string>();
+  // Notes an open asked for before the host had made them ready. A pass takes them first. See `passOrder`.
+  const wanted = new Set<string>();
   let generation = 0;
   const hostedKey = (document: { workspaceId: string; objectId: string }) => {
     for (const [key, row] of hosted)
@@ -1514,6 +1517,7 @@ export async function startServiceLiveHost(options: {
           parking.delete(key);
           idle.delete(key);
           unloading.delete(key);
+          wanted.delete(key);
           keeping.delete(key);
           grantsEnded.delete(key);
           heldOf.delete(key);
@@ -2229,7 +2233,15 @@ export async function startServiceLiveHost(options: {
           const key = hostedKey(document);
           if (!key) return;
           touch(key);
-          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
+          if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) {
+            // Awake, and not ready yet: after a start no note is. The next pass takes this one first, so whoever
+            // is opening it does not wait for its turn behind every other note. A note that is ready gets no mark.
+            if (!activation!.completed(hosted.get(key)!.target) && !wanted.has(key)) {
+              wanted.add(key);
+              nudgePass();
+            }
+            return;
+          }
           await exclusive(
             () =>
               withLiveHostSignal(signal, callerSignal, async (joined) => {
@@ -3219,59 +3231,73 @@ export async function startServiceLiveHost(options: {
               });
               // Targets with no owner share one catch-up pull of their workspace a pass.
               const catchUp: ServiceCatchUp = new Map();
+              const targetKey = (target: ServiceActivationTarget) =>
+                JSON.stringify([target.workspaceId, target.path]);
+              // A mark also ends when its note is hosted no longer, or became ready some other way.
+              for (const key of [...wanted]) {
+                const row = hosted.get(key);
+                if (!row || activation!.completed(row.target)) wanted.delete(key);
+              }
+              const order = passOrder(targets, index, bounds.maxDocumentsPerPass, (target) =>
+                wanted.has(targetKey(target)),
+              );
+              const visit = async (target: ServiceActivationTarget) => {
+                // A mark buys one visit, and it is spent here, before the visit's work. A note still not ready after
+                // it, as while it backs off or its restore runs, goes back to its turn. An open that arrives during
+                // the visit marks the note again, and that mark stands for the next pass.
+                wanted.delete(targetKey(target));
+                const timed: SlowPassTarget = {
+                    object:
+                      hosted
+                        .get(JSON.stringify([target.workspaceId, target.path]))
+                        ?.objectId.slice(0, 8) ?? null,
+                    ms: 0,
+                    outcome: "error",
+                    settle: "none",
+                    materialized: null,
+                  },
+                  startedAt = now();
+                slowTargets.push(timed);
+                try {
+                  // Settlement runs in the activation's own document work. A restore
+                  // fence during it leaves the pass pending rather than ready.
+                  const outcome = await activation!.activate(
+                    target,
+                    passSignal,
+                    settleTarget &&
+                      (async (consumer, document, joined) => {
+                        timed.object ??= document.objectId.slice(0, 8);
+                        const sent = consumer.settlesSent;
+                        try {
+                          const settled = await consumer.settleDrained(document, joined);
+                          timed.materialized = !settlementPending(settled) && settled.materialized;
+                          return settled;
+                        } finally {
+                          // A settlement the engine was asked for counts as sent even when it then failed.
+                          timed.settle =
+                            consumer.settlesSent > sent
+                              ? "sent"
+                              : timed.materialized === null
+                                ? "none"
+                                : "reused";
+                        }
+                      }),
+                    catchUp,
+                  );
+                  timed.outcome = outcome.kind === "done" ? "done" : "pending";
+                  noteWaiting(target, outcome);
+                } finally {
+                  timed.ms = Math.round(now() - startedAt);
+                }
+              };
+              // A wanted note that fails does not cost the others their turn in this pass.
+              for (const target of order.first) await step(() => visit(target));
               await step(async () => {
-                for (
-                  let visited = 0;
-                  visited < Math.min(bounds.maxDocumentsPerPass, targets.length);
-                  visited++
-                ) {
-                  index %= targets.length;
-                  const target = targets[index]!;
-                  index = (index + 1) % targets.length;
-                  const timed: SlowPassTarget = {
-                      object:
-                        hosted
-                          .get(JSON.stringify([target.workspaceId, target.path]))
-                          ?.objectId.slice(0, 8) ?? null,
-                      ms: 0,
-                      outcome: "error",
-                      settle: "none",
-                      materialized: null,
-                    },
-                    startedAt = now();
-                  slowTargets.push(timed);
-                  try {
-                    // Settlement runs in the activation's own document work. A restore
-                    // fence during it leaves the pass pending rather than ready.
-                    const outcome = await activation!.activate(
-                      target,
-                      passSignal,
-                      settleTarget &&
-                        (async (consumer, document, joined) => {
-                          timed.object ??= document.objectId.slice(0, 8);
-                          const sent = consumer.settlesSent;
-                          try {
-                            const settled = await consumer.settleDrained(document, joined);
-                            timed.materialized =
-                              !settlementPending(settled) && settled.materialized;
-                            return settled;
-                          } finally {
-                            // A settlement the engine was asked for counts as sent even when it then failed.
-                            timed.settle =
-                              consumer.settlesSent > sent
-                                ? "sent"
-                                : timed.materialized === null
-                                  ? "none"
-                                  : "reused";
-                          }
-                        }),
-                      catchUp,
-                    );
-                    timed.outcome = outcome.kind === "done" ? "done" : "pending";
-                    noteWaiting(target, outcome);
-                  } finally {
-                    timed.ms = Math.round(now() - startedAt);
-                  }
+                for (const { target, next } of order.turn) {
+                  // The turn moves on before each visit. A failure ends the pass's turn, and the next pass
+                  // takes up after the note that failed, so one failing note cannot keep the others waiting.
+                  index = next;
+                  await visit(target);
                 }
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
