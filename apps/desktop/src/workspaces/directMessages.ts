@@ -168,11 +168,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       throw new DirectMessageError("refused", OTHER_ACCOUNT);
     return credentials;
   };
-  // The window may leave the pick's workspace while the account is read, so its check runs after that read.
-  const asPicked = async (viewerId: string, pick: DirectPick): Promise<Credentials> => {
-    const credentials = await as({ viewerId, scope: directScope(pick.admitted) });
+  const asPicked = (viewerId: string, pick: DirectPick): Promise<Credentials> =>
+    as({ viewerId, scope: directScope(pick.admitted) });
+  // The window may leave the pick's workspace at any wait, so its check runs in the turn its request leaves.
+  const postPicked = (
+    credentials: Credentials,
+    pick: DirectPick,
+    path: string,
+    body: unknown,
+  ): Promise<unknown> => {
     pick.assertCurrent();
-    return credentials;
+    return post(credentials, path, body);
   };
 
   async function call(
@@ -381,7 +387,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(
     async resolve(viewerId: string, pick: DirectPick): Promise<DirectResolution> {
       const credentials = await asPicked(viewerId, pick);
       const resolved = parseDirectResolution(
-        await post(credentials, DIRECT_ROUTES.resolve, { person: pick.person }),
+        await postPicked(credentials, pick, DIRECT_ROUTES.resolve, { person: pick.person }),
       );
       if (!resolved)
         throw new DirectMessageError(
@@ -405,12 +411,19 @@ export function createDirectMessages<Credentials extends DirectAccount>(
       if (extractChatFileReferences(input.body).length > 0)
         throw new DirectMessageError("refused", "Files can't be linked in a direct message.");
       const { messageId, body } = input;
-      const [credentials, to] =
-        "pick" in input
-          ? [await asPicked(input.viewerId, input.pick), { person: input.pick.person }]
-          : [await as(input.viewer), { conversationId: input.conversationId }];
       const result = parseDirectSendResult(
-        await post(credentials, DIRECT_ROUTES.send, { messageId, body, ...to }),
+        "pick" in input
+          ? await postPicked(
+              await asPicked(input.viewerId, input.pick),
+              input.pick,
+              DIRECT_ROUTES.send,
+              { messageId, body, person: input.pick.person },
+            )
+          : await post(await as(input.viewer), DIRECT_ROUTES.send, {
+              messageId,
+              body,
+              conversationId: input.conversationId,
+            }),
       );
       if (!result)
         throw new DirectMessageError(

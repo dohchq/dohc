@@ -23,6 +23,10 @@ import type { OperationTable } from "./operationTable";
 
 export const DIRECT_INACTIVE_MESSAGE =
   "This message was not sent because this window changed workspaces.";
+// The window can change workspaces after the send leaves, so the send may have arrived.
+// Sending it again is safe: the server takes the same message id and words once.
+export const DIRECT_START_INACTIVE_MESSAGE =
+  "This window changed workspaces, so the message may not have been sent. Check the conversation in Chats before sending it again.";
 
 // The contract's own checks, so the window and the relay agree on every limit.
 const id = z.string().refine(isDirectId, "invalid id");
@@ -87,7 +91,7 @@ export const directMessageOperations = {
     result: contract<DirectSendResult>(parseDirectSendResult, "invalid send result"),
     guard: "active-workspace",
     scope: "workspace",
-    inactiveMessage: DIRECT_INACTIVE_MESSAGE,
+    inactiveMessage: DIRECT_START_INACTIVE_MESSAGE,
   },
   directSend: {
     capabilityId: "direct.send",

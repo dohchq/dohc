@@ -247,6 +247,29 @@ describe("direct messages for the signed-in account", () => {
     });
   });
 
+  it("checks a member pick's window in the same turn its request leaves", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/send", () => Response.json({ conversationId: "c1", seq: 1 }));
+    h.routes.set("/sync/direct/resolve", () =>
+      Response.json({
+        conversationId: null,
+        person: { personId: "bob", name: "Bob", blocked: false },
+      }),
+    );
+    // Requests already made by the time anything queued after the window check runs.
+    const seen: number[] = [];
+    const pick = {
+      person: { workspaceId: "w", memberId: "owner" },
+      admitted: { relayUrl: "https://relay.test", userId: "ann" },
+      assertCurrent: () => {
+        queueMicrotask(() => seen.push(h.requests.length));
+      },
+    };
+    await h.service.resolve("ann", pick);
+    await h.service.send({ viewerId: "ann", pick, messageId: "m1", body: "hi" });
+    expect(seen).toEqual([1, 2]);
+  });
+
   it("acts in a conversation only on the server whose list named it, even where another lists the same ids", async () => {
     const h = harness();
     h.routes.set("/sync/direct/conversations", () =>
