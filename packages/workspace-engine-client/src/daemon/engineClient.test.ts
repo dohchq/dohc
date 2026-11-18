@@ -689,7 +689,7 @@ describe("private owner delivery transport", () => {
         rowWire = e.id;
         rowDigest = params.digest as string;
       } else if (e.method === "ydoc.ownerStop.pause") {
-        expect(params).toEqual({ binding: target.binding, ...paused });
+        expect(params).toEqual({ binding: target.binding, ...paused, roomCopyBase64: "AAA=" });
         peer.send({
           type: "response",
           id: e.id,
@@ -752,7 +752,11 @@ describe("private owner delivery transport", () => {
         }),
       ).toBe("added");
       expect(
-        await transport.ownerYDocPause(request, { binding: target.binding, ...paused }),
+        await transport.ownerYDocPause(request, {
+          binding: target.binding,
+          ...paused,
+          roomCopy: Uint8Array.of(0, 0),
+        }),
       ).toMatchObject({ state: "released", materialized: true, paused: { copyWritten: false } });
       const document = { mainVersionId: "main", objectId: "object" };
       expect(await transport.ownerYDocPausedCopy(request, document)).toEqual({

@@ -153,6 +153,15 @@ interface RelayShareRequest {
 
 /** What Stop and Resume of one live document need, for the window and for agents alike. */
 export interface OwnerLiveDocumentActionDependencies<Workspace> {
+  /** Ends the server's pause of the note at `path` and returns its cause; null when it is not paused. */
+  resumeOwnerLivePause?(
+    workspace: Workspace,
+    path: string,
+  ): Promise<"refused" | "failing" | "ended" | null>;
+  /** The notes the server paused, as this computer last settled them. */
+  ownerLivePauses?(
+    workspace: Workspace,
+  ): readonly { objectId: string; cause: "refused" | "failing" | "ended" }[];
   remoteForWorkspace(
     workspace: Workspace,
     options?: { allowPaused: boolean },
@@ -738,6 +747,11 @@ export function createOwnerLiveDocumentActions<
       input.workspaceId,
       input.path,
       async (): Promise<ResumeOwnerLiveDocumentResult> => {
+        // A note the server paused for good resumes there first; the rest is an ordinary Resume.
+        const paused = await dependencies.resumeOwnerLivePause?.(operation.workspace, input.path);
+        operation.assertCurrent();
+        // A note whose file was moved, deleted or replaced has nothing at its path to start again.
+        if (paused === "ended") return { ended: true };
         // A Resume names its document by path, and the server resumes its own document there: the record names that one.
         const row =
           record && input.author ? await serverRow(operation, { path: input.path }) : null;
@@ -768,7 +782,8 @@ export function createOwnerLiveDocumentActions<
             })
             .parse(result);
           // Credit only the document this request resumed, and only when the server's answer says it did.
-          const answer = changedBy(result);
+          // Ending the server's pause resumed it, though the server never stopped hosting it.
+          const answer = paused ? "applied" : changedBy(result);
           if (named)
             await finishChange(
               operation,
@@ -896,16 +911,22 @@ export function createOwnerLiveDocumentActions<
         );
         // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
         const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
+        const pauses = dependencies.ownerLivePauses?.(operation.workspace) ?? [];
         for (const row of documents.values()) {
           // Each row speaks for the server's document, never for another that had or has its path.
           const deferred = localStops.find(
             (stop) => stop.document.objectId === row.objectId,
           )?.deferred;
-          if (deferred)
+          const startable =
+            row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld";
+          if (deferred) Object.assign(row, { deferredStop: deferred, canResume: startable });
+          // A note the server paused stays enrolled until Resume ends its pause.
+          // Resume of an ended pause starts nothing, so only it ignores the server's copy.
+          const pause = pauses.find((candidate) => candidate.objectId === row.objectId);
+          if (pause)
             Object.assign(row, {
-              deferredStop: deferred,
-              canResume:
-                row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld",
+              status: "paused",
+              canResume: pause.cause === "ended" || startable,
             });
           // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
           const kept = quarantines.filter(

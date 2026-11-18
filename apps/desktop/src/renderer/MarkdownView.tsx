@@ -1114,9 +1114,44 @@ export function MarkdownView(props: {
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
   const [pageEditor, setPageEditor] = useState<MarkdownEditorHandle | null>(null);
+  // A replaced document mounts a new editor. If the old one had the caret and
+  // focus went nowhere else since, the new one gets it back. Focus left on the
+  // page or on the surface holding this note (focusReturn.ts moves it there
+  // when the old editor goes) went nowhere else.
+  const documentKeyRef = useRef(props.documentKey);
+  documentKeyRef.current = props.documentKey;
+  const refocus = useRef<{ key: string; at: number } | null>(null);
   const attachEditor = useCallback((handle: MarkdownEditorHandle | null) => {
+    const previous = wysiwygRef.current;
     wysiwygRef.current = handle;
     if (onEditorReadyRef.current) setPageEditor(handle);
+    if (handle === null) {
+      const at = previous?.caret() ?? null;
+      if (at !== null) refocus.current = { key: documentKeyRef.current, at };
+      return;
+    }
+    const pending = refocus.current;
+    if (!pending) return;
+    const active = document.activeElement;
+    const view = viewRef.current;
+    const unclaimed =
+      !active ||
+      active === document.body ||
+      (active.hasAttribute("data-focus-surface") && view !== null && active.contains(view));
+    if (pending.key !== documentKeyRef.current || !unclaimed) {
+      refocus.current = null;
+      return;
+    }
+    handle.focus(pending.at);
+    if (handle.caret() !== null) refocus.current = null;
+  }, []);
+  useEffect(() => {
+    // A click while the editor rebuilds puts focus where the user chose.
+    const drop = () => {
+      refocus.current = null;
+    };
+    document.addEventListener("pointerdown", drop, true);
+    return () => document.removeEventListener("pointerdown", drop, true);
   }, []);
   useEffect(() => {
     if (!onEditorReady || opening) return;

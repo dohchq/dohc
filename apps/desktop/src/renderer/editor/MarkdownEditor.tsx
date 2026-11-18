@@ -147,7 +147,9 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
-  focus: (position?: "start" | "end") => void;
+  focus: (position?: "start" | "end" | number) => void;
+  /** Where the caret is while this editor has focus. */
+  caret: () => number | null;
   getMarkdown: () => string;
   replaceMarkdown: (markdown: string) => void;
   insertTypedText: (text: string, caret: number) => void;
@@ -1097,6 +1099,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           if (selection) view.dispatch(view.state.tr.setSelection(selection));
           view.focus();
           view.dispatch(view.state.tr.scrollIntoView());
+        },
+        caret() {
+          if (!editor || editor.isDestroyed || !editor.isFocused) return null;
+          return editor.state.selection.head;
         },
         getMarkdown() {
           if (!editor) return value;

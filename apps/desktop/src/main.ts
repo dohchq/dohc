@@ -3768,6 +3768,7 @@ const activity = {
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       ownerLivePausedPaths: desktopEngine.ownerLivePausedPaths(workspaceId),
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
+      ownerLivePauses: desktopEngine.ownerLivePauses(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
       notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
@@ -7457,6 +7458,8 @@ const desktopEngine = createDesktopEngine({
   notifyOwnerDraftsChanged: (workspaceId) => ownerPendingShare.refresh(workspaceId),
   ownerPendingPaths: (workspaceId) => ownerPendingShare.paths(workspaceId),
   ownerHasOpen: (workspaceId, path) => engineYDocSessionIpc.ownerHasOpen(workspaceId, path),
+  leaveLiveEditing: (workspaceId, path, leave) =>
+    engineYDocSessionIpc.leaveLiveEditing(workspaceId, path, leave),
   notifyOwnerLiveStopped: (workspaceId, objectId, path) => {
     sendRendererActivity({ workspaceId, liveDocumentStopped: objectId });
     void engineYDocSessionIpc
@@ -9223,6 +9226,8 @@ function registerIpcHandlers(): void {
     DesktopWorkspaceOperation["workspace"]
   > = {
     person: () => ({ kind: "person", personId: localInstallationId() }),
+    resumeOwnerLivePause: (workspace, path) => desktopEngine.resumeOwnerLivePause(workspace, path),
+    ownerLivePauses: (workspace) => desktopEngine.ownerLivePauses(workspace.workspaceId),
     remoteForWorkspace,
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,

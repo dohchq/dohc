@@ -639,8 +639,9 @@ export const StopOwnerLiveDocumentResult = z
   .strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
 // `already` when the server says the document was already live, so this Resume changed nothing.
+// `ended`: the note's file was moved, deleted or replaced, so the server's pause ended and nothing started.
 export const ResumeOwnerLiveDocumentResult = z
-  .object({ already: z.literal(true).optional() })
+  .object({ already: z.literal(true).optional(), ended: z.literal(true).optional() })
   .strict();
 export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -1704,6 +1705,21 @@ const SYNC_STATUS_BASE_FIELDS = {
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z
     .array(z.object({ objectId: z.string().min(1), path: SAFE_RELATIVE_PATH, detail: z.string() }))
+    .optional(),
+  // Notes the server paused for good, each with its copy written next to it.
+  ownerLivePauses: z
+    .array(
+      z.object({
+        pauseId: z.string().min(1),
+        objectId: z.string().min(1),
+        path: SAFE_RELATIVE_PATH,
+        cause: z.enum(["refused", "failing", "ended"]),
+        names: z.array(z.string()).max(256),
+        copyPath: SAFE_RELATIVE_PATH.nullable(),
+        leftOut: z.boolean(),
+      }),
+    )
+    .max(64)
     .optional(),
   ownerLiveQuarantines: z
     .array(OwnerLiveQuarantine)
