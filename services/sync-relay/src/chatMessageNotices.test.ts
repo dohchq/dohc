@@ -308,6 +308,30 @@ describe("mention and reply Notices", () => {
     expect(s.pushes("ana")).toEqual([]);
   });
 
+  it("writes no Notice and no push for a member in a hidden Group, and still tells an admin", async () => {
+    const s = await seed();
+    await s.member("ana");
+    const ben = await s.member("ben");
+    expect(
+      (await post(s.h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    const hidden = await s.h(
+      request(OWNER, `/sync/${WORKSPACE}/members/groups/${EVENTS}/rule`, {
+        ...jsonBody({ level: "none" }),
+        method: "PUT",
+      }),
+    );
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+    s.bindPush("ana");
+    await s.ownerSays("hidden", "t-events", "@Ana @Ben the surprise is on Friday");
+    expect(await s.notices("ana")).toEqual([]);
+    expect(s.pushes("ana")).toEqual([]);
+    expect((await s.notices("ben")).map((row) => row.title)).toEqual([
+      "Kim mentioned you in #events",
+    ]);
+  });
+
   it("writes nothing for a removed member", async () => {
     const s = await seed();
     const ana = await s.member("ana");
