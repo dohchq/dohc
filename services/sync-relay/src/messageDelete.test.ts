@@ -664,4 +664,27 @@ describe("a member's raw pull", () => {
       "chat.message.tombstone",
     );
   });
+
+  it("answers busy, with nothing from either read, when the rebuild goes stale too", async () => {
+    const { h } = await seed();
+    await ownerAppend(h, [
+      ownerMessage("m-one", "t-team", "the first words"),
+      ownerMessage("m-two", "t-team", "the second words"),
+    ]);
+    const ana = await member(h, "ana");
+    const first = holdNames();
+    const pulling = pull(h, ana.shareId);
+    await first.atLookup;
+    expect((await deleteMessage(h, OWNER, "m-one", "t-team")).status).toBe(200);
+    first.release();
+    const second = holdNames();
+    await second.atLookup;
+    expect((await deleteMessage(h, OWNER, "m-two", "t-team")).status).toBe(200);
+    second.release();
+    const answer = await pulling;
+    expect(answer.status).toBe(503);
+    expect(await answer.text()).not.toMatch(/the (first|second) words/u);
+    const next = await pull(h, ana.shareId);
+    expect(next.status).toBe(200);
+  });
 });
