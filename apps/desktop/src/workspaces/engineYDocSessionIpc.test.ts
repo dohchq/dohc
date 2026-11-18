@@ -311,6 +311,27 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it("asks the editor to gather typing only while the note has no live editing", async () => {
+    for (const ownerBound of [false, true]) {
+      const h = harness(providerSession({ ownerBound }));
+      try {
+        const sender = new FakeSender(7);
+        await h.ipc.open(sender, openPayload);
+        expect(
+          h.ipc.applyUpdate(sender, {
+            sessionId: openPayload.sessionId,
+            update: new Uint8Array([0, 0]),
+            seq: 1,
+            lineageGeneration: 1,
+            requestId: "11111111-1111-4111-8111-111111111111",
+          }),
+        ).toEqual(ownerBound ? { accepted: true } : { accepted: true, batchDelayMs: 1_000 });
+      } finally {
+        await h.ipc.shutdown();
+      }
+    }
+  });
+
   it("sends a definitive edit refusal through the scoped save event", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
@@ -409,9 +430,9 @@ describe("engine Y.Doc IPC adapter", () => {
         lineageGeneration: 1,
         requestId,
       });
-    expect(apply(first)).toEqual({ accepted: true });
+    expect(apply(first)).toEqual({ accepted: true, batchDelayMs: 1_000 });
     h.setPerson("account-bob");
-    expect(apply(first)).toEqual({ accepted: true });
+    expect(apply(first)).toEqual({ accepted: true, batchDelayMs: 1_000 });
     expect(
       apply(second, {
         authorContext: "account-alice-context",
@@ -419,7 +440,7 @@ describe("engine Y.Doc IPC adapter", () => {
         actorOriginId: "account-alice",
         attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 },
       }),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, batchDelayMs: 1_000 });
     const typedBy = (personId: string, idempotencyKey: string) => ({
       idempotencyKey,
       actorOriginId: personId,
@@ -472,7 +493,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const batch = new Uint8Array([1, 2, 3]);
     const apply = (sessionId: string, update: Uint8Array) =>
       h.ipc.applyUpdate(sender, { sessionId, update, seq: 1, lineageGeneration: 1, requestId });
-    expect(apply(openPayload.sessionId, batch)).toEqual({ accepted: true });
+    expect(apply(openPayload.sessionId, batch)).toEqual({ accepted: true, batchDelayMs: 1_000 });
     // The acceptance never reaches the renderer. The account changes, and the
     // document's session closes and opens again over a new provider.
     h.setPerson("account-bob");
@@ -482,8 +503,11 @@ describe("engine Y.Doc IPC adapter", () => {
     const reopened = { ...openPayload, sessionId: "renderer-session-2" };
     await h.ipc.open(sender, reopened);
     expect(original.close).toHaveBeenCalled();
-    expect(apply(reopened.sessionId, batch)).toEqual({ accepted: true });
-    expect(apply(reopened.sessionId, new Uint8Array([9]))).toEqual({ accepted: true });
+    expect(apply(reopened.sessionId, batch)).toEqual({ accepted: true, batchDelayMs: 1_000 });
+    expect(apply(reopened.sessionId, new Uint8Array([9]))).toEqual({
+      accepted: true,
+      batchDelayMs: 1_000,
+    });
     expect(outcomes).toEqual([
       { outcome: "recorded", person: "account-alice" },
       { outcome: "deduped", person: "account-alice" },
@@ -1076,7 +1100,7 @@ describe("engine Y.Doc IPC adapter", () => {
         requestId: "11111111-1111-4111-8111-111111111111",
         seq: 4,
       }),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, batchDelayMs: 1_000 });
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([

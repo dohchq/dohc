@@ -551,24 +551,15 @@ interface DocumentGeneration {
 }
 
 interface LocalUpdateRecord {
-  updateBase64: string;
-  // The engine's key for this record. A record that later edits joined gets
-  // a key of its own, so the engine never sees a caller's key with other bytes.
-  idempotencyKey: string;
-  // The callers' keys this record acknowledges or refuses.
-  readonly keys: string[];
+  readonly updateBase64: string;
+  readonly idempotencyKey: string;
   readonly actorOriginId?: string;
   readonly attribution?: ChangeAttributionWire;
   readonly trustedAutomationDraft?: boolean;
   readonly seed: boolean;
   readonly generation: DocumentGeneration;
   refusal?: unknown;
-  operation?: Promise<YdocRecordUpdateResult | undefined>;
 }
-
-// Keystrokes are tens of bytes, so this still takes in a second of typing.
-// The engine groups owner drafts under the same cap.
-const MAX_JOINED_RECORD_BYTES = 4096;
 
 const LINEAGE_CHANGED_WHILE_RECORDING =
   "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.";
@@ -620,15 +611,6 @@ export class YdocAdapterSession {
   private seedReserved = false;
   private lastSettledSha: string | null = null;
   private recordChain: Promise<void> = Promise.resolve();
-  // The newest record while it waits to be sent. Later edits by the same
-  // author join it.
-  private unsentRecord: LocalUpdateRecord | null = null;
-  private lastRecordLane: "journal" | "owner-outbox" | undefined;
-  private lastRecordSentAt = 0;
-  private paceWake: (() => void) | null = null;
-  // Work waiting on the record chain wants it written now. It stays set
-  // until no record is pending.
-  private hurried = false;
   private activeLocalRecordCapture: LocalRecordCapture | null = null;
   // Contract: an observer-detected local hazard is reject-and-quarantine.
   // Structured text edits reject before a transaction and do not quarantine.
@@ -755,7 +737,6 @@ export class YdocAdapterSession {
       await this.requestRecordUpdate({
         updateBase64: bytesToBase64(update),
         idempotencyKey: `${this.sessionId}:recovery-base:${this.nextLocalUpdateSeq++}`,
-        keys: [],
         seed: true,
         generation: this.generation,
       });
@@ -824,13 +805,9 @@ export class YdocAdapterSession {
     // An edit on a document whose lineage changed waits for no engine answer:
     // it cannot enter the winning lineage.
     if (this.generation.refusal) throw this.generation.refusal;
-    const joined = this.joinUnsentRecord(update, options, seedUpdate);
-    if (joined !== undefined) return joined;
-    const key = options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
     const record: LocalUpdateRecord = {
       updateBase64: bytesToBase64(update),
-      idempotencyKey: key,
-      keys: [key],
+      idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
       ...(options?.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
@@ -859,12 +836,9 @@ export class YdocAdapterSession {
       this.restoreAcknowledgedDocument();
       throw error;
     }
-    if (this.pendingRecords.size === 0) this.hurried = false;
     this.pendingRecords.add(record);
     this.pendingRecordBytes += retainedBytes;
-    this.unsentRecord = seedUpdate ? null : record;
     const operation = this.recordChain.then(async () => {
-      await this.paceJournalRecord();
       this.assertRecordable();
       if (record.refusal !== undefined) throw record.refusal;
       try {
@@ -911,74 +885,7 @@ export class YdocAdapterSession {
         }
       }
     });
-    record.operation = this.trackRecordOperation(operation);
-    return record.operation;
-  }
-
-  /**
-   * Joins an edit to the newest record while that record waits for its turn,
-   * if both have one author and the merged update stays small. Only a paced
-   * session joins: a record waits long enough to take in edits only there.
-   */
-  private joinUnsentRecord(
-    update: Uint8Array,
-    options: ApplyLocalUpdateOptions | undefined,
-    seedUpdate: boolean,
-  ): Promise<YdocRecordUpdateResult | undefined> | undefined {
-    const record = this.unsentRecord;
-    if (
-      this.adapter.journalRecordIntervalMs <= 0 ||
-      record === null ||
-      record.operation === undefined ||
-      seedUpdate ||
-      record.generation !== this.generation ||
-      record.refusal !== undefined ||
-      !this.pendingRecords.has(record) ||
-      record.actorOriginId !== (options?.actorOriginId || undefined) ||
-      record.trustedAutomationDraft !== (options?.trustedAutomationDraft ? true : undefined) ||
-      JSON.stringify(record.attribution) !== JSON.stringify(options?.attribution)
-    )
-      return undefined;
-    const merged = bytesToBase64(Y.mergeUpdates([base64ToBytes(record.updateBase64), update]));
-    const growth = (merged.length - record.updateBase64.length) * 2;
-    if (
-      base64ToBytes(merged).byteLength > MAX_JOINED_RECORD_BYTES ||
-      growth > YDOC_PENDING_MAX_BYTES - this.pendingRecordBytes
-    )
-      return undefined;
-    if (record.keys.length === 1)
-      record.idempotencyKey = `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    record.keys.push(options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`);
-    record.updateBase64 = merged;
-    this.pendingRecordBytes += growth;
-    return record.operation;
-  }
-
-  /**
-   * While the note is not live, the engine writes at most one record per
-   * interval, so a paused note's typing does not reach the relay faster than
-   * it can take it.
-   */
-  private async paceJournalRecord(): Promise<void> {
-    const wait =
-      this.lastRecordLane === "journal" && !this.hurried
-        ? this.lastRecordSentAt + this.adapter.journalRecordIntervalMs - Date.now()
-        : 0;
-    if (wait <= 0) return;
-    await new Promise<void>((resolve) => {
-      const wake = (): void => {
-        clearTimeout(timer);
-        if (this.paceWake === wake) this.paceWake = null;
-        resolve();
-      };
-      const timer = setTimeout(wake, wait);
-      this.paceWake = wake;
-    });
-  }
-
-  private hurryRecords(): void {
-    this.hurried = true;
-    this.paceWake?.();
+    return this.trackRecordOperation(operation);
   }
 
   /**
@@ -1041,7 +948,6 @@ export class YdocAdapterSession {
 
   resendMissingState(): Promise<void> {
     if (!this.missingLocalState) return Promise.resolve();
-    this.hurryRecords();
     const originals = [...this.pendingRecords];
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
@@ -1056,11 +962,8 @@ export class YdocAdapterSession {
   }
 
   private async requestRecordUpdate(record: LocalUpdateRecord): Promise<YdocRecordUpdateResult> {
-    // Once a request carries its bytes, nothing more joins it.
-    if (this.unsentRecord === record) this.unsentRecord = null;
     const generation = record.generation;
     if (generation.refusal) throw generation.refusal;
-    this.lastRecordSentAt = Date.now();
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
       updateBase64: record.updateBase64,
@@ -1096,14 +999,13 @@ export class YdocAdapterSession {
           if (pending !== record) refusedUpdates.push(update);
           pending.refusal = error;
           this.removePendingRecord(pending);
-          for (const key of pending.keys)
-            for (const listener of this.localUpdateRefusedListeners) {
-              try {
-                listener(key, error);
-              } catch (cause) {
-                this.surfaceSessionError(cause);
-              }
+          for (const listener of this.localUpdateRefusedListeners) {
+            try {
+              listener(pending.idempotencyKey, error);
+            } catch (cause) {
+              this.surfaceSessionError(cause);
             }
+          }
         }
         this.restoreAcknowledgedDocument();
       }
@@ -1115,17 +1017,15 @@ export class YdocAdapterSession {
       throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
     this.removePendingRecord(record);
-    const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
-    this.lastRecordLane = lane;
     if (!record.seed) {
-      for (const key of record.keys)
-        for (const listener of this.localUpdateAcknowledgedListeners) {
-          try {
-            listener(key, lane);
-          } catch (error) {
-            this.surfaceSessionError(error);
-          }
+      const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
+      for (const listener of this.localUpdateAcknowledgedListeners) {
+        try {
+          listener(record.idempotencyKey, lane);
+        } catch (error) {
+          this.surfaceSessionError(error);
         }
+      }
     }
     if ("ownerDraft" in result && this.ownerDraft) {
       // A resync reading now may answer with the queue as it was before this edit.
@@ -1226,7 +1126,6 @@ export class YdocAdapterSession {
 
   async adoptCollectionRecord(): Promise<"settled" | "ownerPending" | "declined"> {
     this.assertRecordable();
-    this.hurryRecords();
     await this.recordChain;
     await this.resyncIfNeeded();
     const raw = await this.adapter.request(this.workspace, YDOC_METHOD.adoptCollectionRecord, {
@@ -1243,7 +1142,6 @@ export class YdocAdapterSession {
     allowLossySourceSha256?: string;
   }): Promise<YdocSettleResult> {
     this.assertRecordable();
-    this.hurryRecords();
     await this.recordChain;
     // A resync request that landed while the journal drained is waited out,
     // not reported as a failed save: the settle must not write text this
@@ -1457,7 +1355,6 @@ export class YdocAdapterSession {
    * that the file never took.
    */
   async leaveLiveEditing<T>(leave: (unsent: Uint8Array) => Promise<T>): Promise<T> {
-    this.hurryRecords();
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
       let left: T;
@@ -1546,7 +1443,6 @@ export class YdocAdapterSession {
   private async readResyncState(): Promise<Uint8Array> {
     try {
       while (true) {
-        this.hurryRecords();
         await this.recordChain.catch(() => undefined);
         if (this.closed) {
           throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
@@ -1675,7 +1571,6 @@ export class YdocAdapterSession {
 
   async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
     if (this.closed) return;
-    this.hurryRecords();
     await this.recordChain.catch(() => undefined);
     const params: YdocCloseParams = {
       sessionId: this.sessionId,
@@ -1708,7 +1603,6 @@ export class YdocAdapterSession {
   // document journaled, so the next open resurrects them.
   async evict(): Promise<void> {
     if (this.closed) return;
-    this.hurryRecords();
     await this.recordChain.catch(() => undefined);
     const params: YdocEvictParams = { sessionId: this.sessionId };
     try {
@@ -1852,12 +1746,7 @@ export class YdocLiveAdapter {
   private readonly requester: WorkspaceDaemonRequester;
   private readonly eventPositions = new Map<string, { seq: number; sessionGeneration: number }>();
 
-  // The least time between two records of a note that is not live. Zero
-  // records every edit as it comes.
-  readonly journalRecordIntervalMs: number;
-
-  constructor(transport: EngineTransport, options: { journalRecordIntervalMs?: number } = {}) {
-    this.journalRecordIntervalMs = options.journalRecordIntervalMs ?? 0;
+  constructor(transport: EngineTransport) {
     this.requester = new WorkspaceDaemonRequester(transport);
     this.unsubscribeEvents = transport.onEvent((event) => this.receiveEvent(event));
   }

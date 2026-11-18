@@ -2753,7 +2753,7 @@ describe("registered engine Y.Doc ownership", () => {
         requestId: "11111111-1111-4111-8111-111111111111",
         seq: 1,
       }),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, batchDelayMs: 1_000 });
     expect(h.provider.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {
       idempotencyKey: "11111111-1111-4111-8111-111111111111",
       actorOriginId: "person-local",

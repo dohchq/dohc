@@ -1564,7 +1564,7 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
       lineageGeneration: 1,
       requestId: "11111111-1111-4111-8111-111111111111",
     }),
-  ).toEqual({ accepted: true });
+  ).toEqual({ accepted: true, batchDelayMs: 1_000 });
   for (const { channel, payload } of sent) {
     if (channel === CHANNELS.engineYDocRemoteUpdate) {
       Y.applyUpdate(editor, (payload as { update: Uint8Array }).update);

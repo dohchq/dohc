@@ -250,6 +250,7 @@ function makeTransport(
       if (!result.accepted) {
         throw new EngineYDocDeliveryRefusedError(result.reason);
       }
+      return result.batchDelayMs;
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {

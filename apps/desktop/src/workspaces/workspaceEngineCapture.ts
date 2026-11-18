@@ -974,9 +974,6 @@ export interface WorkspaceEngineCaptureOptions {
   // gate the open-time settle of an unsettled document waits on.
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
-  // The least time between two engine records of an editor's note that is
-  // not live. Omitted records every edit as it comes.
-  journalRecordIntervalMs?: number;
   onError?: (context: string, error: unknown) => void;
   // Sets a document's text aside in Notices and answers a handle to that
   // write. `discardUnsentState` removes the draft by that handle once a save
@@ -3261,9 +3258,6 @@ export function createWorkspaceEngineCapture(
             seedAbsentLineage,
             ...(options.settleDebounceMs !== undefined
               ? { settleDebounceMs: options.settleDebounceMs }
-              : {}),
-            ...(options.journalRecordIntervalMs !== undefined
-              ? { journalRecordIntervalMs: options.journalRecordIntervalMs }
               : {}),
             // A reopen must find the object this session opened. If the path
             // now names another object, refuse rather than replay this

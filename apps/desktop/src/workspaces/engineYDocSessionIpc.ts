@@ -80,6 +80,14 @@ import {
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 
+// Main records each editor update as one engine row. While a note's live
+// editing is paused, the server host turns each row into one delivery, and
+// the relay takes about one a second. An update per keystroke left thousands
+// waiting at Resume. The editor gathers up to a second of typing per update
+// instead, and sends what it gathered at once when the note closes or the app
+// quits.
+const UNBOUND_TYPING_BATCH_MS = 1_000;
+
 /** The session holds no claim yet, and every binding names one. */
 class OwnerClaimNotLearned extends Error {
   constructor(readonly resync: () => Promise<void>) {
@@ -1130,11 +1138,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           },
           this.#localPersonId,
         );
+        const sharedView = this.#isSharedView(owned.workspace);
         try {
           owned.provider.applyLocalUpdate(
             input.update,
             () => noteLocalEdit(owned.saveSeq, input.seq),
-            this.#isSharedView(owned.workspace)
+            sharedView
               ? {
                   idempotencyKey: input.requestId,
                   attribution: { actorKind: "human", onBehalfOf: person },
@@ -1151,7 +1160,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           }
           throw error;
         }
-        return { accepted: true };
+        return sharedView || owned.provider.ownerBound
+          ? { accepted: true }
+          : { accepted: true, batchDelayMs: UNBOUND_TYPING_BATCH_MS };
       },
     );
     if (applied.kind === "refused") {
