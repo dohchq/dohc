@@ -214,6 +214,11 @@ describe("a member's raw pull answered across a change", () => {
     const response = await reading;
     expect(response.status, await response.clone().text()).toBe(200);
     const body = await json(response);
+    // The rerun reads the new level, as a fresh pull does.
+    const groupAt = (answer: Record<string, unknown>) =>
+      (answer.reach as { groups: Array<{ channelWireId: string; level: string }> }).groups;
+    expect(groupAt(body)).toEqual([{ channelWireId: TEAM, level: "view" }]);
+    expect(groupAt(await json(await s.pull()))).toEqual(groupAt(body));
     const next = await s.pull(`since=${body.nextCursor as string}`);
     expect(next.status, await next.clone().text()).toBe(200);
   });

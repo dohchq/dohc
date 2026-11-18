@@ -3249,7 +3249,7 @@ describe("a joined workspace through the CLI", () => {
 
   // The owner's Group made with a level comes from the relay with its rule,
   // so members never see it before the rule applies.
-  it("creates the owner's Group with a level through the relay", async () => {
+  it("routes the owner's Group made with a level to the relay's create", async () => {
     const f = fixture();
     const context = await f.create().openCliWorkspace(f.workspace);
     await expect(context.createGroup!({ name: "Board", level: "none" })).resolves.toMatchObject({

@@ -1924,6 +1924,8 @@ describe("a Group's rule", () => {
     };
     const { h } = await seed({ activity });
     await invited(h, "ana");
+    // The invite wakes them too, so only wakes after it count.
+    woken.length = 0;
     await ruled(h, OWNER, GROUP, "none");
     expect(woken).toContain(WORKSPACE);
   });
