@@ -31,7 +31,7 @@ export const appWords = {
   readsRecords: "Reads records",
   changesRecords: "Can change records",
   fields: (names: string) => `Fields: ${names}`,
-  sendsElsewhere: "An app can send what it reads to other websites.",
+  sendsElsewhere: "An app can send what it reads, and what you enter in it, to other websites.",
 
   source: "Source",
   sourceNote: "The source this version was published from. It doesn't prove what runs.",
