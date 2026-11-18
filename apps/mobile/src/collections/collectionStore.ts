@@ -182,8 +182,9 @@ export function createWorkspaceCollections(
   ) => {
     const now = view;
     if (now?.datasetId !== datasetId) return;
+    // A replayed receipt can be older than what a later read showed; that read wins.
     const patch = (record: CollectionRecord) =>
-      record.id === recordId
+      record.id === recordId && (record.version ?? 0) < version
         ? { ...record, version, values: { ...record.values, [fieldId]: value } }
         : record;
     const { opened } = now;

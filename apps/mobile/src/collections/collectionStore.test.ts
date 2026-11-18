@@ -587,6 +587,26 @@ describe("a record's change", () => {
     expect(collections.view()?.rows[0]).toEqual(saved);
   });
 
+  it("keeps a later read over a replayed receipt for an older version", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, "offline", ok({ saved: { version: 2, priorValue: "a0" } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    // The first try saved version 2; a later change elsewhere made version 3, which a refresh reads.
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      page([{ id: "a0", version: 3, values: { "f-name": "Ana" } }]),
+    );
+    await collections.reload();
+    collections.retry(KEY);
+    await answered(collections);
+    expect(state(collections)).toMatchObject({ kind: "saved", version: 2 });
+    const later = { id: "a0", version: 3, values: { "f-name": "Ana" } };
+    expect(collections.view()?.opened?.record).toEqual(later);
+    expect(collections.view()?.rows[0]).toEqual(later);
+  });
+
   it("lands no Reload once its screen closes, another record opens, or a newer Reload starts", async () => {
     const { server, collections } = await onRecord();
     const read = (version: number) =>
