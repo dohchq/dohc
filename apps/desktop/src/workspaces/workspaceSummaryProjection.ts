@@ -164,12 +164,17 @@ export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): Works
 // The recovery folder a rebuild saved into, when the record names one inside
 // the copy's recovery root.
 // A membership's Group levels from the reach stored with it. Without a
-// readable reach, Chats gives every Group the member level.
+// stored reach, Chats gives every Group the member level. A stored reach it
+// can't read gives every Group View, since the write gate takes no post then.
 function storedGroupLevels(raw: Record<string, unknown>) {
+  if (raw.reach === undefined) return {};
   const reach = storedShareViewReach(raw);
-  return reach === null
-    ? {}
-    : { groupLevels: { groupDefault: reach.groupDefault, groups: [...reach.groups] } };
+  return {
+    groupLevels:
+      reach === null
+        ? { groupDefault: "view" as const, groups: [] }
+        : { groupDefault: reach.groupDefault, groups: [...reach.groups] },
+  };
 }
 
 function accessSaved(raw: unknown): { accessSaved?: { folder: string; count: number } } {
