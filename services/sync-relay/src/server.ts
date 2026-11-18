@@ -20,6 +20,7 @@ import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import { createPhoneApps } from "./phoneApps";
+import { createPhoneCollections } from "./phoneCollections";
 import type { PhoneAppLaunchScope } from "./storage/phoneApps";
 import { readOwnerAppResponses } from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
@@ -697,6 +698,7 @@ export function createSyncRelayHandler({
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
         phoneApps,
+        phoneCollections: createPhoneCollections({ storage, host: datasetHost }),
         ...(phonePages ? { phonePages } : {}),
       })
     : undefined;

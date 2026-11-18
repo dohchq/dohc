@@ -1,0 +1,271 @@
+import { randomUUID } from "node:crypto";
+import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+import { JournalError } from "@dohc/app-backend-runtime/journal";
+import {
+  isDatasetReopenWaitError,
+  isDatasetWorkerFailure,
+} from "@dohc/app-backend-runtime/supervisor";
+import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
+import type { DatasetDescription } from "@dohc/security-contract/dataset";
+import { jsonResponse } from "@dohc/service-http";
+import type { AccountSession } from "@dohc/workspace-auth/session";
+import { hiddenFile } from "./accountFeed";
+import type { AppBackendAuth } from "./appBackendAuthority";
+import type { RelayDatasetHost } from "./datasetHost";
+import { badRequest, notFound, relayError, RELAY_ERROR_MESSAGES } from "./errors";
+import type { SyncRelayStorage } from "./storage";
+import { accountIsFenced } from "./storage/accountDeletion";
+import { collectionFilePaths } from "./storage/collectionFilePresence";
+import type { StorageContext } from "./storage/context";
+
+// The phone reads its account's transactional Collections: their names, one Collection's tables and fields, and pages
+// of one table's records, through the table's own read operation, as the desktop reads them. It only reads. The account
+// route has checked the sign-in, its fence, the owner and Show on phone. A Collection that is archived, still
+// importing, or whose dataset.json is missing or under a hidden path answers as one that doesn't exist.
+
+/** Records a page holds, as the desktop asks for them. */
+export const PHONE_COLLECTION_PAGE = 50;
+
+const OPERATIONS = new Set(["collections", "collection", "collectionRecords"]);
+
+/** The phone's Collection operations. They read the relay's dataset host, so they need no server copy. */
+export function isPhoneCollectionOperation(name: string): boolean {
+  return OPERATIONS.has(name);
+}
+
+const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const FILE_ID = /^[A-Za-z0-9_-]{16,128}$/;
+
+function args(value: unknown, required: string[], optional: string[] = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw badRequest("Invalid Collection arguments.");
+  const keys = Object.keys(value);
+  if (
+    required.some((key) => !keys.includes(key)) ||
+    keys.some((key) => !required.includes(key) && !optional.includes(key))
+  )
+    throw badRequest("Invalid Collection arguments.");
+  return value as Record<string, unknown>;
+}
+function id(value: unknown): string {
+  if (typeof value !== "string" || !ID.test(value)) throw notFound();
+  return value;
+}
+/** A read's cursor, as the read gave it: the last record's ID and its sort value. The read checks the value. */
+function cursor(value: unknown): { id: string | number; value: AppBackendJson } | undefined {
+  if (value === undefined || value === null) return undefined;
+  const { id: key, value: sorted } = args(value, ["id", "value"]);
+  if (
+    !(typeof key === "string" && key.length > 0 && key.length <= 1024) &&
+    !(typeof key === "number" && Number.isSafeInteger(key))
+  )
+    throw badRequest("Invalid Collection cursor.");
+  try {
+    return { id: key, value: parseAppBackendJson(sorted, 4096) };
+  } catch {
+    throw badRequest("Invalid Collection cursor.");
+  }
+}
+
+export function createPhoneCollections(options: {
+  storage: SyncRelayStorage;
+  /** Absent while this server keeps no Collections. */
+  host: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> | undefined;
+}) {
+  const storage = options.storage as StorageContext;
+
+  // The fence, the owner and Show on phone. Plain reads, so the dataset host runs this inside the read too.
+  function holds(userId: string, workspaceId: string): void {
+    if (
+      accountIsFenced(storage, userId) ||
+      !storage.workspaceIsOwnedBy(workspaceId, userId) ||
+      !storage.showsOnPhone(userId, workspaceId)
+    )
+      throw notFound();
+  }
+  // Its dataset.json is on main, and neither where it was approved nor where it is now is hidden.
+  function visible(workspaceId: string, datasetId: string): boolean {
+    const paths = collectionFilePaths(storage, workspaceId, datasetId);
+    return (
+      paths !== null &&
+      paths.current !== null &&
+      !hiddenFile(paths.approved) &&
+      !hiddenFile(paths.current)
+    );
+  }
+  function describe(
+    host: NonNullable<typeof options.host>,
+    auth: AppBackendAuth,
+    workspaceId: string,
+    datasetId: string,
+  ): DatasetDescription {
+    if (!visible(workspaceId, datasetId)) throw notFound();
+    const description = host.describe(auth, { workspaceId, datasetId });
+    if (description.archived) throw notFound();
+    return description;
+  }
+  // Attached files' names, by file ID, for the values a page shows. A file still waiting to attach has none.
+  function fileNames(workspaceId: string, datasetId: string, fileIds: ReadonlySet<string>) {
+    const names: Record<string, string> = {};
+    const read = storage.db.prepare(
+      "SELECT metadata FROM sync_relay_dataset_files WHERE workspace_id=? AND dataset_id=? AND file_id=? AND attached_revision IS NOT NULL",
+    );
+    for (const fileId of fileIds) {
+      const row = read.get(workspaceId, datasetId, fileId);
+      const name: unknown = row && JSON.parse(String(row.metadata)).name;
+      if (typeof name === "string") names[fileId] = name;
+    }
+    return names;
+  }
+
+  async function run(input: {
+    caller: AccountSession;
+    workspaceId: string;
+    operation: string;
+    args: unknown;
+    authorize(): Promise<void>;
+    signal: AbortSignal;
+  }): Promise<unknown> {
+    const { caller, workspaceId, operation, authorize } = input;
+    const userId = caller.userId;
+    const host = options.host;
+    // The host checks this guard at admission and again inside the read.
+    const auth: AppBackendAuth = {
+      kind: "named",
+      workspaceId,
+      userId,
+      launch: { authorizeOperation: () => holds(userId, workspaceId), recheck: authorize },
+    };
+    if (operation === "collections") {
+      const { cursor: after } = args(input.args, [], ["cursor"]);
+      if (after !== undefined) id(after);
+      if (!host) return { collections: [], nextCursor: null };
+      const page = host.list(auth, {
+        workspaceId,
+        limit: PHONE_COLLECTION_PAGE,
+        ...(after === undefined ? {} : { after: after as string }),
+      });
+      return {
+        collections: page.datasets
+          .filter((dataset) => !dataset.archived && visible(workspaceId, dataset.datasetId))
+          .map(({ datasetId, name }) => ({ datasetId, name })),
+        nextCursor: page.nextCursor,
+      };
+    }
+    if (!host) throw notFound();
+    if (operation === "collection") {
+      const datasetId = id(args(input.args, ["datasetId"]).datasetId);
+      const { name, tables } = describe(host, auth, workspaceId, datasetId);
+      return {
+        datasetId,
+        name,
+        tables: tables.map((table) => {
+          const fields = table.fields.flatMap((field) =>
+            field.type === "button" || field.generated
+              ? []
+              : [
+                  {
+                    fieldId: field.fieldId,
+                    name: field.name,
+                    type: field.type,
+                    ...(field.options ? { options: field.options } : {}),
+                  },
+                ],
+          );
+          return {
+            tableId: table.tableId,
+            name: table.name,
+            primaryFieldId: fields.some((field) => field.fieldId === table.primaryKeyFieldId)
+              ? table.primaryKeyFieldId!
+              : null,
+            fields,
+          };
+        }),
+      };
+    }
+    const body = args(input.args, ["datasetId", "tableId"], ["after"]);
+    const datasetId = id(body.datasetId),
+      tableId = id(body.tableId),
+      after = cursor(body.after);
+    const description = describe(host, auth, workspaceId, datasetId);
+    const table = description.tables.find((table) => table.tableId === tableId);
+    if (!table) throw notFound();
+    // The desktop's choice: the table's first operation that only reads.
+    const read = description.operations.find(
+      (operation) =>
+        operation.tableId === tableId && operation.kind === "read" && operation.readOnly,
+    );
+    if (!read) return { status: "refused", reason: "no-read" };
+    const { result } = await host.invoke(auth, {
+      workspaceId,
+      datasetId,
+      revision: description.revision,
+      revisionSha256: description.revisionSha256,
+      operationId: read.operationId,
+      input: { limit: PHONE_COLLECTION_PAGE, ...(after ? { after } : {}) },
+      idempotencyKey: randomUUID(),
+      signal: input.signal,
+    });
+    await authorize();
+    holds(userId, workspaceId);
+    if (!visible(workspaceId, datasetId)) throw notFound();
+    if (
+      !result ||
+      typeof result !== "object" ||
+      Array.isArray(result) ||
+      !Array.isArray(result.rows) ||
+      !Object.hasOwn(result, "nextCursor")
+    )
+      throw relayError("conflict", "This Collection's read gave an answer dohc can't show.");
+    const attachments = table.fields.filter((field) => field.type === "attachment");
+    const fileIds = new Set<string>();
+    for (const row of result.rows)
+      if (row && typeof row === "object" && !Array.isArray(row)) {
+        const values = row.values;
+        if (values && typeof values === "object" && !Array.isArray(values))
+          for (const field of attachments) {
+            const value = values[field.fieldId];
+            if (typeof value === "string" && FILE_ID.test(value)) fileIds.add(value);
+          }
+      }
+    return {
+      status: "ready",
+      rows: result.rows,
+      nextCursor: result.nextCursor,
+      files: fileNames(workspaceId, datasetId, fileIds),
+    };
+  }
+
+  return {
+    /** One Collection operation, answered as the dataset routes answer the host's refusals. */
+    async respond(input: Parameters<typeof run>[0]): Promise<Response> {
+      try {
+        return jsonResponse({ ok: true, result: await run(input) });
+      } catch (error) {
+        if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error))
+          return jsonResponse(
+            { ok: false, error: RELAY_ERROR_MESSAGES.server_busy, code: "server_busy" },
+            503,
+            error.retryAfterMs
+              ? { "retry-after": String(Math.ceil(error.retryAfterMs / 1000)) }
+              : {},
+          );
+        if (isAppBackendRuntimeError(error)) throw relayError("conflict");
+        if (error instanceof JournalError)
+          throw relayError(error.code === "invalid" ? "bad_request" : "conflict");
+        if (error instanceof DatasetHostError)
+          throw relayError(
+            error.code === "not_authorized"
+              ? "not_found"
+              : error.code === "invalid"
+                ? "bad_request"
+                : "conflict",
+          );
+        throw error;
+      }
+    },
+  };
+}
+
+export type PhoneCollections = ReturnType<typeof createPhoneCollections>;

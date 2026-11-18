@@ -1,4 +1,5 @@
 import { appWords } from "@dohc/interface-words/apps";
+import { collectionWords } from "@dohc/interface-words/collections";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Haptics from "expo-haptics";
 import { Stack, useIsFocused, useRouter } from "expo-router";
@@ -11,6 +12,7 @@ import {
   FolderOpen,
   PenTool,
   ShieldCheck,
+  Table2,
 } from "lucide-react-native";
 import {
   Fragment,
@@ -24,6 +26,7 @@ import {
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import type { AppsState } from "../apps/appStore";
+import type { CollectionsState } from "../collections/collectionStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
 import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
@@ -35,11 +38,13 @@ import { useFailureNotice, useView } from "../workspace/useView";
 import { homeRows, type HomeRow } from "./homeModel";
 
 const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
+const NO_COLLECTIONS: CollectionsState = { collections: null, problem: null, failures: 0 };
 const nothing = () => () => undefined;
 
 // Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its sketches and other files, as the
-// desktop's Home lists them, then its published apps, each version under its app. A page opens to read; a folder opens
-// in place; an app's version opens its review. The phone opens no other kind of file yet, so those rows only name it.
+// desktop's Home lists them, then its published apps, each version under its app, then its transactional Collections.
+// A page opens to read; a folder opens in place; an app's version opens its review; a Collection opens its records. The
+// phone opens no other kind of file yet, so those rows only name it.
 // The list reads again when the feed reports a file change.
 export function ServerHome() {
   const theme = useTheme();
@@ -183,6 +188,70 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
           );
         })
       )}
+      <Collections workspaceId={workspaceId} workspace={workspace} />
+    </>
+  );
+}
+
+/**
+ * The workspace's transactional Collections, read each time Home shows, as its apps are. The section shows only once
+ * the list has one; a failed read is a toast and a Notices row.
+ */
+function Collections({ workspaceId, workspace }: { workspaceId: string; workspace: string }) {
+  const theme = useTheme();
+  const router = useRouter();
+  const { collections } = useAccount();
+  const [folded, setFolded] = useState(false);
+  const state = useSyncExternalStore(
+    collections?.subscribe ?? nothing,
+    useCallback(() => collections?.state() ?? NO_COLLECTIONS, [collections]),
+  );
+  const focused = useIsFocused();
+  useEffect(() => {
+    if (focused) void collections?.refresh();
+  }, [focused, collections]);
+  const retry = useCallback(() => void collections?.refresh(), [collections]);
+  useFailureNotice(
+    `read:${workspaceId}:collections`,
+    collectionWords.collectionsFailed(workspace),
+    state,
+    retry,
+  );
+  if (!state.collections?.length) return null;
+  return (
+    <>
+      <SectionHeader
+        title={collectionWords.collections}
+        collapsed={folded}
+        unread={false}
+        first={false}
+        onToggle={() => {
+          void Haptics.selectionAsync();
+          setFolded((value) => !value);
+        }}
+      />
+      {folded
+        ? null
+        : state.collections.map((collection) => (
+            <Pressable
+              key={collection.datasetId}
+              onPress={() =>
+                router.push({ pathname: "/collection", params: { id: collection.datasetId } })
+              }
+              style={({ pressed }) => [
+                styles.row,
+                styles.app,
+                pressed ? { backgroundColor: theme.panel2 } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={collection.name}
+            >
+              <Table2 size={18} color={theme.ink} strokeWidth={1.9} />
+              <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+                {collection.name}
+              </Text>
+            </Pressable>
+          ))}
     </>
   );
 }
