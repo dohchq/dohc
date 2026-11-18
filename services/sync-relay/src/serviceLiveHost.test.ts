@@ -7998,12 +7998,20 @@ it("visits first, in the next pass, a note opened before the host had made it re
   // Two more notes, so a pass of two leaves one for the next and the turn moves.
   const third = { ...o.other, objectId: "third-object", path: "docs/third.md" },
     fourth = { ...o.other, objectId: "fourth-object", path: "docs/fourth.md" };
+  // The two new notes have nothing behind them, so each visit of one only waits.
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate),
+    through = activate.getMockImplementation()!;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    return [third.path, fourth.path].includes(args[0].path)
+      ? Promise.resolve({ kind: "pending" as const, reason: "held" })
+      : through.apply(this, args);
+  });
   await o.host.update({
     workspaces: o.workspaces,
     documents: [o.sibling, o.other, third, fourth],
     ...stay,
   });
-  const calls = vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls;
+  const calls = activate.mock.calls;
   const paused = () => vi.waitFor(() => expect(polls.paused()).toBe(true));
   // The notes one held pass visits, in order.
   const pass = async () => {
@@ -8552,6 +8560,30 @@ it("visits a note with an edit no signal announced within the idle interval on a
     `Idle host, 24 notes: pause ${pause} ms, the note with an unannounced edit visited after ${paced.clock.nowMs() - queued} ms`,
   );
   expect(paced.clock.nowMs() - queued).toBeLessThanOrEqual(paced.ceiling);
+});
+
+// A pass stops visiting at the first note that fails. The turn has to move on with each visit, or the next pass
+// begins at the same failing note and the notes after it are never reached.
+// Proves: while one of eight notes fails every time it is visited, every other note is still visited.
+// The activation here is a stand-in that marks the visit.
+it("still visits the other notes while one fails on every visit", async () => {
+  const h = await readyHostedHost(["workspace"], { notes: 8 });
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate),
+    through = activate.getMockImplementation()!;
+  let fails = 0;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    if (args[0].path !== "docs/note-0.md") return through.apply(this, args);
+    fails++;
+    return Promise.reject(new Error("Settlement failed."));
+  });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const host = await startServiceLiveHost(h.f);
+  cleanup.push(() => host.close());
+  // Three failures are three passes, each of which planned all eight notes.
+  await vi.waitFor(() => expect(fails).toBeGreaterThanOrEqual(3));
+  expect(new Set(h.visited)).toEqual(
+    new Set(Array.from({ length: 7 }, (_, index) => `docs/note-${String(index + 1)}.md`)),
+  );
 });
 
 // Proves: a relay write asks for a pass no sooner than one poll interval after the last one, so a host whose own

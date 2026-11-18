@@ -3240,56 +3240,62 @@ export async function startServiceLiveHost(options: {
               const order = passOrder(targets, index, bounds.maxDocumentsPerPass, (target) =>
                 wanted.has(targetKey(target)),
               );
-              index = order.next;
+              const visit = async (target: ServiceActivationTarget) => {
+                const timed: SlowPassTarget = {
+                    object:
+                      hosted
+                        .get(JSON.stringify([target.workspaceId, target.path]))
+                        ?.objectId.slice(0, 8) ?? null,
+                    ms: 0,
+                    outcome: "error",
+                    settle: "none",
+                    materialized: null,
+                  },
+                  startedAt = now();
+                slowTargets.push(timed);
+                try {
+                  // Settlement runs in the activation's own document work. A restore
+                  // fence during it leaves the pass pending rather than ready.
+                  const outcome = await activation!.activate(
+                    target,
+                    passSignal,
+                    settleTarget &&
+                      (async (consumer, document, joined) => {
+                        timed.object ??= document.objectId.slice(0, 8);
+                        const sent = consumer.settlesSent;
+                        try {
+                          const settled = await consumer.settleDrained(document, joined);
+                          timed.materialized = !settlementPending(settled) && settled.materialized;
+                          return settled;
+                        } finally {
+                          // A settlement the engine was asked for counts as sent even when it then failed.
+                          timed.settle =
+                            consumer.settlesSent > sent
+                              ? "sent"
+                              : timed.materialized === null
+                                ? "none"
+                                : "reused";
+                        }
+                      }),
+                    catchUp,
+                  );
+                  timed.outcome = outcome.kind === "done" ? "done" : "pending";
+                  noteWaiting(target, outcome);
+                } finally {
+                  timed.ms = Math.round(now() - startedAt);
+                  // A mark buys one visit. A note still not ready, as while it backs off or its restore runs,
+                  // goes back to its turn, and the next open marks it again.
+                  wanted.delete(targetKey(target));
+                }
+              };
+              // A wanted note that fails does not cost the others their turn in this pass.
+              for (const target of order.first) await step(() => visit(target));
               await step(async () => {
-                for (const target of order.visit) {
-                  const timed: SlowPassTarget = {
-                      object:
-                        hosted
-                          .get(JSON.stringify([target.workspaceId, target.path]))
-                          ?.objectId.slice(0, 8) ?? null,
-                      ms: 0,
-                      outcome: "error",
-                      settle: "none",
-                      materialized: null,
-                    },
-                    startedAt = now();
-                  slowTargets.push(timed);
-                  try {
-                    // Settlement runs in the activation's own document work. A restore
-                    // fence during it leaves the pass pending rather than ready.
-                    const outcome = await activation!.activate(
-                      target,
-                      passSignal,
-                      settleTarget &&
-                        (async (consumer, document, joined) => {
-                          timed.object ??= document.objectId.slice(0, 8);
-                          const sent = consumer.settlesSent;
-                          try {
-                            const settled = await consumer.settleDrained(document, joined);
-                            timed.materialized =
-                              !settlementPending(settled) && settled.materialized;
-                            return settled;
-                          } finally {
-                            // A settlement the engine was asked for counts as sent even when it then failed.
-                            timed.settle =
-                              consumer.settlesSent > sent
-                                ? "sent"
-                                : timed.materialized === null
-                                  ? "none"
-                                  : "reused";
-                          }
-                        }),
-                      catchUp,
-                    );
-                    timed.outcome = outcome.kind === "done" ? "done" : "pending";
-                    noteWaiting(target, outcome);
-                  } finally {
-                    timed.ms = Math.round(now() - startedAt);
-                    // A mark buys one visit. A note still not ready, as while it backs off or its restore runs,
-                    // goes back to its turn, and the next open marks it again.
-                    wanted.delete(targetKey(target));
-                  }
+                for (const { target, next } of order.turn) {
+                  // The turn moves on before each visit. A failure ends the pass's turn, and the next pass
+                  // takes up after the note that failed, so one failing note cannot keep the others waiting.
+                  index = next;
+                  await visit(target);
                 }
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
