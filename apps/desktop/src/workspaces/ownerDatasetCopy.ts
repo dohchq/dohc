@@ -53,6 +53,13 @@ const offline = (host: string) =>
     code: "offline",
     message: `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
   });
+/** A change made while this computer can't bring its copy up to date, refused the same way. */
+const copyNotUpdated = () =>
+  new AppBackendRuntimeError({
+    code: "offline",
+    message:
+      "dohc didn't save this change. This Collection is read-only until dohc can update its copy on this device.",
+  });
 /** A change made with no one signed in, refused the same way. */
 const signedOutChange = () =>
   new AppBackendRuntimeError({
@@ -187,6 +194,8 @@ export async function createOwnerDatasetCopy(
     pending = 0,
     // Whether the server answered the last time the copy asked; null before it asks.
     reachable: boolean | null = null,
+    // The server answered, but the last update could not bring the copy up to date.
+    updateFailed = false,
     // The server has not answered the running update for `slowMs`.
     slow = false,
     // Why the last update failed, for a read that has no copy to show.
@@ -214,7 +223,8 @@ export async function createOwnerDatasetCopy(
   const host = new URL(options.origin).host;
   const unreachable = () =>
     new CollectionServerUnreachableError(`This Collection needs ${host}, which dohc can't reach.`);
-  const refused = () => (signedOut ? signedOutChange() : offline(host));
+  const refused = () =>
+    signedOut ? signedOutChange() : notUpdated() ? copyNotUpdated() : offline(host);
   const markerPath = join(options.directory, "archived.json");
   const binding = createHash("sha256")
     .update(JSON.stringify([options.scope, options.ownerKey, new URL(options.origin).origin]))
@@ -315,14 +325,17 @@ export async function createOwnerDatasetCopy(
       authorize(signal);
       return dataset;
     });
-  // What a read shows now, without asking the server.
-  const offlineNow = () => signedOut || reachable === false || slow;
+  // What a read shows now, without asking the server. A copy that can't be
+  // brought up to date takes no change either, as the page would not show it.
+  const notUpdated = () => updateFailed && !signedOut && reachable !== false && !slow;
+  const offlineNow = () => signedOut || reachable === false || slow || updateFailed;
   const kept = () => {
     const copy = (savedAtMs: number) => ({
       offline: offlineNow(),
       savedAtMs,
       host,
       ...(signedOut ? { signedOut: true as const } : {}),
+      ...(notUpdated() ? { updateFailed: true as const } : {}),
     });
     if (archived)
       return {
@@ -376,6 +389,7 @@ export async function createOwnerDatasetCopy(
     const before = {
       cursor: replica.state()?.cursor,
       offline: offlineNow(),
+      updateFailed: notUpdated(),
       archived: archived !== null,
     };
     const both = AbortSignal.any([signal, lifetime.signal]);
@@ -405,6 +419,7 @@ export async function createOwnerDatasetCopy(
           if (archived) await clearArchive();
         });
       reachable = true;
+      updateFailed = false;
       failure = null;
     } catch (error) {
       if (denied) {
@@ -419,16 +434,19 @@ export async function createOwnerDatasetCopy(
         // This computer's own change took the copy past the head this update
         // captured, so the catch-up had nothing to bring in.
         reachable = true;
+        updateFailed = false;
         failure = null;
       } else if (error instanceof DatasetCopyOfflineError) reachable = false;
       else {
         // The server answered with an error, as a front whose server is down
-        // does, or the copy could not take what it sent. Only an archived
-        // Collection, whose capture the host refuses, explains it. Otherwise
-        // the copy may not be current, and asks again.
+        // does, or this computer could not write what it sent, as on a full
+        // disk. An archived Collection, whose capture the host refuses,
+        // explains it. Otherwise the server is there but the copy may not be
+        // current, so it asks again.
         try {
           await describeRemote(remote, signal, options.scope.datasetId, { includeArchived: true });
-          reachable = archived !== null;
+          reachable = true;
+          updateFailed = archived === null;
           if (archived) failure = null;
         } catch {
           if (closing || both.aborted) return;
@@ -445,10 +463,11 @@ export async function createOwnerDatasetCopy(
     }
     const shownOffline = before.offline || slow;
     slow = false;
-    if (reachable === false) scheduleRetry();
+    if (reachable === false || updateFailed) scheduleRetry();
     const cursor = replica.state()?.cursor;
     if (
-      shownOffline !== (reachable === false) ||
+      shownOffline !== offlineNow() ||
+      before.updateFailed !== notUpdated() ||
       before.archived !== (archived !== null) ||
       (before.cursor && cursor
         ? !equalRecoveryCursor(before.cursor, cursor)

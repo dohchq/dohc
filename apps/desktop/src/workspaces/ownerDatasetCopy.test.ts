@@ -10,6 +10,28 @@ import type { OwnerDatasetData } from "./remoteDataset";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
 
+// Set to make this computer's copy fail to write what the server sent, as a full disk does.
+const disk = vi.hoisted(() => ({ full: false }));
+vi.mock("@dohc/app-backend-runtime/replica", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/app-backend-runtime/replica")>();
+  return {
+    ...actual,
+    createDatasetReplica: async (...args: Parameters<typeof actual.createDatasetReplica>) => {
+      const replica = await actual.createDatasetReplica(...args);
+      return Object.assign(Object.create(replica) as typeof replica, {
+        catchUp: (...catchUp: Parameters<typeof replica.catchUp>) =>
+          disk.full
+            ? Promise.reject(
+                Object.assign(new Error("ENOSPC: no space left on device, write"), {
+                  code: "ENOSPC",
+                }),
+              )
+            : replica.catchUp(...catchUp),
+      });
+    },
+  };
+});
+
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 it("persists real owner reads across restart, catches up, and refuses offline writes and revoked access", async () => {
@@ -474,3 +496,119 @@ it.each(["delete", "status", "closing"])(
   },
   30_000,
 );
+
+it("says this computer can't update its copy, not that the server is out of reach, and recovers", async () => {
+  const f = fixture(),
+    directory = await mkdtemp(join(tmpdir(), "desktop-copy-disk-full-"));
+  const host = await f.storage.createDatasetHost({
+    publicEditRelease: undefined,
+    directory: join(directory, "host"),
+    limits,
+    onShutdownError(error) {
+      throw error;
+    },
+  });
+  const actor = { kind: "named" as const, workspaceId: "w", userId: "owner" },
+    scope = { workspaceId: "w", datasetId: id(1) };
+  const definition: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(1),
+    name: "Entries",
+    schemaPath: "schema.sql",
+    operationsPath: "actions.js",
+    tables: [
+      {
+        tableId: id(2),
+        name: "Entries",
+        sqlName: "entries",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(3),
+            name: "ID",
+            sqlColumn: "id",
+            type: "number",
+            required: true,
+            unique: true,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(5),
+        name: "seed",
+        label: "Seed",
+        kind: "create",
+        tableId: id(2),
+        access: "owner",
+        readOnly: false,
+        fieldIds: [id(3)],
+      },
+    ],
+  };
+  const schemaSql = "CREATE TABLE entries(id INTEGER PRIMARY KEY);",
+    operationSource =
+      "globalThis.operations={seed(ctx){ctx.db.execute('INSERT INTO entries DEFAULT VALUES');return null;}};";
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
+  const options = {
+    directory: join(directory, "copy"),
+    scope,
+    ownerKey: "owner",
+    origin: "https://relay",
+    assertOwner() {},
+    onChanged: () => heard?.(),
+  };
+  let heard: (() => void) | undefined;
+  const changed = () =>
+    new Promise<void>((resolve) => {
+      heard = resolve;
+    });
+  await mkdir(options.directory);
+  const copy = await createOwnerDatasetCopy(options);
+  const source: DatasetReplicaSource = {
+    capture: async () => host.replicaCapture(actor, scope),
+    page: async (input) => host.replicaPage(actor, { ...scope, ...input }),
+    blob: async (input) => host.replicaBlob(actor, { ...scope, ...input }),
+  };
+  const remote = {
+    describe: async () => host.describe(actor, scope),
+  } as unknown as OwnerDatasetData;
+  const signal = new AbortController().signal;
+  try {
+    await host.activate(actor, { workspaceId: "w", revision, schemaSql, operationSource });
+    expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
+      copy: { offline: false },
+    });
+    // A change on the server leaves the copy behind, and this computer can't write it.
+    await host.invoke(actor, {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: id(5),
+      input: {},
+      idempotencyKey: "elsewhere",
+      workspaceId: "w",
+      access: { kind: "data" },
+    });
+    disk.full = true;
+    let found = changed();
+    await copy.data(remote, source, signal).inspect!(id(1));
+    await found;
+    expect(await copy.data(remote, source, signal).inspect!(id(1))).toMatchObject({
+      copy: { offline: true, updateFailed: true },
+    });
+    disk.full = false;
+    found = changed();
+    await copy.data(remote, source, signal).inspect!(id(1));
+    await found;
+    const recovered = await copy.data(remote, source, signal).inspect!(id(1));
+    expect(recovered.copy).toMatchObject({ offline: false });
+    expect(recovered.copy).not.toHaveProperty("updateFailed");
+  } finally {
+    disk.full = false;
+    await copy.close();
+    await host.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  }
+});
