@@ -323,4 +323,54 @@ describe("Explorer, for a move main says may change who can see the item", () =>
     );
     expect(props.onError).not.toHaveBeenCalled();
   });
+
+  it("keeps a move's question when another move in the batch asks it after Not versioned", async () => {
+    const props = {
+      ...explorerProps(),
+      files: [
+        { path: "draft.md", kind: "file" as const },
+        { path: "clip.mp4", kind: "file" as const },
+      ],
+      folders: ["team"],
+    };
+    render(<Explorer {...props} />);
+    const access = (name: string) =>
+      new Error(
+        `Error invoking remote method 'desktop:move-workspace-path': AccessChangeError: Moving ${name} into team may change who can see it. People who could read it may keep a copy.`,
+      );
+    moveWorkspacePath.mockImplementation(
+      async (input: { fromPath: string; confirmNotVersioned?: boolean }) => {
+        if (input.fromPath === "draft.md") throw access("draft.md");
+        if (!input.confirmNotVersioned)
+          throw new Error(
+            "Error invoking remote method 'desktop:move-workspace-path': NotVersionedError: This change also happens in Main, because clip.mp4 isn't versioned.\nclip.mp4",
+          );
+        throw access("clip.mp4");
+      },
+    );
+    fireEvent.click(row("draft.md"));
+    fireEvent.click(row("clip.mp4"), { ctrlKey: true });
+    dragInto("draft.md", "team");
+    fireEvent.click(await screen.findByTestId("confirm-not-versioned"));
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledTimes(3));
+    const dialog = await screen.findByTestId("access-change-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Move 2 items?");
+    moveWorkspacePath.mockResolvedValue({ path: "" });
+    fireEvent.click(screen.getByTestId("confirm-access-change"));
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledTimes(5));
+    expect(moveWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      fromPath: "draft.md",
+      toPath: "team/draft.md",
+      confirmAccessChange: true,
+    });
+    expect(moveWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      fromPath: "clip.mp4",
+      toPath: "team/clip.mp4",
+      confirmNotVersioned: true,
+      confirmAccessChange: true,
+    });
+    expect(props.onError).not.toHaveBeenCalled();
+  });
 });

@@ -1348,19 +1348,30 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           });
         }
         if (accessChanged.length > 0) {
-          setAccessAsk({
-            workspaceId,
-            moves: accessChanged.map((change) => ({
-              fromPath: sourcePath(change),
-              toPath: "toPath" in change ? change.toPath : sourcePath(change),
-            })),
-            go: () =>
-              void runChangesOnce(
-                accessChanged.map((change) => ({ ...change, id: nextChangeId() })),
-                run,
-                { ...options, accessConfirmed: true },
-              ),
-          });
+          const moves = accessChanged.map((change) => ({
+            fromPath: sourcePath(change),
+            toPath: "toPath" in change ? change.toPath : sourcePath(change),
+          }));
+          const go = () =>
+            void runChangesOnce(
+              accessChanged.map((change) => ({ ...change, id: nextChangeId() })),
+              run,
+              { ...options, accessConfirmed: true },
+            );
+          // A move asked after Not versioned joins the question still waiting,
+          // so one answer runs both.
+          setAccessAsk((waiting) =>
+            waiting?.workspaceId === workspaceId
+              ? {
+                  workspaceId,
+                  moves: [...waiting.moves, ...moves],
+                  go: () => {
+                    waiting.go();
+                    go();
+                  },
+                }
+              : { workspaceId, moves, go },
+          );
         }
         // Pages live editing refused report together, with the way to Live
         // documents. Each folder it refused reports alone, so its notice keeps
@@ -3010,7 +3021,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         />
       ) : null}
 
-      {accessAsk ? (
+      {accessAsk && !askNotVersioned ? (
         <ConfirmDialog
           title={accessChangeConfirmText(accessAsk.moves).title}
           icon={FolderInput}
