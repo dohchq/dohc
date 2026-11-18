@@ -32,13 +32,44 @@ describe("GroupSettingsDialog", () => {
     const { save, onClose } = open({ level: null, memberLevel: "comment" });
     await waitFor(() => expect(checked("Can post")).toBe(true));
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
-      "Follows the member level.",
+      "Follows the member level, Comment.",
+    );
+    expect(screen.getByTestId("chats-group-access-always").textContent).toBe(
+      "The owner and admins can always read and post.",
     );
     fireEvent.click(radio("View only"));
     expect(screen.queryByTestId("chats-group-access-follows")).toBeNull();
+    expect(screen.getByTestId("chats-group-access-set").textContent).toBe("Set for this Group.");
     fireEvent.click(screen.getByTestId("chats-group-settings-save"));
     await waitFor(() => expect(save).toHaveBeenCalledWith("view"));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps following the member level when a Group with no rule comes back to it", async () => {
+    const { save, onClose } = open({ level: null, memberLevel: "edit" });
+    await waitFor(() => expect(checked("Can post")).toBe(true));
+    fireEvent.click(radio("View only"));
+    fireEvent.click(radio("Can post"));
+    expect(screen.queryByTestId("chats-group-access-follow")).toBeNull();
+    fireEvent.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
+      "Follows the member level, Edit.",
+    );
+  });
+
+  it("keeps a saved rule that matches the member level until Follow the member level", async () => {
+    const { save } = open({ level: "comment", memberLevel: "comment" });
+    await waitFor(() => expect(checked("Can post")).toBe(true));
+    expect(screen.getByTestId("chats-group-access-set").textContent).toBe("Set for this Group.");
+    fireEvent.click(radio("View only"));
+    fireEvent.click(radio("Can post"));
+    expect(screen.getByTestId("chats-group-access-set")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("chats-group-access-follow"));
+    expect(screen.getByTestId("chats-group-access-follows")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("chats-group-settings-save"));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(null));
   });
 
   it("warns before hiding the Group, and clears a rule to follow the member level", async () => {
@@ -89,15 +120,19 @@ describe("GroupSettingsDialog", () => {
     expect(checked("No access")).toBe(true);
   });
 
-  it("names the Group's folder, whose own rule its files follow, and closes to show it", async () => {
+  it("says a hidden Group's folder keeps its files as they are, and closes to show it", async () => {
     const onOpenFolder = vi.fn();
     const { onClose } = open({ level: null, memberLevel: "comment" }, undefined, {
       folderPath: "Team/Plans",
       onOpenFolder,
     });
-    const line = await screen.findByTestId("chats-group-access-folder");
-    expect(line.textContent).toBe("Files in Plans follow that folder's own access rule.");
-    fireEvent.click(screen.getByRole("button", { name: "Plans" }));
+    await waitFor(() => expect(checked("Can post")).toBe(true));
+    expect(screen.queryByTestId("chats-group-access-folder")).toBeNull();
+    fireEvent.click(radio("No access"));
+    expect(screen.getByTestId("chats-group-access-hiding").textContent).toBe(
+      "Members will no longer see Announcements. Files in Plans stay as they are.",
+    );
+    fireEvent.click(screen.getByTestId("chats-group-access-folder"));
     expect(onOpenFolder).toHaveBeenCalledWith("Team/Plans");
     expect(onClose).toHaveBeenCalled();
   });

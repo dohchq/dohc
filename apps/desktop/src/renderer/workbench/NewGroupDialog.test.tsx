@@ -95,7 +95,7 @@ describe("NewGroupDialog", () => {
     const post = await screen.findByRole("radio", { name: "Can post" });
     expect(post.getAttribute("aria-checked")).toBe("true");
     expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
-      "Follows the member level.",
+      "Follows the member level, Comment.",
     );
     fireEvent.change(nameField(), { target: { value: "Announcements" } });
     fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
@@ -118,16 +118,35 @@ describe("NewGroupDialog", () => {
     );
   });
 
-  it("turns the picker off with no connection, and has none when no one else is here", async () => {
+  it("follows the member level again when the pick comes back to it", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "view" })}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: "No access" }));
+    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    expect(screen.getByTestId("chats-group-access-follows")).toBeTruthy();
+  });
+
+  it("says members will see the Group with no connection, and has no picker until someone else is here", async () => {
     render(<NewGroupDialog onCreate={vi.fn()} access={async () => "offline"} onClose={vi.fn()} />);
     expect((await screen.findByTestId("chats-new-channel-access-offline")).textContent).toBe(
-      "Choosing access needs a connection.",
+      "Members will see this Group. Choose access in Group settings once you're connected.",
     );
-    for (const name of ["Can post", "View only", "No access"]) {
-      const radio = screen.getByRole("radio", { name }) as HTMLButtonElement;
-      expect(radio.disabled).toBe(true);
-      expect(radio.getAttribute("aria-checked")).toBe("false");
-    }
+    expect(screen.queryByRole("radio", { name: "No access" })).toBeNull();
     cleanup();
     const alone = deferred<null>();
     render(<NewGroupDialog onCreate={vi.fn()} access={() => alone.promise} onClose={vi.fn()} />);

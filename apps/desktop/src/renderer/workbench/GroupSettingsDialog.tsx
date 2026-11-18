@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import { Overlay } from "../Overlay";
 import { basenameOf } from "../path";
-import { GhostButton, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useShownAfter } from "../ui/useShownAfter";
@@ -42,48 +42,64 @@ const OPTIONS = [
 const memberChoice = (level: MemberLevel): GroupRuleLevel =>
   level === "view" ? "view" : "comment";
 
+const MEMBER_LEVEL_NAME = { view: "View", comment: "Comment", edit: "Edit" } as const;
+
 /**
- * The Members picker. A null `level` follows the member level and says so.
- * A null `memberLevel` draws the picker off with nothing chosen, as when the
- * relay can't be reached.
+ * What a pick in the Members picker sets. For a Group with no rule, picking
+ * the level the member level already gives keeps following it, so trying
+ * another level and coming back saves no rule.
  */
+export function pickedGroupLevel(
+  picked: GroupRuleLevel,
+  saved: GroupRuleLevel | null,
+  memberLevel: MemberLevel,
+): GroupRuleLevel | null {
+  return saved === null && picked === memberChoice(memberLevel) ? null : picked;
+}
+
+/** The Members picker. A null `level` follows the member level and names it. */
 export function GroupAccessPicker(props: {
   level: GroupRuleLevel | null;
-  memberLevel: MemberLevel | null;
+  memberLevel: MemberLevel;
   disabled?: boolean;
   onChange: (level: GroupRuleLevel | null) => void;
 }) {
-  const value = props.level ?? (props.memberLevel ? memberChoice(props.memberLevel) : "");
   return (
-    <>
-      <div className="flex items-center justify-between gap-3">
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <span className="text-[13px] text-ink">Members</span>
-        <SegmentedControl<GroupRuleLevel | "">
+        <SegmentedControl<GroupRuleLevel>
           label="Members"
           testId="chats-group-access-level"
-          value={value}
+          value={props.level ?? memberChoice(props.memberLevel)}
           options={OPTIONS}
-          disabled={props.disabled === true || props.memberLevel === null}
-          onChange={(level) => {
-            if (level !== "") props.onChange(level);
-          }}
+          disabled={props.disabled === true}
+          onChange={props.onChange}
         />
       </div>
-      {props.memberLevel === null ? null : props.level === null ? (
+      {props.level === null ? (
         <p data-testid="chats-group-access-follows" className="m-0 text-[12px] text-muted">
-          Follows the member level.
+          Follows the member level, {MEMBER_LEVEL_NAME[props.memberLevel]}.
         </p>
       ) : (
-        <GhostButton
-          data-testid="chats-group-access-follow"
-          disabled={props.disabled}
-          className="self-start"
-          onClick={() => props.onChange(null)}
-        >
-          Follow the member level
-        </GhostButton>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <p data-testid="chats-group-access-set" className="m-0 text-[12px] text-muted">
+            Set for this Group.
+          </p>
+          <SecondaryButton
+            size="row"
+            data-testid="chats-group-access-follow"
+            disabled={props.disabled}
+            onClick={() => props.onChange(null)}
+          >
+            Follow the member level
+          </SecondaryButton>
+        </div>
       )}
-    </>
+      <p data-testid="chats-group-access-always" className="m-0 text-[12px] text-muted">
+        The owner and admins can always read and post.
+      </p>
+    </div>
   );
 }
 
@@ -219,44 +235,50 @@ export function GroupSettingsDialog(props: {
                 memberLevel={ready.memberLevel}
                 disabled={busy}
                 onChange={(level) => {
-                  setChosen(level ?? "member");
+                  setChosen(
+                    level === null
+                      ? "member"
+                      : (pickedGroupLevel(level, ready.level, ready.memberLevel) ?? "member"),
+                  );
                   setFailure(null);
                 }}
               />
               {hiding ? (
                 <p
                   data-testid="chats-group-access-hiding"
-                  className="m-0 flex items-start gap-1.5 text-[12px] text-muted"
+                  className="m-0 flex items-start gap-2 text-[12px] text-muted"
                 >
                   <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
                   <span>
-                    Members will no longer see {props.groupName}. People who read it may keep a
-                    copy.
+                    Members will no longer see {props.groupName}.{" "}
+                    {folderName && props.folderPath ? (
+                      <>
+                        Files in{" "}
+                        {props.onOpenFolder ? (
+                          <button
+                            type="button"
+                            data-testid="chats-group-access-folder"
+                            disabled={busy}
+                            onClick={() => {
+                              props.onOpenFolder?.(props.folderPath!);
+                              props.onClose();
+                            }}
+                            className="cursor-pointer text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
+                          >
+                            {folderName}
+                          </button>
+                        ) : (
+                          <span className="text-ink">{folderName}</span>
+                        )}{" "}
+                        stay as they are.
+                      </>
+                    ) : (
+                      "People who read it may keep a copy."
+                    )}
                   </span>
                 </p>
               ) : null}
             </>
-          ) : null}
-          {folderName && props.folderPath ? (
-            <p data-testid="chats-group-access-folder" className="m-0 text-[12px] text-muted">
-              Files in{" "}
-              {props.onOpenFolder ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    props.onOpenFolder?.(props.folderPath!);
-                    props.onClose();
-                  }}
-                  className="cursor-pointer text-ink underline decoration-line underline-offset-2 hover:decoration-ink"
-                >
-                  {folderName}
-                </button>
-              ) : (
-                <span className="text-ink">{folderName}</span>
-              )}{" "}
-              follow that folder&apos;s own access rule.
-            </p>
           ) : null}
         </section>
         <div className="flex flex-col gap-3">
@@ -266,7 +288,7 @@ export function GroupSettingsDialog(props: {
               data-testid="chats-group-access-error"
               className="m-0 flex items-start gap-2 text-[12px] text-danger"
             >
-              <TriangleAlert size={14} aria-hidden className="mt-px shrink-0" />
+              <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
               {failure}
             </p>
           ) : null}
