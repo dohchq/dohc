@@ -49,6 +49,15 @@ export interface NamedChatMessage {
   lane?: "posts" | "chat";
   parentMessageId?: string | null;
   startsPost?: boolean;
+  /** Set on a deleted message's line, which keeps who wrote it and when and has no body. */
+  deletedAtMs?: number;
+}
+
+/** A delete a follow passes. The reader replaces that message's line. */
+export interface DeletedChatMessage {
+  messageId: string;
+  threadId: string;
+  deletedAtMs: number;
 }
 
 /**
@@ -130,9 +139,14 @@ export function chatMessage(value: unknown): NamedChatMessage {
       (key) => typeof value[key] === "string",
     ) ||
     (value.authorUserId !== null && typeof value.authorUserId !== "string") ||
+    (value.deletedAtMs !== undefined &&
+      (!Number.isSafeInteger(value.deletedAtMs) ||
+        value.body !== null ||
+        value.bodyTooLarge !== false)) ||
     !(
       (value.bodyTooLarge === false && typeof value.body === "string") ||
-      (value.bodyTooLarge === true && value.body === null)
+      (value.bodyTooLarge === true && value.body === null) ||
+      (value.deletedAtMs !== undefined && value.body === null)
     ) ||
     (value.authorKind !== "human" &&
       value.authorKind !== "agent" &&
@@ -174,6 +188,22 @@ export function chatMessage(value: unknown): NamedChatMessage {
           parentMessageId: typeof value.parentMessageId === "string" ? value.parentMessageId : null,
           startsPost: value.startsPost === true,
         }),
+    ...(value.deletedAtMs === undefined ? {} : { deletedAtMs: Number(value.deletedAtMs) }),
+  };
+}
+
+function deletedMessage(value: unknown): DeletedChatMessage {
+  if (
+    !record(value) ||
+    typeof value.messageId !== "string" ||
+    typeof value.threadId !== "string" ||
+    !Number.isSafeInteger(value.deletedAtMs)
+  )
+    throw invalid();
+  return {
+    messageId: value.messageId,
+    threadId: value.threadId,
+    deletedAtMs: Number(value.deletedAtMs),
   };
 }
 
@@ -276,12 +306,42 @@ export async function followNamedChat(
     limit: String(CHAT_PAGE_LIMIT),
   });
   const value = await chatRequest(`/api/named-chat/messages?${query}`, signal);
-  if (typeof value.hasMore !== "boolean") throw invalid();
+  if (typeof value.hasMore !== "boolean" || !Array.isArray(value.deleted)) throw invalid();
   return {
     messages: page(value, channel),
+    deleted: value.deleted.map(deletedMessage),
     nextCursor: cursor(value.nextCursor),
     hasMore: value.hasMore,
   };
+}
+
+/**
+ * Deletes a message: the owner or an admin any message in a Group or on a file, anyone their own.
+ * The relay answers not-found for every refusal.
+ */
+export async function deleteNamedChatMessage(
+  place: NamedChatPlace,
+  message: Pick<NamedChatMessage, "messageId" | "threadId">,
+  signal: AbortSignal,
+): Promise<DeletedChatMessage> {
+  const value = await chatRequest("/api/named-chat/messages/delete", signal, {
+    shareId: place.shareId,
+    threadId: message.threadId,
+    messageId: message.messageId,
+  });
+  const deleted = deletedMessage(value.deleted);
+  if (
+    value.shareId !== place.shareId ||
+    deleted.messageId !== message.messageId ||
+    deleted.threadId !== message.threadId
+  )
+    throw invalid();
+  return deleted;
+}
+
+/** The line a deleted message leaves. */
+export function deletedLine(message: NamedChatMessage, deletedAtMs: number): NamedChatMessage {
+  return { ...message, body: null, linkAgent: false, deletedAtMs };
 }
 
 /** Posts a message. Retrying with the same `id` and fields returns the original message. */
@@ -323,9 +383,19 @@ export function chatBodyTooLong(text: string, channel: NamedChatPlace): boolean 
 export function mergeChatMessages(
   current: readonly NamedChatMessage[],
   incoming: readonly NamedChatMessage[],
+  deleted: readonly DeletedChatMessage[] = [],
 ): NamedChatMessage[] {
   // The relay sequence is unique; a message ID can match an omission marker's `omitted:<relaySeq>`.
   const bySeq = new Map(current.map((item) => [item.relaySeq, item]));
   for (const item of incoming) bySeq.set(item.relaySeq, item);
-  return [...bySeq.values()].sort((left, right) => left.relaySeq - right.relaySeq);
+  // A delete names the message, not its coordinate: an open follow is already past it.
+  const deletedAt = new Map(
+    deleted.map((entry) => [JSON.stringify([entry.threadId, entry.messageId]), entry.deletedAtMs]),
+  );
+  return [...bySeq.values()]
+    .map((item) => {
+      const at = deletedAt.get(JSON.stringify([item.threadId, item.messageId]));
+      return at === undefined || item.deletedAtMs !== undefined ? item : deletedLine(item, at);
+    })
+    .sort((left, right) => left.relaySeq - right.relaySeq);
 }

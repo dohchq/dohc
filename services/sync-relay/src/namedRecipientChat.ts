@@ -261,7 +261,7 @@ export function createNamedRecipientChat(options: {
   resolveActor: ResolveActor;
   lookupUserDisplayName?: LogAuthorNameLookup;
   claimPendingShares(userId: string, signal?: AbortSignal): Promise<void>;
-  activity: Pick<DiscussionActivityHub, "wait">;
+  activity: Pick<DiscussionActivityHub, "wait" | "wakeLog">;
   publicOrigin: string;
   exchangeKey: string;
   limits: NamedLiveBrowserHttpLimits;
@@ -297,9 +297,11 @@ export function createNamedRecipientChat(options: {
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const channels = url.pathname === "/sync/named-chat/channels";
+    const deleting = url.pathname === "/sync/named-chat/messages/delete";
     if (
-      (!channels && url.pathname !== "/sync/named-chat/messages") ||
+      (!channels && !deleting && url.pathname !== "/sync/named-chat/messages") ||
       (request.method !== "GET" && (channels || request.method !== "POST")) ||
+      (deleting && request.method !== "POST") ||
       request.signal.aborted ||
       request.headers.get("origin") !== options.publicOrigin ||
       !verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)
@@ -357,19 +359,23 @@ export function createNamedRecipientChat(options: {
           if (!value || typeof value !== "object" || Array.isArray(value))
             throw badRequest("invalid request");
           input = value as Record<string, unknown>;
-          const allowed = new Set([
-            "shareId",
-            "channelWireId",
-            "path",
-            "id",
-            "threadId",
-            "lane",
-            "parentMessageId",
-            "body",
-            "authorKind",
-            "authorDisplayName",
-            "authorUserId",
-          ]);
+          const allowed = new Set(
+            deleting
+              ? ["shareId", "threadId", "messageId"]
+              : [
+                  "shareId",
+                  "channelWireId",
+                  "path",
+                  "id",
+                  "threadId",
+                  "lane",
+                  "parentMessageId",
+                  "body",
+                  "authorKind",
+                  "authorDisplayName",
+                  "authorUserId",
+                ],
+          );
           if (Object.keys(input).some((key) => !allowed.has(key)))
             throw relayError("share_op_rejected");
         } else {
@@ -429,6 +435,21 @@ export function createNamedRecipientChat(options: {
         };
         const authority = action("read");
         if (authority.share.workspaceId !== share.workspaceId) throw notFound();
+        // Deleting reads the account's role and reach in the workspace, not
+        // the share's level: a member at View still deletes their own message.
+        if (deleting) {
+          const deleted = storage.deleteWorkspaceMessage({
+            workspaceId: share.workspaceId,
+            threadId: parseString(input.threadId, "threadId", 512),
+            messageId: parseString(input.messageId, "messageId", 512),
+            actor: { kind: "account", userId: actor.userId },
+            nowMs: options.nowMs(),
+          });
+          if (!deleted.ok) throw notFound();
+          if (!deleted.repeated) options.activity.wakeLog(share.workspaceId);
+          const { messageId, threadId, deletedAtMs } = deleted.tombstone.payload;
+          return json({ shareId, deleted: { messageId, threadId, deletedAtMs } });
+        }
         // A workspace share reaches every ordinary Group, one follow for them all.
         // Any other share reaches one channel.
         const workspace = isWorkspaceSelector(authority.effectiveSelector);

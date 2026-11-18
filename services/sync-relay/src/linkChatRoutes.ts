@@ -45,6 +45,7 @@ export function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
     createdAtMs: message.createdAtMs,
     body: message.body,
     bodyTooLarge: message.bodyTooLarge,
+    ...(message.deletedAtMs === undefined ? {} : { deletedAtMs: message.deletedAtMs }),
   };
 }
 

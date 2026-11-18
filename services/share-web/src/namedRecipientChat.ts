@@ -26,7 +26,30 @@ function groupMessage(value: unknown): boolean {
   return message(rest);
 }
 
+const DELETED_KEYS = "deletedAtMs,messageId,relaySeq,threadId";
+
+/** A delete a page passes: the reader replaces that message's line. */
+function deletedEntry(value: unknown): boolean {
+  return (
+    record(value) &&
+    Object.keys(value).sort().join() === DELETED_KEYS &&
+    typeof value.messageId === "string" &&
+    typeof value.threadId === "string" &&
+    Number.isSafeInteger(value.deletedAtMs) &&
+    Number.isSafeInteger(value.relaySeq) &&
+    Number(value.relaySeq) > 0
+  );
+}
+
 function message(value: unknown): boolean {
+  if (!record(value)) return false;
+  // A deleted message's line keeps who wrote it and when, and has no body.
+  const { deletedAtMs, ...line } = value;
+  if (Object.hasOwn(value, "deletedAtMs")) {
+    if (!Number.isSafeInteger(deletedAtMs) || line.body !== null || line.bodyTooLarge !== false)
+      return false;
+    value = line;
+  }
   if (!record(value) || Object.keys(value).sort().join() !== MESSAGE_KEYS) return false;
   return (
     ["messageId", "threadId", "authorDisplayName"].every((key) => typeof value[key] === "string") &&
@@ -36,7 +59,8 @@ function message(value: unknown): boolean {
     (value.startsPost === false || (value.startsPost === true && value.lane === "posts")) &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) ||
-      (value.bodyTooLarge === false && typeof value.body === "string")) &&
+      (value.bodyTooLarge === false && typeof value.body === "string") ||
+      (deletedAtMs !== undefined && value.bodyTooLarge === false && value.body === null)) &&
     ["human", "agent", "automation", "link"].includes(String(value.authorKind)) &&
     (value.authorOwnerDisplayName === null || typeof value.authorOwnerDisplayName === "string") &&
     // A link holder has no account.
@@ -56,11 +80,25 @@ function resultMatches(
   write: boolean,
   following: boolean,
   everyGroup: boolean,
+  deleting: boolean,
 ): boolean {
   if (typeof value.shareId !== "string") return false;
+  if (deleting) {
+    const { deleted } = value;
+    return (
+      Object.keys(value).sort().join() === "deleted,shareId" &&
+      record(deleted) &&
+      Object.keys(deleted).sort().join() === "deletedAtMs,messageId,threadId" &&
+      typeof deleted.messageId === "string" &&
+      typeof deleted.threadId === "string" &&
+      Number.isSafeInteger(deleted.deletedAtMs)
+    );
+  }
+  const deletes = Array.isArray(value.deleted) && value.deleted.every(deletedEntry);
   if (everyGroup)
     return (
-      Object.keys(value).sort().join() === "hasMore,messages,nextCursor,shareId" &&
+      Object.keys(value).sort().join() === "deleted,hasMore,messages,nextCursor,shareId" &&
+      deletes &&
       Array.isArray(value.messages) &&
       value.messages.every(groupMessage) &&
       Number.isSafeInteger(value.nextCursor) &&
@@ -101,9 +139,10 @@ function resultMatches(
   return (
     keys(
       following
-        ? ["hasMore", "messages", "nextCursor", "shareId"]
-        : ["messages", "nextCursor", "olderCursor", "shareId"],
+        ? ["deleted", "hasMore", "messages", "nextCursor", "shareId"]
+        : ["deleted", "messages", "nextCursor", "olderCursor", "shareId"],
     ) &&
+    deletes &&
     Array.isArray(value.messages) &&
     value.messages.every(message) &&
     Number.isSafeInteger(value.nextCursor) &&
@@ -158,12 +197,18 @@ export function createNamedRecipientChatClient(options: {
     );
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url),
-      write = request.method === "POST";
+      write = request.method === "POST",
+      deleting = url.pathname === "/api/named-chat/messages/delete";
     const following = !write && url.pathname.endsWith("/messages") && url.searchParams.has("since");
     const pool = following ? followCalls : calls;
     if (
-      !["/api/named-chat/channels", "/api/named-chat/messages"].includes(url.pathname) ||
-      (request.method !== "GET" && (!write || url.pathname !== "/api/named-chat/messages")) ||
+      ![
+        "/api/named-chat/channels",
+        "/api/named-chat/messages",
+        "/api/named-chat/messages/delete",
+      ].includes(url.pathname) ||
+      (request.method !== "GET" && (!write || url.pathname === "/api/named-chat/channels")) ||
+      (deleting && !write) ||
       request.signal.aborted ||
       request.headers.get("host") !== origin.host ||
       request.headers.get("sec-fetch-site") === "cross-site" ||
@@ -249,6 +294,7 @@ export function createNamedRecipientChatClient(options: {
                 write,
                 following,
                 everyGroup,
+                deleting,
               )
             )
               return refuse();

@@ -455,6 +455,7 @@ it("passes a link holder's post through as a link post with no account, and refu
           shareId: "share",
           channelWireId: "wire",
           messages: [message],
+          deleted: [],
           nextCursor: 9,
           olderCursor: null,
         }),
