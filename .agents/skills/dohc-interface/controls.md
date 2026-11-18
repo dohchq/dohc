@@ -2,7 +2,7 @@
 
 The look: warm paper, quiet graphite, one sans for every word of the interface, serif for brand moments, and color only for meaning.
 
-Compose the controls in [`ui/controls.tsx`](../../../apps/desktop/src/renderer/ui/controls.tsx) first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, `RetryRow`, and `FieldError`. Copy their classes if you must inline one. Use the recipes below only for parts that file doesn't cover.
+Use the controls in [`ui/controls.tsx`](../../../apps/desktop/src/renderer/ui/controls.tsx) first: `PrimaryButton`, `SecondaryButton`, `GhostButton`, `DangerButton`, `IconButton`, `Pill`, `SectionLabel`, `EmptyState`, `RetryRow`, and `FieldError`. Use the recipes below only for parts that file doesn't cover.
 
 For the logo, use `DohcMark`, `DohcWordmark`, or `DohcLockup` from `packages/brand/src/DohcLogo.tsx`.
 
@@ -45,7 +45,7 @@ Danger marks something that failed or is broken. Warning marks something partly 
 | Brand moments | `font-serif`, rarely |
 | Code and Markdown source | `font-mono` |
 
-Set small text at 10, 11, 12, or 13px, never a fraction. Paths, counts, times, and shortcuts use the interface font, so give `<kbd>` `font-sans`. Never uppercase a label. Draw a path with `PathLine` from `ui/PathLine.tsx`, and cut a long name in the middle so its extension stays.
+Use 10, 11, 12, or 13px for small text, never a fraction. Paths, counts, times, and shortcuts use the interface font, so give `<kbd>` `font-sans`. Never uppercase a label. Draw a path with `PathLine` from `ui/PathLine.tsx`. Cut a long name in the middle so its extension shows.
 
 ## Radius and elevation
 
@@ -99,7 +99,7 @@ Focus shows only while the person moves with the keyboard. `keyboardNavigation.t
 
 ## Agents
 
-An agent's avatar is a rounded square. A person's is round. Shape is the cue, because people choose agent colors. Give every agent mark a text alternative, as `AgentBadge` does. A running agent shows a 6px round `bg-agent` dot.
+An agent's avatar is a rounded square. A person's is round. Shape tells them apart, because people pick agent colors. Give every agent mark a text alternative, as `AgentBadge` does. A running agent shows a 6px round `bg-agent` dot.
 
 ## Motion
 
