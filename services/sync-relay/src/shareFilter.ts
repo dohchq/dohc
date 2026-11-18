@@ -195,6 +195,11 @@ export function fileSideOf(selector: AnyShareSelector): ShareSelector | null {
   return isChatChannelSelector(selector) ? null : selector;
 }
 
+/** The file side an edit is judged against. An admin reads rule files but writes none. */
+export function fileWriteSideOf(selector: AnyShareSelector): ShareSelector | null {
+  return isWorkspaceSelector(selector) ? workspaceFileWriteReach(selector) : fileSideOf(selector);
+}
+
 // A selector with ONE chat side: a chat grant, or a group's channel. A
 // workspace share reaches many Groups; `chatSideFor` answers for one.
 export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector | null {

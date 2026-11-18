@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { pathCollisionKey } from "../pathCollisionKey";
+import { closeTestStorages, moment, testStorage } from "../testing";
 import { currentAccessRuleSet, initializeAccessRuleSchema } from "./accessRules";
 import { applyCurrentFileOp, currentFileStatements } from "./currentFiles";
 import { initializeSyncRelaySchema } from "./schema";
 import type { SqliteDb } from "./types";
+import type { StorageContext } from "./context";
+import { workspaceUsageBytes } from "./workspaces";
+
+afterAll(closeTestStorages);
 
 const { DatabaseSync } = createRequire(import.meta.url)(
   "node:sqlite",
@@ -280,4 +285,41 @@ describe("the relay's access rule index", () => {
     expect(pathCollisionKey(path)).toBe(contractCollisionKey(path));
     expect(isAccessRulePath(path)).toBe(path.endsWith("~") ? false : true);
   });
+});
+
+// The log's quota check counts the log row before the rule row exists, so the
+// batch checks again once applied.
+it("refuses a rule write whose rule row would take the workspace over its quota", async () => {
+  const storage = await testStorage(),
+    context = storage as unknown as StorageContext;
+  expect(storage.claimWorkspace({ workspaceId: "ws", ownerUserId: "owner", createdAtMs: 1 })).toBe(
+    "created",
+  );
+  const text = "members: view\n";
+  storage.putBlob({
+    workspaceId: "ws",
+    sha256: createHash("sha256").update(text).digest("hex"),
+    content: Buffer.from(text),
+    createdAtMs: 1,
+  });
+  const op = moment("Team/access.yaml", text, { payload: { payloadAfterContentKind: "text" } });
+  const payloadJson = JSON.stringify(op.payload);
+  const append = () =>
+    storage.appendLogBatch({
+      workspaceId: "ws",
+      originId: "device",
+      ops: [
+        { originSeq: op.originSeq, opKind: op.opKind, payloadJson, recordedAtMs: op.recordedAtMs },
+      ],
+    });
+  const before = workspaceUsageBytes(context, "ws");
+  // Room for the log row, not for the rule row it adds.
+  context.options.workspaceQuotaBytes = before + Buffer.byteLength(payloadJson);
+  expect(append).toThrow(/quota exceeded/);
+  expect(workspaceUsageBytes(context, "ws")).toBe(before);
+  expect(context.db.prepare("SELECT COUNT(*) AS n FROM sync_relay_access_rules").get()!.n).toBe(0);
+  context.options.workspaceQuotaBytes += "Team".length + text.length;
+  append();
+  expect(currentAccessRuleSet(context.db, "ws")).not.toBeNull();
+  expect(workspaceUsageBytes(context, "ws")).toBe(context.options.workspaceQuotaBytes);
 });

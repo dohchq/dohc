@@ -14,7 +14,7 @@ import {
 } from "./namedLiveBrowserHttp";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 import {
-  fileSideOf,
+  fileWriteSideOf,
   parseStoredAnyShareSelectorJson,
   pathVisibleThroughShare,
 } from "./shareFilter";
@@ -249,7 +249,10 @@ export function createNamedDesktopLive(options: {
               });
               if (
                 !authority.ok ||
-                !pathVisibleThroughShare(fileSideOf(authority.effectiveSelector)!, path.normalized)
+                !pathVisibleThroughShare(
+                  fileWriteSideOf(authority.effectiveSelector)!,
+                  path.normalized,
+                )
               )
                 continue;
               authorized = true;
