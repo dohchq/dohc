@@ -4713,3 +4713,63 @@ fn a_folder_with_two_rule_files_bounds_the_people_each_names() {
         assert_eq!(main_rules(&f), after, "{second}");
     }
 }
+
+/// Opus's cases from review: a Version puts two rule files in one folder,
+/// one rule nobody can read, and changes a rule above it. Written outermost
+/// first, as the desktop gives them, each state is within what Main gave
+/// before and after. But once the rule above is written, the merge's check
+/// judges the two files against what Main gives then, and either one alone
+/// shows someone more there. Planning again found no order, so Main kept
+/// the rule above alone and the merge could not finish. The planner now
+/// judges its order as the merge will, and writes the folder's files first.
+#[test]
+fn a_merge_into_a_folder_with_two_rule_files_does_not_stop_partway() {
+    const TWO_PEOPLE: &str = "people:\n  r@example.com: edit\n  p@example.com: comment\n";
+    let cases = [
+        (
+            "access.yaml",
+            "members: comment\n",
+            "members: comment\npeople:\n  p@example.com: view\n",
+            "a",
+            "members: comment\n",
+        ),
+        (
+            "q/team/access.yaml",
+            EDIT,
+            "members: comment\n",
+            "q/team/sub",
+            "people:\n  p@example.com: edit\n",
+        ),
+    ];
+    for (above, main_above, version_above, folder, upper) in cases {
+        let f = Fixture::new();
+        f.versioned_write(write(above, main_above, "m-above"))
+            .unwrap();
+        f.versioned_write(write(&format!("{folder}/doc.md"), "doc", "m-doc"))
+            .unwrap();
+        create_version(&f, "feature");
+        let (upper_rule, lower_rule) = (
+            format!("{folder}/ACCESS.yaml"),
+            format!("{folder}/access.yaml"),
+        );
+        version_write(&f, "feature", above, version_above, "v-above");
+        version_write(&f, "feature", &upper_rule, upper, "v-upper");
+        version_write(&f, "feature", &lower_rule, TWO_PEOPLE, "v-lower");
+        let order = rule_order(
+            &f,
+            "feature",
+            &[above, upper_rule.as_str(), lower_rule.as_str()],
+            &[],
+        );
+        merge_judged(&f, "feature", order, &[folder]);
+        assert_eq!(
+            main_rules(&f),
+            BTreeMap::from([
+                (above.to_owned(), version_above.to_owned()),
+                (upper_rule.clone(), upper.to_owned()),
+                (lower_rule.clone(), TWO_PEOPLE.to_owned()),
+            ]),
+            "{folder}"
+        );
+    }
+}

@@ -854,8 +854,8 @@ impl<'a> Change<'a> {
     }
 }
 
-/// The search keeps the steps a phase has taken as the bits of one word.
-/// Past this many in one group's phase, only the order given is tried.
+/// The search keeps the steps a group has taken as the bits of one word.
+/// Past this many in one group, only the order given is tried.
 const MAX_SEARCHED_RULE_STEPS: usize = 64;
 
 /// What the search found for a change of many rule files. Each list holds
@@ -896,7 +896,11 @@ enum Found {
 struct Search<'c, 'a> {
     change: &'c Change<'a>,
     steps: &'c [Step<'a>],
+    /// How many of the steps are writes. The rest are deletes.
+    writes: usize,
     work: &'c mut RuleOrderWork,
+    /// How many whole orders [`certified`] refused.
+    refused: usize,
 }
 
 impl<'a> Search<'_, 'a> {
@@ -907,12 +911,19 @@ impl<'a> Search<'_, 'a> {
             .is_some()
     }
 
-    /// An order of `phase`, indexes into the steps, from `files`, in which
-    /// every state is within bounds.
-    fn phase(&mut self, files: &RuleFiles<'a>, phase: &[usize]) -> Found {
-        if phase.len() > MAX_SEARCHED_RULE_STEPS {
+    /// An order of `group`, indexes into the steps with its writes first,
+    /// from the rules before the change. It makes every write before any
+    /// delete, every state is within bounds, and the merge's own check
+    /// accepts it at each step.
+    fn group(&mut self, group: &[usize]) -> Found {
+        let change = self.change;
+        let files = &change.start;
+        if group.len() > MAX_SEARCHED_RULE_STEPS {
+            if self.work.take(files.len()).is_none() {
+                return Found::OutOfWork;
+            }
             let mut files = files.clone();
-            for &step in phase {
+            for &step in group {
                 if !self.charge(&files, step) {
                     return Found::OutOfWork;
                 }
@@ -921,35 +932,51 @@ impl<'a> Search<'_, 'a> {
                     return Found::OutOfWork;
                 }
             }
-            return Found::Order(phase.to_vec());
+            return match certified(self.steps, &change.start, group, self.work) {
+                Some(true) => Found::Order(group.to_vec()),
+                _ => Found::OutOfWork,
+            };
         }
-        let mut order = Vec::with_capacity(phase.len());
+        let write_slots = group
+            .iter()
+            .enumerate()
+            .filter(|&(_, &step)| step < self.writes)
+            .fold(0, |done, (slot, _)| done | 1 << slot);
+        let mut order = Vec::with_capacity(group.len());
         let mut failed = BTreeSet::new();
-        match self.search(files, 0, phase, &mut failed, &mut order) {
-            Some(true) => Found::Order(order.into_iter().map(|slot| phase[slot]).collect()),
+        match self.search(files, 0, write_slots, group, &mut failed, &mut order) {
+            Some(true) => Found::Order(order.into_iter().map(|slot| group[slot]).collect()),
             Some(false) => Found::None,
             None => Found::OutOfWork,
         }
     }
 
-    /// Depth first, trying the order given first. `None` when the work ran
-    /// out before an answer.
+    /// Depth first, trying the order given first, with no delete before
+    /// every slot in `write_slots` is done. `None` when the work ran out before
+    /// an answer.
     fn search(
         &mut self,
         files: &RuleFiles<'a>,
         done: u64,
-        phase: &[usize],
+        write_slots: u64,
+        group: &[usize],
         failed: &mut BTreeSet<u64>,
         order: &mut Vec<usize>,
     ) -> Option<bool> {
-        if order.len() == phase.len() {
-            return Some(true);
+        if order.len() == group.len() {
+            self.work.take(group.len())?;
+            let order: Vec<usize> = order.iter().map(|&slot| group[slot]).collect();
+            let accepted = certified(self.steps, &self.change.start, &order, self.work)?;
+            self.refused += usize::from(!accepted);
+            return Some(accepted);
         }
         if failed.contains(&done) {
             return Some(false);
         }
-        for (slot, &step) in phase.iter().enumerate() {
-            if done & (1 << slot) != 0 {
+        let refused = self.refused;
+        for (slot, &step) in group.iter().enumerate() {
+            if done & (1 << slot) != 0 || (step >= self.writes && done & write_slots != write_slots)
+            {
                 continue;
             }
             if !self.charge(files, step) {
@@ -961,14 +988,81 @@ impl<'a> Search<'_, 'a> {
                 continue;
             }
             order.push(slot);
-            if self.search(&next, done | (1 << slot), phase, failed, order)? {
+            if self.search(&next, done | (1 << slot), write_slots, group, failed, order)? {
                 return Some(true);
             }
             order.pop();
         }
-        failed.insert(done);
+        // The steps done lead to the same rules in any order, so nothing
+        // else from them can succeed. A refused whole order also depends on
+        // the order of the steps done, so it says nothing of another order.
+        if self.refused == refused {
+            failed.insert(done);
+        }
         Some(false)
     }
+}
+
+/// Whether making `steps` in `order`, indexes into them, one at a time
+/// from `start`, keeps everyone within what `start` and the rules after give
+/// them after each one. `None` when the work runs out first.
+fn order_is_safe<'a>(
+    start: RuleFiles<'a>,
+    steps: &[Step<'a>],
+    order: &[usize],
+    work: &mut RuleOrderWork,
+) -> Option<bool> {
+    let change = Change::new(start, steps, order, work)?;
+    work.take(change.start.len())?;
+    let mut files = change.start.clone();
+    for &step in order {
+        work.take(change.cost[step] + files.len() + 1)?;
+        steps[step].apply(&mut files);
+        if !change.safe_after(&files, step) {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+/// Whether the merge's own check accepts `order`, one group of steps, at
+/// every step after the first. That check judges the steps still to make
+/// against the rules as the earlier ones left them, not against `start`, so
+/// an order within bounds from `start` can still be refused partway. The
+/// search already judged the first step's check.
+///
+/// Steps in folders apart from each other can't affect each other's reach,
+/// so the check is judged apart for each group the steps still to make fall
+/// into. A step changes only its own group's rules, so after it, only the
+/// groups its own group splits into need judging again.
+fn certified<'a>(
+    steps: &[Step<'a>],
+    start: &RuleFiles<'a>,
+    order: &[usize],
+    work: &mut RuleOrderWork,
+) -> Option<bool> {
+    let [first, rest @ ..] = order else {
+        return Some(true);
+    };
+    // One step left goes straight to the rules after.
+    if rest.len() < 2 {
+        return Some(true);
+    }
+    work.take(start.len())?;
+    let mut files = start.clone();
+    steps[*first].apply(&mut files);
+    for group in independent_groups(steps, rest, work)? {
+        if group.len() < 2 {
+            continue;
+        }
+        work.take(files.len())?;
+        if !order_is_safe(files.clone(), steps, &group, work)?
+            || !certified(steps, &files, &group, work)?
+        {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 /// The steps in `active` in groups that can't affect each other: two steps
@@ -1167,7 +1261,9 @@ fn with_steps<T>(
 
 /// An order for writing, then deleting, many rule files one at a time, in
 /// which no step gives any member more anywhere than both the rules before
-/// and the rules after give them. Each phase tries the order given first.
+/// and the rules after give them. Before each step, the merge checks the
+/// steps still to make against the rules as the earlier ones left them, and
+/// the order passes each of those checks too. It tries the order given first.
 ///
 /// `before` is every rule file before the change, and every rule file in a
 /// folder whose name folds together with a step's. Files merge between the
@@ -1231,34 +1327,19 @@ pub fn safe_rule_file_order(
         let mut search = Search {
             change: &change,
             steps: &steps,
+            writes: writes.len(),
             work,
+            refused: 0,
         };
         // Respelled folders are apart from every other step, so their writes
         // and deletes go around the others' unchanged.
         let (mut write_order, respelled_deletes) = split(&respelled);
         let mut delete_order = Vec::new();
+        // A group moves only its own folders, so it starts from the rules
+        // before the change, whatever the other groups did.
         for group in groups {
-            let (group_writes, group_deletes): (Vec<usize>, Vec<usize>) =
-                group.iter().partition(|&&step| step < writes.len());
-            // A group moves only its own folders, so it starts from the
-            // rules before the change, whatever the other groups did.
-            if search.work.take(change.start.len()).is_none() {
-                return too_many(&group);
-            }
-            let mut files = change.start.clone();
-            let written = match search.phase(&files, &group_writes) {
-                Found::Order(order) => order,
-                Found::None => {
-                    let (writes, deletes) = split(&group);
-                    return RuleFileOrder::Widens { writes, deletes };
-                }
-                Found::OutOfWork => return too_many(&group),
-            };
-            for &step in &group_writes {
-                steps[step].apply(&mut files);
-            }
-            let deleted = match search.phase(&files, &group_deletes) {
-                Found::Order(order) => order,
+            let (written, deleted) = match search.group(&group) {
+                Found::Order(order) => split(&order),
                 Found::None => {
                     let (writes, deletes) = split(&group);
                     return RuleFileOrder::Widens { writes, deletes };
@@ -1266,7 +1347,7 @@ pub fn safe_rule_file_order(
                 Found::OutOfWork => return too_many(&group),
             };
             write_order.extend(written);
-            delete_order.extend(deleted.into_iter().map(|step| step - writes.len()));
+            delete_order.extend(deleted);
         }
         delete_order.extend(respelled_deletes);
         RuleFileOrder::Safe {
@@ -1292,32 +1373,21 @@ pub fn rule_file_order_is_safe(
     }
     with_steps(before, steps, work, |start, steps, work| {
         if work.take(reading_work(&start, &steps)).is_none() {
-            return false;
+            return Some(false);
         }
         let Some((respelled, rest)) = respelled_apart(&start, &steps, folded) else {
-            return false;
+            return Some(false);
         };
         // The order given must already be the respelling order.
         let given: Vec<usize> = (0..steps.len())
             .filter(|&step| folded.contains(steps[step].path))
             .collect();
         if given != respelled {
-            return false;
+            return Some(false);
         }
-        let Some(change) = Change::new(start, &steps, &rest, work) else {
-            return false;
-        };
-        if work.take(change.start.len()).is_none() {
-            return false;
-        }
-        let mut files = change.start.clone();
-        rest.iter().all(|&step| {
-            work.take(change.cost[step] + files.len() + 1).is_some() && {
-                steps[step].apply(&mut files);
-                change.safe_after(&files, step)
-            }
-        })
+        order_is_safe(start, &steps, &rest, work)
     })
+    .flatten()
     .unwrap_or(false)
 }
 
@@ -2247,21 +2317,26 @@ mod tests {
 
     /// The steps the runtime finds in a folder another folder's name folds
     /// together with, in `states`, when there are two steps or more.
+    /// The steps the runtime's `folded_folders` finds: in a folder whose
+    /// key another folder of a path `states` hold shares. The root is a
+    /// spelling of the empty key, as `．` is.
     fn folded_steps<'a>(
         states: &[&BTreeMap<String, String>],
         steps: &[(&'a str, Option<&'a str>)],
     ) -> Vec<&'a str> {
-        let spelled: BTreeSet<&str> = states
-            .iter()
-            .flat_map(|files| files.keys())
-            .flat_map(|path| chain(access_rule_folder(path)).skip(1))
+        let spelled: BTreeSet<&str> = std::iter::once("")
+            .chain(
+                states
+                    .iter()
+                    .flat_map(|files| files.keys())
+                    .flat_map(|path| chain(access_rule_folder(path)).skip(1)),
+            )
             .collect();
         steps
             .iter()
             .filter(|(path, _)| {
                 let key = path_collision_key(access_rule_folder(path));
                 steps.len() > 1
-                    && !access_rule_folder(path).is_empty()
                     && spelled
                         .iter()
                         .filter(|other| path_collision_key(other) == key)
@@ -2596,22 +2671,217 @@ mod tests {
                     refused += 1;
                 }
             }
-            let RuleFileOrder::Safe { writes, deletes } = plan_steps(&before, &steps, &folded)
-            else {
+            let Some(made) = merged_as_the_desktop_does(&before, &steps, &folded) else {
                 continue;
             };
+            let made = made.unwrap_or_else(|why| panic!("{main:?} -> {after:?}: {why}"));
             ordered += 1;
-            let order = planned(&steps, &writes, &deletes);
-            assert_eq!(
-                widening_in_steps(&before, &order, &points),
-                None,
-                "{main:?} -> {after:?}"
+            let (start, end) = (
+                self::texts(&before),
+                self::texts(made.last().unwrap_or(&before)),
             );
+            for state in &made {
+                assert_eq!(
+                    relay_reach::widening(&start, &self::texts(state), &end, &points),
+                    None,
+                    "{main:?} -> {after:?}"
+                );
+            }
         }
         assert!(
             ordered > 300 && accepted > 500 && refused > 50,
             "{ordered} {accepted} {refused}"
         );
+    }
+
+    /// Rule files by path, with their bytes.
+    type RuleBytes = BTreeMap<String, Vec<u8>>;
+
+    /// Makes `steps` from `before` as the desktop does. It sorts them with
+    /// [`sort_rule_changes`] and plans them, then makes each one after the
+    /// merge's own check of the steps still to make, judged from the rules
+    /// as the earlier steps left them. When that check refuses, it plans
+    /// what is left again, up to three times in a row. `Ok` holds each state
+    /// it made. `Err` says why it stopped partway, or that the check refused
+    /// an order the planner gave, which nothing changed under. `None` when
+    /// the first plan is refused, before any step.
+    fn merged_as_the_desktop_does(
+        before: &RuleBytes,
+        steps: &[(&str, Option<&str>)],
+        folded: &[&str],
+    ) -> Option<Result<Vec<RuleBytes>, String>> {
+        fn plan<'a>(
+            now: &BTreeMap<String, Vec<u8>>,
+            left: &[(&'a str, Option<&'a str>)],
+            folded: &[&str],
+        ) -> Result<Vec<(&'a str, Option<&'a str>)>, RuleFileOrder> {
+            let mut left = left.to_vec();
+            sort_rule_changes(&mut left, |(path, text)| (*path, text.is_none()));
+            match plan_steps(now, &left, folded) {
+                RuleFileOrder::Safe { writes, deletes } => Ok(planned(&left, &writes, &deletes)),
+                refused => Err(refused),
+            }
+        }
+        let mut order = plan(before, steps, folded).ok()?;
+        let (mut now, mut made, mut refusals) = (before.clone(), Vec::new(), Vec::new());
+        let mut index = 0;
+        while index < order.len() {
+            if !checked(&now, &order[index..], folded) {
+                refusals.push(index);
+                if refusals.len() == 3 {
+                    return Some(Err(format!("refused three times at {:?}", order[index])));
+                }
+                match plan(&now, &order[index..], folded) {
+                    Ok(rest) => {
+                        order.truncate(index);
+                        order.extend(rest);
+                        continue;
+                    }
+                    Err(refused) => {
+                        return Some(Err(format!(
+                            "stopped partway after {:?}: {refused:?}",
+                            &order[..index]
+                        )));
+                    }
+                }
+            }
+            let (path, text) = order[index];
+            match text {
+                Some(text) => now.insert(path.to_owned(), text.as_bytes().to_vec()),
+                None => now.remove(path),
+            };
+            made.push(now.clone());
+            index += 1;
+        }
+        if !refusals.is_empty() {
+            return Some(Err(format!(
+                "the check refused the planned order at {refusals:?}"
+            )));
+        }
+        Some(Ok(made))
+    }
+
+    /// Opus's generator from review: small changes to rules in folders whose
+    /// names fold together or to other depths, many with a second rule file.
+    /// Each planned merge goes to the end as the desktop makes it. A folder
+    /// with two rule files once stopped two of these partway: the planner
+    /// judged its order from Main before the merge, and the merge's check
+    /// from Main as the earlier steps left it.
+    #[test]
+    fn generated_merges_never_stop_partway() {
+        const TEXTS: &[&str] = &[
+            "members: view\n",
+            "members: edit\n",
+            "members: comment\n",
+            "people:\n",
+            "people:\n  p@example.com: edit\n",
+            "members: comment\npeople:\n  p@example.com: view\n",
+            "members: edit\npeople:\n  r@example.com: view\n",
+            "people:\n  r@example.com: edit\n  p@example.com: comment\n",
+            "members: bogus\n",
+        ];
+        const FOLDERS: &[&str] = &[
+            "",
+            "\u{ff0e}",
+            "a",
+            "A",
+            "a.",
+            "a\u{ff0f}x",
+            "a/x",
+            "a/x/y",
+            "a\u{ff0f}x/y",
+            "a\u{ff0f}x\u{ff0f}y",
+            "\u{2105}",
+            "c",
+            "c/o",
+            "c/o/s",
+            "Team",
+            "team.",
+            "Team/sub",
+            "q",
+            "q/team",
+            "q/team/sub",
+            "Q",
+            "q\u{ff0f}team",
+        ];
+        let mut seed: u64 = 77;
+        let mut next = |bound: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap() % bound
+        };
+        // One in three rule files takes the second spelling.
+        let rule_named = |folder: &str, second: bool| {
+            if second {
+                second_rule_in(folder)
+            } else {
+                rule_in(folder)
+            }
+        };
+        let mut planned_merges = 0;
+        for _ in 0..8_000 {
+            let mut chosen: Vec<&str> = Vec::new();
+            for _ in 0..3 + next(4) {
+                let folder = FOLDERS[next(FOLDERS.len())];
+                if !chosen.contains(&folder) {
+                    chosen.push(folder);
+                }
+            }
+            let mut main: BTreeMap<String, String> = BTreeMap::new();
+            for &folder in &chosen {
+                if next(3) != 0 {
+                    let path = rule_named(folder, next(3) == 0);
+                    main.insert(path, TEXTS[next(TEXTS.len())].to_owned());
+                }
+                if next(3) == 0 && !folder.is_empty() {
+                    main.insert(format!("{folder}/doc.md"), "doc".to_owned());
+                }
+            }
+            let mut source = main.clone();
+            for _ in 0..2 + next(3) {
+                let folder = chosen[next(chosen.len())];
+                let path = rule_named(folder, next(3) == 0);
+                if source.contains_key(&path) && next(3) == 0 {
+                    source.remove(&path);
+                } else {
+                    source.insert(path, TEXTS[next(TEXTS.len())].to_owned());
+                }
+            }
+            let rules = |files: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+                files
+                    .iter()
+                    .filter(|(path, _)| is_access_rule_path(path))
+                    .map(|(path, text)| (path.clone(), text.clone()))
+                    .collect()
+            };
+            let (from, to) = (rules(&main), rules(&source));
+            let steps: Vec<(&str, Option<&str>)> = to
+                .iter()
+                .filter(|(path, text)| from.get(*path) != Some(*text))
+                .map(|(path, text)| (path.as_str(), Some(text.as_str())))
+                .chain(
+                    from.keys()
+                        .filter(|path| !to.contains_key(*path))
+                        .map(|path| (path.as_str(), None)),
+                )
+                .collect();
+            if steps.len() < 2 {
+                continue;
+            }
+            let before: BTreeMap<String, Vec<u8>> = from
+                .iter()
+                .map(|(path, text)| (path.clone(), text.as_bytes().to_vec()))
+                .collect();
+            let folded = folded_steps(&[&main, &source], &steps);
+            if let Some(made) = merged_as_the_desktop_does(&before, &steps, &folded) {
+                planned_merges += 1;
+                if let Err(why) = made {
+                    panic!("{main:?} -> {source:?}: {why}");
+                }
+            }
+        }
+        assert!(planned_merges > 3_000, "{planned_merges}");
     }
 
     fn named_people(prefix: &str, count: usize) -> String {
@@ -2692,17 +2962,21 @@ mod tests {
                 writes.push(("access.yaml", VIEW_TEXT));
             }
             let started = std::time::Instant::now();
-            let order = safe_writes(plan(&before, &writes));
+            safe_writes(plan(&before, &writes));
             eprintln!(
                 "60 folders made private, root {root}: {:?}",
                 started.elapsed()
             );
-            // The merge's own check of that order fits the allowance too.
-            let steps: Vec<(&str, Option<&str>)> = in_order(&writes, &order)
-                .into_iter()
-                .map(|(path, text)| (path, Some(text)))
+            // The merge's own check before each step fits the allowance too.
+            let steps: Vec<(&str, Option<&str>)> = writes
+                .iter()
+                .map(|&(path, text)| (path, Some(text)))
                 .collect();
-            assert!(checked(&before, &steps, &[]), "root {root}");
+            let made = merged_as_the_desktop_does(&before, &steps, &[]);
+            assert!(
+                matches!(made, Some(Ok(ref made)) if made.len() == steps.len()),
+                "root {root}"
+            );
         }
     }
 
