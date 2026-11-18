@@ -128,14 +128,15 @@ async function relay() {
     phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
     read: async () => new Map(),
   };
-  // The app backend as far as a launch reaches it. Like the real host, it serves only an app with a
-  // dataset capability whose Collection is installed here. Like the supervisor, it waits for the
-  // launch's pre-commit check after the worker returns, runs its in-commit check, and only then commits.
+  // The app backend as far as a launch reaches it. Like the real host, it serves an app with a dataset
+  // capability whose Collection is installed here, or one that requests nothing. Like the supervisor, it
+  // waits for the launch's pre-commit check after the worker returns, runs its in-commit check, and only
+  // then commits.
   const datasetHost = new Proxy(
     {},
     {
       get: (_target, key) =>
-        key === "publication"
+        key === "servedPublication"
           ? (auth: AppBackendAuth, publicationId: string) => {
               hostCalls.push(auth);
               const row = storage.readAppPublication({
@@ -145,15 +146,15 @@ async function relay() {
                 limits,
               });
               const dataset = row.candidate.capabilities[0];
-              if (dataset?.kind !== "dataset") return null;
-              if (dataset.datasetId !== capability.datasetId)
+              if (dataset && dataset.kind !== "dataset") return null;
+              if (dataset && dataset.datasetId !== capability.datasetId)
                 throw new Error("You do not have access to this Collection.");
               return {
                 authority: { principalKey: "owner", caller: { kind: "owner" } },
                 workspaceId: "trip",
-                datasetId: dataset.datasetId,
+                datasetId: dataset?.datasetId ?? null,
                 authorityRevision: row.authorityRevision,
-                capability: dataset,
+                capability: dataset ?? null,
                 candidate: row.candidate,
                 local,
               };
@@ -200,8 +201,17 @@ async function relay() {
       nowMs: 2_000,
     }).publicationId;
   const publicationId = publish();
-  // The phone can't open an app without a transactional Collection yet.
-  const staticApp = publish([]);
+  // The phone can't open an app over a document Collection yet, even before its owner approves it.
+  const collectionApp = publish([
+    {
+      kind: "collection-create",
+      collectionPath: "responses",
+      schemaSha256: "f".repeat(64),
+      allowedFields: ["name"],
+      requiredFields: ["name"],
+      readFields: ["name"],
+    },
+  ]);
   // Nor one whose Collection isn't installed on this relay.
   const strayApp = publish([{ ...capability, datasetId: "00000000-0000-4000-8000-000000000002" }]);
   const op = async (who: string, operation: string, args: unknown, workspace = "trip") => {
@@ -216,11 +226,17 @@ async function relay() {
   // Share-web, as the relay sees it: the viewer origin and the exchange key, and nobody's sign-in.
   const shareWeb = (
     path: string,
-    init: { body?: unknown; launchId?: string; stream?: ReadableStream<Uint8Array> } = {},
+    init: {
+      body?: unknown;
+      launchId?: string;
+      stream?: ReadableStream<Uint8Array>;
+      app?: string;
+    } = {},
   ) => {
     const post = init.body !== undefined || init.stream !== undefined;
+    const app = init.app ?? publicationId;
     return h(
-      new Request(`http://relay.test/sync/trip/app-publications/${publicationId}/backend/${path}`, {
+      new Request(`http://relay.test/sync/trip/app-publications/${app}/backend/${path}`, {
         method: post ? "POST" : "GET",
         headers: {
           origin: SHARE_WEB_ORIGIN,
@@ -233,28 +249,30 @@ async function relay() {
       } as RequestInit),
     );
   };
-  const approve = (revision = 1) =>
-    op("phone:ana", "appApprove", { publicationId, authorityRevision: revision });
-  const grantFor = async (revision = 1) =>
-    (await op("phone:ana", "appLaunch", { publicationId, authorityRevision: revision })).body.result
-      .grant;
-  const redeem = async (grantValue: string) => {
+  const approve = (revision = 1, app = publicationId) =>
+    op("phone:ana", "appApprove", { publicationId: app, authorityRevision: revision });
+  const grantFor = async (revision = 1, app = publicationId) =>
+    (await op("phone:ana", "appLaunch", { publicationId: app, authorityRevision: revision })).body
+      .result.grant;
+  const redeem = async (grantValue: string, app = publicationId) => {
     const response = await shareWeb("redeem", {
       body: { grant: grantValue, launchHost: `${"a".repeat(48)}.apps.test` },
+      app,
     });
     return response.ok ? ((await response.json()) as { launchId: string }).launchId : null;
   };
-  const launch = async () => {
-    await approve();
-    return (await redeem(await grantFor()))!;
+  const launch = async (app = publicationId) => {
+    await approve(1, app);
+    return (await redeem(await grantFor(1, app), app))!;
   };
-  const descriptor = async (launchId: string) =>
-    (await shareWeb("descriptor", { launchId })).status;
+  const descriptor = async (launchId: string, app = publicationId) =>
+    (await shareWeb("descriptor", { launchId, app })).status;
   return {
     h,
     storage,
     publicationId,
-    staticApp,
+    publish,
+    collectionApp,
     strayApp,
     op,
     shareWeb,
@@ -324,9 +342,9 @@ it("lists, reviews and shows the source of the owner's published apps, and nothi
   const unpublished = { publicationId: "b".repeat(64) };
   const notFound = await r.op("phone:ana", "appReview", unpublished);
   expect(notFound.status).toBe(404);
-  // An app with no transactional Collection, and one whose Collection isn't installed on this relay,
-  // are left out of the catalog above and refused like a missing one.
-  for (const publicationId of [r.staticApp, r.strayApp])
+  // An app over a document Collection, and one whose Collection isn't installed on this relay, are
+  // left out of the catalog above and refused like a missing one.
+  for (const publicationId of [r.collectionApp, r.strayApp])
     for (const [operation, args] of [
       ["appReview", { publicationId }],
       ["appSource", { publicationId, path: "docs/app/index.ts" }],
@@ -352,6 +370,61 @@ it("lists, reviews and shows the source of the owner's published apps, and nothi
     ["appSource", { publicationId: r.publicationId, path: "docs/app/index.ts" }],
   ] as const)
     expect((await r.op("phone:ana", operation, args)).status, operation).toBe(404);
+});
+
+it("lists and launches an app that requests nothing in the workspace, and serves it only its files", async () => {
+  const r = await relay();
+  const app = r.publish([]);
+  const listed = (await r.op("phone:ana", "apps", {})).body.result.apps;
+  expect(listed).toHaveLength(2);
+  expect(listed).toContainEqual({
+    publicationId: app,
+    authorityRevision: 1,
+    appRoot: "docs/app",
+    sourceRevision: "1".repeat(64),
+    approved: false,
+  });
+  expect((await r.op("phone:ana", "appReview", { publicationId: app })).body.result).toMatchObject({
+    authorityRevision: 1,
+    capabilities: [],
+    approval: null,
+  });
+  const launchId = await r.launch(app);
+  const described = await r.shareWeb("descriptor", { launchId, app });
+  expect(described.status).toBe(200);
+  expect(await described.json()).toEqual({
+    publicationId: app,
+    authorityRevision: 1,
+    files: [expect.objectContaining({ path: "bundle.js", sha256: digest(source) })],
+  });
+  const blob = (revision: number) =>
+    r.shareWeb(`blobs/${digest(source)}?authorityRevision=${revision}`, { launchId, app });
+  const bytes = await blob(1);
+  expect(bytes.status).toBe(200);
+  expect(Buffer.from(await bytes.arrayBuffer())).toEqual(source);
+  expect((await blob(2)).status).toBe(404);
+  // It has no dataset, so no backend operation reaches anything.
+  for (const action of ["invoke", "upload", "file", "attempt"])
+    expect((await r.shareWeb(action, { launchId, app, body: invokeBody })).status, action).toBe(
+      404,
+    );
+  expect(r.commits()).toBe(0);
+  // Another account can't see it.
+  expect((await r.op("phone:bob", "appReview", { publicationId: app })).status).toBe(404);
+  // Nor can the phone while the workspace is hidden from it.
+  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
+  expect(await r.descriptor(launchId, app)).toBe(404);
+  r.storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: true });
+  expect(await r.descriptor(launchId, app)).toBe(200);
+  // Nor once the operator takes it down.
+  r.storage.disableAppPublication({
+    publicationId: app,
+    reason: "Confirmed malware",
+    nowMs: 3_000,
+  });
+  expect(await r.descriptor(launchId, app)).toBe(404);
+  expect((await r.op("phone:ana", "appReview", { publicationId: app })).status).toBe(404);
+  expect((await r.op("phone:ana", "apps", {})).body.result.apps).toHaveLength(1);
 });
 
 it("takes approval only from a phone, for one revision, and needs it again after a change", async () => {

@@ -881,16 +881,18 @@ export function createDatasetAppRoutes(
     /** A phone launch: only a publication runs, never an app approved on a computer. */
     publishedOnly = false,
   ): Promise<Response> => {
-    const published = host.publication(auth, route.publicationId);
+    const published = host.servedPublication(auth, route.publicationId);
+    const get =
+      route.action === "descriptor" || route.action === "summary" || route.action === "blob";
     if (
       !published ||
       (!options.publications && !published.local) ||
-      (publishedOnly && published.local)
+      (publishedOnly && published.local) ||
+      // An app with no dataset serves only its files.
+      (!published.capability && !get)
     )
       throw notFound();
     const { authority, workspaceId, datasetId, authorityRevision, capability } = published;
-    const get =
-      route.action === "descriptor" || route.action === "summary" || route.action === "blob";
     const signal = AbortSignal.any([
       request.signal,
       storage.unavailable,
@@ -911,7 +913,11 @@ export function createDatasetAppRoutes(
     try {
       release = admit(
         {
-          dataset: JSON.stringify([workspaceId, datasetId]),
+          dataset: JSON.stringify(
+            datasetId === null
+              ? [workspaceId, null, route.publicationId]
+              : [workspaceId, datasetId],
+          ),
           participant: authority.principalKey,
           ...(authority.caller.kind === "link"
             ? { link: JSON.stringify([workspaceId, authority.caller.grantId]) }
@@ -960,7 +966,7 @@ export function createDatasetAppRoutes(
           const sharerName =
             (await options.shareSenderLabel?.(share.granterUserId).catch(() => null)) ?? null;
           signal.throwIfAborted();
-          const current = host.publication(auth, route.publicationId);
+          const current = host.servedPublication(auth, route.publicationId);
           if (!current || current.authority.caller.kind !== "named") throw notFound();
           return {
             ...storage.getShareLabels(grant.shareId, "member"),
@@ -976,6 +982,7 @@ export function createDatasetAppRoutes(
             files: published.candidate.files,
           };
         }
+        if (!capability || datasetId === null) throw notFound();
         if (route.action === "attempt") {
           const body = record(
             raw,

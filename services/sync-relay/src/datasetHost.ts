@@ -528,6 +528,23 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       local,
     };
   }
+  // The app whose files a named caller may load: a dataset app, or a publication that requests nothing in the
+  // workspace and so has no dataset. Null for any other app.
+  function servedPublication(auth: AppBackendAuth, publicationId: string) {
+    const dataset = publication(auth, publicationId);
+    if (dataset || auth.kind !== "named") return dataset;
+    const { candidate, authorityRevision, authority } = namedPublication(auth, publicationId);
+    if (candidate.capabilities.length) return null;
+    return {
+      workspaceId: auth.workspaceId,
+      datasetId: null,
+      authorityRevision,
+      capability: null,
+      authority,
+      candidate,
+      local: false,
+    };
+  }
   try {
     const recoveryDirectory = join(options.directory, "recovery");
     await mkdir(recoveryDirectory, { recursive: true });
@@ -916,6 +933,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       history: host.history,
       historyRevision: host.historyRevision,
       publication,
+      servedPublication,
       requireCollectionFile,
       lifecycle: host.lifecycle,
       archiveDataset: host.archiveDataset,

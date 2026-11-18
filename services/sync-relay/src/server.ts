@@ -485,7 +485,7 @@ export function createSyncRelayHandler({
     endShareWebLaunches: endShareWebAppLaunches,
     // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
     servable(userId, workspaceId, publicationId) {
-      const published = datasetHost?.publication(
+      const published = datasetHost?.servedPublication(
         { kind: "named", workspaceId, userId },
         publicationId,
       );

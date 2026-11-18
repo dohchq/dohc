@@ -26,6 +26,8 @@ export const appWords = {
   publishedByAgent: "Published by an agent",
 
   reach: "What it can reach",
+  /** An app that requests nothing in the workspace. It may still reach other websites. */
+  reachesNothing: "Nothing in this workspace.",
   readsRecords: "Reads records",
   changesRecords: "Can change records",
   fields: (names: string) => `Fields: ${names}`,
