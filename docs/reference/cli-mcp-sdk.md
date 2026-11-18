@@ -409,13 +409,13 @@ Returns `{ ok: true, path, keptEdits, already?: true } | { ok: false, reason }`.
 
 ### `dohc_resume_live_editing`
 
-Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.
+Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. `ended: true` means its file was moved, deleted or replaced: the server's pause of it ended and live editing stays off. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 
-Returns `{ ok: true, path, already?: true } | { ok: false, reason }`.
+Returns `{ ok: true, path, already?: true, ended?: true } | { ok: false, reason }`.
 
 ### `dohc_list_retained_copies`
 
@@ -1291,7 +1291,7 @@ Resume live editing for a document, as Resume does in Live documents.
 
 Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it. already is true when the document was already live. Then dohc records no one. Run live again to follow it: preparing until the server starts the document, then ready.
 
-With `--json`, prints `{ schemaVersion, ok: true, path, already?: true }`.
+With `--json`, prints `{ schemaVersion, ok: true, path, already?: true, ended?: true }`.
 
 #### `dohc document outside-changes`
 
