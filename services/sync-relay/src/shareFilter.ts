@@ -1385,7 +1385,6 @@ export function filterOpForShareAppend(
   if (opKind === "chat.decision.set" && !decisionPollFieldsValid(payload)) {
     return { allowed: false };
   }
-  // Only the owner's devices and the relay create General and agent chats.
   const channelId = asRecord(payload)?.channelId;
   if (
     opKind === "chat.channel.create" &&

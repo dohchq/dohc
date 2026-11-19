@@ -3053,7 +3053,6 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let slug = channel_slug_for_name(GENERAL_CHANNEL_NAME);
         let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
-            // A General from another computer can sit on another slug.
             let existing = match channel_by_slug(tx, &ws, &slug)? {
                 Some(existing) => Some(existing),
                 None => channel_by_id(tx, &ws, GENERAL_CHANNEL_ID)?,

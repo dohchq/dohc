@@ -149,9 +149,6 @@ function snapshotObject(
 type ChatCreatePayload = { channelId?: unknown; wireId?: unknown; kind?: unknown };
 const CHAT_CREATES = `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'`;
 
-// A chat's wire id and kind, from the first create of its wire. A share member
-// or link holder can push a create of a granted wire under any id, and that
-// create never names a chat, so the walk leaves those rows out.
 function chatCreate(
   storage: StorageContext,
   workspaceId: string,

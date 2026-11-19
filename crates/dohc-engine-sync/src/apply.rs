@@ -1034,7 +1034,6 @@ fn apply_channel(
 ) -> Result<(), SyncError> {
     let channel_id = normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
         .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
-    // Only the chat a well-known wire id names may hold its fixed channel id.
     if channel_id != payload.channel_id
         || channel_id == GENERAL_CHANNEL_WIRE_ID
         || agent_id_for_channel_wire_id(&channel_id).is_some()
@@ -1623,7 +1622,6 @@ fn resolve_or_create_placeholder(
         .ok_or(SyncError::InvalidInput {
             reason: "channel thread lacks an identity",
         })?;
-    // General and an agent's chat wait under the id every computer gives them.
     let channel_id = payload
         .channel_wire_id
         .as_deref()
