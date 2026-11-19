@@ -449,16 +449,47 @@ it("keeps a mark key for one account's notice, so it never stops another account
   expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(3);
 });
 
-it("drops a mark key with its row, and keeps each person's newest keys", async () => {
+it("keeps a mark key when its row goes or was never there, so a notice posted again under its ID ignores the resend", async () => {
   const f = await relay();
-  f.post("n-1");
-  await ok(f.phone({ marks: [{ noticeId: "n-1", mark: "dismissed", key: "k" }] }));
-  expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(1);
-  f.advance(NOTICE_DISMISSED_RETENTION_MS);
-  f.post("n-2");
-  expect(f.row("n-1")).toBeUndefined();
-  expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(0);
+  f.post("swept");
+  await ok(
+    f.phone({
+      marks: [
+        { noticeId: "swept", mark: "read", key: "read-1" },
+        { noticeId: "later", mark: "restore", key: "restore-1" },
+      ],
+    }),
+  );
+  f.advance(
+    Math.max(NOTICE_DISMISSED_RETENTION_MS, NOTICE_READ_RETENTION_MS, NOTICE_UNREAD_RETENTION_MS),
+  );
+  f.post("other");
+  expect(f.row("swept")).toBeUndefined();
+  f.post("swept");
+  f.post("later");
+  await ok(f.computer({ marks: [{ noticeId: "later", mark: "dismissed" }] }));
+  const rows = [f.row("swept"), f.row("later")];
+  expect(rows).toMatchObject([{ readAtMs: null }, { dismissedAtMs: f.now() }]);
+  const head = f.storage.noticeHead("ana");
 
+  f.advance(1_000);
+  expect(
+    await ok(
+      f.phone({
+        marks: [
+          { noticeId: "swept", mark: "read", key: "read-1" },
+          { noticeId: "later", mark: "restore", key: "restore-1" },
+        ],
+      }),
+    ),
+  ).toEqual({ ok: true, dismissed: [], repeated: ["read-1", "restore-1"] });
+  expect(f.storage.noticeHead("ana")).toBe(head);
+  expect([f.row("swept"), f.row("later")]).toEqual(rows);
+});
+
+it("keeps each person's newest mark keys", async () => {
+  const f = await relay();
+  f.post("n-2");
   const marks = Array.from({ length: NOTICE_MARK_KEYS_KEPT + 1 }, (_, index) => ({
     noticeId: "n-2",
     mark: index % 2 === 0 ? ("read" as const) : ("unread" as const),
