@@ -96,7 +96,7 @@ function fixture() {
     ) => pause([]),
   );
   const errors: unknown[] = [];
-  const tried = new Map<string, Uint8Array | null>();
+  const tried = new Map<string, { objectId: string; state: Uint8Array | null }>();
   const settle = (
     pauses = [pause],
     options: { listed?: boolean; previous?: OwnerLivePause[] } = {},
@@ -234,8 +234,8 @@ describe("settleOwnerLivePauses", () => {
     expect(f.errors).toEqual([]);
   });
 
-  it("keeps the owner's typing during the pause for the next pass when the copy can't be written", async () => {
-    const f = fixture();
+  /** The owner types ", still typing" while the note pauses, and the copy shows its text. */
+  const typeDuringPause = (f: ReturnType<typeof fixture>) => {
     f.leaveLiveEditing.mockImplementationOnce(async (_path, run, late) => {
       const left = await run([]);
       const editor = new Y.Doc();
@@ -244,12 +244,17 @@ describe("settleOwnerLivePauses", () => {
       late(Y.encodeStateAsUpdate(editor));
       return left;
     });
-    const asText = async (state: Uint8Array) => {
+    f.render.mockImplementation(async (state: Uint8Array) => {
       const doc = new Y.Doc();
       Y.applyUpdate(doc, state);
       return { markdown: doc.getText("t").toString(), leftOut: false };
-    };
-    f.render.mockRejectedValueOnce(new Error("render failed")).mockImplementation(asText);
+    });
+  };
+
+  it("keeps the owner's typing during the pause for the next pass when the copy can't be written", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    f.render.mockRejectedValueOnce(new Error("render failed"));
     expect(await f.settle()).toEqual([]);
     expect(f.errors).toHaveLength(1);
     expect(f.relay.copyWritten).not.toHaveBeenCalled();
@@ -257,6 +262,33 @@ describe("settleOwnerLivePauses", () => {
     expect(f.client.ownerYDocPause).toHaveBeenCalledOnce();
     expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
     expect(f.relay.copyWritten).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the owner's typing during the pause for the next pass when the engine fails after pausing", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    f.client.ownerYDocPausedCopy
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("engine busy"));
+    expect(await f.settle()).toEqual([]);
+    expect(f.errors).toHaveLength(1);
+    await f.settle();
+    expect(f.client.ownerYDocPause).toHaveBeenCalledOnce();
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
+    expect(f.relay.copyWritten).toHaveBeenCalledOnce();
+  });
+
+  it("writes the owner's typing during the pause into the copy when the pause then ended elsewhere", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    f.client.ownerYDocPausedCopy
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("engine busy"));
+    await f.settle();
+    // Another computer resumed the note before this one wrote the copy.
+    expect(await f.settle([])).toEqual([]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
+    expect(f.client.ownerYDocStopClear).toHaveBeenCalledOnce();
   });
 
   it("writes one copy when the pause was made but its answer failed", async () => {

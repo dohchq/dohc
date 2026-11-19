@@ -326,7 +326,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   // Notes the server paused for good that this computer holds as paused, from each
   // workspace's last complete read. They take no room until their owner resumes them.
   const ownerLivePauses = new Map<string, OwnerLivePause[]>();
-  const ownerLivePausesTried = new Map<string, Uint8Array | null>();
+  const ownerLivePausesTried = new Map<string, { objectId: string; state: Uint8Array | null }>();
   // Counts each workspace's Resumes, so a pass that read the pauses before one keeps its answer to itself.
   const ownerLivePauseResumes = new Map<string, number>();
   // A note the server paused takes no room and no delivery turn until its owner resumes it.

@@ -123,9 +123,10 @@ export async function settleOwnerLivePauses(input: {
   writes: OwnerLivePauseWrites;
   /**
    * The pauses this desktop has asked the engine to make and not yet settled,
-   * each with the state to write its copy from when the owner typed during it.
+   * each with its note and, when the owner typed during it and its copy is
+   * not yet written, the state to write the copy from.
    */
-  tried: Map<string, Uint8Array | null>;
+  tried: Map<string, { objectId: string; state: Uint8Array | null }>;
   /**
    * Runs `pause` between the edits of the editors open on the note at `path`,
    * given the edits they have not sent. Once it succeeds, they show the note.
@@ -143,18 +144,31 @@ export async function settleOwnerLivePauses(input: {
   onError(pause: RelayLivePause, error: unknown): void;
 }): Promise<OwnerLivePause[]> {
   const request = () => ({ id: 0, workspace: input.workspaceHandle, deadlineMs: 30_000 });
-  /** Writes a held Stop's copy, or `text` in its place, next to `near` and records it. */
+  /**
+   * Writes a held Stop's copy next to `near` and records it. The owner's typing
+   * during its pause never reached the engine, so it joins the copy here.
+   */
   const writeHeld = async (
     held: NonNullable<Awaited<ReturnType<EngineClient["ownerYDocPausedCopy"]>>>,
     near: string,
-    text = held.bytes?.toString("utf8") ?? "",
   ) => {
+    const objectId = held.stop.document.objectId;
+    const late = [...input.tried.values()].find((t) => t.objectId === objectId && t.state)?.state;
+    const withLate = late ? await input.render(late) : null;
     const path = (await input.writes.exists(held.stop.paused.copyPath))
       ? await freeName(near, input.writes)
       : held.stop.paused.copyPath;
-    const written = await input.writes.create(path, text);
-    return (await input.client.ownerYDocPausedCopyWritten(request(), held.stop.document, written))
-      .paused;
+    const written = await input.writes.create(
+      path,
+      withLate?.markdown ?? held.bytes?.toString("utf8") ?? "",
+    );
+    const { paused } = await input.client.ownerYDocPausedCopyWritten(
+      request(),
+      held.stop.document,
+      written,
+    );
+    for (const t of input.tried.values()) if (t.objectId === objectId) t.state = null;
+    return withLate?.leftOut ? { ...paused, leftOut: true } : paused;
   };
   const settled: OwnerLivePause[] = [];
   for (const pause of input.pauses) {
@@ -174,7 +188,8 @@ export async function settleOwnerLivePauses(input: {
       if (!held && listed && pause.copy) {
         const roomCopy = await relayCopy(input.relay, pause, input.signal);
         const copyPath = await freeName(pause.path, input.writes);
-        input.tried.set(pause.pauseId, null);
+        const tried = { objectId: pause.objectId, state: null as Uint8Array | null };
+        input.tried.set(pause.pauseId, tried);
         let paused = roomCopy;
         const late: Uint8Array[] = [];
         // The owner's open editor waits while the note pauses, so the copy takes
@@ -195,23 +210,22 @@ export async function settleOwnerLivePauses(input: {
               input.signal,
             );
           },
-          (edits) => late.push(edits),
+          // Kept until the copy is written, on this pass or a later one.
+          (edits) => {
+            late.push(edits);
+            tried.state = Y.mergeUpdates([paused, ...late]);
+          },
         );
         held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
         if (!held) throw new Error("The paused note's copy is missing.");
         joined = true;
-        // Typing during the pause never reached the engine, so it joins the copy
-        // here, on this pass or the next if writing the copy fails.
-        if (late.length > 0) input.tried.set(pause.pauseId, Y.mergeUpdates([paused, ...late]));
       }
       // Only a copy written for this pause names it. A held Stop may be an earlier pause's.
       let copy: { copyPath: string | null; leftOut: boolean } | null =
         input.previous.find((told) => told.pauseId === pause.pauseId) ?? null;
       if (held && !held.stop.paused.copyWritten) {
-        const lateState = joined ? input.tried.get(pause.pauseId) : null;
-        const withLate = lateState ? await input.render(lateState) : null;
-        const written = await writeHeld(held, pause.path, withLate?.markdown);
-        if (joined) copy = withLate?.leftOut ? { ...written, leftOut: true } : written;
+        const written = await writeHeld(held, pause.path);
+        if (joined) copy = written;
       }
       if (pause.copy && !joined) {
         const file = await input.render(await relayCopy(input.relay, pause, input.signal));
