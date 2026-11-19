@@ -792,8 +792,6 @@ it.each(["access ended", "stopped", "paused"] as const)(
   },
 );
 
-// Proves: after a Stop, the owner's save replaces the host's last save when both were made from the
-// same file, and every other save, push, or Pause keeps the stored file's check.
 const last = blob("last save"),
   owner = blob("owner save"),
   second = blob("second computer save");

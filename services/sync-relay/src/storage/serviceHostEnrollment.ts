@@ -507,7 +507,6 @@ export function readServiceHostEnrollmentByObjectId(
     .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
   return value ? row(value) : null;
 }
-/** Whether the owner's save replaces the last save of the note's host after a Stop, both made from the same file. */
 export function isOwnerSaveOfStoppedNote(
   storage: StorageContext,
   input: { workspaceId: string; userId: string; payloadJson: string },
