@@ -9,41 +9,44 @@ export function isWellFormedUtf16(value: string): boolean {
     : !ILL_FORMED_UTF16_PATTERN.test(value);
 }
 
-function jsonWellFormed(value: unknown): boolean {
-  if (typeof value === "string") return isWellFormedUtf16(value);
-  if (Array.isArray(value)) return value.every(jsonWellFormed);
-  if (value !== null && typeof value === "object")
-    return Object.entries(value).every(
-      ([key, item]) => isWellFormedUtf16(key) && jsonWellFormed(item),
-    );
-  return true;
-}
-
-function contentWellFormed(content: Y.Item["content"]): boolean {
-  if (content instanceof Y.ContentString) return isWellFormedUtf16(content.str);
-  if (content instanceof Y.ContentFormat)
-    return isWellFormedUtf16(content.key) && jsonWellFormed(content.value);
-  if (content instanceof Y.ContentEmbed) return jsonWellFormed(content.embed);
-  if (content instanceof Y.ContentAny || content instanceof Y.ContentJSON)
-    return jsonWellFormed(content.arr);
-  if (content instanceof Y.ContentType) {
-    const type = content.type;
-    if (type instanceof Y.XmlElement) return isWellFormedUtf16(type.nodeName);
-    if (type instanceof Y.XmlHook) return isWellFormedUtf16(type.hookName);
-  }
-  return true;
-}
+const REPLACEMENT = "�";
 
 function replacements(value: string): number {
   let count = 0;
-  for (let at = value.indexOf("�"); at !== -1; at = value.indexOf("�", at + 1)) count += 1;
+  for (let at = value.indexOf(REPLACEMENT); at !== -1; at = value.indexOf(REPLACEMENT, at + 1))
+    count += 1;
   return count;
+}
+
+function visitJsonStrings(value: unknown, visit: (value: string) => void): void {
+  if (typeof value === "string") visit(value);
+  else if (Array.isArray(value)) for (const item of value) visitJsonStrings(item, visit);
+  else if (value !== null && typeof value === "object")
+    for (const [key, item] of Object.entries(value)) {
+      visit(key);
+      visitJsonStrings(item, visit);
+    }
+}
+
+function visitValueStrings(item: Y.Item, visit: (value: string) => void): void {
+  if (item.parentSub !== null) visit(item.parentSub);
+  const content = item.content;
+  if (content instanceof Y.ContentFormat) {
+    visit(content.key);
+    visitJsonStrings(content.value, visit);
+  } else if (content instanceof Y.ContentEmbed) visitJsonStrings(content.embed, visit);
+  else if (content instanceof Y.ContentAny || content instanceof Y.ContentJSON)
+    visitJsonStrings(content.arr, visit);
+  else if (content instanceof Y.ContentType) {
+    const type = content.type;
+    if (type instanceof Y.XmlElement) visit(type.nodeName);
+    else if (type instanceof Y.XmlHook) visit(type.hookName);
+  }
 }
 
 type SharedType = Y.AbstractType<Y.YEvent<any>>;
 
-/** U+FFFD in a type's own live text, where Yjs leaves one for each half of a split surrogate pair. */
-function liveReplacements(type: SharedType): number {
+function liveTextReplacements(type: SharedType): number {
   let count = 0;
   for (let item = type._start; item !== null; item = item.right)
     if (!item.deleted && item.content instanceof Y.ContentString)
@@ -53,23 +56,25 @@ function liveReplacements(type: SharedType): number {
 
 export interface Utf16Verdict {
   readonly illFormed: boolean;
-  /** U+FFFD the transaction added without inserting it, as a split surrogate pair leaves. */
+  /** U+FFFD the transaction added, as a split surrogate pair leaves in text. */
   readonly newReplacement: boolean;
 }
 
-/** Checks each transaction's UTF-16 from what it inserted, deleted and touched, never the whole note. */
+/** Checks each transaction's UTF-16 from what it inserted, deleted and split, never the whole note. */
 export class Utf16Ledger {
-  private readonly counts = new WeakMap<SharedType, number>();
+  private readonly textReplacements = new WeakMap<SharedType, number>();
   private readonly verdicts = new WeakMap<Y.Transaction, Utf16Verdict>();
-  private roots: number;
+  private readonly rootNames = new Set<string>();
+  private illFormedRoot = false;
 
   constructor(private readonly doc: Y.Doc) {
-    for (const type of doc.share.values()) this.counts.set(type, liveReplacements(type));
+    this.readRootNames();
+    for (const type of doc.share.values())
+      this.textReplacements.set(type, liveTextReplacements(type));
     for (const structs of doc.store.clients.values())
       for (const struct of structs)
         if (struct instanceof Y.Item && !struct.deleted && struct.content instanceof Y.ContentType)
-          this.counts.set(struct.content.type, liveReplacements(struct.content.type));
-    this.roots = doc.share.size;
+          this.textReplacements.set(struct.content.type, liveTextReplacements(struct.content.type));
     doc.on("afterTransaction", this.observe);
   }
 
@@ -84,45 +89,74 @@ export class Utf16Ledger {
     return verdict;
   }
 
+  private readRootNames(): number {
+    let added = 0;
+    for (const name of this.doc.share.keys()) {
+      if (this.rootNames.has(name)) continue;
+      this.rootNames.add(name);
+      if (!isWellFormedUtf16(name)) this.illFormedRoot = true;
+      added += replacements(name);
+    }
+    return added;
+  }
+
   // Runs before Yjs collects deleted content, so a deleted string still holds its text.
   private readonly observe = (transaction: Y.Transaction): void => {
-    let illFormed = false;
-    if (this.doc.share.size !== this.roots) {
-      this.roots = this.doc.share.size;
-      for (const [name, type] of this.doc.share) {
-        if (!isWellFormedUtf16(name)) illFormed = true;
-        if (!this.counts.has(type)) this.counts.set(type, 0);
-      }
-    }
-    const touched = new Set<SharedType>(transaction.changed.keys());
+    const added = this.doc.share.size === this.rootNames.size ? 0 : this.readRootNames();
+    let illFormed = this.illFormedRoot;
+    const net = new Map<SharedType, number>();
+    const deletedText = new Map<SharedType, number>();
+    const recount = new Set<SharedType>();
+    const tally = (counts: Map<SharedType, number>, type: SharedType, count: number) => {
+      if (count !== 0) counts.set(type, (counts.get(type) ?? 0) + count);
+    };
     transaction.afterState.forEach((after, client) => {
       const before = transaction.beforeState.get(client) ?? 0;
       if (after === before) return;
       const structs = this.doc.store.clients.get(client)!;
       for (let index = Y.findIndexSS(structs, before); index < structs.length; index += 1) {
         const struct = structs[index]!;
-        if (!(struct instanceof Y.Item)) continue;
-        if (struct.parentSub !== null && !isWellFormedUtf16(struct.parentSub)) illFormed = true;
-        if (!contentWellFormed(struct.content)) illFormed = true;
-        touched.add(struct.parent as SharedType);
-        if (struct.content instanceof Y.ContentType) touched.add(struct.content.type);
+        if (!(struct instanceof Y.Item) || struct.deleted) continue;
+        const parent = struct.parent as SharedType;
+        if (struct.content instanceof Y.ContentString) {
+          if (!isWellFormedUtf16(struct.content.str)) illFormed = true;
+          if (struct.content.str.includes(REPLACEMENT)) recount.add(parent);
+        }
+        visitValueStrings(struct, (value) => {
+          if (!isWellFormedUtf16(value)) illFormed = true;
+          tally(net, parent, replacements(value));
+        });
       }
     });
-    const deleted = new Map<SharedType, number>();
     Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
       if (!(struct instanceof Y.Item)) return;
+      if (struct.id.clock >= (transaction.beforeState.get(struct.id.client) ?? 0)) return;
       const parent = struct.parent as SharedType;
-      touched.add(parent);
-      if (struct.content instanceof Y.ContentString)
-        deleted.set(parent, (deleted.get(parent) ?? 0) + replacements(struct.content.str));
+      if (struct.content instanceof Y.ContentString) {
+        const count = replacements(struct.content.str);
+        if (count > 0) recount.add(parent);
+        tally(deletedText, parent, count);
+      }
+      visitValueStrings(struct, (value) => tally(net, parent, -replacements(value)));
     });
-    let newReplacement = false;
-    for (const type of touched) {
-      const after = liveReplacements(type);
-      if (after - (this.counts.get(type) ?? 0) + (deleted.get(type) ?? 0) > 0)
-        newReplacement = true;
-      this.counts.set(type, after);
+    for (const right of transaction._mergeStructs) {
+      if (!(right instanceof Y.Item) || !(right.content instanceof Y.ContentString)) continue;
+      if (right.origin === null || !right.content.str.startsWith(REPLACEMENT)) continue;
+      const left = Y.getItem(this.doc.store, right.origin);
+      if (left instanceof Y.Item && left.content instanceof Y.ContentString)
+        if (left.content.str.endsWith(REPLACEMENT)) recount.add(right.parent as SharedType);
     }
+    for (const type of recount) {
+      const after = liveTextReplacements(type);
+      tally(
+        net,
+        type,
+        after - (this.textReplacements.get(type) ?? 0) + (deletedText.get(type) ?? 0),
+      );
+      this.textReplacements.set(type, after);
+    }
+    let newReplacement = added > 0;
+    for (const count of net.values()) if (count > 0) newReplacement = true;
     this.verdicts.set(transaction, { illFormed, newReplacement });
   };
 }

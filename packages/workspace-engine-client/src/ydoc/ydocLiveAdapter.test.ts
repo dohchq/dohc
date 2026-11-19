@@ -2989,6 +2989,56 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("rejects edits after an ill-formed root name, even one created without an update", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await session.applyLocalEdit((doc) => {
+      doc.getMap("\ud800");
+    });
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getText("plainText").insert(0, "A");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(0);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("rejects a new U+FFFD in a map value and allows replacing one", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    session.doc.transact(() => {
+      session.doc.getMap("meta").set("k", "a�");
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    await session.applyLocalEdit((doc) => {
+      doc.getMap("meta").set("k", "b�");
+    });
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getMap("meta").set("other", "�");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("rejects ill-formed Y.Text attribute keys and values", async () => {
     const attributes = [{ ["\ud800key"]: "value" }, { key: "\udc00value" }];
     for (const attribute of attributes) {

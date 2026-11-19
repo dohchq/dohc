@@ -5,7 +5,7 @@ import { openEngineYdocProviderSession } from "./ydocProviderSession";
 
 const KEYS = 41;
 
-async function keystrokeMedianMs(paragraphs: number): Promise<number> {
+async function keystrokeMedianMs(paragraphs: number, words = 1): Promise<number> {
   const engine = new YdocLoopbackEngine();
   engine.seedFile({ workspace: "w", versionId: "v", path: "n.md", content: "" });
   const provider = await openEngineYdocProviderSession({
@@ -26,7 +26,8 @@ async function keystrokeMedianMs(paragraphs: number): Promise<number> {
     Array.from({ length: paragraphs }, (_, index) => {
       const paragraph = new Y.XmlElement("paragraph");
       const text = new Y.XmlText(`Paragraph ${index} keeps 😀 ordinary prose and `);
-      text.insert(text.length, "bold words", { bold: true });
+      for (let word = 0; word < words; word++)
+        text.insert(text.length, `bold word ${word} 😀 `, { bold: word % 2 === 0 });
       paragraph.insert(0, [text]);
       return paragraph;
     }),
@@ -49,6 +50,6 @@ async function keystrokeMedianMs(paragraphs: number): Promise<number> {
 
 it("takes a typed character in a long note as fast as in a short one", async () => {
   const short = await keystrokeMedianMs(40);
-  const long = await keystrokeMedianMs(4_000);
-  expect(long).toBeLessThan(short * 4 + 0.5);
+  expect(await keystrokeMedianMs(4_000)).toBeLessThan(short * 4 + 0.5);
+  expect(await keystrokeMedianMs(1, 20_000)).toBeLessThan(short * 4 + 0.5);
 }, 60_000);
