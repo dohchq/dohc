@@ -17,12 +17,12 @@ import {
   YdocSessionQuarantinedError,
   YdocLiveAdapter,
   YdocOwnerDraftPendingError,
-  isWellFormedUtf16,
   type EngineTransport,
   type YdocAdapterSession,
   type YdocDeliveredHead,
 } from "./ydocLiveAdapter";
 import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
+import { isWellFormedUtf16 } from "./utf16Ledger";
 import {
   openEngineYdocProviderSession,
   YdocReleasedWithSettleFailureError,
