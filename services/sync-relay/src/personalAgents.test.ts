@@ -2237,6 +2237,7 @@ describe("a personal agent in a workspace its person joined", () => {
     let held: Promise<void> | null = null;
     let looking!: () => void;
     let found = true;
+    let invisible = false;
     const f = await fixture({
       namedBrowserSessionLimits: {
         maxSessions: 8,
@@ -2252,6 +2253,7 @@ describe("a personal agent in a workspace its person joined", () => {
           await held;
         }
         if (!found) return null;
+        if (invisible) return "ㅤ​";
         return userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null;
       },
       // A browser's cookie names its person; a test request's bearer names its own.
@@ -2342,6 +2344,18 @@ describe("a personal agent in a workspace its person joined", () => {
       expect.objectContaining({ body: "from the agent", authorOwnerDisplayName: "Ada" }),
     ]);
     expect(JSON.stringify(answer)).not.toContain("later/");
+
+    // A name with nothing the engine shows is left off, since the engine
+    // refuses a post that carries one.
+    invisible = true;
+    await ok(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        idempotencyKey: "post-3",
+      }),
+    );
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).not.toHaveProperty("authorOwnerDisplayName");
   });
 
   it("takes a joined workspace into reach, never one its person isn't a member of, and appends no chat there", async () => {

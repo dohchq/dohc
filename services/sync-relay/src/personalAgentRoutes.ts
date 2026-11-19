@@ -17,6 +17,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
+import { shownName } from "./chatWakes";
 import { badRequest, notFound, relayError, type RelayError } from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import { linkChatMessage, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
@@ -968,7 +969,9 @@ export function createPersonalAgentToolRoutes(input: {
         return groups(await linkAuthority.freshPersonal(authority), body);
       case "post": {
         // The name is read first, so no wait falls between the fresh check and the write.
-        const person = await accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId);
+        // The engine refuses a post whose name shows nothing, so such a name is left off.
+        const name = await accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId);
+        const person = shownName(name ?? "") || null;
         return post(await linkAuthority.freshPersonal(authority), body, person);
       }
       case "delete":
