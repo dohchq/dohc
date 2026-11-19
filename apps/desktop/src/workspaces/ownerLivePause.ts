@@ -121,8 +121,11 @@ export async function settleOwnerLivePauses(input: {
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
-  /** The pauses this desktop has asked the engine to make and not yet settled. */
-  tried: Set<string>;
+  /**
+   * The pauses this desktop has asked the engine to make and not yet settled,
+   * each with the state to write its copy from when the owner typed during it.
+   */
+  tried: Map<string, Uint8Array | null>;
   /**
    * Runs `pause` between the edits of the editors open on the note at `path`,
    * given the edits they have not sent. Once it succeeds, they show the note.
@@ -168,12 +171,10 @@ export async function settleOwnerLivePauses(input: {
       // or on a pass whose answer failed after the engine made it. Any other Stop leaves
       // the relay's copy a file of its own.
       let joined = held !== null && !held.stop.paused.copyWritten && input.tried.has(pause.pauseId);
-      // The copy's text with the owner's typing during the pause, when there was some.
-      let withLate: { markdown: string; leftOut: boolean } | null = null;
       if (!held && listed && pause.copy) {
         const roomCopy = await relayCopy(input.relay, pause, input.signal);
         const copyPath = await freeName(pause.path, input.writes);
-        input.tried.add(pause.pauseId);
+        input.tried.set(pause.pauseId, null);
         let paused = roomCopy;
         const late: Uint8Array[] = [];
         // The owner's open editor waits while the note pauses, so the copy takes
@@ -199,13 +200,16 @@ export async function settleOwnerLivePauses(input: {
         held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
         if (!held) throw new Error("The paused note's copy is missing.");
         joined = true;
-        // Typing during the pause never reached the engine, so it joins the copy here.
-        if (late.length > 0) withLate = await input.render(Y.mergeUpdates([paused, ...late]));
+        // Typing during the pause never reached the engine, so it joins the copy
+        // here, on this pass or the next if writing the copy fails.
+        if (late.length > 0) input.tried.set(pause.pauseId, Y.mergeUpdates([paused, ...late]));
       }
       // Only a copy written for this pause names it. A held Stop may be an earlier pause's.
       let copy: { copyPath: string | null; leftOut: boolean } | null =
         input.previous.find((told) => told.pauseId === pause.pauseId) ?? null;
       if (held && !held.stop.paused.copyWritten) {
+        const lateState = joined ? input.tried.get(pause.pauseId) : null;
+        const withLate = lateState ? await input.render(lateState) : null;
         const written = await writeHeld(held, pause.path, withLate?.markdown);
         if (joined) copy = withLate?.leftOut ? { ...written, leftOut: true } : written;
       }

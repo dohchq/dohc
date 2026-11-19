@@ -4093,8 +4093,9 @@ export function createWorkspaceEngineCapture(
         return current?.ownerBound;
       },
       // Behind the edits already handed over, so the generation holds them.
-      // Edits that arrive meanwhile wait behind it and never reach the engine,
-      // so `late` gets them with the state they build on.
+      // Edits that arrive meanwhile, until the editors show the engine's state,
+      // wait behind it and never reach the engine, so `late` gets them with
+      // the state they build on.
       leaveLiveEditing(leave, late) {
         if (closed) return Promise.reject(closedError());
         return append(async () => {
@@ -4111,13 +4112,15 @@ export function createWorkspaceEngineCapture(
             if (generation.ownerBound) leaving = null;
             throw error;
           }
-          if (late && canonicalDoc !== null && queuedOriginals.size > 0)
-            late(
-              Y.mergeUpdates([
-                Y.encodeStateAsUpdate(canonicalDoc),
-                ...[...queuedOriginals].map((original) => original.update),
-              ]),
-            );
+          if (late && canonicalDoc !== null) {
+            // The replacement retires this document, so its state is read first.
+            const base = Y.encodeStateAsUpdate(canonicalDoc);
+            await generation.resync?.().catch(() => undefined);
+            if (queuedOriginals.size > 0)
+              late(
+                Y.mergeUpdates([base, ...[...queuedOriginals].map((original) => original.update)]),
+              );
+          }
           return left;
         });
       },

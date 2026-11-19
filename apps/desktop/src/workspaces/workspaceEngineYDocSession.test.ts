@@ -103,6 +103,7 @@ let blockedMaterialization = false;
 let closeRefusal: unknown = null;
 let beforeRecordUpdate: (() => Promise<void>) | null = null;
 let beforeClose: (() => Promise<void>) | null = null;
+let beforeResync: (() => Promise<void>) | null = null;
 let beforeSettle: (() => Promise<void>) | null = null;
 let enforceRecordOwner = false;
 // Refuses the next journal write once, the way the daemon refuses it on the
@@ -149,6 +150,11 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === YDOC_METHOD.recordUpdate && beforeRecordUpdate) {
         const hook = beforeRecordUpdate;
         beforeRecordUpdate = null;
+        await hook();
+      }
+      if (request.method === YDOC_METHOD.resync && beforeResync) {
+        const hook = beforeResync;
+        beforeResync = null;
         await hook();
       }
       if (request.method === YDOC_METHOD.close && beforeClose) {
@@ -335,6 +341,7 @@ beforeEach(async () => {
   closeRefusal = null;
   beforeRecordUpdate = null;
   beforeClose = null;
+  beforeResync = null;
   beforeSettle = null;
   enforceRecordOwner = false;
   nextRecordRefusal = null;
@@ -2268,17 +2275,25 @@ it("hands typing that reached it during the pause to late, with what it builds o
   try {
     typeIntoBody(editor, "Typed before the pause.");
     const late: Uint8Array[] = [];
+    // The engine's state takes a moment to arrive, and the owner types on until it does.
+    let typedAfterPause = false;
+    beforeResync = async () => {
+      typedAfterPause = true;
+      typeIntoBody(editor, " Typed before the note came back.");
+    };
     await session.leaveLiveEditing!(
       async () => {
         typeIntoBody(editor, " Typed during the pause.");
       },
       (edits) => late.push(edits),
     );
+    expect(typedAfterPause).toBe(true);
+    expect(replacements).toHaveBeenCalledOnce();
     expect(late).toHaveLength(1);
     const copy = documentMarkdown(late[0]!);
     expect(copy).toContain("Typed before the pause.");
     expect(copy).toContain("Typed during the pause.");
-    await vi.waitFor(() => expect(replacements).toHaveBeenCalledOnce());
+    expect(copy).toContain("Typed before the note came back.");
     expect(journalMarkdown()).not.toContain("Typed during the pause.");
   } finally {
     await session.close({ settle: false });
