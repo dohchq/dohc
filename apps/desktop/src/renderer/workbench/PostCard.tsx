@@ -351,7 +351,9 @@ export function PostCard(props: {
                 />
               ) : null}
               {[...byEmoji.entries()].map(([emoji, records]) => {
-                const mine = records.some((r) => r.authorId === props.data.viewerAuthorId);
+                const mine = records.some(
+                  (r) => r.authorKind === "human" && r.authorId === props.data.viewerAuthorId,
+                );
                 return (
                   <FeedReactionPill
                     key={emoji}

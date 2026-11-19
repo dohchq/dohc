@@ -123,6 +123,102 @@ fn reaction_lww_is_permutation_convergent() {
     assert_eq!(winners[0], ("added".to_owned(), 101, "omega".to_owned(), 0));
 }
 
+fn exported_reactions(engine: &EngineStore) -> Vec<ReplicationEnvelope> {
+    engine
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_id, origin_seq, payload_json, recorded_at_ms FROM replication_log \
+                 WHERE workspace_id = 'ws' AND imported = 0 AND op_kind = 'chat.reaction.set' \
+                 ORDER BY rowid",
+            )?
+            .query_map([], |row| {
+                Ok(ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
+                    workspace_id: "ws".to_owned(),
+                    origin_id: row.get(0)?,
+                    origin_seq: row.get(1)?,
+                    op_kind: "chat.reaction.set".to_owned(),
+                    payload: serde_json::from_str(&row.get::<_, String>(2)?).expect("payload"),
+                    recorded_at_ms: row.get(3)?,
+                    relay_seq: None,
+                })
+            })?
+            .collect::<Result<_, _>>()
+        })
+        .expect("exported reactions")
+}
+
+fn reactors(engine: &mut EngineStore) -> Vec<(String, Option<String>)> {
+    let mut reactors: Vec<_> = LinkedChatStore::new(engine)
+        .list_reactions("ws", "thread-imported", None, 10)
+        .expect("reactions")
+        .into_iter()
+        .map(|reaction| (format!("{:?}", reaction.author_kind), reaction.author_agent_id))
+        .collect();
+    reactors.sort();
+    reactors
+}
+
+#[test]
+fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
+    let (_scratch, _path, mut source) = open_store();
+    imported_chat_fixture(&mut source, "peer");
+    let writes = [
+        (ChatActorKind::Human, None, ChatReactionState::Added),
+        (ChatActorKind::Agent, None, ChatReactionState::Added),
+        (ChatActorKind::Agent, Some("codex"), ChatReactionState::Added),
+        (ChatActorKind::Agent, Some("terminal"), ChatReactionState::Added),
+        (ChatActorKind::Agent, Some("codex"), ChatReactionState::Removed),
+    ];
+    for (index, (author_kind, agent, state)) in writes.into_iter().enumerate() {
+        LinkedChatStore::new(&mut source)
+            .set_reaction(
+                &SetReaction {
+                    workspace_id: "ws".to_owned(),
+                    thread_id: "thread-imported".to_owned(),
+                    message_id: "message-imported".to_owned(),
+                    emoji: "👍".to_owned(),
+                    author_id: "ada".to_owned(),
+                    replication_author_id: Some("ada".to_owned()),
+                    author_kind,
+                    author_agent_id: agent.map(str::to_owned),
+                    author_display_name: "Ada".to_owned(),
+                    state,
+                    now_ms: 30 + i64::try_from(index).expect("index"),
+                    request_id: format!("reaction-{index}"),
+                },
+                &NoFaults,
+            )
+            .expect("reaction");
+    }
+    let expected = vec![
+        ("Agent".to_owned(), None),
+        ("Agent".to_owned(), Some("terminal".to_owned())),
+        ("Human".to_owned(), None),
+    ];
+    assert_eq!(reactors(&mut source), expected);
+
+    let operations = exported_reactions(&source);
+    assert_eq!(operations.len(), 5);
+    for reversed in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        imported_chat_fixture(&mut engine, "peer");
+        let mut order: Vec<&ReplicationEnvelope> = operations.iter().collect();
+        if reversed {
+            order.reverse();
+        }
+        for operation in order {
+            apply_chat_envelope(&mut engine, operation, &NoFaults).expect("apply");
+        }
+        assert_eq!(
+            reactors(&mut engine),
+            expected,
+            "dropping authorAgentId on apply or keying the cell by author id alone -> another computer merges the person's and agents' reactions (reversed: {reversed})."
+        );
+    }
+}
+
 #[test]
 fn reaction_import_rejects_non_emoji_graphemes() {
     for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
@@ -2529,6 +2625,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                 author_id: "Ada".to_owned(),
                 replication_author_id: Some("Ada".to_owned()),
                 author_kind: ChatActorKind::Human,
+                author_agent_id: None,
                 author_display_name: "Ada".to_owned(),
                 state: ChatReactionState::Removed,
                 now_ms: 0,
@@ -2723,6 +2820,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
                 author_id: "verified-user".to_owned(),
                 replication_author_id: Some("verified-user".to_owned()),
                 author_kind: ChatActorKind::Human,
+                author_agent_id: None,
                 author_display_name: "Verified".to_owned(),
                 state: ChatReactionState::Added,
                 now_ms: 32,

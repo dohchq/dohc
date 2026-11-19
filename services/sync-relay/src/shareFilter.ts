@@ -786,7 +786,7 @@ function servedChatPayload(
 ): Record<string, unknown> {
   const served = pickServed(record, SERVED_CHAT_FIELDS[opKind]);
   if (
-    opKind === "chat.message.append" &&
+    (opKind === "chat.message.append" || opKind === "chat.reaction.set") &&
     typeof record.authorAgentId === "string" &&
     record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)
   ) {

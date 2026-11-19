@@ -37,7 +37,10 @@ mod thread_projection;
 pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
-pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
+pub use reactions::{
+    is_reaction_emoji_verbatim, normalize_reaction_agent_id, normalize_reaction_author_id,
+    reaction_id_for,
+};
 pub use receipts::{
     ChatCoordinatePublication, ChatCoordinateState, ChatStageOutcome, ChatStagePublication,
     ChatStageReceipt, MAX_PUBLICATION_STAGE_KEYS,
@@ -505,6 +508,8 @@ pub struct ChatReaction {
     pub emoji: String,
     pub author_id: String,
     pub author_kind: ChatActorKind,
+    /// The agent in Settings that reacted. Only an agent's reaction has one.
+    pub author_agent_id: Option<String>,
     pub author_display_name: String,
     pub state: ChatReactionState,
     pub at_ms: i64,
@@ -1060,6 +1065,8 @@ pub struct SetReaction {
     pub author_id: String,
     pub replication_author_id: Option<String>,
     pub author_kind: ChatActorKind,
+    /// See [`ChatReaction::author_agent_id`].
+    pub author_agent_id: Option<String>,
     pub author_display_name: String,
     pub state: ChatReactionState,
     pub now_ms: i64,
@@ -7065,7 +7072,7 @@ fn active_reactions_for_messages(
     let mut stmt = conn
         .prepare_cached(
             "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \
-                    r.author_kind, r.author_display_name, r.state, r.at_ms \
+                    r.author_kind, r.author_display_name, r.state, r.at_ms, r.author_agent_id \
              FROM chat_reactions r \
              JOIN chat_messages m ON m.workspace_id = r.workspace_id \
                AND m.thread_id = r.thread_id AND m.message_id = r.message_id \
@@ -9431,6 +9438,7 @@ fn map_reaction_row(
     let author_display_name: String = row.get(6)?;
     let state: String = row.get(7)?;
     let at_ms: i64 = row.get(8)?;
+    let author_agent_id: String = row.get(9)?;
     Ok((|| {
         let author_kind = ChatActorKind::from_db(&author_kind)?;
         let state = ChatReactionState::from_db(&state)?;
@@ -9446,6 +9454,7 @@ fn map_reaction_row(
             emoji,
             author_id,
             author_kind,
+            author_agent_id: (!author_agent_id.is_empty()).then_some(author_agent_id),
             author_display_name,
             state,
             at_ms,

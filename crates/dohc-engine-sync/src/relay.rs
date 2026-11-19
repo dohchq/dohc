@@ -5842,6 +5842,8 @@ enum ChatLwwCell {
         message_id: String,
         emoji: String,
         author_id: String,
+        author_kind: String,
+        author_agent_id: String,
     },
     Decision {
         message_id: String,
@@ -5867,6 +5869,8 @@ fn chat_lww_cell(op_kind: &str, payload: &serde_json::Value) -> Option<ChatLwwCe
             message_id: field("messageId")?,
             emoji: field("emoji")?,
             author_id: field("authorId")?,
+            author_kind: field("authorKind")?,
+            author_agent_id: field("authorAgentId").unwrap_or_default(),
         }),
         "chat.decision.set" => Some(ChatLwwCell::Decision {
             message_id: field("messageId")?,
@@ -5957,10 +5961,13 @@ fn rebase_current_chat_projection(
             message_id,
             emoji,
             author_id,
+            author_kind,
+            author_agent_id,
         } => tx.execute(
             "UPDATE chat_reactions SET origin_id=?1,origin_seq=?2 \
              WHERE workspace_id=?3 AND origin_id=?4 AND origin_seq=?5 \
-               AND message_id=?6 AND emoji=?7 AND author_id=?8",
+               AND message_id=?6 AND emoji=?7 AND author_id=?8 \
+               AND author_kind=?9 AND author_agent_id=?10",
             params![
                 new_origin_id,
                 new_origin_seq,
@@ -5969,7 +5976,9 @@ fn rebase_current_chat_projection(
                 old_origin_seq,
                 message_id,
                 emoji,
-                author_id
+                author_id,
+                author_kind,
+                author_agent_id
             ],
         ),
         ChatLwwCell::Decision { message_id } => tx.execute(

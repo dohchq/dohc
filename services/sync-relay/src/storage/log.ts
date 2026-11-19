@@ -46,10 +46,10 @@ function withAdmittedChatName(
   const human = snapshot.find((author) => author.kind === "human");
   if (!human) throw new Error("named chat admission requires an account author");
   const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
-  if (op.opKind === "chat.reaction.set" || payload.authorKind === "human") {
+  if (payload.authorKind === "human") {
     payload.authorDisplayName = human.humanName;
     delete payload.authorOwnerDisplayName;
-  } else {
+  } else if (op.opKind === "chat.message.append") {
     payload.authorOwnerDisplayName = human.humanName;
   }
   return { ...op, payloadJson: stableJsonStringify(payload), admittedAuthorSnapshot: snapshot };

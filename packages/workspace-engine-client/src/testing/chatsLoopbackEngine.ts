@@ -524,16 +524,21 @@ function projectionPath(workspaceId: string, threadId: string): string {
   return `.dohc/chats/v1-${base32LowercaseNoPadding(digest)}.md`;
 }
 
-function reactionId(messageId: string, emoji: string, authorId: string): string {
-  const digest = createHash("sha256")
+function reactionId(
+  messageId: string,
+  emoji: string,
+  authorId: string,
+  kind: "human" | "agent",
+  agentId: string,
+): string {
+  const hash = createHash("sha256")
     .update(messageId)
     .update("\0")
     .update(emoji)
     .update("\0")
-    .update(authorId)
-    .digest()
-    .subarray(0, 16);
-  return `reaction_${base32LowercaseNoPadding(digest)}`;
+    .update(authorId);
+  if (kind === "agent") hash.update("\0agent\0").update(agentId);
+  return `reaction_${base32LowercaseNoPadding(hash.digest().subarray(0, 16))}`;
 }
 
 function attachmentId(
@@ -551,8 +556,14 @@ function attachmentId(
   return hash.digest("hex");
 }
 
-function reactionCellKey(messageId: string, emoji: string, authorId: string): string {
-  return `${messageId}\0${emoji}\0${authorId}`;
+function reactionCellKey(
+  messageId: string,
+  emoji: string,
+  authorId: string,
+  kind: "human" | "agent",
+  agentId: string,
+): string {
+  return `${messageId}\0${emoji}\0${authorId}\0${kind}\0${agentId}`;
 }
 
 function bookmarkKey(ownerUserId: string, bookmarkId: string): string {
@@ -2456,6 +2467,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       "authorId",
       "kind",
       "displayName",
+      "agentId",
     ]);
     const authorId = normalizeTrimmed(
       requiredString(authorInput, "authorId", "invalid-sender"),
@@ -2471,12 +2483,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     const kind = requiredString(authorInput, "kind", "invalid-sender");
     if (kind !== "human" && kind !== "agent") throw new Error("invalid-sender");
+    const agentId = optionalString(authorInput, "agentId");
+    if (agentId !== undefined && kind !== "agent") throw new Error("invalid-parameters");
     const stateValue = requiredString(params, "state", "invalid-parameters");
     if (stateValue !== "added" && stateValue !== "removed") throw new Error("invalid-parameters");
-    const key = reactionCellKey(messageId, emoji, authorId);
+    const key = reactionCellKey(messageId, emoji, authorId, kind, agentId ?? "");
     const prior = state.reactions.get(key);
     const reaction: ChatReaction = {
-      reactionId: reactionId(messageId, emoji, authorId),
+      reactionId: reactionId(messageId, emoji, authorId, kind, agentId ?? ""),
       threadId,
       messageId,
       emoji,
@@ -2487,6 +2501,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           requiredString(authorInput, "displayName", "invalid-sender"),
           "invalid-sender",
         ),
+        ...(agentId === undefined ? {} : { agentId }),
       },
       state: stateValue,
       // The per-cell +1 bump keeps a stale or equal local time from losing.
