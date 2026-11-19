@@ -520,7 +520,7 @@ describe("CollectionPage", () => {
         writeRefusal ??
         (accessEnded
           ? "Your access to this share ended."
-          : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+          : "Your access to this share changed. Ask for Edit access, then return to this window.");
       expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
     },
   );

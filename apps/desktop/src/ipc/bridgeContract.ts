@@ -6694,6 +6694,7 @@ export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessP
 export const CheckSharedViewAccessResult = z.object({
   status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
   access: z.enum(["view", "comment", "edit"]).optional(),
+  relayStatesMore: z.literal(true).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 

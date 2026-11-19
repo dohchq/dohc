@@ -13,6 +13,7 @@ const check = vi.fn<DohcDesktopBridge["checkSharedViewAccess"]>();
 let visible = true;
 const verified = vi.fn();
 const pull = vi.fn<() => Promise<boolean>>();
+const follow = vi.fn<() => Promise<unknown>>();
 const persistent = vi.fn();
 let credentialsChanged: Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 beforeEach(() => {
@@ -24,6 +25,7 @@ beforeEach(() => {
   check.mockReset().mockResolvedValue({ status: "current", access: "edit" });
   verified.mockReset();
   pull.mockReset().mockResolvedValue(false);
+  follow.mockReset().mockResolvedValue("current");
   persistent.mockReset();
   vi.spyOn(Math, "random").mockReturnValue(0.5);
   window.dohcDesktop = {
@@ -54,6 +56,7 @@ function setup() {
         enabled: true,
         onVerified: verified,
         pull,
+        followStatedLevel: follow,
         onPersistentFailure: persistent,
       }),
     { initialProps: { workspaceId: "A", admission: { superseded: false } } },
@@ -168,6 +171,7 @@ it("rechecks immediately when workspace relay sync recovers", async () => {
         relayFailed,
         onVerified: verified,
         pull,
+        followStatedLevel: follow,
         onPersistentFailure: persistent,
       }),
     { initialProps: { relayFailed: false } },
@@ -195,6 +199,7 @@ it("does not interpret another workspace's healthy sync as recovery", async () =
         relayFailed,
         onVerified: verified,
         pull,
+        followStatedLevel: follow,
         onPersistentFailure: persistent,
       }),
     { initialProps: { workspaceId: "A", admission: { superseded: false }, relayFailed: true } },
@@ -483,7 +488,7 @@ it.each(["hidden", "credentials", "workspace", "failure"])(
   },
 );
 
-it("limits focus requests to one per five seconds since the last pull", async () => {
+it("limits focus requests to one per five seconds", async () => {
   setup();
   await flush();
   for (let second = 1; second <= 10; second++) {
@@ -526,4 +531,124 @@ it("does not postpone background pulls when a write requests an access check", a
     });
   }
   expect(pull).toHaveBeenCalledTimes(2);
+});
+
+const more: CheckSharedViewAccessResult = {
+  status: "current",
+  access: "view",
+  relayStatesMore: true,
+};
+const returnToWindow = async (afterMs = 5_000) => {
+  await act(() => vi.advanceTimersByTimeAsync(afterMs));
+  act(() => window.dispatchEvent(new Event("focus")));
+  await flush();
+};
+
+it("follows the stated level once when a return finds the relay states more", async () => {
+  setup();
+  await flush();
+  expect(follow).not.toHaveBeenCalled();
+  check.mockResolvedValueOnce(more);
+  await returnToWindow();
+  expect(follow).toHaveBeenCalledOnce();
+  expect(verified).toHaveBeenLastCalledWith(more);
+  await act(() => vi.advanceTimersByTimeAsync(120_000));
+  await returnToWindow();
+  expect(follow).toHaveBeenCalledOnce();
+});
+
+it("follows the stated level when the window opens on a share the relay states more for", async () => {
+  check.mockResolvedValueOnce(more);
+  const pulled = deferred<boolean>();
+  pull.mockReturnValueOnce(pulled.promise);
+  setup();
+  await flush();
+  expect(follow).not.toHaveBeenCalled();
+  await act(async () => pulled.resolve(false));
+  expect(follow).toHaveBeenCalledOnce();
+});
+
+it("asks for nothing more on returns while the levels agree", async () => {
+  setup();
+  await flush();
+  for (let index = 0; index < 4; index++) await returnToWindow(6_000);
+  expect(check).toHaveBeenCalledTimes(5);
+  expect(pull).toHaveBeenCalledTimes(5);
+  expect(follow).not.toHaveBeenCalled();
+});
+
+it("starts one follow for two returns in a row, and never two at once", async () => {
+  setup();
+  await flush();
+  check.mockResolvedValue(more);
+  const first = deferred<unknown>();
+  follow.mockReturnValueOnce(first.promise);
+  await returnToWindow();
+  await returnToWindow(1_000);
+  expect(follow).toHaveBeenCalledOnce();
+  expect(check).toHaveBeenCalledTimes(2);
+  await returnToWindow(10_000);
+  expect(follow).toHaveBeenCalledOnce();
+  expect(check).toHaveBeenCalledTimes(2);
+  await act(async () => first.resolve("current"));
+  expect(check).toHaveBeenCalledTimes(3);
+  expect(follow).toHaveBeenCalledTimes(2);
+});
+
+it("does not follow again until the next return when the pin could not follow", async () => {
+  setup();
+  await flush();
+  check.mockResolvedValue(more);
+  await returnToWindow();
+  expect(follow).toHaveBeenCalledOnce();
+  await act(() => vi.advanceTimersByTimeAsync(600_000));
+  expect(follow).toHaveBeenCalledOnce();
+  await returnToWindow();
+  expect(follow).toHaveBeenCalledTimes(2);
+});
+
+it("does not follow for a write caller's check or a pull alone", async () => {
+  const hook = setup();
+  await flush();
+  check.mockResolvedValue(more);
+  await act(async () => {
+    expect(await hook.result.current()).toEqual(more);
+    await hook.result.current.pull();
+  });
+  expect(follow).not.toHaveBeenCalled();
+});
+
+it("does not follow when the return's own pull failed", async () => {
+  setup();
+  await flush();
+  check.mockResolvedValue(more);
+  pull.mockRejectedValueOnce(new Error("offline"));
+  await returnToWindow();
+  expect(follow).not.toHaveBeenCalled();
+});
+
+it("drops a follow's answer after the workspace changes", async () => {
+  check.mockResolvedValue(more);
+  const following = deferred<unknown>();
+  follow.mockReturnValueOnce(following.promise);
+  const hook = setup();
+  await flush();
+  expect(follow).toHaveBeenCalledOnce();
+  check.mockResolvedValue({ status: "current", access: "edit" });
+  hook.rerender({ workspaceId: "B", admission: { superseded: false } });
+  await flush();
+  await act(async () => following.resolve("current"));
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(follow).toHaveBeenCalledOnce();
+  expect(persistent).not.toHaveBeenCalled();
+});
+
+it("checks on a return within five seconds of a background pull", async () => {
+  setup();
+  await flush();
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(pull).toHaveBeenCalledTimes(2);
+  expect(check).toHaveBeenCalledTimes(1);
+  await returnToWindow(2_000);
+  expect(check).toHaveBeenCalledTimes(2);
 });

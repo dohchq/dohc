@@ -15,6 +15,7 @@ export function useSharedViewAccess(input: {
   admission: { readonly superseded: boolean };
   onVerified(result: CheckSharedViewAccessResult): void;
   pull(pressBurst?: boolean): Promise<boolean>;
+  followStatedLevel(): Promise<unknown>;
   onPersistentFailure(error: unknown): void;
 }): SharedViewAccessScheduler {
   const latest = useRef(input);
@@ -30,7 +31,7 @@ export function useSharedViewAccess(input: {
     let epoch = 0;
     let timer: number | undefined;
     let nextPullAt = Date.now() + 30_000;
-    let lastPullAt = -Infinity;
+    let lastReturnAt = -Infinity;
     let buttonPulls: number[] = [];
     let inFlight: Promise<CheckSharedViewAccessResult> | null = null;
     let followUp: Promise<CheckSharedViewAccessResult> | null = null;
@@ -69,6 +70,8 @@ export function useSharedViewAccess(input: {
     ): Promise<CheckSharedViewAccessResult> => {
       if (!isCurrent() || !visible() || paused) return Promise.resolve(unverified());
       clearTimer();
+      const returned = access && pull;
+      if (returned) lastReturnAt = Date.now();
       const startedEpoch = epoch;
       inFlight = (async (): Promise<CheckSharedViewAccessResult> => {
         let result = unverified();
@@ -81,7 +84,6 @@ export function useSharedViewAccess(input: {
           };
           const pullShare = async () => {
             if (!pull) return;
-            lastPullAt = Date.now();
             await latest.current.pull(pressBurst);
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             failures = 0;
@@ -97,6 +99,10 @@ export function useSharedViewAccess(input: {
           }
           for (const completion of completed)
             if (completion.status === "rejected") throw completion.reason;
+          if (returned && result.relayStatesMore) {
+            await latest.current.followStatedLevel();
+            if (!isCurrent() || startedEpoch !== epoch) return unverified();
+          }
           return result;
         } catch (error) {
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
@@ -150,7 +156,7 @@ export function useSharedViewAccess(input: {
       if (!isCurrent() || !visible() || paused) return;
       const recovering = failures > 0;
       failures = 0;
-      if (Date.now() - lastPullAt < 5_000) {
+      if (Date.now() - lastReturnAt < 5_000) {
         if (recovering) {
           nextPullAt = Date.now() + 30_000;
           schedule();

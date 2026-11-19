@@ -352,8 +352,119 @@ describe("metadata-only access checks", () => {
     h.fetchAccess.mockResolvedValue("edit");
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
-    ).toEqual({ status: "current", access: "view" });
+    ).toEqual({ status: "current", access: "view", relayStatesMore: true });
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
     expect(h.reconcile).not.toHaveBeenCalled();
+  });
+
+  describe("when the owner raised this person's level", () => {
+    const check = (h: Awaited<ReturnType<typeof harness>>) =>
+      h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    const refresh = (h: Awaited<ReturnType<typeof harness>>, trigger: "background" | "manual") =>
+      h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { ...payload, trigger });
+    const view = { paths: ["docs"], versionId: null, access: "view" as const };
+    const edit = { paths: ["docs"], versionId: null, access: "edit" as const };
+    async function openAtView() {
+      const h = await harness();
+      h.workspace.shareView!.grantedSelector = { ...view };
+      h.fetchInfo.mockResolvedValue({ ...info, selector: view });
+      h.fetchAccess.mockResolvedValue("view");
+      await refresh(h, "background");
+      for (const mock of [
+        h.fetchInfo,
+        h.fetchAccess,
+        h.setView,
+        h.recordIdentity,
+        h.reconcile,
+        h.notify,
+      ])
+        mock.mockClear();
+      return h;
+    }
+
+    it.each([
+      ["view", "comment"],
+      ["view", "edit"],
+      ["comment", "edit"],
+    ] as const)(
+      "says the relay states more for a pin at %s and a stated %s, and widens nothing itself",
+      async (pinned, stated) => {
+        const h = await openAtView();
+        h.workspace.shareView!.grantedSelector = { ...view, access: pinned };
+        h.fetchAccess.mockResolvedValue(stated);
+        expect(await check(h)).toEqual({
+          status: "current",
+          access: pinned,
+          relayStatesMore: true,
+        });
+        expect(h.workspace.shareView!.grantedSelector).toEqual({ ...view, access: pinned });
+        for (const mock of [h.fetchInfo, h.setView, h.recordIdentity, h.reconcile, h.notify])
+          expect(mock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["view", "view"],
+      ["comment", "comment"],
+      ["edit", "edit"],
+      ["edit", "view"],
+      ["comment", "view"],
+    ] as const)("says nothing more for a pin at %s and a stated %s", async (pinned, stated) => {
+      const h = await openAtView();
+      h.workspace.shareView!.grantedSelector = { ...view, access: pinned };
+      h.fetchAccess.mockResolvedValue(stated);
+      expect(await check(h)).toEqual({ status: "current", access: stated });
+      expect(h.fetchInfo).not.toHaveBeenCalled();
+    });
+
+    it("widens the pin and records the identity through the refresh the window then asks for", async () => {
+      const h = await openAtView();
+      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+      expect(await check(h)).toMatchObject({ access: "view", relayStatesMore: true });
+      await refresh(h, "background");
+      expect(h.fetchInfo).not.toHaveBeenCalled();
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      await expect(refresh(h, "manual")).resolves.toMatchObject({ ok: true });
+      expect(h.fetchInfo).toHaveBeenCalledOnce();
+      expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
+      expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({ grantedSelector: edit });
+      expect(h.notify).toHaveBeenLastCalledWith({ workspaceId: "existing", summaryChanged: true });
+      expect(workspaceSummaryFor(h.workspace).shareView?.access).toBe("edit");
+      expect(() => requireShareViewProposalScope(h.workspace.shareView)).not.toThrow();
+      expect(await check(h)).toEqual({ status: "current", access: "edit" });
+    });
+
+    it.each([
+      ["states other paths", { paths: ["everything"], versionId: null, access: "edit" as const }],
+      [
+        "states a version",
+        { paths: ["docs"], versionId: "saved-version", access: "edit" as const },
+      ],
+    ])("changes nothing when that refresh's read %s", async (_name, selector) => {
+      const h = await openAtView();
+      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchInfo.mockResolvedValue({ ...info, selector });
+      expect(await check(h)).toMatchObject({ relayStatesMore: true });
+      await expect(refresh(h, "manual")).resolves.toMatchObject({ ok: true });
+      expect(h.fetchInfo).toHaveBeenCalledOnce();
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      expect(h.recordIdentity).not.toHaveBeenCalled();
+      expect(() => requireShareViewProposalScope(h.workspace.shareView)).toThrow();
+      expect(await check(h)).toMatchObject({ access: "view", relayStatesMore: true });
+      expect(h.fetchInfo).toHaveBeenCalledOnce();
+    });
+
+    it("changes nothing when that refresh's read fails", async () => {
+      const h = await openAtView();
+      h.fetchAccess.mockResolvedValue("edit");
+      h.fetchInfo.mockRejectedValue(new Error("offline"));
+      expect(await check(h)).toMatchObject({ relayStatesMore: true });
+      await expect(refresh(h, "manual")).rejects.toThrow("offline");
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      expect(h.setView).not.toHaveBeenCalled();
+      expect(h.recordIdentity).not.toHaveBeenCalled();
+    });
   });
   it.each(["workspace", "credentials", "close"])(
     "discards a deferred 404 after %s changes",
