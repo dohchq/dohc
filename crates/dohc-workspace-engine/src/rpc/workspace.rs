@@ -1960,6 +1960,103 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_whose_pages_are_damaged_answers_state_corrupt_until_it_is_replaced() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db_path = scratch
+            .path()
+            .join(".dohc")
+            .join("engine")
+            .join("engine.db");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "damaged-pages",
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("a fresh workspace opens");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+
+        let (root_page, page_size) = {
+            let conn = rusqlite::Connection::open(&db_path).expect("open store");
+            conn.execute_batch(
+                "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
+            )
+            .expect("a table to damage");
+            let root_page: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("root page");
+            let page_size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .expect("page size");
+            (root_page.unsigned_abs(), page_size.unsigned_abs())
+        };
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&db_path)
+                .expect("store file");
+            file.seek(SeekFrom::Start((root_page - 1) * page_size))
+                .expect("seek");
+            file.write_all(&[0]).expect("no b-tree page type");
+            file.sync_all().expect("sync");
+        }
+
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("the store serves before its pages are checked");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let actor = service.open(Some(&handle)).expect("open").actor.clone();
+        let waited = std::time::Instant::now();
+        while actor.lifecycle() != LifecycleState::Damaged {
+            assert!(
+                waited.elapsed() < Duration::from_secs(30),
+                "the page check stops the actor"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let refused = service
+            .ensure_handle_allows_method(Some(&handle), "versionedText.read")
+            .expect_err("a damaged store serves nothing");
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::Internal, "state-corrupt")
+        );
+        service
+            .ensure_handle_allows_method(Some(&handle), "workspace.close")
+            .expect("a damaged store still closes");
+        service
+            .workspace_close(Some(handle.clone()))
+            .await
+            .expect("a damaged store closes");
+        assert!(
+            service.open(Some(&handle)).is_err(),
+            "the closed handle is gone"
+        );
+
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect_err("a reopen checks the pages first");
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::Internal, "state-corrupt")
+        );
+    }
+
     #[tokio::test]
     async fn workspace_opens_degraded_when_observation_cannot_start() {
         let scratch = ScratchDir::new().unwrap();
