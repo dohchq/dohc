@@ -152,7 +152,8 @@ export interface EngineYdocProviderSession {
   readonly unsettled: boolean;
   // `armSettle: false` journals the update without scheduling a settle, for
   // a replay the file must not receive until the person edits again.
-  // `settleDelayMs` replaces the settle debounce for the settle it arms.
+  // `settleDelayMs` replaces the settle debounce from this edit until an edit
+  // names none, for retries and remote changes too.
   applyLocalUpdate(
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions & { armSettle?: boolean; settleDelayMs?: number },
@@ -336,6 +337,10 @@ export async function openEngineYdocProviderSession(
   }
 
   let transientRetryMs = settleDebounceMs;
+  // The settle delay the latest edit named, as the least wait for any
+  // automatic settle. A settle holds the engine, so one that starts between a
+  // paused note's gathered updates would hold back the typing that follows.
+  let namedSettleDelayMs: number | undefined;
 
   function armSettleTimer(ms: number): void {
     cancelSettle = scheduleSettle(() => {
@@ -352,14 +357,14 @@ export async function openEngineYdocProviderSession(
     if (closed || cancelSettle !== null || capMs === null) return;
     // The cap belongs to this failure, so a ladder that walked out behind a
     // file lock cannot make the next busy-database wait ten seconds.
-    const delay = Math.min(transientRetryMs, capMs);
+    const delay = Math.max(Math.min(transientRetryMs, capMs), namedSettleDelayMs ?? 0);
     transientRetryMs = Math.min(delay * 2, capMs);
     armSettleTimer(delay);
   }
 
-  function requestSettle(delayMs = settleDebounceMs): void {
+  function requestSettle(): void {
     cancelSettle?.();
-    armSettleTimer(delayMs);
+    armSettleTimer(namedSettleDelayMs ?? settleDebounceMs);
   }
 
   function trackLocalOperation(
@@ -376,7 +381,10 @@ export async function openEngineYdocProviderSession(
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
     });
     void journalChain.catch(() => undefined);
-    if (armSettle) requestSettle(settleDelayMs);
+    if (armSettle) {
+      namedSettleDelayMs = settleDelayMs;
+      requestSettle();
+    }
     return journaled;
   }
 
