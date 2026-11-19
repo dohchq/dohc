@@ -3,6 +3,7 @@ import { createLiveTickets } from "./liveTickets.js";
 import { audience, binding, fixture, key, report, scope } from "./liveTickets.test-helper.js";
 import { hashLiveTicketToken } from "./liveTicketSecurity.js";
 import { openSyncRelayStorage } from "./storage.js";
+import { LiveTicketFailure } from "./liveOpenRefusalLog";
 
 it("mints one server-derived live ticket and redeems it exactly once", async () => {
   const state = await fixture();
@@ -228,6 +229,7 @@ it("keeps storage failures internal and strips credential-bearing errors", async
       expect(serialized).not.toContain(token);
       expect(serialized).not.toContain(hash);
       expect(error.cause).toBeUndefined();
+      if (error instanceof LiveTicketFailure) expect(error.words).toBe("Error");
     }
   } finally {
     await state.close();

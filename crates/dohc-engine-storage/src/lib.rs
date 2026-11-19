@@ -72,7 +72,7 @@ pub use blob::{
 };
 pub use checkpoint::{CheckpointWait, HeldReader, WalPressure};
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
-pub use error::StorageError;
+pub use error::{SpaceShortfall, StorageError};
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 #[cfg(all(
     feature = "fault-injection",

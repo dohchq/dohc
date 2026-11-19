@@ -737,15 +737,12 @@ describe("share grants", () => {
     ).toBe(unknown);
   });
 
-  it("advances the shared-log cursor across filtered-out rows so pagination cannot stall", async () => {
+  it("reaches a shared row behind filtered-out rows in one page", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
     const ops = [] as unknown[];
     for (let index = 0; index < 5; index += 1) {
-      // Upload the referenced blob first so the append validates; the point of
-      // this test is cursor advancement across FILTERED-OUT (out-of-selector)
-      // rows, which is unaffected by whether the granter's blobs exist.
       await putBlob(h, `hidden ${index}`);
       ops.push(momentOp(`private/file-${index}.md`, `hidden ${index}`));
     }
@@ -754,34 +751,25 @@ describe("share grants", () => {
     await appendOps(h, ops);
     await createShare(h);
 
-    const refusedPage = await json(
+    const page = await json(
       await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=2")),
     );
-    expect(refusedPage).toMatchObject({ ops: [], nextCursor: 2, hasMore: true });
-    let cursor = refusedPage.nextCursor as number;
-    const collected: string[] = [];
-    for (let guard = 0; guard < 10; guard += 1) {
-      const page = await json(
-        await h(request(RECIPIENT, `/sync/shares/share-0/log?since=${cursor}&limit=2`)),
-      );
-      for (const op of page.ops as Array<{ payload: { path: string } }>) {
-        collected.push(op.payload.path);
-      }
-      expect(page.nextCursor as number).toBeGreaterThan(cursor);
-      cursor = page.nextCursor as number;
-      if (!(page.hasMore as boolean)) break;
-    }
-    expect(collected).toEqual(["docs/last.md"]);
+    expect(page).toMatchObject({ nextCursor: 6, hasMore: false });
+    expect((page.ops as Array<{ payload: { path: string } }>).map((op) => op.payload.path)).toEqual(
+      ["docs/last.md"],
+    );
 
     await putBlob(h, "later publication");
     await appendOps(h, [momentOp("docs/later.md", "later publication")]);
     const later = await json(
-      await h(request(RECIPIENT, `/sync/shares/share-0/log?since=${cursor}&limit=2`)),
+      await h(
+        request(RECIPIENT, `/sync/shares/share-0/log?since=${page.nextCursor as number}&limit=2`),
+      ),
     );
     expect(later.ops).toEqual([
       expect.objectContaining({ payload: expect.objectContaining({ path: "docs/later.md" }) }),
     ]);
-    expect(later.nextCursor).toBeGreaterThan(cursor);
+    expect(later.nextCursor).toBeGreaterThan(page.nextCursor as number);
     expect(later.hasMore).toBe(false);
   });
 });

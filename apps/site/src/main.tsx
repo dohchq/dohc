@@ -1,4 +1,5 @@
 import type { Root } from "react-dom/client";
+import { engineLoadFinished } from "./hero-engine";
 
 const host = document.getElementById("desktop-demo");
 
@@ -21,8 +22,8 @@ if (host) {
       if (retry) retry.hidden = false;
     });
   };
-  const mount = async (): Promise<boolean> => {
-    if (mounted) return false;
+  const mount = async () => {
+    if (mounted) return;
     mounted = true;
     if (status) status.textContent = "Loading your workspace…";
     if (retry) retry.hidden = true;
@@ -69,10 +70,8 @@ if (host) {
       stopKeyboardNavigation = initKeyboardNavigation(root);
       reactRoot = createRoot(root, { onUncaughtError: failed });
       reactRoot.render(createElement(ProductDemo));
-      return true;
     } catch (error) {
       failed(error);
-      return false;
     }
   };
   retry?.addEventListener("click", () => {
@@ -80,14 +79,27 @@ if (host) {
   });
 
   if ("IntersectionObserver" in window) {
+    let latest: IntersectionObserverEntry;
     const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return;
-        void mount().then((didMount) => {
-          if (didMount) observer.disconnect();
-        });
+      async (entries) => {
+        const entry = entries[entries.length - 1];
+        latest = entry;
+        if (!entry.isIntersecting) return;
+        if (
+          entry.intersectionRatio < 1 / 3 &&
+          entry.boundingClientRect.top > 0 &&
+          window.scrollY === 0
+        ) {
+          await Promise.race([
+            engineLoadFinished,
+            new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+          ]);
+          if (latest !== entry) return;
+        }
+        observer.disconnect();
+        void mount();
       },
-      { rootMargin: "0px" },
+      { threshold: [0, 1 / 3] },
     );
     observer.observe(host);
   } else {

@@ -108,6 +108,8 @@ export function createNamedShareTransportRoutes(
       }
       const since = parseCursor(url.searchParams.get("since"));
       const limit = parseLimit(url.searchParams.get("limit"));
+      const scan = url.searchParams.get("scan");
+      if (scan !== null && scan !== "page") throw badRequest("scan must be page");
       // A group is read one half at a time. The channel pull names the
       // channel and gets its chat; the folder mount names nothing and gets
       // its files. Each client refuses the other half's ops, so one page
@@ -128,6 +130,9 @@ export function createNamedShareTransportRoutes(
         "authenticated",
         half,
         ["user", actor.userId],
+        false,
+        0,
+        scan === "page" ? limit : undefined,
       );
       // The selector that filtered the page being returned. A held read
       // refilters with the grant's level at each wake.

@@ -38,6 +38,7 @@ import {
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { DOCUMENT_TOO_DENSE_WORDS } from "../ipc/errorWords";
 import { isPrivacyDenial } from "./privacyDenial";
+import { resolveWorkspaceDocument } from "./workspaceAssets";
 import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./physicalWorkspaceRemoval";
 import type { RegistryEntry } from "./registryStore";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
@@ -150,6 +151,7 @@ interface TestHarnessOptions {
   resolveDocumentPath?: (
     workspace: { workspaceId: string; rootPath: string; attachmentId: symbol },
     path: string,
+    access: "read" | "write",
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
@@ -1688,6 +1690,7 @@ describe("engine Y.Doc IPC adapter", () => {
         attachmentId: AUTHORITY_ID,
       },
       "alias/a.md",
+      "write",
     );
     expect(resolveDocumentPath.mock.calls.map(([, path]) => path)).toEqual([
       "alias/a.md",
@@ -3202,6 +3205,30 @@ describe("engine Y.Doc IPC adapter", () => {
       h.setReadOnly(true);
       await expect(h.ipc.editDocument(append)).rejects.toThrow("shared view");
       expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("reads a document in a received share, and still refuses to edit it", async () => {
+      const root = mkdtempSync(join(tmpdir(), "dohc-received-share-"));
+      mkdirSync(join(root, "shared-with-me", "trip"), { recursive: true });
+      writeFileSync(join(root, "shared-with-me", "trip", "notes.md"), "# Notes\n");
+      try {
+        const h = harness(editableSession(), {
+          rootPath: root,
+          resolveDocumentPath: (workspace, path, access) =>
+            resolveWorkspaceDocument(workspace.rootPath, path, access),
+        });
+        const path = "shared-with-me/trip/notes.md";
+        await expect(h.ipc.readDocument({ workspaceId: "workspace-1", path })).resolves.toEqual({
+          path,
+          state: null,
+        });
+        await expect(h.ipc.editDocument({ ...append, path })).rejects.toThrow(
+          `Invalid asset path (reserved): ${path}`,
+        );
+        expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
 
     it("reads the held document's state, or nothing when no editor holds it", async () => {

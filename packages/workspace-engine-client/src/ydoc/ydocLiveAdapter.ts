@@ -2,18 +2,21 @@ import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingLimits";
 import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
+import { isWellFormedUtf16, Utf16Ledger } from "./utf16Ledger";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { EngineRequestDeadlineError, EngineRequestError } from "../daemon/engineClient";
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isEngineStoreBusyRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isMarkdownWriteHeldRefusal,
   isYdocSessionNotFoundRefusal,
   WorkspaceDaemonRequester,
+  YdocUpdateNotRecordedError,
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
 import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
@@ -261,6 +264,8 @@ export interface ApplyLocalUpdateOptions {
    * engine-side instead of journaling twice.
    */
   idempotencyKey?: string;
+  /** A busy outcome after no send could have recorded it refuses the update for good. */
+  dropWhenUnrecorded?: boolean;
 }
 
 export interface YdocLocalTextEdit {
@@ -268,15 +273,6 @@ export interface YdocLocalTextEdit {
   index: number;
   insert?: string;
   deleteLength?: number;
-}
-
-const ILL_FORMED_UTF16_PATTERN =
-  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
-
-export function isWellFormedUtf16(value: string): boolean {
-  return typeof value.isWellFormed === "function"
-    ? value.isWellFormed()
-    : !ILL_FORMED_UTF16_PATTERN.test(value);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -313,192 +309,6 @@ function createPlaintextSeedDoc(content: string, clientID: number): Y.Doc {
   return doc;
 }
 
-function visitJsonStrings(value: unknown, visitor: (value: string) => void): void {
-  if (typeof value === "string") {
-    visitor(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) visitJsonStrings(item, visitor);
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, item] of Object.entries(value)) {
-      visitor(key);
-      visitJsonStrings(item, visitor);
-    }
-  }
-}
-
-function visitDeltaStrings(text: Y.Text | Y.XmlText, visitor: (value: string) => void): void {
-  for (const operation of text.toDelta()) {
-    if (typeof operation.insert === "string") {
-      visitor(operation.insert);
-    } else {
-      visitJsonStrings(operation.insert, visitor);
-    }
-    for (const [key, value] of Object.entries(operation.attributes ?? {})) {
-      visitor(key);
-      visitJsonStrings(value, visitor);
-    }
-  }
-}
-
-function visitSharedValueStrings(value: unknown, visitor: (value: string) => void): void {
-  if (value instanceof Y.XmlText || value instanceof Y.Text) {
-    visitDeltaStrings(value, visitor);
-    return;
-  }
-  if (value instanceof Y.XmlElement) {
-    for (const [key, attribute] of Object.entries(value.getAttributes())) {
-      visitor(key);
-      if (attribute !== undefined) visitor(attribute);
-    }
-    for (const child of value.toArray()) {
-      visitSharedValueStrings(child, visitor);
-    }
-    return;
-  }
-  if (value instanceof Y.XmlFragment) {
-    for (const child of value.toArray()) {
-      visitSharedValueStrings(child, visitor);
-    }
-    return;
-  }
-  if (value instanceof Y.Map) {
-    visitJsonStrings(value.toJSON(), visitor);
-    return;
-  }
-  if (value instanceof Y.Array) {
-    for (const item of value.toArray()) {
-      visitSharedValueStrings(item, visitor);
-    }
-    return;
-  }
-  visitJsonStrings(value, visitor);
-}
-
-function countReplacementChars(value: string): number {
-  let count = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) === 0xfffd) count += 1;
-  }
-  return count;
-}
-
-interface RootUtf16Snapshot {
-  readonly strings: readonly string[];
-  readonly replacementCount: number;
-}
-
-type DocUtf16Snapshot = ReadonlyMap<string, RootUtf16Snapshot>;
-
-function hasReplacementChars(snapshot: DocUtf16Snapshot): boolean {
-  for (const root of snapshot.values()) if (root.replacementCount > 0) return true;
-  return false;
-}
-
-function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
-  const snapshot = new Map<string, RootUtf16Snapshot>();
-  for (const [root, value] of doc.share) {
-    const strings: string[] = [root];
-    visitSharedValueStrings(value, (item) => strings.push(item));
-    snapshot.set(root, {
-      strings,
-      replacementCount: strings.reduce((count, item) => count + countReplacementChars(item), 0),
-    });
-  }
-  return snapshot;
-}
-
-// Minimal view of Yjs' internal item list, used only to count U+FFFD that this
-// transaction DELETED. Yjs sanitizes a split surrogate pair to U+FFFD in every
-// public read (toString/toDelta) and even in item storage, so a masked split
-// (delete N pre-existing U+FFFD while a mid-pair split adds N) nets to zero in
-// aggregate counts. Counting the deleted U+FFFD separately closes that bypass.
-interface YjsInternalItem {
-  readonly deleted: boolean;
-  readonly right: YjsInternalItem | null;
-  readonly content: { readonly str?: string; readonly type?: YjsInternalType };
-}
-interface YjsInternalType {
-  readonly _start: YjsInternalItem | null;
-}
-
-function countDeletedTextReplacementChars(type: YjsInternalType): number {
-  let total = 0;
-  const walk = (start: YjsInternalItem | null, ancestorDeleted: boolean): void => {
-    let item = start;
-    while (item) {
-      const deleted = ancestorDeleted || item.deleted;
-      const content = item.content;
-      if (typeof content.str === "string") {
-        if (deleted) total += countReplacementChars(content.str);
-      } else if (content.type) {
-        walk(content.type._start, deleted);
-      }
-      item = item.right;
-    }
-  };
-  walk(type._start, false);
-  return total;
-}
-
-// Per-root count of U+FFFD contained in text the transaction `delta` DELETED,
-// reconstructed by replaying `beforeState` + `delta` into a gc:false clone
-// (which retains deleted content as tombstones) and walking the deleted items.
-function deletedReplacementCounts(
-  beforeState: Uint8Array,
-  delta: Uint8Array,
-): ReadonlyMap<string, number> {
-  const clone = new Y.Doc({ gc: false });
-  Y.applyUpdate(clone, beforeState);
-  Y.applyUpdate(clone, delta);
-  const counts = new Map<string, number>();
-  for (const [root, value] of clone.share) {
-    counts.set(root, countDeletedTextReplacementChars(value as unknown as YjsInternalType));
-  }
-  return counts;
-}
-
-function assertDocUtf16IsSafe(
-  doc: Y.Doc,
-  before: DocUtf16Snapshot,
-  computeDeleted: () => ReadonlyMap<string, number>,
-  seedUpdate: boolean,
-): void {
-  const after = snapshotDocUtf16(doc);
-  let hasReplacement = false;
-  for (const [, current] of after) {
-    for (const value of current.strings) {
-      // A lone surrogate survives directly in non-text values (map/attribute
-      // strings are not sanitized) — reject it unconditionally.
-      if (!isWellFormedUtf16(value)) throw new IllFormedUtf16EditError();
-    }
-    if (current.replacementCount > 0) hasReplacement = true;
-  }
-  // Fast path: no U+FFFD anywhere post-edit ⇒ no split (masked or otherwise)
-  // could have occurred, so skip the clone entirely (the common case).
-  if (!hasReplacement) return;
-  if (seedUpdate) return;
-
-  // A split surfaces as a NET-NEW U+FFFD once offsetting deletions are counted:
-  // newFFFD = after − before + deleted. Reject any root with newFFFD > 0. This
-  // catches the masked split (cross_engine.rs:264) without over-rejecting a
-  // clean delete of pre-existing U+FFFD (a net decrease → newFFFD ≤ 0).
-  // The general opaque split that no live TypeScript scan can reconstruct is
-  // caught engine-side by the replay-parity gate
-  // (crates/dohc-engine-collab/src/replay_parity.rs).
-  const deleted = computeDeleted();
-  for (const [root, current] of after) {
-    const newReplacement =
-      current.replacementCount -
-      (before.get(root)?.replacementCount ?? 0) +
-      (deleted.get(root) ?? 0);
-    if (newReplacement > 0) throw new IllFormedUtf16EditError();
-  }
-}
-
 function isInsideSurrogatePair(value: string, index: number): boolean {
   if (index <= 0 || index >= value.length) return false;
   const previous = value.charCodeAt(index - 1);
@@ -533,10 +343,6 @@ function assertTextEditIsValid(text: string, edit: YdocLocalTextEdit): void {
 
 interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
-  readonly before: DocUtf16Snapshot;
-  // Only text that existed before the edit can be deleted by it, so with no
-  // U+FFFD before there is none to count and the state is not encoded.
-  readonly beforeState: Uint8Array | null;
   readonly seedUpdate: boolean;
   readonly originalUpdate?: Uint8Array;
   operation?: Promise<YdocRecordUpdateResult | undefined>;
@@ -556,8 +362,10 @@ interface LocalUpdateRecord {
   readonly actorOriginId?: string;
   readonly attribution?: ChangeAttributionWire;
   readonly trustedAutomationDraft?: boolean;
+  readonly dropWhenUnrecorded?: boolean;
   readonly seed: boolean;
   readonly generation: DocumentGeneration;
+  mayHaveRecorded?: boolean;
   refusal?: unknown;
 }
 
@@ -571,7 +379,8 @@ export function isLineageChange(error: unknown): boolean {
 }
 
 export class YdocAdapterSession {
-  private activeDoc: Y.Doc;
+  private activeDoc!: Y.Doc;
+  private utf16!: Utf16Ledger;
   get doc(): Y.Doc {
     return this.activeDoc;
   }
@@ -647,6 +456,7 @@ export class YdocAdapterSession {
     (id: string, lane: "journal" | "owner-outbox") => void
   >();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
+  private readonly localUpdateUncertainListeners = new Set<(id: string) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<(error: RemoteYdocApplyError) => void>();
   private readonly resyncNeededListeners = new Set<(error: YdocResyncNeededError) => void>();
@@ -682,12 +492,24 @@ export class YdocAdapterSession {
     this.lineageClaimId = input.lineageClaimId;
     this.lineageOriginatedHere = input.lineageOriginatedHere;
     this.ownerDraft = input.ownerDraft;
-    this.activeDoc = new Y.Doc();
-    declareDohcRootSchema(this.activeDoc, this.contentKind);
-    Y.applyUpdate(this.activeDoc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
+    const doc = new Y.Doc();
+    declareDohcRootSchema(doc, this.contentKind);
+    Y.applyUpdate(doc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
     declareDohcRootSchema(this.acknowledgedDoc, this.contentKind);
     Y.applyUpdate(this.acknowledgedDoc, this.initialUpdate);
-    this.activeDoc.on("update", this.handleDocUpdate);
+    this.activate(doc);
+  }
+
+  private activate(doc: Y.Doc): void {
+    this.activeDoc = doc;
+    this.utf16 = new Utf16Ledger(doc);
+    doc.on("update", this.handleDocUpdate);
+  }
+
+  private deactivate(): Y.Doc {
+    this.activeDoc.off("update", this.handleDocUpdate);
+    this.utf16.dispose();
+    return this.activeDoc;
   }
 
   canonicalSource(): "ydoc" {
@@ -811,6 +633,7 @@ export class YdocAdapterSession {
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
       ...(options?.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
+      ...(options?.dropWhenUnrecorded ? { dropWhenUnrecorded: true } : {}),
       seed: seedUpdate,
       generation: this.generation,
     };
@@ -873,6 +696,16 @@ export class YdocAdapterSession {
           // the thrown value, and a transient refusal buried in a diagnostic
           // wrapper reads as terminal. Recovery met the same busy engine the
           // write did; report that, not a story about recovery.
+          if (
+            isEngineStoreBusyRefusal(recoveryFailure) &&
+            record.dropWhenUnrecorded &&
+            !record.mayHaveRecorded &&
+            this.pendingRecords.has(record)
+          ) {
+            const notRecorded = new YdocUpdateNotRecordedError();
+            this.retireRefusedRecord(record, notRecorded);
+            throw notRecorded;
+          }
           if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
           if (isTransientEngineRefusal(refusal)) throw refusal;
           const refusalMessage = refusal instanceof Error ? refusal.message : String(refusal);
@@ -982,33 +815,20 @@ export class YdocAdapterSession {
         }),
       );
     } catch (error) {
-      if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
-        // Retire causal dependents before replacement so observers can retain
-        // a recovery copy. Independent clients keep their queued writes.
-        const refusedUpdates = [base64ToBytes(record.updateBase64)];
-        let tail = false;
-        for (const pending of this.pendingRecords) {
-          if (pending === record) tail = true;
-          if (!tail) continue;
-          const update = base64ToBytes(pending.updateBase64);
-          if (
-            pending !== record &&
-            !refusedUpdates.some((refused) => ydocUpdateDependsOn(update, refused))
-          )
-            continue;
-          if (pending !== record) refusedUpdates.push(update);
-          pending.refusal = error;
-          this.removePendingRecord(pending);
-          for (const listener of this.localUpdateRefusedListeners) {
+      if (!isEngineStoreBusyRefusal(error)) {
+        if (!record.mayHaveRecorded) {
+          record.mayHaveRecorded = true;
+          for (const listener of this.localUpdateUncertainListeners) {
             try {
-              listener(pending.idempotencyKey, error);
+              listener(record.idempotencyKey);
             } catch (cause) {
               this.surfaceSessionError(cause);
             }
           }
         }
-        this.restoreAcknowledgedDocument();
       }
+      if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record))
+        this.retireRefusedRecord(record, error);
       throw error;
     }
     // Only an answer within this document's lineage acknowledges the edit.
@@ -1040,6 +860,34 @@ export class YdocAdapterSession {
     return result;
   }
 
+  private retireRefusedRecord(record: LocalUpdateRecord, error: unknown): void {
+    // Retire causal dependents before replacement so observers can retain
+    // a recovery copy. Independent clients keep their queued writes.
+    const refusedUpdates = [base64ToBytes(record.updateBase64)];
+    let tail = false;
+    for (const pending of this.pendingRecords) {
+      if (pending === record) tail = true;
+      if (!tail) continue;
+      const update = base64ToBytes(pending.updateBase64);
+      if (
+        pending !== record &&
+        !refusedUpdates.some((refused) => ydocUpdateDependsOn(update, refused))
+      )
+        continue;
+      if (pending !== record) refusedUpdates.push(update);
+      pending.refusal = error;
+      this.removePendingRecord(pending);
+      for (const listener of this.localUpdateRefusedListeners) {
+        try {
+          listener(pending.idempotencyKey, error);
+        } catch (cause) {
+          this.surfaceSessionError(cause);
+        }
+      }
+    }
+    this.restoreAcknowledgedDocument();
+  }
+
   private removePendingRecord(record: LocalUpdateRecord): void {
     if (!this.pendingRecords.delete(record)) return;
     this.pendingRecordBytes -=
@@ -1054,10 +902,8 @@ export class YdocAdapterSession {
     Y.applyUpdate(replacement, Y.encodeStateAsUpdate(this.acknowledgedDoc));
     for (const record of this.pendingRecords)
       Y.applyUpdate(replacement, base64ToBytes(record.updateBase64));
-    const refusedDoc = this.activeDoc;
-    refusedDoc.off("update", this.handleDocUpdate);
-    this.activeDoc = replacement;
-    replacement.on("update", this.handleDocUpdate);
+    const refusedDoc = this.deactivate();
+    this.activate(replacement);
     this.initialUpdate = Y.encodeStateAsUpdate(replacement);
     for (const listener of this.lineageReplacementListeners) {
       try {
@@ -1258,6 +1104,11 @@ export class YdocAdapterSession {
   onLocalUpdateRefused(handler: (id: string, error: unknown) => void): () => void {
     this.localUpdateRefusedListeners.add(handler);
     return () => this.localUpdateRefusedListeners.delete(handler);
+  }
+
+  onLocalUpdateUncertain(handler: (id: string) => void): () => void {
+    this.localUpdateUncertainListeners.add(handler);
+    return () => this.localUpdateUncertainListeners.delete(handler);
   }
 
   onOwnerDraftChanged(handler: () => void): () => void {
@@ -1472,10 +1323,8 @@ export class YdocAdapterSession {
           const replacement = new Y.Doc();
           declareDohcRootSchema(replacement, this.contentKind);
           Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
-          replacement.on("update", this.handleDocUpdate);
-          this.activeDoc.off("update", this.handleDocUpdate);
-          this.retiredDocs.add(this.activeDoc);
-          this.activeDoc = replacement;
+          this.retiredDocs.add(this.deactivate());
+          this.activate(replacement);
           this.lineageClaimId = result.lineageClaimId;
           this.lineageOriginatedHere = result.lineageOriginatedHere;
           this.initialUpdate = update;
@@ -1590,9 +1439,10 @@ export class YdocAdapterSession {
     this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
+    this.localUpdateUncertainListeners.clear();
     this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
-    this.doc.off("update", this.handleDocUpdate);
+    this.deactivate();
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
@@ -1618,15 +1468,21 @@ export class YdocAdapterSession {
     this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
+    this.localUpdateUncertainListeners.clear();
     this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
-    this.doc.off("update", this.handleDocUpdate);
+    this.deactivate();
     for (const retired of this.retiredDocs) retired.destroy();
     this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
   }
 
-  private readonly handleDocUpdate = (update: Uint8Array, origin: unknown): void => {
+  private readonly handleDocUpdate = (
+    update: Uint8Array,
+    origin: unknown,
+    _doc: Y.Doc,
+    transaction: Y.Transaction,
+  ): void => {
     try {
       if (this.closed) return;
       if (origin === ENGINE_DELIVERED_ORIGIN) {
@@ -1638,15 +1494,9 @@ export class YdocAdapterSession {
       if (origin !== LOCAL_EDITOR_ORIGIN) return;
 
       const capture = this.activeLocalRecordCapture;
-      assertDocUtf16IsSafe(
-        this.doc,
-        capture?.before ?? snapshotDocUtf16(this.doc),
-        () =>
-          capture?.beforeState
-            ? deletedReplacementCounts(capture.beforeState, update)
-            : new Map<string, number>(),
-        capture?.seedUpdate ?? false,
-      );
+      const verdict = this.utf16.verdict(transaction);
+      if (verdict.illFormed || (verdict.newReplacement && !capture?.seedUpdate))
+        throw new IllFormedUtf16EditError();
       if (capture?.originalUpdate !== undefined) return;
       const operation = this.enqueueRecordUpdate(
         update,
@@ -1677,12 +1527,9 @@ export class YdocAdapterSession {
     originalUpdate?: Uint8Array,
   ): Promise<YdocRecordUpdateResult | undefined> {
     this.assertRecordable();
-    const before = snapshotDocUtf16(this.doc);
     const capture: LocalRecordCapture = {
       options: options === undefined ? undefined : structuredClone(options),
       originalUpdate,
-      before,
-      beforeState: hasReplacementChars(before) ? Y.encodeStateAsUpdate(this.doc) : null,
       seedUpdate,
     };
     this.activeLocalRecordCapture = capture;

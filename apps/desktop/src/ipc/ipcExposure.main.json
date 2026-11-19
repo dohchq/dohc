@@ -184,6 +184,7 @@
     "desktop:list-my-share-changes",
     "desktop:list-notices",
     "desktop:list-owner-live-documents",
+    "desktop:list-owner-live-recovery-packages",
     "desktop:list-owner-live-refusals",
     "desktop:list-personal-chat-feed",
     "desktop:list-record-buttons",

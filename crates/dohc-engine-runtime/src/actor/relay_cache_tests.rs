@@ -636,12 +636,11 @@ async fn cursor_committed_crash_invalidates_writer_cache() {
     supervisor.close(&path).unwrap();
 }
 
-/// The read names exactly the new note the sync pass skips for its open
-/// editing session, and the pass sends exactly that note once it is left.
-/// The note waits either to claim its lineage or, once the session claimed
-/// it, to send the settled file.
+/// An open new note whose lineage no pass could claim is named as held, and
+/// the pass sends it once it is left. Once its session claimed the lineage,
+/// the pass sends the settled file while the note stays open.
 #[tokio::test]
-async fn first_exports_held_open_names_what_the_pass_sends_once_the_note_is_left() {
+async fn first_exports_held_open_names_only_an_unclaimed_open_note() {
     for claimed_live in [false, true] {
         let (scratch, path, producer) = document_fixture(true, false, 4);
         let supervisor = WorkspaceSupervisor::new();
@@ -690,26 +689,26 @@ async fn first_exports_held_open_names_what_the_pass_sends_once_the_note_is_left
         append(&actor, producer.plaintext_insert(4, "b")).await;
         settle_doc(&actor, scratch.path().to_owned()).await;
 
-        assert_eq!(held().await.unwrap(), ["doc.md"], "{claimed_live}");
+        if claimed_live {
+            assert!(held().await.unwrap().is_empty());
+            pass().await.unwrap();
+            assert_eq!(sent().await.unwrap(), 1, "the pass sends the open note");
+            drop(session);
+            supervisor.close(&path).unwrap();
+            continue;
+        }
+        assert_eq!(held().await.unwrap(), ["doc.md"]);
         pass().await.unwrap();
-        assert_eq!(
-            sent().await.unwrap(),
-            0,
-            "the pass skips the open note: {claimed_live}"
-        );
-        assert_eq!(held().await.unwrap(), ["doc.md"], "{claimed_live}");
+        assert_eq!(sent().await.unwrap(), 0, "the pass skips the open note");
+        assert_eq!(held().await.unwrap(), ["doc.md"]);
 
         drop(session);
-        assert!(held().await.unwrap().is_empty(), "{claimed_live}");
+        assert!(held().await.unwrap().is_empty());
         pass().await.unwrap();
-        assert_eq!(
-            sent().await.unwrap(),
-            1,
-            "the pass sends the left note: {claimed_live}"
-        );
+        assert_eq!(sent().await.unwrap(), 1, "the pass sends the left note");
         // Once its first file record is sent, opening the note again holds nothing.
         let _session = leases.acquire(&key()).unwrap();
-        assert!(held().await.unwrap().is_empty(), "{claimed_live}");
+        assert!(held().await.unwrap().is_empty());
         supervisor.close(&path).unwrap();
     }
 }

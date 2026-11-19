@@ -11,6 +11,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   sharedDatasetViewerOrigin,
+  openAppFromFolderLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import {
@@ -209,7 +210,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     guest.setDefaultTimeout(30_000);
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
     await guest.goto(linkUrl);
-    await guest.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(guest);
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
     await form.getByLabel("Name", { exact: false }).fill("Shared browser participant");

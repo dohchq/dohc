@@ -16,8 +16,8 @@ use dohc_engine_collab::{
     replace_lineage_with_successor, settle, BaseCoordinateRecord, BaseRelayCoordinate,
     ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey, LeaseRegistry,
     LineageClaimStatus, LineageGuard, LocalAppend, MarkerCreation, Regime, RemoteUpdate,
-    SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
-    SuccessorReplacement, Ydoc,
+    SettleOutcome, SuccessorAuthor, SuccessorIdentity, SuccessorIdentityInput,
+    SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
 use dohc_engine_collab::{RemoteAppendProbe, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -1793,6 +1793,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             path: "notes/a.txt",
             successor: &cross_bound,
             scene_result: None,
+            author: SuccessorAuthor::default(),
             now_ms: 1_150,
         },
         &NoFaults,
@@ -1825,6 +1826,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 path: "notes/a.txt",
                 successor: &successor,
                 scene_result: None,
+                author: SuccessorAuthor::default(),
                 now_ms: 1_200,
             },
             &NoFaults,
@@ -1836,6 +1838,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
         SuccessorInstallOutcome::Installed {
             predecessor_claim_id: predecessor_claim_id.clone(),
             successor_claim_id: successor.lineage_claim_id.clone(),
+            record_facts: None,
         }
     );
     let active = read_marker(&store, &key)
@@ -2017,6 +2020,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             path: "notes/a.txt",
             successor: &successor,
             scene_result: None,
+            author: SuccessorAuthor::default(),
             now_ms: 1_275,
         },
         &NoFaults,
@@ -2080,6 +2084,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             path: "notes/a.txt",
             successor: &successor,
             scene_result: None,
+            author: SuccessorAuthor::default(),
             now_ms: 1_280,
         },
         &NoFaults,
@@ -2122,6 +2127,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 path: "notes/a.txt",
                 successor: &successor,
                 scene_result: None,
+                author: SuccessorAuthor::default(),
                 now_ms: 1_300,
             },
             &NoFaults,
@@ -2168,6 +2174,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             path: "notes/a.txt",
             successor: &next,
             scene_result: None,
+            author: SuccessorAuthor::default(),
             now_ms: 1_350,
         },
         &NoFaults,
@@ -2211,6 +2218,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             path: "notes/a.txt",
             successor: &other,
             scene_result: None,
+            author: SuccessorAuthor::default(),
             now_ms: 1_400,
         },
         &NoFaults,
