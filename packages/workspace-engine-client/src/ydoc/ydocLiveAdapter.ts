@@ -264,7 +264,7 @@ export interface ApplyLocalUpdateOptions {
    * engine-side instead of journaling twice.
    */
   idempotencyKey?: string;
-  /** A busy answer before any send could have recorded it refuses the update for good. */
+  /** A busy outcome after no send could have recorded it refuses the update for good. */
   dropWhenUnrecorded?: boolean;
 }
 
@@ -456,6 +456,7 @@ export class YdocAdapterSession {
     (id: string, lane: "journal" | "owner-outbox") => void
   >();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
+  private readonly localUpdateUncertainListeners = new Set<(id: string) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
   private readonly remoteApplyErrorListeners = new Set<(error: RemoteYdocApplyError) => void>();
   private readonly resyncNeededListeners = new Set<(error: YdocResyncNeededError) => void>();
@@ -695,6 +696,16 @@ export class YdocAdapterSession {
           // the thrown value, and a transient refusal buried in a diagnostic
           // wrapper reads as terminal. Recovery met the same busy engine the
           // write did; report that, not a story about recovery.
+          if (
+            isEngineStoreBusyRefusal(recoveryFailure) &&
+            record.dropWhenUnrecorded &&
+            !record.mayHaveRecorded &&
+            this.pendingRecords.has(record)
+          ) {
+            const notRecorded = new YdocUpdateNotRecordedError();
+            this.retireRefusedRecord(record, notRecorded);
+            throw notRecorded;
+          }
           if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
           if (isTransientEngineRefusal(refusal)) throw refusal;
           const refusalMessage = refusal instanceof Error ? refusal.message : String(refusal);
@@ -803,38 +814,21 @@ export class YdocAdapterSession {
           idempotencyKey: record.idempotencyKey,
         }),
       );
-    } catch (answer) {
-      let error = answer;
-      if (!isEngineStoreBusyRefusal(answer)) record.mayHaveRecorded = true;
-      else if (record.dropWhenUnrecorded && !record.mayHaveRecorded)
-        error = new YdocUpdateNotRecordedError();
-      if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
-        // Retire causal dependents before replacement so observers can retain
-        // a recovery copy. Independent clients keep their queued writes.
-        const refusedUpdates = [base64ToBytes(record.updateBase64)];
-        let tail = false;
-        for (const pending of this.pendingRecords) {
-          if (pending === record) tail = true;
-          if (!tail) continue;
-          const update = base64ToBytes(pending.updateBase64);
-          if (
-            pending !== record &&
-            !refusedUpdates.some((refused) => ydocUpdateDependsOn(update, refused))
-          )
-            continue;
-          if (pending !== record) refusedUpdates.push(update);
-          pending.refusal = error;
-          this.removePendingRecord(pending);
-          for (const listener of this.localUpdateRefusedListeners) {
+    } catch (error) {
+      if (!isEngineStoreBusyRefusal(error)) {
+        if (!record.mayHaveRecorded) {
+          record.mayHaveRecorded = true;
+          for (const listener of this.localUpdateUncertainListeners) {
             try {
-              listener(pending.idempotencyKey, error);
+              listener(record.idempotencyKey);
             } catch (cause) {
               this.surfaceSessionError(cause);
             }
           }
         }
-        this.restoreAcknowledgedDocument();
       }
+      if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record))
+        this.retireRefusedRecord(record, error);
       throw error;
     }
     // Only an answer within this document's lineage acknowledges the edit.
@@ -864,6 +858,34 @@ export class YdocAdapterSession {
       };
     }
     return result;
+  }
+
+  private retireRefusedRecord(record: LocalUpdateRecord, error: unknown): void {
+    // Retire causal dependents before replacement so observers can retain
+    // a recovery copy. Independent clients keep their queued writes.
+    const refusedUpdates = [base64ToBytes(record.updateBase64)];
+    let tail = false;
+    for (const pending of this.pendingRecords) {
+      if (pending === record) tail = true;
+      if (!tail) continue;
+      const update = base64ToBytes(pending.updateBase64);
+      if (
+        pending !== record &&
+        !refusedUpdates.some((refused) => ydocUpdateDependsOn(update, refused))
+      )
+        continue;
+      if (pending !== record) refusedUpdates.push(update);
+      pending.refusal = error;
+      this.removePendingRecord(pending);
+      for (const listener of this.localUpdateRefusedListeners) {
+        try {
+          listener(pending.idempotencyKey, error);
+        } catch (cause) {
+          this.surfaceSessionError(cause);
+        }
+      }
+    }
+    this.restoreAcknowledgedDocument();
   }
 
   private removePendingRecord(record: LocalUpdateRecord): void {
@@ -1082,6 +1104,11 @@ export class YdocAdapterSession {
   onLocalUpdateRefused(handler: (id: string, error: unknown) => void): () => void {
     this.localUpdateRefusedListeners.add(handler);
     return () => this.localUpdateRefusedListeners.delete(handler);
+  }
+
+  onLocalUpdateUncertain(handler: (id: string) => void): () => void {
+    this.localUpdateUncertainListeners.add(handler);
+    return () => this.localUpdateUncertainListeners.delete(handler);
   }
 
   onOwnerDraftChanged(handler: () => void): () => void {
@@ -1412,6 +1439,7 @@ export class YdocAdapterSession {
     this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
+    this.localUpdateUncertainListeners.clear();
     this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
     this.deactivate();
@@ -1440,6 +1468,7 @@ export class YdocAdapterSession {
     this.settlementWantedListeners.clear();
     this.localUpdateAcknowledgedListeners.clear();
     this.localUpdateRefusedListeners.clear();
+    this.localUpdateUncertainListeners.clear();
     this.acknowledgedDoc.destroy();
     this.ownerDraftChangedListeners.clear();
     this.deactivate();

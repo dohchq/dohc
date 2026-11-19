@@ -1713,6 +1713,26 @@ it("drops a definitively refused caller-confirmed original so later typing can s
   editor.destroy();
 });
 
+it("tells an agent the busy engine kept nothing of its write, and never sends it again", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  busyRecordAttempts = 2;
+  await expect(keyedWrite(session, "Busy write.")).rejects.toThrow(
+    `The engine did not record this write to ${PATH}, and nothing of it was kept. Retry with the same request.`,
+  );
+  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Busy write.");
+
+  await keyedWrite(session, "Busy write.", "claim/1/1");
+  await session.settleNow();
+  await session.close({ settle: false });
+  const sent = requests.filter(
+    (request) =>
+      request.method === YDOC_METHOD.recordUpdate && request.idempotencyKey === "claim/1/0",
+  );
+  expect(sent).toHaveLength(2);
+  expect((await readFile(join(root, PATH), "utf8")).split("Busy write.")).toHaveLength(2);
+  expect(journalMarkdown().split("Busy write.")).toHaveLength(2);
+});
+
 it("retires a busy refusal's typing checkpoint once the engine records the resent typing", async () => {
   await capture.stop();
   const written: string[] = [];

@@ -1558,13 +1558,20 @@ async function daemonDeathCapture(
         Y.applyUpdate(doc, update);
       },
       async applyLocalUpdate(update, applyOptions) {
-        if (!state.daemonAlive) throw transportDeath();
+        const key = applyOptions?.idempotencyKey;
+        const uncertain = (): void => {
+          if (key !== undefined) options.onLocalUpdateUncertain?.(key);
+        };
+        if (!state.daemonAlive) {
+          uncertain();
+          throw transportDeath();
+        }
         state.dropWhenUnrecorded.push(applyOptions?.dropWhenUnrecorded);
         if (state.applyRefusals.length > 0) throw state.applyRefusals.shift();
         const fault = state.applyFaults.shift();
+        if (fault !== undefined) uncertain();
         if (fault === "drop") throw transportDeath();
         if (state.refuseApply) throw new Error("record-update-refused");
-        const key = applyOptions?.idempotencyKey;
         const bytes = Buffer.from(update).toString("base64");
         if (key !== undefined && keyLedger.has(key)) {
           if (keyLedger.get(key) !== bytes) {

@@ -8508,7 +8508,7 @@ describe("a keyed write the busy engine refused", () => {
     });
     const before = engine.recordedUpdates.length;
     keys.length = 0;
-    busyAnswers = 1;
+    busyAnswers = 2;
     const agentUpdate = plaintextUpdate(provider.initialUpdate, (text) => text.insert(3, " agent"));
     await expect(
       provider.applyLocalUpdate(agentUpdate, {
@@ -8524,7 +8524,7 @@ describe("a keyed write the busy engine refused", () => {
     });
     await expect(provider.settleNow()).resolves.toMatchObject({ content: "abc agent" });
     await provider.close({ settle: false });
-    expect(keys).toEqual(["claim/1/0", "claim/1/1"]);
+    expect(keys).toEqual(["claim/1/0", "claim/1/0", "claim/1/1"]);
     expect(engine.recordedUpdates.length - before).toBe(1);
   });
 

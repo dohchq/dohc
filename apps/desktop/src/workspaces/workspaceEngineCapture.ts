@@ -3065,8 +3065,6 @@ export function createWorkspaceEngineCapture(
       return true;
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
-      if (!hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal))
-        record.mayHaveRecorded = true;
       if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
         record.uncertainFailures = 0;
         record.lastUncertainFailureAt = null;
@@ -3327,6 +3325,11 @@ export function createWorkspaceEngineCapture(
                 }
               }
               if (lane === "owner-outbox") input.onOwnerEditQueued?.();
+            },
+            onLocalUpdateUncertain: (id) => {
+              for (const record of pendingRecords) {
+                if (record.options.idempotencyKey === id) record.mayHaveRecorded = true;
+              }
             },
             onLocalUpdateRefused: (id, error) => {
               for (const record of pendingRecords) {
@@ -3685,10 +3688,13 @@ export function createWorkspaceEngineCapture(
       let sent = false;
       const unanswered = (error: unknown): Error =>
         sent || record.sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
-      const refused = (error: unknown): unknown =>
-        hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError)
-          ? keyedWriteNotRecorded(error)
-          : error;
+      const refused = async (error: unknown): Promise<unknown> => {
+        if (!hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError))
+          return error;
+        if (checkpointBase !== null && checkpointContentKind !== "scene")
+          await flushCheckpoint().catch((cause: unknown) => onError("Typing checkpoint", cause));
+        return keyedWriteNotRecorded(error);
+      };
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
@@ -3698,12 +3704,12 @@ export function createWorkspaceEngineCapture(
           }
         } catch (error) {
           if (record.acknowledged) return;
-          if (record.refusal !== null) throw refused(record.refusal.error);
+          if (record.refusal !== null) throw await refused(record.refusal.error);
           if (!sent && !record.sent) removePendingRecord(record);
           throw unanswered(error);
         }
         if (record.acknowledged) return;
-        if (record.refusal !== null) throw refused(record.refusal.error);
+        if (record.refusal !== null) throw await refused(record.refusal.error);
         if (!pendingRecords.has(record)) {
           throw new YdocAdapterError(
             "lineage-changed",
@@ -3745,7 +3751,7 @@ export function createWorkspaceEngineCapture(
           }
           if (recordUpdateFailure(record, error) && record.unanswered === null) {
             const editorVisible = refuseRecord(record, error);
-            if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
+            if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw await refused(error);
             if (editorVisible && canonicalDoc !== null)
               announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
           }
@@ -3760,13 +3766,13 @@ export function createWorkspaceEngineCapture(
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
             if (record.acknowledged) return;
             const refusal = (record as PendingRecord).refusal;
-            if (refusal !== null) throw refused(refusal.error);
+            if (refusal !== null) throw await refused(refusal.error);
             throw keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
           const refusal = (record as PendingRecord).refusal;
-          if (refusal !== null) throw refused(refusal.error);
+          if (refusal !== null) throw await refused(refusal.error);
           if (record.acknowledged) return;
           if (!pendingRecords.has(record)) {
             throw new YdocAdapterError(
