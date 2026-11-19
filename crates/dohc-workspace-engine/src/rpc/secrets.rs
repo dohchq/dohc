@@ -241,12 +241,14 @@ impl EngineService {
         Ok(json!(exists))
     }
 
-    /// The workspace's secret key, and whether this call minted it.
+    /// The workspace's secret key, and whether this call minted it. A mint
+    /// waits for `before_mint`, and an error there leaves no key.
     async fn load_or_create_secret_key(
         &self,
         cancellation: &OperationCancellation,
         open: &OpenWorkspace,
         operation: &'static str,
+        before_mint: impl std::future::Future<Output = Result<(), WireError>>,
     ) -> Result<(dohc_engine_crypto::SecretDataKey, bool), WireError> {
         let held = open.actor.location();
         let key_task =
@@ -273,6 +275,7 @@ impl EngineService {
         if has_state {
             return Err(WireError::new(ErrorCode::Internal, "key-corrupt"));
         }
+        before_mint.await?;
 
         if cancellation.token.is_cancelled() {
             return Err(cancellation.interruption(operation));
@@ -320,7 +323,21 @@ impl EngineService {
         )
         .await?;
         let (key, minted) = self
-            .load_or_create_secret_key(&cancellation, &open, "secrets.write (key load)")
+            .load_or_create_secret_key(
+                &cancellation,
+                &open,
+                "secrets.write (key load)",
+                Self::read_under_ctx(
+                    &cancellation,
+                    "secrets.write (disk check)",
+                    open.actor.check_secret_write_target(
+                        open.root.clone(),
+                        open.workspace_id.clone(),
+                        params.version_id.clone(),
+                        path.clone(),
+                    ),
+                ),
+            )
             .await?;
         // The minted key landed, so the write runs to its answer.
         let cancellation = if minted {

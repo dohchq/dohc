@@ -74,9 +74,59 @@ impl Workspace {
         call(&self.transport, &handle, self.next_request, method, params).await
     }
 
-    async fn secrets(&mut self, method: &str, mut params: Value) {
+    async fn secrets(&mut self, method: &str, mut params: Value) -> Value {
         params["workspaceId"] = json!(self.id);
-        self.call(method, params).await;
+        self.call(method, params).await
+    }
+
+    async fn secrets_error(&mut self, method: &str, mut params: Value) -> String {
+        params["workspaceId"] = json!(self.id);
+        self.next_request += 1;
+        let handle = self.handle.clone().expect("open workspace");
+        format!(
+            "{:?}",
+            call_error(&self.transport, &handle, self.next_request, method, params).await
+        )
+    }
+
+    async fn delete(&mut self, moment_id: &str) {
+        self.secrets(
+            "secrets.delete",
+            json!({
+                "versionId": "main",
+                "path": ".env",
+                "origin": "api",
+                "momentId": moment_id,
+            }),
+        )
+        .await;
+    }
+
+    async fn reconcile(&mut self) {
+        let handle = self.handle.clone().expect("open workspace");
+        reconcile_until_settled(&self.transport, &handle, self.next_request).await;
+    }
+
+    async fn recorded(&mut self, text: &str) -> bool {
+        self.secrets("secrets.recorded", json!({ "path": ".env", "text": text }))
+            .await["recorded"]
+            .as_bool()
+            .expect("recorded flag")
+    }
+
+    fn secret_rows(&self) -> i64 {
+        rusqlite::Connection::open(self.scratch.path().join(".dohc/engine/engine.db"))
+            .expect("sqlite")
+            .query_row(
+                "SELECT (SELECT count(*) FROM secret_moments) + \n                 (SELECT count(*) FROM materialization_jobs WHERE job_id GLOB 'secret-mat_*')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("secret rows")
+    }
+
+    fn has_key(&self) -> bool {
+        self.scratch.path().join(".dohc/engine/secret.key").exists()
     }
 
     async fn write(&mut self, text: &str, moment_id: &str) {
@@ -151,6 +201,8 @@ async fn a_queued_restore_keeps_an_edit_made_while_closed() {
     assert_eq!(workspace.env().as_deref(), Some("VALUE=edited\n"));
     workspace.assert_no_conflict_sibling();
     assert_eq!(workspace.job_status("restore-first"), "conflict");
+    workspace.reconcile().await;
+    assert!(workspace.recorded("VALUE=edited\n").await);
     workspace.close().await;
 }
 
@@ -179,6 +231,8 @@ async fn a_queued_delete_keeps_an_edit_made_while_closed() {
     assert_eq!(workspace.env().as_deref(), Some("VALUE=edited\n"));
     workspace.assert_no_conflict_sibling();
     assert_eq!(workspace.job_status("delete"), "conflict");
+    workspace.reconcile().await;
+    assert!(workspace.recorded("VALUE=edited\n").await);
     workspace.close().await;
 }
 
@@ -195,5 +249,132 @@ async fn a_queued_write_keeps_a_file_created_while_closed() {
     assert_eq!(workspace.env().as_deref(), Some("VALUE=created\n"));
     workspace.assert_no_conflict_sibling();
     assert_eq!(workspace.job_status("queued"), "conflict");
+    workspace.reconcile().await;
+    assert!(workspace.recorded("VALUE=created\n").await);
+    workspace.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_writes_land_the_newest_text_on_reopen() {
+    let mut workspace = Workspace::open_new("writes").await;
+    workspace.write("VALUE=first\n", "first").await;
+    workspace.write("VALUE=second\n", "second").await;
+    workspace.write("VALUE=third\n", "third").await;
+    workspace.close().await;
+    assert_eq!(workspace.env(), None);
+
+    workspace.open().await;
+
+    assert_eq!(workspace.env().as_deref(), Some("VALUE=third\n"));
+    workspace.assert_no_conflict_sibling();
+    for moment_id in ["first", "second", "third"] {
+        assert_eq!(workspace.job_status(moment_id), "complete", "{moment_id}");
+    }
+    workspace.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_write_then_delete_leaves_no_file_on_reopen() {
+    let mut workspace = Workspace::open_new("write-delete").await;
+    workspace.write("VALUE=first\n", "first").await;
+    workspace.delete("delete").await;
+    workspace.close().await;
+
+    workspace.open().await;
+
+    assert_eq!(workspace.env(), None);
+    workspace.assert_no_conflict_sibling();
+    assert_eq!(workspace.job_status("first"), "complete");
+    assert_eq!(workspace.job_status("delete"), "complete");
+    workspace.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_after_a_pending_write_lands_on_reopen() {
+    let mut workspace = Workspace::open_new("write-restore").await;
+    workspace.write("VALUE=first\n", "first").await;
+    workspace.reopen().await;
+    workspace.write("VALUE=second\n", "second").await;
+    workspace
+        .secrets(
+            "secrets.restore",
+            json!({
+                "path": ".env",
+                "beforeMomentId": "second",
+                "momentId": "restore-first",
+                "origin": "api",
+            }),
+        )
+        .await;
+    workspace.close().await;
+
+    workspace.open().await;
+
+    assert_eq!(workspace.env().as_deref(), Some("VALUE=first\n"));
+    workspace.assert_no_conflict_sibling();
+    assert_eq!(workspace.job_status("second"), "complete");
+    assert_eq!(workspace.job_status("restore-first"), "complete");
+    workspace.close().await;
+}
+
+async fn a_write_over_an_unreadable_file_records_nothing(name: &str, contents: Vec<u8>) {
+    let mut workspace = Workspace::open_new(name).await;
+    std::fs::write(workspace.scratch.path().join(".env"), &contents).expect("place file");
+
+    let error = workspace
+        .secrets_error(
+            "secrets.write",
+            json!({
+                "versionId": "main",
+                "path": ".env",
+                "text": "VALUE=new\n",
+                "origin": "api",
+                "momentId": "new",
+            }),
+        )
+        .await;
+
+    assert!(error.contains("invalid-path"), "{error}");
+    assert_eq!(workspace.secret_rows(), 0);
+    assert!(!workspace.has_key());
+    assert_eq!(
+        std::fs::read(workspace.scratch.path().join(".env")).expect("file"),
+        contents
+    );
+    workspace.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_over_a_non_text_file_records_nothing() {
+    a_write_over_an_unreadable_file_records_nothing("non-text", vec![0xff, 0xfe, b'\n']).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_over_an_oversized_file_records_nothing() {
+    a_write_over_an_unreadable_file_records_nothing(
+        "oversized",
+        vec![b'a'; dohc_engine_files::MAX_CAPTURE_TEXT_BYTES as usize + 1],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_version_fence_keeps_an_edit_over_a_queued_write() {
+    let mut workspace = Workspace::open_new("fence").await;
+    workspace.write("VALUE=queued\n", "queued").await;
+    std::fs::write(workspace.scratch.path().join(".env"), "VALUE=edited\n").expect("edit");
+
+    let id = workspace.id.clone();
+    workspace
+        .call(
+            "versions.createNamed",
+            json!({ "workspaceId": id, "name": "Draft", "fromVersionId": "main" }),
+        )
+        .await;
+
+    assert_eq!(workspace.env().as_deref(), Some("VALUE=edited\n"));
+    workspace.assert_no_conflict_sibling();
+    assert_eq!(workspace.job_status("queued"), "conflict");
+    assert!(workspace.recorded("VALUE=edited\n").await);
     workspace.close().await;
 }

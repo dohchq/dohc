@@ -7,7 +7,7 @@ use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
     WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, Preimage};
+use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, Preimage, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
@@ -54,12 +54,7 @@ fn secret_write(version: &str, path: &str, moment: &str, now_ms: i64) -> SecretW
     }
 }
 
-async fn secret_merge_replay(
-    write_completed: bool,
-    delete_first: bool,
-    legacy_write: bool,
-    placed: &str,
-) {
+async fn secret_merge_replay(delete_first: bool, legacy_write: bool) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
         return;
@@ -90,7 +85,7 @@ async fn secret_merge_replay(
                     metadata_correlation_id: None,
                     now_ms: 3,
                 },
-                Preimage::Absent,
+                &|_, _, _, _| Ok(Preimage::Absent),
                 &NoFaults,
             )
             .unwrap();
@@ -135,36 +130,33 @@ async fn secret_merge_replay(
     }
     supervisor.close(&db).unwrap();
     {
-        let mut store = EngineStore::open(&db, 5).unwrap();
+        let store = EngineStore::open(&db, 5).unwrap();
         let jobs = store.list_pending_materialization_jobs().unwrap();
         let merge_jobs: Vec<_> = jobs
             .iter()
             .filter(|job| job.job_id.starts_with("secret-mat_merge-"))
+            .map(|job| (job.target_path.as_str(), &job.preimage))
             .collect();
-        assert_eq!(merge_jobs.len(), 2);
-        assert_eq!(merge_jobs[0].target_path, paths[0]);
-        assert_eq!(merge_jobs[1].target_path, paths[1]);
-        if write_completed {
-            store
-                .mark_materialization_complete("secret-mat_merge-Foo.env", 5)
-                .unwrap();
-        }
-        if legacy_write {
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(
-                        "UPDATE materialization_jobs SET workspace_id='' WHERE job_id='secret-mat_merge-Foo.env'",
-                        [],
-                    )
-                    .map_err(dohc_engine_storage::StorageError::persist_public)
-                })
-                .unwrap();
-        }
+        let delete = ("foo.env", &Preimage::Present(hex_sha256(b"TOKEN=base")));
+        let write = ("Foo.env", &Preimage::Absent);
+        let expected = if delete_first {
+            [delete, write]
+        } else {
+            [write, delete]
+        };
+        assert_eq!(merge_jobs, expected);
     }
-    if !delete_first {
-        // The desktop's merge places deletes before writes.
-        std::fs::remove_file(root.join("foo.env")).unwrap();
-        std::fs::write(root.join(placed), "TOKEN=target").unwrap();
+    if legacy_write {
+        EngineStore::open(&db, 5)
+            .unwrap()
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET workspace_id='' WHERE job_id='secret-mat_merge-Foo.env'",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
     }
     let actor = supervisor.open(&db, 6).unwrap().actor;
     if legacy_write {
@@ -182,7 +174,7 @@ async fn secret_merge_replay(
             .unwrap();
         assert!(!root.join("foo.env").exists());
     }
-    let replay = actor
+    actor
         .materialize_replay_pending(root.path().into(), WS.into(), 6)
         .await
         .unwrap();
@@ -194,45 +186,43 @@ async fn secret_merge_replay(
             .unwrap()
             .is_some()
     );
+    for job in ["secret-mat_merge-foo.env", "secret-mat_merge-Foo.env"] {
+        assert_eq!(
+            store.load_materialization_job(job).unwrap().unwrap().status,
+            JobStatus::Complete,
+            "{job}"
+        );
+    }
+    let names: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".env") || name.starts_with(".dohc-write-"))
+        .collect();
+    assert_eq!(names, ["Foo.env"]);
     assert_eq!(
-        store
-            .load_materialization_job("secret-mat_merge-foo.env")
-            .unwrap()
-            .unwrap()
-            .status,
-        JobStatus::Complete
-    );
-    assert_eq!(
-        std::fs::read(root.join("Foo.env")).unwrap_or_else(|error| panic!("secret lost after replay completed {replay} jobs (write_completed={write_completed}): {error}")),
+        std::fs::read(root.join("Foo.env")).unwrap(),
         b"TOKEN=target"
     );
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_survives_reopen_replay() {
-    secret_merge_replay(false, false, false, "Foo.env").await;
-}
-
-#[tokio::test]
-async fn secret_case_only_merge_survives_replay_after_write_completed() {
-    secret_merge_replay(true, false, false, "Foo.env").await;
-}
-
-/// On macOS a write over equal bytes keeps the stored spelling, so the file
-/// is still stored as `foo.env` when the old spelling's delete replays.
-#[tokio::test]
-async fn secret_case_only_merge_survives_replay_with_old_spelling_stored() {
-    secret_merge_replay(false, false, false, "foo.env").await;
+    secret_merge_replay(false, false).await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_delete_first_survives_reopen() {
-    secret_merge_replay(false, true, false, "Foo.env").await;
+    secret_merge_replay(true, false).await;
 }
 
 #[tokio::test]
 async fn secret_case_only_merge_delete_first_waits_for_legacy_write() {
-    secret_merge_replay(false, true, true, "Foo.env").await;
+    secret_merge_replay(true, true).await;
+}
+
+#[tokio::test]
+async fn secret_case_only_merge_waits_for_legacy_write() {
+    secret_merge_replay(false, true).await;
 }
 
 #[tokio::test]
@@ -266,7 +256,7 @@ async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
                     metadata_correlation_id: None,
                     now_ms: 2,
                 },
-                Preimage::Absent,
+                &|_, _, _, _| Ok(Preimage::Absent),
                 &NoFaults,
             )
             .unwrap();

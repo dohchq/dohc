@@ -119,7 +119,7 @@ fn secret_changed_ingest_consumes_an_engine_self_write() {
                 now_ms: 2,
             },
             SecretDiskIntent::Materialize {
-                expected: dohc_engine_storage::Preimage::Absent,
+                check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
             },
             &FilesNoFaults,
         )

@@ -48,7 +48,7 @@ fn write(
                 now_ms,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             &NO_FAULTS,
         )
@@ -78,7 +78,7 @@ fn write_version(
                 now_ms,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             &NO_FAULTS,
         )
@@ -124,7 +124,7 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 now_ms: 10,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             &NO_FAULTS,
         )
@@ -143,7 +143,7 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 metadata_correlation_id: None,
                 now_ms: 11,
             },
-            Preimage::Absent,
+            &|_, _, _, _| Ok(Preimage::Absent),
             &NO_FAULTS,
         )
         .expect_err("ordinary path delete must fail at the store door");
@@ -321,7 +321,7 @@ fn crash_before_persist_rolls_back_secret_write() {
                 now_ms: 10,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             faults.as_ref(),
         );
@@ -359,7 +359,7 @@ fn crash_after_commit_is_durable() {
                 now_ms: 10,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             faults.as_ref(),
         );
@@ -520,7 +520,7 @@ fn secret_apply_propagates_source_delete() {
             metadata_correlation_id: None,
             now_ms: 11,
         },
-        Preimage::Absent,
+        &|_, _, _, _| Ok(Preimage::Absent),
         &NO_FAULTS,
         |_, _| Ok(()),
     )
@@ -540,7 +540,7 @@ fn secret_apply_propagates_source_delete() {
         &mut store,
         &key,
         &input,
-        Preimage::Absent,
+        &|_, _, _, _| Ok(Preimage::Absent),
         &NO_FAULTS,
         |_, _| Ok(()),
     )
@@ -628,7 +628,7 @@ fn a_divergent_secret_merge_records_no_conflict() {
         &mut store,
         &key,
         &input,
-        Preimage::Absent,
+        &|_, _, _, _| Ok(Preimage::Absent),
         &NO_FAULTS,
         |_, _| Ok(()),
     )
@@ -713,7 +713,7 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
         None,
         None,
         20,
-        Preimage::Present("disk-sha".to_owned()),
+        &|_, _, _, _| Ok(Preimage::Present("disk-sha".to_owned())),
         &NO_FAULTS,
         |_, _| Ok(()),
     )
@@ -1087,7 +1087,7 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
                 now_ms: 10,
             },
             SecretDiskIntent::Materialize {
-                expected: Preimage::Absent,
+                check: &|_, _, _, _| Ok(Preimage::Absent),
             },
             &NO_FAULTS,
         )

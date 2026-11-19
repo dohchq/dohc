@@ -570,7 +570,6 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     use dohc_engine_domain::{
         NoFaults, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
     };
-    use dohc_engine_storage::Preimage;
 
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -611,11 +610,14 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
                     now_ms: 5,
                 },
                 SecretDiskIntent::Materialize {
-                    expected: Preimage::Absent,
+                    check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
                 },
                 &NoFaults,
             )
             .expect("foreign secret write");
+        store
+            .mark_materialization_complete("secret-mat_api-secret-moment", 5)
+            .expect("settle projection");
     }
     // Disk carries different bytes: a claim would show up as a changed tip.
     write_file(scratch.path(), ".env", b"TOKEN=from-disk");
