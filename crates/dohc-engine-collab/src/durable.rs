@@ -3988,7 +3988,9 @@ mod append_compaction_query_tests {
             .expect("a committed append answers committed");
             assert!(matches!(append, TxnOutcome::Committed(ref app) if app.seq == seq));
         }
-        let marker = read_marker(&store, &key).expect("marker").expect("marker row");
+        let marker = read_marker(&store, &key)
+            .expect("marker")
+            .expect("marker row");
         assert_eq!(
             (marker.head_update_seq, marker.head_snapshot_seq),
             (i64::from(DEFAULT_COMPACTION_THRESHOLD), 0)
