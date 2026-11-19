@@ -412,6 +412,45 @@ async fn a_respelling_after_a_cancelled_write_waits_for_the_old_spellings_delete
 }
 
 #[tokio::test]
+async fn a_replaced_write_completes_when_its_folder_is_now_a_file() {
+    let workspace = Workspace::new();
+    let actor = workspace.open(2);
+    for (text, moment) in [
+        (
+            "VALUE=first
+",
+            "first",
+        ),
+        (
+            "VALUE=second
+",
+            "second",
+        ),
+    ] {
+        workspace
+            .write(
+                &actor,
+                "main",
+                "config/.env",
+                text,
+                moment,
+                workspace.queue(),
+            )
+            .await
+            .unwrap();
+    }
+    workspace.close();
+    std::fs::write(workspace.root.join("config"), "not a folder").unwrap();
+
+    let actor = workspace.open(3);
+    workspace.replay(&actor).await;
+    workspace.close();
+
+    assert_eq!(workspace.job("first").status, JobStatus::Complete);
+    assert_eq!(workspace.file("config").as_deref(), Some("not a folder"));
+}
+
+#[tokio::test]
 async fn a_write_the_disk_already_holds_removes_the_temp_its_crash_left() {
     let workspace = Workspace::new();
     let actor = workspace.open(2);

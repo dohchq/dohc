@@ -1324,7 +1324,9 @@ fn materialize_secret_one_with_remover(
 /// Mark a secret job complete without running it, as when a newer job for its
 /// file replaces it. A stopped run of this job may have left its plaintext
 /// temp beside the target, which only this job's own run would remove, so it
-/// is removed first. If the temp can't be removed, the job stays pending.
+/// is removed first. If the temp can't be removed, the job stays pending. A
+/// folder on the way that is now a file or a link holds no temp this job can
+/// reach, so the job completes.
 pub fn complete_secret_job_unrun(
     store: &EngineStore,
     root: &Path,
@@ -1334,9 +1336,26 @@ pub fn complete_secret_job_unrun(
     require_materialization_owner(store)?;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
-    let target = resolve_target(&canonical_root, &job.target_path)?;
+    match remove_secret_job_temp(&canonical_root, job) {
+        Ok(())
+        | Err(MaterializeError::SymlinkTarget)
+        | Err(MaterializeError::Io {
+            kind: ErrorKind::NotADirectory,
+            ..
+        }) => {}
+        Err(err) => return Err(err),
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(())
+}
+
+fn remove_secret_job_temp(
+    canonical_root: &Path,
+    job: &MaterializationJob,
+) -> Result<(), MaterializeError> {
+    let target = resolve_target(canonical_root, &job.target_path)?;
     let parent_path = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
-    if let Some(parent) = SecretParentGuard::open_existing(&canonical_root, &target, parent_path)? {
+    if let Some(parent) = SecretParentGuard::open_existing(canonical_root, &target, parent_path)? {
         let tmp = temp_sibling(&target, &job.job_id);
         let tmp_name = tmp.file_name().ok_or(MaterializeError::UnsafeTargetPath)?;
         match parent.remove_file(tmp_name, &tmp) {
@@ -1345,7 +1364,6 @@ pub fn complete_secret_job_unrun(
             Err(err) => return Err(MaterializeError::io(&tmp, &err)),
         }
     }
-    store.mark_materialization_complete(&job.job_id, now_ms)?;
     Ok(())
 }
 
