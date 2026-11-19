@@ -245,13 +245,15 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
       }),
     ).toMatchObject({ status: 200, result: { ok: true } });
     dialog = await openLinkPane(page, PATH);
-    await dialog.getByRole("button", { name: "Comments", exact: true }).click();
+    await dialog.getByRole("button", { name: "Link options" }).click();
+    await dialog.getByRole("menuitem", { name: "Comments", exact: true }).click();
     const comment = dialog.locator("[data-comment-message-id]").filter({ hasText: COMMENT });
     await expect(comment).toContainText("Claude Code");
     await expect(comment).toContainText("Unverified");
     await expect(comment.getByRole("button", { name: "Block", exact: true })).toBeVisible();
 
     // The link's Agents list names both, and the post is Claude Code's last action.
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const agents = dialog.getByRole("region", { name: "Agents" });
     await expect(agents.getByRole("listitem")).toHaveCount(2);
     await expect(agents.getByRole("listitem").filter({ hasText: "Claude Code" })).toContainText(
