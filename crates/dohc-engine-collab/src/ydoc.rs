@@ -37,8 +37,8 @@ use yrs::types::text::{TextDiffChunk, YChange};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, Doc, GetString, IdSet, Map, Options, Out, ReadTxn, StateVector, Text, Transact,
-    Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
+    Any, Array, Doc, GetString, IdSet, Map, MapRef, Options, Out, ReadTxn, StateVector, Text,
+    Transact, Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
 use crate::error::CollabError;
@@ -1679,8 +1679,9 @@ impl Ydoc {
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
                     // adds only what changed.
+                    let inline = inline_reading_fits::<_, WIRE_SEED>(&*txn, &map, &blocks);
                     let (start, end) = if file_fold {
-                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
+                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks, inline)
                     } else {
                         (0, 0)
                     };
@@ -1688,17 +1689,11 @@ impl Ydoc {
                     if len > start + end {
                         frag.remove_range(txn, start, len - start - end);
                     }
-                    let changed = &blocks[start as usize..blocks.len() - end as usize];
-                    let insert = |txn: &mut yrs::TransactionMut<'_>, inline: bool| {
-                        for block in changed.iter().rev() {
-                            insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block, inline);
-                        }
-                    };
-                    let before = frag.len(txn);
-                    insert(txn, true);
-                    if !body_fits_projection(&*txn, &frag) {
-                        frag.remove_range(txn, start, frag.len(txn) - before);
-                        insert(txn, false);
+                    for block in blocks[start as usize..blocks.len() - end as usize]
+                        .iter()
+                        .rev()
+                    {
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block, inline);
                     }
                 };
                 if WIRE_SEED {
@@ -4853,11 +4848,29 @@ fn parse_list<'src>(
     Some((block, at))
 }
 
-fn body_fits_projection<T: ReadTxn>(txn: &T, body: &yrs::XmlFragmentRef) -> bool {
+fn inline_reading_fits<T: ReadTxn, const WIRE_DEFAULTS: bool>(
+    txn: &T,
+    frontmatter: &MapRef,
+    blocks: &[MdBlock<'_>],
+) -> bool {
     let mut remaining = MAX_PROJECTION_NODES;
     let mut bytes = 0;
-    body.children(txn)
-        .all(|child| markdown_node(txn, child, 0, &mut remaining, &mut bytes).is_ok())
+    let frontmatter_fits = frontmatter.iter(txn).all(|(key, value)| {
+        checked_projection_len(bytes, key.len()).is_ok_and(|total| {
+            bytes = total;
+            projection_frontmatter_value(txn, value, 0, &mut remaining, &mut bytes).is_ok()
+        })
+    });
+    let scratch = yrs::Doc::new();
+    let body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
+    let mut scratch_txn = scratch.transact_mut();
+    for block in blocks.iter().rev() {
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &body, 0, block, true);
+    }
+    frontmatter_fits
+        && body
+            .children(&scratch_txn)
+            .all(|child| markdown_node(&scratch_txn, child, 0, &mut remaining, &mut bytes).is_ok())
 }
 
 fn insert_md_paragraph<F: XmlFragment>(
@@ -5195,6 +5208,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     txn: &T,
     body: &yrs::XmlFragmentRef,
     blocks: &[MdBlock<'_>],
+    inline: bool,
 ) -> (u32, u32) {
     let len = body.len(txn);
     if len == 0 || blocks.is_empty() {
@@ -5213,7 +5227,7 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, true);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, inline);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }

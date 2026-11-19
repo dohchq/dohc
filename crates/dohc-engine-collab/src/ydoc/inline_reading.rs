@@ -1094,6 +1094,41 @@ Run `make` and see [`npm install`](https://docs.example/install).
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &crowded)
             .expect("folds");
         assert!(doc.project_richdoc().is_ok());
+        let links = format!("{}end\n", "[x](u) ".repeat(10_000));
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &links)
+            .expect("folds");
+        doc.rewrite_content_to_markdown_for_fold(
+            ContentKind::Richdoc,
+            &format!("{}{links}", "p\n\n".repeat(70_000)),
+        )
+        .expect("folds");
+        assert!(doc.project_richdoc().is_ok());
+        let properties: String = ('a'..='j').map(|key| format!("{key}: 1\n")).collect();
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(
+            ContentKind::Richdoc,
+            &format!("---\n{properties}---\n{}end\n", "[x](u) ".repeat(32_767)),
+        )
+        .expect("folds");
+        assert!(doc.project_richdoc().is_ok());
+    }
+
+    #[test]
+    fn a_note_too_dense_to_format_saves_only_its_raw_reading_and_keeps_it() {
+        let paragraph = format!("{}end", "[x](u) ".repeat(40_000));
+        let doc = Ydoc::wire();
+        let update = doc
+            .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &format!("{paragraph}\n"))
+            .expect("folds");
+        assert!(update.len() < 2 * paragraph.len(), "{} bytes", update.len());
+        let update = doc
+            .rewrite_content_to_markdown_for_fold(
+                ContentKind::Richdoc,
+                &format!("{paragraph}\n\nAdded.\n"),
+            )
+            .expect("folds");
+        assert!(update.len() < 1_000, "{} bytes", update.len());
     }
 
     #[test]
