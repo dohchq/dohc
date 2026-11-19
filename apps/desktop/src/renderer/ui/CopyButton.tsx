@@ -179,6 +179,70 @@ export function createCopy(options: {
   };
 }
 
+/**
+ * One control's copy for an owner that shows the answer itself, such as a
+ * menu row that answers in its own row. `feedback` holds the answer for
+ * COPY_FEEDBACK_MS, and `announcement` is the same answer for a status
+ * region the owner keeps mounted.
+ */
+export function useCopy(options: {
+  getText: () => string | null | Promise<string | null>;
+  words?: Partial<Record<CopyFeedback, string>> | undefined;
+  sensitive?: CopySecret | undefined;
+  failure?: string | undefined;
+}): {
+  copy: () => void;
+  feedback: CopyFeedback | null;
+  announcement: string;
+  words: Record<CopyFeedback, string>;
+} {
+  const report = useContext(ShellErrorReporter);
+  const words: Record<CopyFeedback, string> = { ...COPY_WORDS, ...options.words };
+  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const getText = useRef<typeof options.getText | null>(options.getText);
+  getText.current = options.getText;
+  const reportTo = useRef(report);
+  reportTo.current = report;
+  const spoken = useRef(words);
+  spoken.current = words;
+  const secret = useRef(options.sensitive);
+  secret.current = options.sensitive;
+  const action = useRef<ReturnType<typeof createCopy> | null>(null);
+  const mountedGetText = options.getText;
+  const failure = options.failure;
+  // In the commit that puts the control on screen, so a click that comes
+  // before React's passive effects run still counts.
+  useLayoutEffect(() => {
+    // Set again here: StrictMode runs the cleanup below and this effect
+    // again without a render between them.
+    getText.current = mountedGetText;
+    let announce: ReturnType<typeof setTimeout> | null = null;
+    const copy = createCopy({
+      getText: () => getText.current?.() ?? null,
+      report: () => reportTo.current,
+      secret: () => secret.current,
+      failure,
+      show: (next) => {
+        setFeedback(next);
+        // Cleared now and set in a later task, so a second answer inside
+        // the feedback window is announced again.
+        setAnnouncement("");
+        if (announce !== null) clearTimeout(announce);
+        announce = next ? setTimeout(() => setAnnouncement(spoken.current[next]), 0) : null;
+      },
+    });
+    action.current = copy;
+    return () => {
+      copy.dispose();
+      // The text source goes with the control.
+      getText.current = null;
+      if (announce !== null) clearTimeout(announce);
+    };
+  }, []);
+  return { copy: () => void action.current?.copy(), feedback, announcement, words };
+}
+
 export function CopyButton(props: {
   getText: () => string | null | Promise<string | null>;
   // What the button says at rest, and its accessible name. Default "Copy".
@@ -207,54 +271,13 @@ export function CopyButton(props: {
   disabled?: boolean;
   ref?: Ref<HTMLButtonElement> | undefined;
 }) {
-  const report = useContext(ShellErrorReporter);
   const label = props.label ?? "Copy";
-  const words: Record<CopyFeedback, string> = {
-    ...COPY_WORDS,
-    ...(props.copiedLabel ? { copied: props.copiedLabel } : {}),
-  };
-  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
-  const [announcement, setAnnouncement] = useState("");
-  const getText = useRef<typeof props.getText | null>(props.getText);
-  getText.current = props.getText;
-  const reportTo = useRef(report);
-  reportTo.current = report;
-  const spoken = useRef(words);
-  spoken.current = words;
-  const secret = useRef(props.sensitive);
-  secret.current = props.sensitive;
-  const action = useRef<ReturnType<typeof createCopy> | null>(null);
-  const mountedGetText = props.getText;
-  const failure = props.failure;
-  // In the commit that puts the button on screen, so a click that comes
-  // before React's passive effects run still counts.
-  useLayoutEffect(() => {
-    // Set again here: StrictMode runs the cleanup below and this effect
-    // again without a render between them.
-    getText.current = mountedGetText;
-    let announce: ReturnType<typeof setTimeout> | null = null;
-    const copy = createCopy({
-      getText: () => getText.current?.() ?? null,
-      report: () => reportTo.current,
-      secret: () => secret.current,
-      failure,
-      show: (next) => {
-        setFeedback(next);
-        // Cleared now and set in a later task, so a second answer inside
-        // the feedback window is announced again.
-        setAnnouncement("");
-        if (announce !== null) clearTimeout(announce);
-        announce = next ? setTimeout(() => setAnnouncement(spoken.current[next]), 0) : null;
-      },
-    });
-    action.current = copy;
-    return () => {
-      copy.dispose();
-      // The text source goes with the button.
-      getText.current = null;
-      if (announce !== null) clearTimeout(announce);
-    };
-  }, []);
+  const { copy, feedback, announcement, words } = useCopy({
+    getText: props.getText,
+    words: props.copiedLabel ? { copied: props.copiedLabel } : undefined,
+    sensitive: props.sensitive,
+    failure: props.failure,
+  });
 
   const shown = feedback ? words[feedback] : label;
   const Icon = feedback ? ICON[feedback] : (props.icon ?? Copy);
@@ -266,7 +289,7 @@ export function CopyButton(props: {
           data-testid={props.testId}
           disabled={props.disabled}
           aria-label={props.pinName ? label : undefined}
-          onClick={() => void action.current?.copy()}
+          onClick={copy}
           className="inline-flex shrink-0 items-center gap-1.5"
         >
           <Icon size={13} aria-hidden />
@@ -287,7 +310,7 @@ export function CopyButton(props: {
         disabled={props.disabled}
         aria-label={props.pinName ? label : props.iconOnly ? shown : undefined}
         title={props.iconOnly ? shown : undefined}
-        onClick={() => void action.current?.copy()}
+        onClick={copy}
         className={
           props.iconOnly
             ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`
