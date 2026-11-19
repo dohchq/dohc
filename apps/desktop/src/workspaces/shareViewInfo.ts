@@ -35,6 +35,7 @@ export interface ShareViewInfo {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
+  statedShareId?: string;
   granterUserId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
@@ -171,6 +172,7 @@ export async function fetchShareViewInfo(input: {
   return {
     receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
+    ...(typeof body.shareId === "string" ? { statedShareId: body.shareId } : {}),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),
     sharerName: normalizeShareLabel(body.sharerName, 320),

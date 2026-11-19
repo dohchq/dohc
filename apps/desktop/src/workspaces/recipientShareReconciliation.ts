@@ -89,6 +89,15 @@ function mountMatches(mount: ShareMountRecord, credentials: CloudCredentials): b
   );
 }
 
+function mountIsRecipients(mount: ShareMountRecord, credentials: CloudCredentials): boolean {
+  if (mount.recipientUserId !== undefined) return mount.recipientUserId === credentials.userId;
+  return (
+    typeof mount.recipientEmail === "string" &&
+    typeof credentials.email === "string" &&
+    mount.recipientEmail === credentials.email
+  );
+}
+
 function withoutEnded<Record extends { ended?: boolean }>(record: Record): Record {
   const next = { ...record };
   delete next.ended;
@@ -162,7 +171,7 @@ export function reconcileRecipientShares(
     spokenFor.add(mount.shareId);
     const resumed = mount.ended === true && active(mount.shareId) ? withoutEnded(mount) : mount;
     const grantedSelector =
-      resumed.ended !== true && listed(mount.shareId)
+      resumed.ended !== true && listed(mount.shareId) && mountIsRecipients(mount, credentials)
         ? sharePinAtStatedLevel(
             mount.grantedSelector,
             listing.statedFileSelectors.get(mount.shareId),

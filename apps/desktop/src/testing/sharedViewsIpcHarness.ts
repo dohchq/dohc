@@ -31,6 +31,7 @@ export const credentials: CloudCredentials = {
 };
 export const info: ShareViewInfo = {
   shareId: "share",
+  statedShareId: "share",
   granterUserId: "granter",
   granterEmail: "granter@example.test",
   genericChatWritable: true,
