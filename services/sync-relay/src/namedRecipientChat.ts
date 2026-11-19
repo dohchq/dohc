@@ -863,8 +863,10 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   if (!following && query.has("hold")) throw badRequest("hold requires since");
   const hold = following ? parseLinkLogHold(query.get("hold")) : 0;
   let position = following ? since : query.has("before") ? cursor(query.get("before")) : null;
+  let pageStart = position;
   const readPage = () =>
     readAuthorized(input.storage, authorize, (selector) => {
+      pageStart = position;
       const page = {
         workspaceId: input.workspaceId,
         cursor: position,
@@ -995,18 +997,40 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   }
   // A personal agent's post names its account but no person, so an agent's
   // name alone can't pass for anyone's: the page names the account's person.
+  // A rule can change while the names are looked up, so the page is read again
+  // from the same cursor under the reader's current reach, with no wait
+  // between that read and the answer. Each pass names at least one more
+  // account, so a page of at most `limit` posts ends the loop.
   const { personOf } = input;
   if (personOf) {
-    const messages = await Promise.all(
-      page.messages.map(async (message) =>
+    const names = new Map<string, string>();
+    const unnamed = () => [
+      ...new Set(
+        page.messages.flatMap((message) =>
+          message.authorKind === "agent" &&
+          message.authorUserId !== null &&
+          message.authorOwnerDisplayName === null &&
+          !names.has(message.authorUserId)
+            ? [message.authorUserId]
+            : [],
+        ),
+      ),
+    ];
+    for (let accounts = unnamed(); accounts.length > 0; accounts = unnamed()) {
+      await Promise.all(accounts.map(async (userId) => names.set(userId, await personOf(userId))));
+      position = pageStart;
+      page = readPage();
+    }
+    page = {
+      ...page,
+      messages: page.messages.map((message) =>
         message.authorKind === "agent" &&
         message.authorUserId !== null &&
         message.authorOwnerDisplayName === null
-          ? { ...message, authorOwnerDisplayName: await personOf(message.authorUserId) }
+          ? { ...message, authorOwnerDisplayName: names.get(message.authorUserId)! }
           : message,
       ),
-    );
-    page = { ...page, messages };
+    };
   }
   authorize();
   // A delete can commit while the page waits. Read deletion again in the turn

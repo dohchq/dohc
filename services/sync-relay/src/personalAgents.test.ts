@@ -2229,7 +2229,9 @@ describe("a personal agent in a workspace its person joined", () => {
     await expectRefused(await allow(f, ended, { session, reach }));
   });
 
-  it("names its person beside its post in another member's browser, whatever name the agent took", async () => {
+  it("names its person beside its post in another member's browser, whatever name the agent took, and serves the page under the rule in force once the name is found", async () => {
+    let held: Promise<void> | null = null;
+    let looking!: () => void;
     const f = await fixture({
       namedBrowserSessionLimits: {
         maxSessions: 8,
@@ -2239,8 +2241,13 @@ describe("a personal agent in a workspace its person joined", () => {
         maxResponseBytes: 200_000,
         timeoutMs: 1000,
       },
-      lookupUserDisplayName: (userId: string) =>
-        userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null,
+      lookupUserDisplayName: async (userId: string) => {
+        if (held) {
+          looking();
+          await held;
+        }
+        return userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null;
+      },
       // A browser's cookie names its person; a test request's bearer names its own.
       resolveActor: (incoming, workspaceId) => {
         const sessionId = /^session=([\w-]+)$/u.exec(incoming.headers.get("cookie") ?? "")?.[1];
@@ -2270,19 +2277,20 @@ describe("a personal agent in a workspace its person joined", () => {
     await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Olive" } }));
     await ok(await post(f, agent, { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
 
-    const read = await f.h(
-      new Request(
-        `http://relay.test/sync/named-chat/messages?shareId=share-community&channelWireId=wire-team`,
-        {
-          headers: {
-            cookie: "session=joiner-session",
-            origin: SHARE_WEB_ORIGIN,
-            "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+    const read = () =>
+      f.h(
+        new Request(
+          `http://relay.test/sync/named-chat/messages?shareId=share-community&channelWireId=wire-team`,
+          {
+            headers: {
+              cookie: "session=joiner-session",
+              origin: SHARE_WEB_ORIGIN,
+              "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+            },
           },
-        },
-      ),
-    );
-    expect((await ok(read)).messages).toEqual([
+        ),
+      );
+    expect((await ok(await read())).messages).toEqual([
       expect.objectContaining({
         authorKind: "agent",
         authorDisplayName: "Olive",
@@ -2290,6 +2298,34 @@ describe("a personal agent in a workspace its person joined", () => {
         authorOwnerDisplayName: "Ada",
       }),
     ]);
+
+    // A folder hidden while the person's name is looked up is withheld in that answer.
+    await communityWrite(f, "later/c.md", "for now");
+    await ok(
+      await post(f, agent, {
+        workspaceId: COMMUNITY,
+        channelWireId: "wire-team",
+        body: "read @[later/c.md#Secret]",
+        idempotencyKey: "post-2",
+      }),
+    );
+    let release!: () => void;
+    held = new Promise<void>((resolve) => (release = resolve));
+    const entered = new Promise<void>((resolve) => (looking = resolve));
+    const answered = read();
+    await entered;
+    held = null;
+    await communityWrite(f, "later/access.yaml", HIDING_RULE);
+    release();
+    const answer = await ok(await answered);
+    expect(answer.messages).toEqual([
+      expect.objectContaining({
+        body: "read (a file not shared here)",
+        authorOwnerDisplayName: "Ada",
+      }),
+      expect.objectContaining({ body: "from the agent", authorOwnerDisplayName: "Ada" }),
+    ]);
+    expect(JSON.stringify(answer)).not.toContain("later/");
   });
 
   it("takes a joined workspace into reach, never one its person isn't a member of, and appends no chat there", async () => {
