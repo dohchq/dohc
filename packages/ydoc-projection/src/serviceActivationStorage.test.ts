@@ -3430,7 +3430,13 @@ async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true) {
     hostedFeed: true,
     authorize: (input) => authorizeServiceHostReplication(f.storage, { ...credential, ...input }),
   });
-  const stop = () => stopDocument(f, 10);
+  // The note also leaves its path, so its retirement output departs, which these tests read.
+  const stop = () => {
+    stopDocument(f, 10);
+    f.raw.exec(
+      "UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id='object'",
+    );
+  };
   if (stopped) stop();
   const request = (method: string, suffix: string, body?: BodyInit, type = "application/json") =>
     handle(

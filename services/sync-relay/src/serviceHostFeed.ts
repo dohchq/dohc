@@ -425,9 +425,8 @@ export function createServiceHostFeed(
         batched = false;
       // Verified output of a retiring note that stays, kept ordinary until confirmed.
       const staying = new WeakSet<SyncRelayLogInput>();
-      // Whether a retiring note stays in place: its enrollment has no owner Stop and the note is still at its path.
+      // Whether a retiring note stays in place: the note is still at its path.
       const staysInPlace = ({ workspaceId, objectId, path }: ServiceActivationRetirement) =>
-        storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId)?.ownerStop === null &&
         storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
@@ -501,8 +500,9 @@ export function createServiceHostFeed(
             const decision = hostedPublication(scope, known, op);
             if (decision.kind === "refused") refuse(op, decision.reason);
             else if (decision.kind === "retiring") {
-              // Verified retirement output keeps its history. A note that stays, as when its Edit access
-              // ended, takes it as ordinary output, so the stored note holds its last save. A Stop's,
+              // Verified retirement output keeps its history. A note that stays, after a Stop, a Pause or
+              // the end of its Edit access, takes it as ordinary output, so the stored note holds its last
+              // save: the owner continues from that save, and the next save names it as its before. A
               // moved or deleted note's departs.
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
