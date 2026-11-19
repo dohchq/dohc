@@ -1,23 +1,32 @@
 import { CloudOff, CloudUpload, LogIn, X, type LucideIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { withErrorWords } from "../ipc/errorWords";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
-import { ipcErrorMessage } from "./ipcError";
+import { invitationCanBeBrowserLink, nextInvitationCopy } from "./invitationCopy";
 import { notSentWords } from "./notSentWords";
-import { INVITATION_SECRET } from "./shareCopySecrets";
+import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import {
   isShareAccess,
   PersonAccessRow,
+  PersonRemovalError,
+  removePersonAccess,
+  useLocalPeople,
   type ChangedAccess,
-  type SharedPerson,
+  type ListedPerson,
 } from "./sharePerson";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
-import { FieldError, IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
+import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
 import { useCopy } from "./ui/CopyButton";
 import { NameLine } from "./ui/NameLine";
 import { splitPath } from "./ui/PathLine";
-import { rowMatchesTarget, targetLabel, useRelayShareLinkPane } from "./useRelayShareLinkPane";
+import {
+  rowMatchesTarget,
+  shareScope,
+  targetLabel,
+  useRelayShareLinkPane,
+} from "./useRelayShareLinkPane";
 import {
   accessReasonForLane,
   serverName,
@@ -35,26 +44,24 @@ export type RelayShareTarget =
 // toasts, so a long link pane grows it downward and its body scrolls.
 const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
-type InvitedPerson = SharedPerson & { generation: number | null };
+const NO_PEOPLE: readonly ListedPerson[] = [];
 
-const listedSince = (person: InvitedPerson, changed: ChangedAccess) =>
-  person.generation !== null && person.generation >= changed.generation;
+type GrantsOfScope = { scope: string; grantIds: readonly string[] };
+const grantsIn = (held: GrantsOfScope, scope: string) =>
+  held.scope === scope ? held.grantIds : [];
 
-function shownAccess(person: InvitedPerson, changed: ChangedAccess | undefined) {
-  return changed && !listedSince(person, changed) ? changed.access : person.access;
-}
+type InvitationPart = "invitation" | "code";
 
 type InvitationClick = {
+  part: InvitationPart;
   resolve: (text: string | null) => void;
   reject: (error: unknown) => void;
 };
 
-let newestInvitationCopy = 0;
-
 function useInvitation(
-  person: Pick<InvitedPerson, "shareId" | "grantId">,
-  reload: () => Promise<unknown>,
-): () => Promise<string | null> {
+  person: Pick<ListedPerson, "shareId" | "grantId">,
+  onEnded: () => void,
+): (part: InvitationPart) => Promise<string | null> {
   const { shareId, grantId } = person;
   const asked = useRef<InvitationClick | null>(null);
   const { retry } = useWorkspaceQuery(useWorkspaceSession(), {
@@ -68,9 +75,14 @@ function useInvitation(
         const details = await bridge().getShareCopyDetails({ shareId, grantId });
         if (signal.aborted) return details.status;
         if (details.status === "ended") {
-          void reload();
+          onEnded();
           click?.resolve(null);
-        } else click?.resolve(details.browserInvitationUrl ?? details.shareCode);
+        } else
+          click?.resolve(
+            click.part === "code"
+              ? details.shareCode
+              : (details.browserInvitationUrl ?? details.shareCode),
+          );
         return details.status;
       } catch (error) {
         if (!signal.aborted) click?.reject(error);
@@ -78,11 +90,11 @@ function useInvitation(
       }
     },
   });
-  return () =>
+  return (part) =>
     new Promise<string | null>((resolve, reject) => {
-      const copy = ++newestInvitationCopy;
-      const newest = () => copy === newestInvitationCopy;
+      const newest = nextInvitationCopy();
       const click: InvitationClick = {
+        part,
         resolve: (text) => resolve(newest() ? text : null),
         reject: (error) => (newest() ? reject(error) : resolve(null)),
       };
@@ -96,10 +108,11 @@ function useInvitation(
     });
 }
 
-// The people this selection was shared with by email, from the listing the
-// Sharing view reads. `scope` names the workspace and the selection. The
-// list is read while sharing can work, and again whenever `revision` changes.
-function useInvitedPeople(input: {
+// The people this selection was shared with, from the listing the Sharing
+// view reads: `invited` by email, and `onLinkShares`, whom the links list.
+// `scope` names the workspace and the selection. The list is read while
+// sharing can work, and again whenever `revision` changes.
+function useSharedPeople(input: {
   workspaceId: string;
   target: RelayShareTarget;
   scope: string;
@@ -116,7 +129,8 @@ function useInvitedPeople(input: {
       await bridge()
         .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
         .catch(() => undefined);
-      const people: InvitedPerson[] = [];
+      const invited: ListedPerson[] = [];
+      const onLinkShares: ListedPerson[] = [];
       const seen = new Set<string>();
       let cursor: string | undefined;
       let restarted = false;
@@ -132,7 +146,8 @@ function useInvitedPeople(input: {
           if (cursor === undefined || restarted)
             throw new Error("dohc could not list this workspace's shares.");
           restarted = true;
-          people.length = 0;
+          invited.length = 0;
+          onLinkShares.length = 0;
           seen.clear();
           cursor = undefined;
           continue;
@@ -141,7 +156,7 @@ function useInvitedPeople(input: {
           const { selector } = row.kind === "share" ? row : { selector: null };
           if (
             row.kind !== "share" ||
-            row.via !== "named" ||
+            (row.via !== "named" && row.via !== "dependent") ||
             row.status !== "active" ||
             selector === null ||
             selector.kind !== undefined
@@ -154,7 +169,7 @@ function useInvitedPeople(input: {
             )
           )
             continue;
-          people.push({
+          (row.via === "named" ? invited : onLinkShares).push({
             shareId: row.shareId,
             grantId: row.grantId,
             name: row.recipientEmail ?? row.recipientUserId ?? "Unnamed person",
@@ -169,14 +184,19 @@ function useInvitedPeople(input: {
         seen.add(answer.nextCursor);
         cursor = answer.nextCursor;
       }
-      return people;
+      return { invited, onLinkShares };
     },
   });
   const { retry } = query;
   useEffect(() => {
     if (read) void retry();
   }, [read, retry, revision]);
-  return { people: query.value ?? [], failed: query.error !== null, load: retry };
+  return {
+    people: query.value?.invited ?? NO_PEOPLE,
+    onLinkShares: query.value?.onLinkShares ?? NO_PEOPLE,
+    failed: query.error !== null,
+    load: retry,
+  };
 }
 
 export function RelayShareDialog(props: {
@@ -199,61 +219,54 @@ export function RelayShareDialog(props: {
   // the dialog is open.
   const reason = accessReasonForLane(props.accessContext.facts, "granted");
   const held = reason !== "unexplained";
+  const scope = shareScope(props.workspaceId, props.target);
+  const [invitedRevision, setInvitedRevision] = useState(0);
+  const [removedHere, setRemovedHere] = useState<GrantsOfScope>({ scope, grantIds: [] });
+  const removedNow = grantsIn(removedHere, scope);
+  const [retiredInvitations, setRetiredInvitations] = useState<GrantsOfScope>({
+    scope,
+    grantIds: [],
+  });
+  const invited = useSharedPeople({
+    workspaceId: props.workspaceId,
+    target: props.target,
+    scope,
+    read: !held,
+    revision: invitedRevision,
+  });
+  const loadInvited = invited.load;
+  const reloadInvited = () => setInvitedRevision((revision) => revision + 1);
+  const local = useLocalPeople(scope, invited.people);
+  const independent = useLocalPeople(scope, invited.onLinkShares);
   const linkPane = useRelayShareLinkPane({
     workspaceId: props.workspaceId,
     target: props.target,
     visible: !held,
     onClose: props.onClose,
+    people: {
+      answered: independent.answered,
+      changed: (person) => {
+        independent.keep(person);
+        reloadInvited();
+      },
+      removed: independent.drop,
+    },
     ...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {}),
     ...(props.disconnectedAgents ? { disconnectedAgents: props.disconnectedAgents } : {}),
   });
-  // A person invited in this dialog shows at once, before the listing has them.
-  const [invitedHere, setInvitedHere] = useState<{ scope: string; people: InvitedPerson[] }>({
-    scope: linkPane.scope,
-    people: [],
-  });
-  const [invitedRevision, setInvitedRevision] = useState(0);
-  const [changedAccess, setChangedAccess] = useState<{
-    scope: string;
-    byGrant: Readonly<Record<string, ChangedAccess>>;
-  }>({ scope: linkPane.scope, byGrant: {} });
-  const accessNow = changedAccess.scope === linkPane.scope ? changedAccess.byGrant : {};
-  const [removedHere, setRemovedHere] = useState<{ scope: string; grantIds: readonly string[] }>({
-    scope: linkPane.scope,
-    grantIds: [],
-  });
-  const removedNow = removedHere.scope === linkPane.scope ? removedHere.grantIds : [];
-  const invited = useInvitedPeople({
-    workspaceId: props.workspaceId,
-    target: props.target,
-    scope: linkPane.scope,
-    read: !held,
-    revision: invitedRevision,
-  });
-  const loadInvited = invited.load;
-  const listedNow = invited.people;
-  useEffect(() => {
-    setChangedAccess((current) => {
-      const kept = Object.entries(current.byGrant).filter(
-        ([grantId, changed]) =>
-          !listedNow.some((person) => person.grantId === grantId && listedSince(person, changed)),
-      );
-      return kept.length === Object.keys(current.byGrant).length
-        ? current
-        : { ...current, byGrant: Object.fromEntries(kept) };
-    });
-  }, [listedNow]);
-  const listed = held ? [] : invited.people;
-  const invitedPeople = [
-    ...listed,
-    ...(held || invitedHere.scope !== linkPane.scope ? [] : invitedHere.people).filter(
-      (person) => !listed.some((known) => known.grantId === person.grantId),
-    ),
-    // A share with links lists its people through its links.
-  ].filter(
+  const invitedPeople = (
+    held ? [] : [...local.answered(invited.people), ...local.unlisted(invited.people)]
+  ).filter(
     (person) =>
       !linkPane.peopleShareIds.has(person.shareId) && !removedNow.includes(person.grantId),
   );
+  const retireInvitation = (grantId: string) => {
+    setRetiredInvitations((current) => ({
+      scope,
+      grantIds: [...grantsIn(current, scope).filter((retired) => retired !== grantId), grantId],
+    }));
+    local.drop(grantId);
+  };
   const invitedFailed = !held && invited.failed;
 
   // While the body scrolls, the title sits in a band with a rule. The band
@@ -306,20 +319,13 @@ export function RelayShareDialog(props: {
             className={held ? "flex flex-col gap-6 opacity-50" : "flex flex-col gap-6"}
           >
             <EmailShareForm
-              key={linkPane.scope}
+              key={scope}
               workspaceId={props.workspaceId}
               target={props.target}
-              removedGrantIds={removedNow}
+              retiredGrantIds={grantsIn(retiredInvitations, scope)}
               onCreated={(person) => {
-                const scope = linkPane.scope;
-                setInvitedHere((current) => ({
-                  scope,
-                  people: [
-                    ...(current.scope === scope ? current.people : []),
-                    { ...person, email: person.name, generation: 1 },
-                  ],
-                }));
-                setInvitedRevision((revision) => revision + 1);
+                local.keep({ ...person, email: person.name, generation: 1 });
+                reloadInvited();
               }}
             />
 
@@ -338,41 +344,30 @@ export function RelayShareDialog(props: {
                   </RetryRow>
                 ) : null}
                 {invitedPeople.map((person) => {
-                  const scope = linkPane.scope;
                   const removed = (gone: boolean) => {
                     setRemovedHere((current) => {
-                      const others = (current.scope === scope ? current.grantIds : []).filter(
+                      const others = grantsIn(current, scope).filter(
                         (grantId) => grantId !== person.grantId,
                       );
                       return { scope, grantIds: gone ? [...others, person.grantId] : others };
                     });
-                    if (gone)
-                      setInvitedHere((current) => ({
-                        ...current,
-                        people: current.people.filter((here) => here.grantId !== person.grantId),
-                      }));
-                    setInvitedRevision((revision) => revision + 1);
+                    if (gone) retireInvitation(person.grantId);
+                    reloadInvited();
                   };
                   return (
                     <InvitedPersonRow
                       key={person.grantId}
                       workspaceId={props.workspaceId}
                       target={props.target}
-                      person={{
-                        ...person,
-                        access: shownAccess(person, accessNow[person.grantId]),
-                      }}
-                      reload={loadInvited}
+                      person={person}
                       shareRemovals={props.shareRemovals}
+                      onEnded={() => {
+                        retireInvitation(person.grantId);
+                        void loadInvited();
+                      }}
                       onAccessChanged={(changed) => {
-                        setChangedAccess((current) => ({
-                          scope,
-                          byGrant: {
-                            ...(current.scope === scope ? current.byGrant : {}),
-                            [person.grantId]: changed,
-                          },
-                        }));
-                        setInvitedRevision((revision) => revision + 1);
+                        local.keep({ ...person, ...changed });
+                        reloadInvited();
                       }}
                       onRemoved={() => removed(true)}
                       onRestored={() => removed(false)}
@@ -416,46 +411,54 @@ function ShareTitle(props: { target: RelayShareTarget }) {
 function InvitedPersonRow(props: {
   workspaceId: string;
   target: RelayShareTarget;
-  person: InvitedPerson;
-  reload: () => Promise<unknown>;
+  person: ListedPerson;
   shareRemovals: ShareRemovalNotices | undefined;
+  onEnded: () => void;
   onAccessChanged: (changed: ChangedAccess) => void;
   onRemoved: () => void;
   onRestored: () => void;
 }) {
   const { person, workspaceId, shareRemovals } = props;
-  const invitation = useInvitation(person, props.reload);
-  const copied = useCopy({
-    getText: invitation,
+  const invitation = useInvitation(person, props.onEnded);
+  const invitationCopy = useCopy({
+    getText: () => invitation("invitation"),
     words: { copied: "Invitation copied" },
     sensitive: INVITATION_SECRET,
   });
+  const codeCopy = useCopy({
+    getText: () => invitation("code"),
+    words: { copied: "Share code copied" },
+    sensitive: SHARE_CODE_SECRET,
+  });
+  const [copiedLast, setCopiedLast] = useState<InvitationPart>("invitation");
+  const copied = copiedLast === "code" ? codeCopy : invitationCopy;
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
-  const removeErrorId = useId();
-  const subject = `the share of ${targetLabel(props.target)} with ${person.name}`;
+  const shown = useRef(false);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  const subject = `${person.name}'s access to ${targetLabel(props.target)}`;
 
   async function remove() {
     setRemoving(true);
     setRemoveError(null);
     try {
-      const result = await bridge().revokeRelayShare({ shareId: person.shareId });
-      shareRemovals?.removed({
+      await removePersonAccess({
         workspaceId,
-        shareId: person.shareId,
-        undo: result.undo,
-        message: result.undo
-          ? `Ended ${subject}.`
-          : `${subject[0]!.toUpperCase()}${subject.slice(1)} has already ended.`,
-        restoredMessage: `Restored ${subject}.`,
+        person,
+        subject,
+        shareRemovals,
         restored: props.onRestored,
       });
       props.onRemoved();
     } catch (cause) {
       const message = `dohc could not end ${subject}.`;
-      if (shareRemovals)
-        shareRemovals.failed({ workspaceId, message, cause, retry: () => void remove() });
-      else setRemoveError(ipcErrorMessage(cause, message));
+      if (shown.current) setRemoveError(withErrorWords(message, cause));
+      else shareRemovals?.failed({ workspaceId, message, cause, retry: () => void remove() });
     } finally {
       setRemoving(false);
     }
@@ -487,8 +490,24 @@ function InvitedPersonRow(props: {
           id: "copy-invitation",
           label: "Copy invitation",
           testId: `share-copy-invitation-${person.grantId}`,
-          onSelect: copied.copy,
+          onSelect: () => {
+            setCopiedLast("invitation");
+            invitationCopy.copy();
+          },
         },
+        ...(invitationCanBeBrowserLink(person.access, props.target)
+          ? [
+              {
+                id: "copy-code",
+                label: "Copy share code",
+                testId: `share-copy-code-${person.grantId}`,
+                onSelect: () => {
+                  setCopiedLast("code");
+                  codeCopy.copy();
+                },
+              },
+            ]
+          : []),
         {
           id: "remove",
           label: "Remove access",
@@ -500,9 +519,9 @@ function InvitedPersonRow(props: {
       onAccessChanged={props.onAccessChanged}
     >
       {removeError ? (
-        <FieldError id={removeErrorId} testId={`share-remove-error-${person.grantId}`}>
+        <PersonRemovalError grantId={person.grantId} busy={removing} onRetry={() => void remove()}>
           {removeError}
-        </FieldError>
+        </PersonRemovalError>
       ) : null}
     </PersonAccessRow>
   );

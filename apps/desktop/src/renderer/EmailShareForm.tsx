@@ -11,8 +11,9 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton } from "./ui/controls";
 import { CopyButton } from "./ui/CopyButton";
+import { invitationCanBeBrowserLink, nextInvitationCopy } from "./invitationCopy";
 import { ShareAccessMenu } from "./shareAccess";
-import { INVITATION_SECRET } from "./shareCopySecrets";
+import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
 const READS = "They can read only what you selected";
@@ -40,7 +41,9 @@ export function accessOptions(
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
-  removedGrantIds?: readonly string[];
+  // People whose invitation this form no longer offers to copy: their access
+  // was removed here, or their share ended.
+  retiredGrantIds?: readonly string[];
   // A share was made, so whoever lists this selection's people shows them.
   onCreated?: (person: {
     shareId: string;
@@ -57,7 +60,7 @@ export function EmailShareForm(props: {
     result: CreateRelayShareResult;
     share: { recipientEmail: string; access: ShareAccess };
   } | null>(null);
-  const invited = made && !props.removedGrantIds?.includes(made.result.grantId) ? made : null;
+  const invited = made && !props.retiredGrantIds?.includes(made.result.grantId) ? made : null;
   const emailId = useId();
   const form = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement>(null);
@@ -199,11 +202,9 @@ export function EmailShareForm(props: {
       ) : null}
       <div
         data-testid="share-invited"
-        data-share-id={invited?.result.shareId}
-        data-grant-id={invited?.result.grantId}
-        className={invited ? "mt-2 flex min-h-6 items-center gap-2" : undefined}
+        className={invited ? "mt-2 flex min-h-6 flex-wrap items-center gap-2" : undefined}
       >
-        <p role="status" className="m-0 min-w-0 flex-1 text-[12px] leading-4 text-muted">
+        <p role="status" className="m-0 min-w-48 flex-1 text-[12px] leading-4 text-muted">
           {invited ? (
             <>
               Invited <span className="break-all text-ink">{invited.result.recipientEmail}</span>.
@@ -212,14 +213,32 @@ export function EmailShareForm(props: {
           ) : null}
         </p>
         {invited ? (
-          <CopyButton
-            key={invited.result.grantId}
-            label="Copy invitation"
-            copiedLabel="Invitation copied"
-            sensitive={INVITATION_SECRET}
-            testId="share-invitation-copy"
-            getText={() => invited.result.browserInvitationUrl ?? invited.result.shareCode}
-          />
+          <span className="flex shrink-0 items-center gap-2">
+            <CopyButton
+              key={invited.result.grantId}
+              label="Copy invitation"
+              copiedLabel="Invitation copied"
+              sensitive={INVITATION_SECRET}
+              testId="share-invitation-copy"
+              getText={() => {
+                nextInvitationCopy();
+                return invited.result.browserInvitationUrl ?? invited.result.shareCode;
+              }}
+            />
+            {invitationCanBeBrowserLink(invited.share.access, props.target) ? (
+              <CopyButton
+                key={`code:${invited.result.grantId}`}
+                label="Copy share code"
+                copiedLabel="Share code copied"
+                sensitive={SHARE_CODE_SECRET}
+                testId="share-code-copy"
+                getText={() => {
+                  nextInvitationCopy();
+                  return invited.result.shareCode;
+                }}
+              />
+            ) : null}
+          </span>
         ) : null}
       </div>
       {invitedNote?.failed ? (

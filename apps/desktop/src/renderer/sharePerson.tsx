@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import { bridge } from "./bridge";
@@ -12,7 +12,8 @@ import {
   ShareOptionsMenu,
   SharePersonRow,
 } from "./shareAccess";
-import { FieldError } from "./ui/controls";
+import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
+import { FieldError, SecondaryButton } from "./ui/controls";
 import type { MenuEntry } from "./ui/Menu";
 import { useRequestSequence } from "./useRequestSequence";
 
@@ -28,6 +29,135 @@ export type ChangedAccess = { access: ShareAccess; generation: number };
 
 export const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
+
+export type ListedPerson = SharedPerson & { generation: number | null };
+export type AnsweredPerson = SharedPerson & { generation: number };
+type LocalPerson = { person: AnsweredPerson; listed: boolean };
+
+const NO_LOCAL_PEOPLE: Readonly<Record<string, LocalPerson>> = {};
+
+const listedSince = (listed: ListedPerson, answered: AnsweredPerson) =>
+  listed.generation !== null && listed.generation >= answered.generation;
+
+/**
+ * The people Share knows from the relay's own answers: a person invited here,
+ * or one whose access changed here. `listing` is the newest list of grants
+ * with their generations that was read, and a failed read leaves it as it
+ * was. An answer stands until that list holds the grant at the answer's
+ * generation or a later one. A grant the list has held and a later list
+ * leaves out has ended, so it goes.
+ */
+export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) {
+  const [held, setHeld] = useState<{
+    scope: string;
+    byGrant: Readonly<Record<string, LocalPerson>>;
+  }>({ scope, byGrant: NO_LOCAL_PEOPLE });
+  const byGrant = held.scope === scope ? held.byGrant : NO_LOCAL_PEOPLE;
+  const newestListing = useRef(listing);
+  newestListing.current = listing;
+  useEffect(() => {
+    setHeld((current) => {
+      if (current.scope !== scope) return current;
+      let changed = false;
+      const kept: Record<string, LocalPerson> = {};
+      for (const [grantId, local] of Object.entries(current.byGrant)) {
+        const listed = listing.find((person) => person.grantId === grantId);
+        if (listed ? listedSince(listed, local.person) : local.listed) changed = true;
+        else if (listed && !local.listed) {
+          changed = true;
+          kept[grantId] = { ...local, listed: true };
+        } else kept[grantId] = local;
+      }
+      return changed ? { scope, byGrant: kept } : current;
+    });
+  }, [listing, scope]);
+  return {
+    /** The listed people, each at the access the relay answered while the list is older. */
+    answered(listed: readonly ListedPerson[]): ListedPerson[] {
+      return listed.map((person) => {
+        const answered = byGrant[person.grantId]?.person;
+        return answered && !listedSince(person, answered)
+          ? { ...person, access: answered.access }
+          : person;
+      });
+    },
+    /** The people known only from an answer, whom no list holds yet. */
+    unlisted(listed: readonly ListedPerson[]): ListedPerson[] {
+      return Object.values(byGrant)
+        .map((local) => local.person)
+        .filter((person) => !listed.some((known) => known.grantId === person.grantId));
+    },
+    keep(person: AnsweredPerson) {
+      const listed = newestListing.current.some((known) => known.grantId === person.grantId);
+      setHeld((current) => ({
+        scope,
+        byGrant: {
+          ...(current.scope === scope ? current.byGrant : NO_LOCAL_PEOPLE),
+          [person.grantId]: { person, listed },
+        },
+      }));
+    },
+    drop(grantId: string) {
+      setHeld((current) => {
+        if (current.scope !== scope || !(grantId in current.byGrant)) return current;
+        return {
+          scope,
+          byGrant: Object.fromEntries(
+            Object.entries(current.byGrant).filter(([held]) => held !== grantId),
+          ),
+        };
+      });
+    },
+  };
+}
+
+export async function removePersonAccess(input: {
+  workspaceId: string;
+  person: Pick<SharedPerson, "shareId" | "grantId">;
+  subject: string;
+  shareRemovals: ShareRemovalNotices | undefined;
+  restored: () => void;
+}): Promise<void> {
+  const { workspaceId, person, subject } = input;
+  const result = await bridge().revokeRelayShareGrant({
+    workspaceId,
+    shareId: person.shareId,
+    grantId: person.grantId,
+  });
+  input.shareRemovals?.removed({
+    workspaceId,
+    shareId: person.shareId,
+    undo: result.undo,
+    message: `Ended ${subject}.`,
+    restoredMessage: `Restored ${subject}.`,
+    restored: input.restored,
+  });
+}
+
+export function PersonRemovalError(props: {
+  grantId: string;
+  busy: boolean;
+  onRetry: () => void;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <FieldError id={id} testId={`share-remove-error-${props.grantId}`}>
+        {props.children}
+      </FieldError>
+      <SecondaryButton
+        size="compact"
+        disabled={props.busy}
+        aria-describedby={id}
+        data-testid={`share-remove-retry-${props.grantId}`}
+        onClick={props.onRetry}
+      >
+        Try again
+      </SecondaryButton>
+    </div>
+  );
+}
 
 export function PersonAccessRow(props: {
   testId: string;
@@ -59,6 +189,7 @@ export function PersonAccessRow(props: {
   }, [person.access, person.grantId, target.kind]);
   const shareOf = (access: ShareAccess) => ({
     recipientEmail: person.email,
+    recipientName: person.name,
     access,
     shareId: person.shareId,
   });
@@ -74,12 +205,7 @@ export function PersonAccessRow(props: {
     setChanging(true);
     try {
       const share = shareOf(access);
-      if (
-        person.email !== null &&
-        automations.asks(share) &&
-        !(await automations.mayShare(share, current))
-      )
-        return;
+      if (automations.asks(share) && !(await automations.mayShare(share, current))) return;
       const changed = await bridge().retuneRelayShareGrant({
         workspaceId,
         shareId: person.shareId,

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { automationShareWarning } from "./automationShareCheck";
 import { EmailShareForm } from "./EmailShareForm";
+import type { RelayShareTarget } from "./RelayShareDialog";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 
@@ -251,6 +252,47 @@ describe("EmailShareForm", () => {
     await user.click(screen.getByTestId("share-create"));
     await user.click(await screen.findByTestId("share-invitation-copy"));
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
+  });
+
+  it("offers the share code beside an invitation that can be a browser link", async () => {
+    const invitation = "https://share.example.test/s/edit/exact-grant";
+    bridgeMock.createRelayShare.mockResolvedValue({
+      shareId: "share-1",
+      grantId: "exact-grant",
+      shareCode: SHARE_CODE,
+      recipientEmail: "friend@dohc.test",
+      browserInvitationUrl: invitation,
+    });
+    const user = userEvent.setup();
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs"] }} />);
+    await chooseAccess(user, "edit");
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+
+    const code = await screen.findByRole("button", { name: "Copy share code" });
+    expect(code).toBe(screen.getByTestId("share-code-copy"));
+    await user.click(code);
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(SHARE_CODE));
+    expect(await screen.findByRole("button", { name: "Share code copied" })).toBe(code);
+    await user.click(screen.getByTestId("share-invitation-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
+  });
+
+  it.each<{ name: string; target: RelayShareTarget; level: "view" | "edit" }>([
+    { name: "a View share of files", target: { kind: "paths", paths: ["docs"] }, level: "view" },
+    {
+      name: "an Edit share of a version",
+      target: { kind: "version", versionId: "v1" },
+      level: "edit",
+    },
+  ])("offers one copy for $name, whose invitation is the code", async ({ target, level }) => {
+    const user = userEvent.setup();
+    render(<EmailShareForm workspaceId="ws-1" target={target} />);
+    await chooseAccess(user, level);
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+
+    await user.click(await screen.findByTestId("share-invitation-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(SHARE_CODE));
+    expect(screen.queryByTestId("share-code-copy")).toBeNull();
   });
 
   it("ignores a creation response after the workspace changes", async () => {

@@ -20,10 +20,12 @@ export const AUTOMATION_CHECK_FAILED = "dohc could not check which automations t
 /**
  * A share as the dialog shows it: who it makes an editor (an email, or
  * null for anyone who opens a link), its access, and, for a link added to
- * an existing share, that share's id.
+ * an existing share, that share's id. `recipientName` is the name the dialog
+ * shows for a person, which the warning uses when it is given.
  */
 export interface AutomationShare {
   recipientEmail: string | null;
+  recipientName?: string;
   access: string;
   shareId?: string;
 }
@@ -31,7 +33,7 @@ export interface AutomationShare {
 /** The one sentence the dialog says when a share would stop automation steps, or null. */
 export function automationShareWarning(
   stops: AutomationShareImpactResult["stops"],
-  recipientEmail: string | null,
+  recipient: string | null,
 ): string | null {
   if (stops.length === 0) return null;
   const automations = new Map(
@@ -39,7 +41,7 @@ export function automationShareWarning(
   );
   const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
   const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
-  const who = recipientEmail ?? "anyone who opens this link";
+  const who = recipient ?? "anyone who opens this link";
   return `This share stops ${what}, because ${who} cannot ${OR.format(reach)}.`;
 }
 
@@ -89,7 +91,7 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
         return true;
       }
       if (!isCurrent()) return false;
-      const warning = automationShareWarning(stops, share.recipientEmail);
+      const warning = automationShareWarning(stops, share.recipientName ?? share.recipientEmail);
       setChecked({ key, warning, failed: false });
       return warning === null;
     },
