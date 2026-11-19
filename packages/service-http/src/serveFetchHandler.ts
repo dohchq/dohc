@@ -141,6 +141,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         });
       }
       let answered = false;
+      let draining = false;
       let reserved = 0;
       let caller = "";
       const release = () => {
@@ -153,7 +154,8 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       };
       let request: Request | undefined;
       const answer = (response: Response, closeAfter?: IncomingMessage): Promise<void> => {
-        if (answered) return response.body?.cancel().catch(() => undefined) ?? Promise.resolve();
+        if (answered || draining)
+          return response.body?.cancel().catch(() => undefined) ?? Promise.resolve();
         answered = true;
         release();
         options.requestLog?.write(request, method, response.status, arrivedAtMs);
@@ -201,6 +203,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
           return reason;
         };
         const bodyTimer = setTimeout(() => {
+          draining = false;
           bounded.abort(
             refuse(
               options.timedOut?.(url) ?? new Response(null, { status: 408 }),
@@ -215,58 +218,76 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         outgoing.once("close", clearBodyTimer);
         const bounded = new AbortController();
         let received = 0;
-        body = upload().pipeThrough(
-          new TransformStream<Uint8Array, Uint8Array>({
-            start(controller) {
-              bounded.signal.addEventListener(
-                "abort",
-                () => controller.error(bounded.signal.reason),
-                {
-                  once: true,
-                },
-              );
-            },
-            transform(chunk, controller) {
-              received += chunk.byteLength;
-              if (received > maxBodyBytes) {
-                controller.error(
-                  refuse(
-                    options.oversized(url),
-                    new RefusedRequest("Request body too large", "AbortError"),
-                  ),
+        const tooLarge = () =>
+          refuse(
+            options.oversized(url),
+            new RefusedRequest("Request body too large", "AbortError"),
+          );
+        // A caller refused for the budget has passed its handler's check. Its client may read
+        // nothing until it has sent the whole body, so the rest is read and dropped before the answer.
+        const drain = async (source: ReadableStream<Uint8Array>) => {
+          if (!draining) return;
+          const reader = source.getReader();
+          for (;;) {
+            const next = await reader.read().catch(() => null);
+            if (next === null || !draining) return;
+            if (next.done) break;
+            received += next.value.byteLength;
+            if (received > maxBodyBytes) {
+              draining = false;
+              tooLarge();
+              return;
+            }
+          }
+          clearTimeout(bodyTimer);
+          draining = false;
+          void answer(options.busy?.(url) ?? new Response(null, { status: 503 }));
+        };
+        const source = upload();
+        const counted = new TransformStream<Uint8Array, Uint8Array>({
+          start(controller) {
+            bounded.signal.addEventListener(
+              "abort",
+              () => controller.error(bounded.signal.reason),
+              {
+                once: true,
+              },
+            );
+          },
+          transform(chunk, controller) {
+            received += chunk.byteLength;
+            if (received > maxBodyBytes) {
+              controller.error(tooLarge());
+              return;
+            }
+            const budget = options.bodiesInFlight;
+            if (budget && !readFirst) {
+              if (reserved === 0) caller = budget.caller(headers);
+              const callerBytes = callerBytesInFlight.get(caller) ?? 0;
+              if (
+                bytesInFlight + chunk.byteLength > budget.maxBytes ||
+                callerBytes + chunk.byteLength > budget.maxBytesPerCaller
+              ) {
+                const reason = new RefusedRequest(
+                  "Request bodies in flight are at their budget",
+                  "AbortError",
                 );
+                draining = true;
+                release();
+                disconnect.abort(reason);
+                controller.error(reason);
                 return;
               }
-              const budget = options.bodiesInFlight;
-              if (budget && !readFirst) {
-                if (reserved === 0) caller = budget.caller(headers);
-                const callerBytes = callerBytesInFlight.get(caller) ?? 0;
-                if (
-                  bytesInFlight + chunk.byteLength > budget.maxBytes ||
-                  callerBytes + chunk.byteLength > budget.maxBytesPerCaller
-                ) {
-                  controller.error(
-                    refuse(
-                      options.busy?.(url) ?? new Response(null, { status: 503 }),
-                      new RefusedRequest(
-                        "Request bodies in flight are at their budget",
-                        "AbortError",
-                      ),
-                    ),
-                  );
-                  return;
-                }
-                bytesInFlight += chunk.byteLength;
-                callerBytesInFlight.set(caller, callerBytes + chunk.byteLength);
-                reserved += chunk.byteLength;
-              }
-              controller.enqueue(chunk);
-            },
-          }),
-          // A handler that stops reading early still answers before the
-          // connection closes.
-          { preventCancel: true },
-        );
+              bytesInFlight += chunk.byteLength;
+              callerBytesInFlight.set(caller, callerBytes + chunk.byteLength);
+              reserved += chunk.byteLength;
+            }
+            controller.enqueue(chunk);
+          },
+        });
+        // A handler that stops reading early still answers before the connection closes.
+        void source.pipeTo(counted.writable, { preventCancel: true }).catch(() => drain(source));
+        body = counted.readable;
       }
       const start = (body: ReadableStream<Uint8Array> | ArrayBuffer | null) => {
         const init: RequestInit & { duplex: "half" } = {
