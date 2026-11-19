@@ -49,7 +49,7 @@ import {
   initializePushRevokedSessionSchema,
   initializePushSchema,
 } from "./pushSchema";
-import { initializePushDeliveries } from "./pushDeliveries";
+import { initializeNativePushDeliveries, initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
   LINK_DISCUSSION_NAME_BYTE_LIMIT,
@@ -1678,6 +1678,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializePushDeliveries(db);
   initializePushDeviceSchema(db);
   initializePushRevokedSessionSchema(db);
+  initializeNativePushDeliveries(db);
   initializeLiveClaimIndex(db);
   initializeServiceHostFeedIndex(db);
   initializeAgentConnectionSchema(db);
