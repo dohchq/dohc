@@ -18,11 +18,7 @@ type Read<T> = Result<T, Unsure>;
 
 /// The block's inline content as the editor reads `text`, when this reader
 /// follows that reading and the projector writes it back as `text`.
-pub(super) fn read_inline(
-    text: &str,
-    paragraph: bool,
-    budget: &mut usize,
-) -> Option<Vec<InlinePiece>> {
+pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece>> {
     if !text
         .bytes()
         .any(|byte| matches!(byte, b'*' | b'_' | b'`' | b'~' | b'[' | b'!'))
@@ -36,10 +32,6 @@ pub(super) fn read_inline(
     let mut work = units.len().saturating_mul(SCAN_WORK_PER_UNIT);
     lex(&units, &[], false, &mut work, &mut pieces).ok()?;
     let pieces = merged(pieces);
-    let nodes_used = nodes(&pieces);
-    if nodes_used > *budget {
-        return None;
-    }
     let read: Vec<MarkdownNode> = pieces
         .iter()
         .map(|piece| match piece {
@@ -52,34 +44,10 @@ pub(super) fn read_inline(
         })
         .collect();
     let written = render_inline(&read, false, paragraph, false).ok()?;
-    if written != text {
-        return None;
-    }
-    *budget -= nodes_used;
-    Some(pieces)
+    (written == text).then_some(pieces)
 }
-
-/// The projection nodes a document may spend on inline reading. The densest
-/// real note, scaled to the largest note the engine folds, needs about a third.
-pub(super) const INLINE_NODE_BUDGET: usize = crate::limits::MAX_PROJECTION_NODES / 2;
 
 const SCAN_WORK_PER_UNIT: usize = 32;
-
-fn nodes(pieces: &[InlinePiece]) -> usize {
-    pieces
-        .iter()
-        .map(|piece| match piece {
-            InlinePiece::Text(run) => {
-                2 + run
-                    .marks
-                    .iter()
-                    .map(|mark| 1 + mark.attrs.as_object().map_or(0, |attrs| attrs.len()))
-                    .sum::<usize>()
-            }
-            InlinePiece::Image(attrs) => 2 + attrs.len(),
-        })
-        .sum()
-}
 
 fn unsure_text(text: &str) -> bool {
     text.contains(" \n")
@@ -169,6 +137,7 @@ fn plain(kind: MarkKind) -> MarkdownMark {
 // marked masks links and code spans before it looks for closing emphasis, so
 // no delimiter inside one closes a run outside it.
 fn masked(src: &[u16]) -> Read<Vec<u16>> {
+    let last_close = src.iter().rposition(|unit| *unit == u16::from(b']'));
     let mut out = src.to_vec();
     let mut at = 0;
     while at < src.len() {
@@ -176,7 +145,9 @@ fn masked(src: &[u16]) -> Read<Vec<u16>> {
             masked_link(src, at)?
         } else if src[at] == u16::from(b'`') && (at == 0 || src[at - 1] != u16::from(b'`')) {
             let end = masked_code(src, at);
-            if end.is_some_and(|end| label_crosses(src, at, end)) {
+            if end.is_some_and(|end| {
+                last_close.is_some_and(|close| close >= end) && opens_label(&src[at..end])
+            }) {
                 return Err(Unsure);
             }
             end
@@ -243,12 +214,16 @@ fn masked_code(src: &[u16], at: usize) -> Option<usize> {
 
 // marked masks a reference link before code spans, so a label that opens
 // inside a code span and closes after it can end the span early.
-fn label_crosses(src: &[u16], at: usize, end: usize) -> bool {
-    let close = u16::from(b']');
-    src[at..end]
-        .iter()
-        .rposition(|unit| *unit == u16::from(b'['))
-        .is_some_and(|open| !src[at + open..end].contains(&close) && src[end..].contains(&close))
+fn opens_label(span: &[u16]) -> bool {
+    let mut open = 0usize;
+    for unit in span {
+        match ascii(*unit) {
+            Some(b'[') => open += 1,
+            Some(b']') => open = open.saturating_sub(1),
+            _ => {}
+        }
+    }
+    open > 0
 }
 
 fn run_of(src: &[u16], at: usize, unit: u16) -> usize {
@@ -1097,8 +1072,9 @@ Run `make` and see [`npm install`](https://docs.example/install).
 
     #[test]
     fn a_reference_label_that_crosses_a_code_span_keeps_the_raw_reading() {
-        let read = |text: &str| read_inline(text, true, &mut { INLINE_NODE_BUDGET });
+        let read = |text: &str| read_inline(text, true);
         assert!(read("**a `x**[`]**").is_none());
+        assert!(read("**a `x**[a[b]` q** [l](u \"`][r]\")").is_none());
         assert!(read("**a `x[0]`** and [b](https://b.example)").is_some());
     }
 
@@ -1109,15 +1085,40 @@ Run `make` and see [`npm install`](https://docs.example/install).
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
             .expect("folds");
         assert!(doc.project_richdoc().is_ok());
+        let crowded = format!(
+            "{}{}end\n",
+            "p\n\n".repeat(70_000),
+            "[x](u) ".repeat(10_000)
+        );
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &crowded)
+            .expect("folds");
+        assert!(doc.project_richdoc().is_ok());
+    }
+
+    #[test]
+    fn an_outside_save_keeps_the_linked_paragraphs_it_left_alone() {
+        let paragraph = format!("{}end", "[x](u) ".repeat(6_800));
+        let markdown = format!("{paragraph}\n\n{paragraph}\n");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
+            .expect("folds");
+        let update = doc
+            .rewrite_content_to_markdown_for_fold(
+                ContentKind::Richdoc,
+                &format!("{markdown}\nAdded.\n"),
+            )
+            .expect("folds");
+        assert!(update.len() < 1_000, "{} bytes", update.len());
     }
 
     #[test]
     fn unclosed_delimiters_stop_the_reading_early() {
         for unit in ["*", "_", "~"] {
             let text = format!("{}end", format!("{unit}word ").repeat(20_000));
-            assert!(read_inline(&text, true, &mut { INLINE_NODE_BUDGET }).is_none());
+            assert!(read_inline(&text, true).is_none());
         }
         let text = format!("{}end", "**word** ".repeat(20_000));
-        assert!(read_inline(&text, true, &mut { INLINE_NODE_BUDGET }).is_some());
+        assert!(read_inline(&text, true).is_some());
     }
 }
