@@ -24,14 +24,12 @@ const ORIGIN = "https://dohc.example.com";
 
 interface Call {
   readonly path: string;
-  /** The request's body, with each mark's key moved to `keys`. */
   readonly body: unknown;
   readonly keys: readonly unknown[];
   answer(status: number, body?: unknown): void;
   offline(): void;
 }
 
-/** A marks body without its keys, and the keys in order. */
 function withoutKeys(body: unknown): { body: unknown; keys: unknown[] } {
   const marks = (body as { marks?: unknown } | undefined)?.marks;
   if (!Array.isArray(marks)) return { body, keys: [] };
@@ -481,7 +479,6 @@ describe("marks on the account's Notices", () => {
     });
     store.mark("a", "dismissed");
     const lost = await server.marks();
-    // The relay took the Done (3), then another device restored the row (4), and the Done's answer never came.
     await reply(server, held, [relayRow("a", { changeSeq: 4 })], { nextCursor: "4" });
     lost.offline();
     (await timers.next()).done();
