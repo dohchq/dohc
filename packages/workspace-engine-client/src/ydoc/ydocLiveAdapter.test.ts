@@ -8482,7 +8482,7 @@ describe("a keyed write the busy engine refused", () => {
   it("is dropped when no send recorded it, and is never sent again", async () => {
     const engine = seedPlaintextEngine("abc");
     const keys: string[] = [];
-    let busyAnswers = 1;
+    let busyAnswers = 0;
     const refused = vi.fn();
     const provider = await openEngineYdocProviderSession({
       transport: {
@@ -8507,6 +8507,8 @@ describe("a keyed write the busy engine refused", () => {
       scheduleSettle: settleScheduler().schedule,
     });
     const before = engine.recordedUpdates.length;
+    keys.length = 0;
+    busyAnswers = 1;
     const agentUpdate = plaintextUpdate(provider.initialUpdate, (text) => text.insert(3, " agent"));
     await expect(
       provider.applyLocalUpdate(agentUpdate, {
@@ -8529,7 +8531,7 @@ describe("a keyed write the busy engine refused", () => {
   it("is kept when an earlier send went unanswered, and its resend dedupes", async () => {
     const engine = seedPlaintextEngine("abc");
     const keys: string[] = [];
-    let answer: "lost" | "busy" | "engine" = "lost";
+    let answer: "lost" | "busy" | "engine" = "engine";
     const refused = vi.fn();
     const adapter = new YdocLiveAdapter({
       ...forwardYdocBlobEgress(engine),
@@ -8558,6 +8560,8 @@ describe("a keyed write the busy engine refused", () => {
     });
     session.onLocalUpdateRefused(refused);
     const before = engine.recordedUpdates.length;
+    keys.length = 0;
+    answer = "lost";
     try {
       await expect(
         session.applyLocalTextEdit(
