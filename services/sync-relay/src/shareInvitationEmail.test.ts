@@ -242,19 +242,32 @@ it("answers failed at the deadline when the mail server never answers", async ()
   expect(answer).toEqual({ invitationEmail: "failed" });
 });
 
-it.each(["first@example.test, second@example.test", "Friend <friend@example.test>"])(
-  "sends nothing to an address that is not one plain mailbox: %s",
-  async (recipientEmail) => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const { storage, sent, invite } = await fixture();
+it("sends to the address the invite holds", async () => {
+  const { storage, sent, invite } = await fixture();
 
-    const reply = await invite({ recipientEmail });
+  await invite({ recipientEmail: "Friend@Example.TEST" });
 
-    expect(reply).toMatchObject({ ok: true, invitationEmail: "failed" });
-    expect(sent).toEqual([]);
-    expect(storage.getShareGrant("grant-0")).toMatchObject({ status: "active" });
-  },
-);
+  expect(sent.map((message) => message.to)).toEqual(["friend@example.test"]);
+  expect(storage.getShareGrant("grant-0")).toMatchObject({
+    principalEmail: "friend@example.test",
+  });
+});
+
+it.each([
+  "first@example.test, second@example.test",
+  "Friend <friend@example.test>",
+  "fri\u00adend@example.test",
+  "friend\u200b@example.test",
+])("sends nothing to an address that is not one plain mailbox: %s", async (recipientEmail) => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { storage, sent, invite } = await fixture();
+
+  const reply = await invite({ recipientEmail });
+
+  expect(reply).toMatchObject({ ok: true, invitationEmail: "failed" });
+  expect(sent).toEqual([]);
+  expect(storage.getShareGrant("grant-0")).toMatchObject({ status: "active" });
+});
 
 it("stops emailing at 50 invitations in 24 hours, and deleting shares gives none back", async () => {
   const f = await fixture();

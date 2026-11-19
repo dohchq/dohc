@@ -5,9 +5,9 @@ import { admitShareInvitationEmail } from "./storage/shareInvitationEmails";
 
 export const SHARE_INVITATION_EMAIL_DAILY_LIMIT = 50;
 export const SHARE_INVITATION_EMAIL_WINDOW_HOURS = 24;
-export const SHARE_INVITATION_EMAIL_TIMEOUT_MS = 10_000;
+export const SHARE_INVITATION_EMAIL_TIMEOUT_MS = 5_000;
 
-const ONE_MAILBOX = /^[^\s<>@,;:"\\]+@[^\s<>@,;:"\\]+$/u;
+const ONE_MAILBOX = /^[^\s<>@,;:"\\\p{C}]+@[^\s<>@,;:"\\\p{C}]+$/u;
 
 export type ShareInvitationEmailAnswer =
   | { invitationEmail: "sent" | "unavailable" | "failed" }

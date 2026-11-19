@@ -95,14 +95,13 @@ it("keeps a hostile name on one line, capped, and inside the quotation marks", (
   expect(message.text.split("\n")).toHaveLength(14);
 });
 
-it("gives the name no room to start a new line through the addresses", () => {
+it("keeps the inviter's address on one line, and sends to the address it was given unchanged", () => {
   const message = shareInvitationMessage({
     ...invitation,
     inviterEmail: "owner@dohc.test\r\nSubject: other",
-    recipientEmail: "friend@example.test\nBcc: victim@example.test",
   });
   expect(message.subject).toBe('owner@dohc.test Subject: other shared "Trip plan" with you');
-  expect(message.to).toBe("friend@example.test Bcc: victim@example.test");
+  expect(message.to).toBe(invitation.recipientEmail);
   expect(message.text.split("\n")).toHaveLength(14);
 });
 

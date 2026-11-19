@@ -921,7 +921,7 @@ export function createShareGrantRoutes(
           ? {}
           : await emailShareInvitation({
               inviterUserId: actor.userId,
-              recipientEmail: email,
+              recipientEmail: email.trim().toLowerCase(),
               shareId,
               subjectName,
               access,

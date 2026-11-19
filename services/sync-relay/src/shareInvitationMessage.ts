@@ -46,7 +46,7 @@ export function shareInvitationMessage(input: {
   browserInvitationUrl: string | null;
   shareCode: string | null;
 }): EmailMessage {
-  const recipient = oneLine(input.recipientEmail, ADDRESS_MAX_CHARS);
+  const recipient = input.recipientEmail;
   const inviter = oneLine(input.inviterEmail, ADDRESS_MAX_CHARS);
   const name = oneLine(input.subjectName ?? "", NAME_MAX_CHARS).replace(
     /["\u201c\u201d\u201e\u201f\u00ab\u00bb]/gu,
