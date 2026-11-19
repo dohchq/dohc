@@ -77,13 +77,17 @@ async function shareOfOneNoteBehind(batches: number, perBatch: number) {
     recipientUserId: "member",
     paths: ["docs/shared.md"],
   });
-  const page = async (since: number) =>
-    (await json(await h(request("member", `/sync/shares/${shareId}/log?since=${since}`)))) as {
+  const page = async (since: number, query = "") =>
+    (await json(
+      await h(request("member", `/sync/shares/${shareId}/log?since=${since}${query}`)),
+    )) as {
       ops: { opKind: string }[];
       hasMore: boolean;
       nextCursor: number;
     };
-  return { page };
+  const status = async (query: string) =>
+    (await h(request("member", `/sync/shares/${shareId}/log?since=0${query}`))).status;
+  return { page, status };
 }
 
 it("serves a one-note share from a long workspace history in one page", async () => {
@@ -93,6 +97,13 @@ it("serves a one-note share from a long workspace history in one page", async ()
 
   expect(first.ops.map((op) => op.opKind)).toEqual(["moment.append"]);
   expect(first.hasMore).toBe(false);
+});
+
+it("scans one page of rows for a probe, and says there is more", async () => {
+  const { page, status } = await shareOfOneNoteBehind(6, 200);
+
+  expect(await page(0, "&scan=page")).toMatchObject({ ops: [], hasMore: true, nextCursor: 100 });
+  expect(await status("&scan=all")).toBe(400);
 });
 
 it("stops a page at 10,000 rows, and the next page goes on from its cursor", async () => {

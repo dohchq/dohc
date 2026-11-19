@@ -217,8 +217,6 @@ export async function fetchShareViewAccess(input: {
   return body.access;
 }
 
-const ROWS_A_PROBE_MAY_READ_AGAIN = 100;
-
 export async function probeShareViewLog(input: {
   relay: SyncRelayConnection;
   shareId: string;
@@ -229,7 +227,7 @@ export async function probeShareViewLog(input: {
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}&scan=page`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();
@@ -249,12 +247,7 @@ export async function probeShareViewLog(input: {
   }
   // This cursor is only a probe. The engine commits the next cursor after
   // applying changes and recording refusals through the full refresh path.
-  return {
-    unchanged:
-      body.ops.length === 0 &&
-      !body.hasMore &&
-      body.nextCursor - input.since < ROWS_A_PROBE_MAY_READ_AGAIN,
-  };
+  return { unchanged: body.ops.length === 0 && !body.hasMore };
 }
 
 export async function fetchShareAutomationSwitchable(input: {

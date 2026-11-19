@@ -256,6 +256,7 @@ export function createShareReadQueries(
     recipient?: ReceivedRecipient,
     currentOnly = false,
     epochLogFloor = 0,
+    maxRawRows = MAX_RAW_ROWS_PER_SHARE_PAGE,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -294,7 +295,7 @@ export function createShareReadQueries(
         workspaceId,
         since,
         limit,
-        maxRawRows: MAX_RAW_ROWS_PER_SHARE_PAGE,
+        maxRawRows,
       },
       (row) => {
         // A departed publication names a path its document no longer holds.
