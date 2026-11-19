@@ -240,11 +240,15 @@ fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
     for reversed in [false, true] {
         let (_scratch, _path, mut engine) = open_store();
         authored_chat_fixture(&mut engine);
-        let mut order: Vec<&ReplicationEnvelope> = operations.iter().collect();
+        let mut order = operations.clone();
         if reversed {
             order.reverse();
         }
-        for operation in order {
+        for (index, operation) in order.iter_mut().enumerate() {
+            operation.origin_id = format!("computer-{index}");
+            operation.origin_seq = 0;
+        }
+        for operation in &order {
             apply_chat_envelope(&mut engine, operation, &NoFaults).expect("apply");
         }
         assert_eq!(
