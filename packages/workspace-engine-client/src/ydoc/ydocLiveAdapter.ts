@@ -9,12 +9,14 @@ import { EngineRequestDeadlineError, EngineRequestError } from "../daemon/engine
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
+  isEngineStoreBusyRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isMarkdownWriteHeldRefusal,
   isYdocSessionNotFoundRefusal,
   WorkspaceDaemonRequester,
+  YdocUpdateNotRecordedError,
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
 import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
@@ -262,6 +264,8 @@ export interface ApplyLocalUpdateOptions {
    * engine-side instead of journaling twice.
    */
   idempotencyKey?: string;
+  /** A busy answer before any send could have recorded it refuses the update for good. */
+  dropWhenUnrecorded?: boolean;
 }
 
 export interface YdocLocalTextEdit {
@@ -358,8 +362,10 @@ interface LocalUpdateRecord {
   readonly actorOriginId?: string;
   readonly attribution?: ChangeAttributionWire;
   readonly trustedAutomationDraft?: boolean;
+  readonly dropWhenUnrecorded?: boolean;
   readonly seed: boolean;
   readonly generation: DocumentGeneration;
+  mayHaveRecorded?: boolean;
   refusal?: unknown;
 }
 
@@ -626,6 +632,7 @@ export class YdocAdapterSession {
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
       ...(options?.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
+      ...(options?.dropWhenUnrecorded ? { dropWhenUnrecorded: true } : {}),
       seed: seedUpdate,
       generation: this.generation,
     };
@@ -796,7 +803,11 @@ export class YdocAdapterSession {
           idempotencyKey: record.idempotencyKey,
         }),
       );
-    } catch (error) {
+    } catch (answer) {
+      let error = answer;
+      if (!isEngineStoreBusyRefusal(answer)) record.mayHaveRecorded = true;
+      else if (record.dropWhenUnrecorded && !record.mayHaveRecorded)
+        error = new YdocUpdateNotRecordedError();
       if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
         // Retire causal dependents before replacement so observers can retain
         // a recovery copy. Independent clients keep their queued writes.

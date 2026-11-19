@@ -21,6 +21,7 @@ import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
+  YdocUpdateNotRecordedError,
   type EngineTransport,
   type JsonValue,
   type Request,
@@ -1394,6 +1395,7 @@ async function daemonDeathCapture(
       | "commit-then-internal"
     >;
     applyRefusals: unknown[];
+    dropWhenUnrecorded: Array<boolean | undefined>;
     diskMarkdown: string;
     settled: string[];
     seedRequests: boolean[];
@@ -1428,6 +1430,7 @@ async function daemonDeathCapture(
       | "commit-then-internal"
     >,
     applyRefusals: [] as unknown[],
+    dropWhenUnrecorded: [] as Array<boolean | undefined>,
     diskMarkdown: "",
     settled: [] as string[],
     seedRequests: [] as boolean[],
@@ -1556,6 +1559,7 @@ async function daemonDeathCapture(
       },
       async applyLocalUpdate(update, applyOptions) {
         if (!state.daemonAlive) throw transportDeath();
+        state.dropWhenUnrecorded.push(applyOptions?.dropWhenUnrecorded);
         if (state.applyRefusals.length > 0) throw state.applyRefusals.shift();
         const fault = state.applyFaults.shift();
         if (fault === "drop") throw transportDeath();
@@ -2003,18 +2007,15 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   state.daemonAlive = true;
   expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
+  expect(state.dropWhenUnrecorded[0]).toBe(true);
+  expect(state.dropWhenUnrecorded.slice(1)).not.toContain(true);
   await session.close({ settle: false });
   await capture.stop();
 });
 
-it("says a keyed write the busy engine refused every time was not recorded, and never replays it", async () => {
+it("says a keyed write the engine recorded none of was not recorded, and never replays it", async () => {
   const { capture, session, state } = await keyedFaultCapture("dohc-ydoc-keyed-busy-");
-  const busy = () =>
-    new DaemonRefusalError(
-      { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
-      undefined,
-    );
-  state.applyRefusals.push(busy(), busy());
+  state.applyRefusals.push(new YdocUpdateNotRecordedError());
   await expect(
     session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
       idempotencyKey: "claim/1/0",
@@ -2027,6 +2028,7 @@ it("says a keyed write the busy engine refused every time was not recorded, and 
   });
   expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/1"]);
+  expect(state.dropWhenUnrecorded).toEqual([true, true]);
   await session.close({ settle: false });
   await capture.stop();
 });

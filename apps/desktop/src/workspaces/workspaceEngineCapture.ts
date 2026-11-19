@@ -79,6 +79,7 @@ import {
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
+  YdocUpdateNotRecordedError,
   YDOC_PENDING_MAX_BYTES,
   YDOC_PENDING_MAX_RECORDS,
   type EngineStoreRefusal,
@@ -2809,6 +2810,7 @@ export function createWorkspaceEngineCapture(
       durableNotified?: boolean;
       ownerOutbox?: boolean;
       sent: boolean;
+      mayHaveRecorded?: boolean;
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
       unanswered: { error: unknown } | null;
@@ -3034,6 +3036,7 @@ export function createWorkspaceEngineCapture(
         removePendingRecord(pending);
       }
       removePendingRecord(record);
+      checkpointEdited();
       // Caller-confirmed writes report their own refusal. Only lost editor
       // content, including dependent typing, needs a notice and recovery copy.
       if (refusedEditorRecords.length === 0) return false;
@@ -3062,6 +3065,8 @@ export function createWorkspaceEngineCapture(
       return true;
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
+      if (!hasRefusalInCauseChain(error, isYdocUpdateAdmissionRefusal))
+        record.mayHaveRecorded = true;
       if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
         record.uncertainFailures = 0;
         record.lastUncertainFailureAt = null;
@@ -3485,7 +3490,6 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           replayArmed = !settleForgiven;
-          const sentBefore = record.sent;
           try {
             record.sent = true;
             const replay =
@@ -3494,12 +3498,11 @@ export function createWorkspaceEngineCapture(
             const journaled = replay(record.update, {
               ...record.options,
               armSettle: replayArmed,
+              dropWhenUnrecorded: !record.editorVisible && !record.mayHaveRecorded,
             });
             onReplayArmed?.();
             await journaled;
           } catch (error) {
-            if (!sentBefore && hasRefusalInCauseChain(error, isEngineStoreBusyRefusal))
-              record.sent = false;
             if (!recordUpdateFailure(record, error)) throw error;
             if (record.unanswered === null) {
               const editorVisible = refuseRecord(record, error);
@@ -3682,10 +3685,10 @@ export function createWorkspaceEngineCapture(
       let sent = false;
       const unanswered = (error: unknown): Error =>
         sent || record.sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
-      const givenUp = (error: unknown): Error => {
-        if (!sent && !record.sent) removePendingRecord(record);
-        return unanswered(error);
-      };
+      const refused = (error: unknown): unknown =>
+        hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError)
+          ? keyedWriteNotRecorded(error)
+          : error;
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
@@ -3695,11 +3698,12 @@ export function createWorkspaceEngineCapture(
           }
         } catch (error) {
           if (record.acknowledged) return;
-          if (record.refusal !== null) throw record.refusal.error;
-          throw givenUp(error);
+          if (record.refusal !== null) throw refused(record.refusal.error);
+          if (!sent && !record.sent) removePendingRecord(record);
+          throw unanswered(error);
         }
         if (record.acknowledged) return;
-        if (record.refusal !== null) throw record.refusal.error;
+        if (record.refusal !== null) throw refused(record.refusal.error);
         if (!pendingRecords.has(record)) {
           throw new YdocAdapterError(
             "lineage-changed",
@@ -3711,11 +3715,13 @@ export function createWorkspaceEngineCapture(
         // The first generation's doc is the canonical doc, and it takes the
         // update before the journal answers. Keep the state to return to.
         const restoreOnFailure = generation.doc === doc;
-        const sentBefore = record.sent;
         try {
           sent = true;
           record.sent = true;
-          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          const journaled = generation.applyLocalUpdate(update, {
+            ...applyOptions,
+            dropWhenUnrecorded: !record.mayHaveRecorded,
+          });
           armed();
           await journaled;
           acknowledge(record, doc);
@@ -3725,10 +3731,6 @@ export function createWorkspaceEngineCapture(
           }
           return;
         } catch (error) {
-          if (!sentBefore && hasRefusalInCauseChain(error, isEngineStoreBusyRefusal)) {
-            sent = false;
-            record.sent = false;
-          }
           if (restoreOnFailure && canonicalDoc === doc) {
             const restored = new Y.Doc();
             Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
@@ -3741,8 +3743,7 @@ export function createWorkspaceEngineCapture(
             await replaceRefusedHistory(generation, record);
             throw error;
           }
-          const refused = recordUpdateFailure(record, error);
-          if (refused && record.unanswered === null) {
+          if (recordUpdateFailure(record, error) && record.unanswered === null) {
             const editorVisible = refuseRecord(record, error);
             if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
             if (editorVisible && canonicalDoc !== null)
@@ -3759,13 +3760,13 @@ export function createWorkspaceEngineCapture(
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
             if (record.acknowledged) return;
             const refusal = (record as PendingRecord).refusal;
-            if (refusal !== null) throw refusal.error;
-            throw givenUp(error);
+            if (refusal !== null) throw refused(refusal.error);
+            throw keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
           const refusal = (record as PendingRecord).refusal;
-          if (refusal !== null) throw refusal.error;
+          if (refusal !== null) throw refused(refusal.error);
           if (record.acknowledged) return;
           if (!pendingRecords.has(record)) {
             throw new YdocAdapterError(
@@ -3773,7 +3774,7 @@ export function createWorkspaceEngineCapture(
               "The document lineage changed before the write was acknowledged.",
             );
           }
-          if (attempt > 0) throw givenUp(error);
+          if (attempt > 0) throw keyedWriteUncertain(error);
         }
       }
     };
