@@ -2931,9 +2931,13 @@ fn local_reviews_of_same_heads(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<Vec<(String, bool)>, SyncError> {
+    let heads = [&payload.current, &payload.incoming];
+    let [current_path, incoming_path] = heads.map(|head| payload.paths[head.path_ref()].as_str());
+    let [current_sha, incoming_sha] =
+        heads.map(|head| head.present().map_or("", |head| head.blob_sha256.as_str()));
     let mut statement = tx
         .prepare(
-            "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2              AND status='open' AND conflict_id<>?3",
+            "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2              AND status='open' AND conflict_id<>?3              AND current_path IN (?4,?5) AND incoming_path IN (?4,?5)              AND (current_exists=0 OR COALESCE(current_blob_sha256,current_binary_sha256) IN (?6,?7))              AND (incoming_exists=0 OR COALESCE(incoming_blob_sha256,incoming_binary_sha256) IN (?6,?7))",
         )
         .map_err(SyncError::corrupt)?;
     let ids = statement
@@ -2941,7 +2945,11 @@ fn local_reviews_of_same_heads(
             params![
                 payload.workspace_id,
                 payload.target_version_id,
-                payload.conflict_id
+                payload.conflict_id,
+                current_path,
+                incoming_path,
+                current_sha,
+                incoming_sha
             ],
             |row| row.get::<_, String>(0),
         )
