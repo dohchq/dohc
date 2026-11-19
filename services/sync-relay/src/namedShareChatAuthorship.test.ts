@@ -160,50 +160,53 @@ describe("named share chat author names", () => {
     ]);
   });
 
-  it("stores and serves the account name for a person's reaction and reuses it after a rename", async () => {
-    let name = "Recipient";
-    const f = await fixture(() => name);
-    const payload = {
-      reactionId: "reaction",
-      messageId: "message",
-      threadId: "thread",
-      emoji: "👍",
-      authorId: "recipient",
-      authorKind: "human",
-      authorDisplayName: "Owner",
-      state: "added",
-      atMs: 4,
-    };
-    const ops = sequenced([message("human"), { opKind: "chat.reaction.set", payload }]);
-    expect(await json(await f.push(ops))).toMatchObject({ inserted: 2, skipped: 0 });
-    const expected = { ...payload, authorDisplayName: "Recipient" };
-    const original = f.coordinate(1)!;
-    expect(JSON.parse(original.payloadJson)).toEqual(expected);
-    expect(original.admittedAuthorSnapshot).toEqual([
-      { kind: "human", humanId: "recipient", humanName: "Recipient" },
-    ]);
-    for (const [userId, path] of [
-      ["owner", "/sync/workspace/log"],
-      ["recipient", "/sync/shares/" + f.shareId + "/log"],
-    ]) {
-      const page = (await json(await f.h(request(userId!, path!)))) as {
-        ops: Array<{ opKind: string; payload: Record<string, unknown> }>;
+  it.each(["human", "agent", "automation"] as const)(
+    "stores and serves the account name for a %s reaction and reuses it after a rename",
+    async (authorKind) => {
+      let name = "Recipient";
+      const f = await fixture(() => name);
+      const payload = {
+        reactionId: "reaction",
+        messageId: "message",
+        threadId: "thread",
+        emoji: "👍",
+        authorId: "recipient",
+        authorKind,
+        authorDisplayName: "Owner",
+        state: "added",
+        atMs: 4,
       };
-      expect(page.ops.find((op) => op.opKind === "chat.reaction.set")?.payload).toEqual(expected);
-    }
-    name = "Renamed recipient";
-    const retry = ops.map((op) =>
-      op.opKind === "chat.reaction.set"
-        ? { ...op, payload: { ...op.payload, authorDisplayName: "Another claim" } }
-        : op,
-    );
-    expect(await json(await f.push(retry))).toMatchObject({ inserted: 0, skipped: 2 });
-    expect(f.coordinate(1)).toEqual(original);
-    const changed = ops.map((op) =>
-      op.opKind === "chat.reaction.set" ? { ...op, payload: { ...op.payload, emoji: "👎" } } : op,
-    );
-    expect((await f.push(changed)).status).toBe(409);
-  });
+      const ops = sequenced([message("human"), { opKind: "chat.reaction.set", payload }]);
+      expect(await json(await f.push(ops))).toMatchObject({ inserted: 2, skipped: 0 });
+      const expected = { ...payload, authorDisplayName: "Recipient" };
+      const original = f.coordinate(1)!;
+      expect(JSON.parse(original.payloadJson)).toEqual(expected);
+      expect(original.admittedAuthorSnapshot).toEqual([
+        { kind: "human", humanId: "recipient", humanName: "Recipient" },
+      ]);
+      for (const [userId, path] of [
+        ["owner", "/sync/workspace/log"],
+        ["recipient", "/sync/shares/" + f.shareId + "/log"],
+      ]) {
+        const page = (await json(await f.h(request(userId!, path!)))) as {
+          ops: Array<{ opKind: string; payload: Record<string, unknown> }>;
+        };
+        expect(page.ops.find((op) => op.opKind === "chat.reaction.set")?.payload).toEqual(expected);
+      }
+      name = "Renamed recipient";
+      const retry = ops.map((op) =>
+        op.opKind === "chat.reaction.set"
+          ? { ...op, payload: { ...op.payload, authorDisplayName: "Another claim" } }
+          : op,
+      );
+      expect(await json(await f.push(retry))).toMatchObject({ inserted: 0, skipped: 2 });
+      expect(f.coordinate(1)).toEqual(original);
+      const changed = ops.map((op) =>
+        op.opKind === "chat.reaction.set" ? { ...op, payload: { ...op.payload, emoji: "👎" } } : op,
+      );
+      expect((await f.push(changed)).status).toBe(409);
+    },
+  );
 
   it("names an agent's reaction through a share for its account, and serves no id of an agent a desktop runs", async () => {
     const f = await fixture();
