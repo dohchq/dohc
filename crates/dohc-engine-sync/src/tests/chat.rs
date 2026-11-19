@@ -165,10 +165,29 @@ fn reactors(engine: &mut EngineStore) -> Vec<(String, Option<String>)> {
     reactors
 }
 
+fn authored_chat_fixture(engine: &mut EngineStore) {
+    imported_chat_fixture(engine, "peer");
+    let authored = envelope(
+        "peer",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "message-authored",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "ada",
+            "body": "Authored",
+            "createdAtMs": 21
+        }),
+    );
+    apply_chat_envelope(engine, &authored, &NoFaults).expect("authored message");
+}
+
 #[test]
 fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
     let (_scratch, _path, mut source) = open_store();
-    imported_chat_fixture(&mut source, "peer");
+    authored_chat_fixture(&mut source);
     let writes = [
         (ChatActorKind::Human, None, ChatReactionState::Added),
         (ChatActorKind::Agent, None, ChatReactionState::Added),
@@ -194,7 +213,7 @@ fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
                 &SetReaction {
                     workspace_id: "ws".to_owned(),
                     thread_id: "thread-imported".to_owned(),
-                    message_id: "message-imported".to_owned(),
+                    message_id: "message-authored".to_owned(),
                     emoji: "👍".to_owned(),
                     author_id: "ada".to_owned(),
                     replication_author_id: Some("ada".to_owned()),
@@ -220,7 +239,7 @@ fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
     assert_eq!(operations.len(), 5);
     for reversed in [false, true] {
         let (_scratch, _path, mut engine) = open_store();
-        imported_chat_fixture(&mut engine, "peer");
+        authored_chat_fixture(&mut engine);
         let mut order: Vec<&ReplicationEnvelope> = operations.iter().collect();
         if reversed {
             order.reverse();
