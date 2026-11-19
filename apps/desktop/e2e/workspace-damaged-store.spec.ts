@@ -42,7 +42,9 @@ test("@damaged-store a damaged data store is named and Rebuild brings the worksp
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(workspace, [{ path: "kept.md", contents: "# Kept\n\nStill here.\n" }]);
+    await writeWorkspaceFiles(workspace, [
+      { path: "kept.md", contents: "# Kept\n\nStill here.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace });
     const opened = await openWorkspaceFromFirstRun(desktop.page, workspace);
     await waitForWorkspaceFile(desktop.page, opened.workspaceId, "kept.md");

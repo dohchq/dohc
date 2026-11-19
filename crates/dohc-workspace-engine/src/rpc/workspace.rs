@@ -1963,7 +1963,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_whose_pages_are_damaged_answers_state_corrupt_until_it_is_replaced() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db_path = scratch.path().join(".dohc").join("engine").join("engine.db");
+        let db_path = scratch
+            .path()
+            .join(".dohc")
+            .join("engine")
+            .join("engine.db");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);

@@ -366,13 +366,15 @@ fn full(
     folder: &Path,
 ) -> RecoveryError {
     match error {
-        RecoveryError::Storage(StorageError::DiskFull { shortfall: None }) => StorageError::DiskFull {
-            shortfall: Some(SpaceShortfall {
-                needed,
-                available: free_space.available_bytes(folder).unwrap_or(0),
-            }),
+        RecoveryError::Storage(StorageError::DiskFull { shortfall: None }) => {
+            StorageError::DiskFull {
+                shortfall: Some(SpaceShortfall {
+                    needed,
+                    available: free_space.available_bytes(folder).unwrap_or(0),
+                }),
+            }
+            .into()
         }
-        .into(),
         error => error,
     }
 }

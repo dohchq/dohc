@@ -4,13 +4,13 @@ use crate::lock;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::workspace::WorkspaceOpenMode;
 use dohc_engine_protocol::error::ErrorCode;
-use dohc_engine_runtime::LifecycleState;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::transport::ServiceResponse;
 use dohc_engine_protocol::wire::Request;
 use dohc_engine_protocol::wire::Response;
 use dohc_engine_protocol::wire::WorkspaceHandle;
+use dohc_engine_runtime::LifecycleState;
 use serde_json::Value;
 use serde_json::json;
 
