@@ -103,22 +103,32 @@ describe("reading and marking Notices", () => {
     await expect(read).rejects.toMatchObject({ problem: "offline" });
   });
 
-  it("sends exactly the marks, in the phone's scope", async () => {
+  it("sends exactly the marks with their keys, in the phone's scope, and reads the keys the relay repeated", async () => {
     const sent: { url: string; body: string | undefined }[] = [];
+    const answers: unknown[] = [
+      { ok: true, dismissed: [] },
+      { ok: true, dismissed: [], repeated: ["k-1"] },
+      { ok: true, dismissed: [], repeated: [7] },
+    ];
     const fetch: Fetch = async (url, init) => {
       sent.push({ url, body: init.body });
-      return { status: 200, json: async () => ({ ok: true, dismissed: [] }) };
+      const body = answers.shift();
+      return { status: 200, json: async () => body };
     };
-    await sendNoticeMarks(
-      client(fetch),
-      [{ noticeId: "a", mark: "restore" }],
-      new AbortController().signal,
-    );
+    const send = () =>
+      sendNoticeMarks(
+        client(fetch),
+        [{ key: "k-1", noticeId: "a", mark: "restore" }],
+        new AbortController().signal,
+      );
+    await expect(send()).resolves.toEqual(new Set());
     expect(sent).toEqual([
       {
         url: `${ORIGIN}/sync/notices/marks?scope=phone`,
-        body: JSON.stringify({ marks: [{ noticeId: "a", mark: "restore" }] }),
+        body: JSON.stringify({ marks: [{ noticeId: "a", mark: "restore", key: "k-1" }] }),
       },
     ]);
+    await expect(send()).resolves.toEqual(new Set(["k-1"]));
+    await expect(send()).rejects.toMatchObject({ problem: "invalid" });
   });
 });
