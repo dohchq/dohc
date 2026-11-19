@@ -389,6 +389,7 @@ export function openSyncRelayStorage(
       reusePreparedStatements(db),
       {
         pushConfigured: options.pushConfigured ?? false,
+        apnsConfigured: options.apnsConfigured ?? false,
         workspaceQuotaBytes,
         blobGraceMs,
         linkSessionsPerGrantLimit,
@@ -1150,7 +1151,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.noticeHead(this, recipientUserId);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+  markNotices(input: noticeStorage.MarkNoticesInput): { dismissed: string[]; repeated: string[] } {
     return noticeStorage.markNotices(this, input);
   }
 
@@ -2291,6 +2292,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     epochLogFloor: number;
   }): CurrentFileStateRow | null | "reset" {
     return currentFilesStorage.currentObjectFile(this, input);
+  }
+
+  currentFileBlobSha256(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined {
+    return currentFilesStorage.currentFileBlobSha256(this, input);
   }
 
   currentFileObjectId(input: {

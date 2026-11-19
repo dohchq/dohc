@@ -24,6 +24,8 @@ export interface BindPushDeviceInput {
   token: string;
   environment: ApnsEnvironment;
   topic: string;
+  // The account's display name, which a mention of them uses.
+  accountName?: string;
   nowMs: number;
 }
 
@@ -77,6 +79,13 @@ export function sweepExpiredPushDevices(storage: StorageContext, nowMs: number):
  * the result is a binding under a generation no binding had before.
  */
 export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInput): PushDeviceRow {
+  const named = (row: PushDeviceRow): PushDeviceRow => {
+    storage.db
+      .prepare(`INSERT INTO sync_relay_push_device_names (generation, account_name) VALUES (?, ?)
+        ON CONFLICT(generation) DO UPDATE SET account_name = excluded.account_name`)
+      .run(row.generation, (input.accountName ?? "").slice(0, 1024));
+    return row;
+  };
   return storage.tx(() => {
     const db = storage.db;
     // Deletion fences the account in its own transaction; a bind that waited on it must not land after.
@@ -104,7 +113,7 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
           input.nowMs,
           input.sessionId,
         );
-      return { ...existing, expiresAtMs: input.sessionExpiresAtMs };
+      return named({ ...existing, expiresAtMs: input.sessionExpiresAtMs });
     }
     endBindings(
       storage,
@@ -136,7 +145,7 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       input.nowMs,
       input.sessionExpiresAtMs,
     );
-    return {
+    return named({
       userId: input.userId,
       sessionId: input.sessionId,
       token: input.token,
@@ -144,7 +153,7 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       topic: input.topic,
       generation,
       expiresAtMs: input.sessionExpiresAtMs,
-    };
+    });
   });
 }
 

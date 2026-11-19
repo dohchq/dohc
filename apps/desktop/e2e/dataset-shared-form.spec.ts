@@ -9,6 +9,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   sharedDatasetViewerOrigin,
+  openAppFromFolderLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import {
@@ -202,7 +203,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
     await guest.goto(linkUrl);
-    await guest.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(guest);
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
     await form.getByLabel("Name", { exact: false }).fill("Shared browser participant");
@@ -288,7 +289,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     if (publishedDashboard.kind !== "published") throw Error("Expected dashboard publication.");
     const reader = await shared.browser.newPage();
     await reader.goto(linkUrl);
-    await reader.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(reader);
     const dashboardFrame = reader.frameLocator("iframe");
     await expect(dashboardFrame.locator("pre")).toContainText("Shared browser participant");
     const createOperation = dataset.operations.find((operation) => operation.kind === "create")!;
@@ -319,27 +320,18 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     if (current.kind !== "invoked") throw Error("Expected current Collection data.");
     await relay.stop();
     relay = null;
-    const offline = await page.evaluate(
-      async (request) => window.dohcDesktop!.dataset(request),
-      request,
-    );
-    expect(offline).toMatchObject({
-      kind: "invoked",
-      result: current.result,
-      copy: { offline: true },
-    });
+    await expect
+      .poll(() => page.evaluate(async (request) => window.dohcDesktop!.dataset(request), request))
+      .toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     await desktop.close();
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
-    const reopened = await desktop.page.evaluate(
-      async (request) => window.dohcDesktop!.dataset(request),
-      request,
-    );
-    expect(reopened).toMatchObject({
-      kind: "invoked",
-      result: current.result,
-      copy: { offline: true },
-    });
+    const reopened = desktop.page;
+    await expect
+      .poll(() =>
+        reopened.evaluate(async (request) => window.dohcDesktop!.dataset(request), request),
+      )
+      .toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await info.attach("scope", {

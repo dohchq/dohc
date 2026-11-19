@@ -6,7 +6,7 @@ import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
 import { serverLogLine } from "./serverLogWords";
-import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
+import { MAX_RAW_ROWS_PER_SHARE_PAGE, scanFilteredLog } from "./shareReadQueries";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
@@ -399,7 +399,7 @@ export function createServiceHostFeed(
       const since = Math.max(requestedSince, epochLogFloor);
       const page = scanFilteredLog(
         storage,
-        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_LINK_PAGE },
+        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_SHARE_PAGE },
         (row) => {
           const decision = hostedRowDecision(scope, row);
           if (!decision.allowed) return null;
@@ -489,6 +489,23 @@ export function createServiceHostFeed(
         admit(ops) {
           const scope = currentScope(workspaceId),
             known = blobReach.known(scope);
+          const files = new Map<string, string | undefined>();
+          const fileAt = (path: string) =>
+            files.has(path)
+              ? files.get(path)
+              : storage.currentFileBlobSha256({ workspaceId, versionId: "main", path });
+          const fileMovedSince = (op: SyncRelayLogInput) => {
+            if (op.opKind !== "moment.append") return false;
+            const save = asRecord(JSON.parse(op.payloadJson));
+            const path = save?.path,
+              before = save?.payloadBeforeBlobSha256,
+              after = save?.payloadAfterBlobSha256;
+            if (typeof path !== "string" || typeof before !== "string") return false;
+            const current = fileAt(path);
+            if (current !== undefined && current !== before) return true;
+            files.set(path, typeof after === "string" ? after : undefined);
+            return false;
+          };
           const batch = {
             originId: pushOrigin,
             ops: new Map(ops.map((op) => [op.originSeq, op])),
@@ -501,7 +518,7 @@ export function createServiceHostFeed(
             else if (decision.kind === "retiring") {
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
-              else if (staysInPlace(decision.retirement)) staying.add(op);
+              else if (staysInPlace(decision.retirement) && !fileMovedSince(op)) staying.add(op);
               else op.relayAdmission = "departed";
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }

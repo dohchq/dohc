@@ -1215,13 +1215,12 @@ mod tests {
 
     /// Runs `swap` once, when the walk has seen `relative` and is about to
     /// open it.
-    #[cfg(unix)]
     fn swap_before_open(relative: &str, swap: impl FnOnce() + 'static) {
         BEFORE_OPEN.set(Some((relative.to_owned(), Box::new(swap))));
     }
 
-    /// Moves `folder` to `aside` and puts a link to `target` in its place.
-    #[cfg(unix)]
+    /// Moves `folder` to `aside` and puts a link to `target` in its place, a
+    /// junction on Windows.
     fn link_in_place_of(
         folder: std::path::PathBuf,
         aside: std::path::PathBuf,
@@ -1229,11 +1228,21 @@ mod tests {
     ) -> impl FnOnce() {
         move || {
             std::fs::rename(&folder, aside).unwrap();
+            #[cfg(unix)]
             std::os::unix::fs::symlink(target, &folder).unwrap();
+            #[cfg(windows)]
+            {
+                let made = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(&folder)
+                    .arg(target)
+                    .output()
+                    .unwrap();
+                assert!(made.status.success(), "{made:?}");
+            }
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_parent_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
         let f = Fixture::new();
@@ -1252,15 +1261,47 @@ mod tests {
                 outside.path().to_path_buf(),
             ),
         );
-        let facts = f.scan(&cursor);
+        assert_eq!(f.scan(&cursor), vec![]);
         assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
-        assert!(
-            facts.iter().all(|fact| !fact.path.contains("secret")),
-            "{facts:?}"
+    }
+
+    /// Windows finds `.dohc/visibility.toml` under any ASCII case, and so
+    /// does the scan.
+    #[cfg(windows)]
+    #[test]
+    fn a_policy_file_renamed_by_case_still_reports_its_edits() {
+        let f = Fixture::new();
+        f.write(".dohc/visibility.toml", "a");
+        let root = f.root.path();
+        std::fs::rename(root.join(".dohc"), root.join(".DOHC")).unwrap();
+        std::fs::rename(
+            root.join(".DOHC").join("visibility.toml"),
+            root.join(".DOHC").join("VISIBILITY.TOML"),
+        )
+        .unwrap();
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        f.write(".DOHC/VISIBILITY.TOML", "longer");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Changed)]
         );
     }
 
-    #[cfg(unix)]
+    /// A walk inside a folder must not stop it from being renamed, as a held
+    /// handle on Windows would.
+    #[test]
+    fn a_folder_renamed_while_the_walk_is_inside_it_moves() {
+        let f = Fixture::new();
+        f.write("a/b/c/note.md", "in");
+        let root = f.root.path().to_path_buf();
+        swap_before_open("a/b/c", move || {
+            std::fs::rename(root.join("a"), root.join("z")).unwrap();
+        });
+        f.scan(&f.cursor());
+        assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
+    }
+
     #[test]
     fn a_metadata_folder_swapped_for_a_link_during_a_scan_lists_nothing_outside() {
         let f = Fixture::new();

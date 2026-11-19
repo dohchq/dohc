@@ -1575,10 +1575,12 @@ main::before {
 .drive-visual { min-width: 0; }
 .drive-model-stage canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .drive-model-stage { position: relative; height: 420px; }
-.drive-model-stage canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
+.drive-model-poster { display: block; width: 100%; height: 100%; object-fit: contain; }
+.drive-model-stage canvas { position: absolute; inset: 0; visibility: hidden; display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
+.drive-model-stage.is-loaded canvas { visibility: visible; }
+.drive-model-stage.is-loaded .drive-model-poster { visibility: hidden; }
 .drive-model-stage canvas:active { cursor: grabbing; }
-.drive-model-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font: 12px/1.5 var(--font-mono); pointer-events: none; }
-.drive-model-stage.is-loaded .drive-model-loading { display: none; }
+.drive-model-status { position: absolute; inset: auto 0 0; color: var(--muted); text-align: center; font: 12px/1.5 var(--font-mono); pointer-events: none; }
 
 @media (max-width: 760px) {
   .downloads-heading, .ownership-summary { grid-template-columns: 1fr; gap: 24px; }

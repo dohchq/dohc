@@ -218,6 +218,9 @@ export function fenceAccount(
       .prepare("DELETE FROM sync_relay_push_deliveries WHERE account_user_id=?")
       .run(userId);
     storage.db
+      .prepare("DELETE FROM sync_relay_push_sender_rate WHERE sender_key='user:'||?")
+      .run(userId);
+    storage.db
       .prepare("DELETE FROM sync_relay_push_subscriptions WHERE account_user_id=?")
       .run(userId);
     storage.db

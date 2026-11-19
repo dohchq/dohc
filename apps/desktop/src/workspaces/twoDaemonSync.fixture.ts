@@ -35,7 +35,11 @@ import {
   WorkspaceDaemonRequester,
 } from "@dohc/workspace-engine-client";
 
-import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemonSeed";
+import {
+  openLiveDaemonWorkspace,
+  type CloseStep,
+  type LiveDaemonWorkspace,
+} from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
@@ -102,6 +106,7 @@ afterAll(async () => {
 }, 30_000);
 
 export interface LiveDaemonCapture {
+  workspace: LiveDaemonWorkspace["workspace"];
   capture: WorkspaceEngineCapture;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayWorkspaceClient;
@@ -146,6 +151,7 @@ export async function openLiveDaemonCapture(input: {
     relay: input.relay,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -224,6 +230,7 @@ export async function openJoinedDaemonCapture(input: {
     rustEngineSessions: workspace.sessions,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -1009,6 +1016,7 @@ async function runRenameRepro(
       retryOwnerLiveQuarantine: unexpected,
       retryOwnerLiveRelease: unexpected,
       saveOwnerLiveRecoveryCopy: unexpected,
+      listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
       reconcileReceivedShares: unexpected,
@@ -2120,6 +2128,7 @@ async function runDeleteRepro(
       retryOwnerLiveQuarantine: unexpected,
       retryOwnerLiveRelease: unexpected,
       saveOwnerLiveRecoveryCopy: unexpected,
+      listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
       reconcileReceivedShares: unexpected,

@@ -3177,7 +3177,8 @@ fn conflict_resolve_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    let mut automation_claims = Vec::new();
+    let mut result = VersionedTextStore::new(store)
         .resolve_text_conflict_with(
             input,
             faults,
@@ -3214,12 +3215,25 @@ fn conflict_resolve_on_store(
                     )
                     .map_err(search_domain)?;
                 }
-                dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
-                    .map_err(map_fold_error)?;
+                if let Some(facts) =
+                    dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
+                        .map_err(map_fold_error)?
+                {
+                    automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                        tx,
+                        &input.workspace_id,
+                        &facts,
+                        result.conflict.updated_at_ms,
+                    )?;
+                }
                 Ok(())
             },
         )
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    if let Some(write) = result.write.as_mut() {
+        write.automation_claims = automation_claims;
+    }
+    Ok(result)
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error

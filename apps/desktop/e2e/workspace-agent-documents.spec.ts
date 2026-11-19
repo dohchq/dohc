@@ -385,6 +385,39 @@ test("an agent's edit merges into a document the person is typing in", async ({}
   }
 });
 
+test("an agent reads a document in a received share, and can't edit it", async () => {
+  const temp = await createTempWorkspace();
+  const path = "shared-with-me/trip/notes.md";
+  let desktop: Desktop | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/readme.md", contents: "# Notes\n" },
+      { path, contents: "# Trip\n\nShared with me.\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const opened = await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, opened.workspaceId, "notes/readme.md");
+    await waitForCliEndpoint(temp.homeDir);
+    expect(await agentCli(temp, "documentRead", { path })).toEqual({
+      ok: true,
+      path,
+      markdown: "# Trip\n\nShared with me.\n",
+    });
+    expect(
+      await agentCli(temp, "documentEdit", {
+        agent: "e2e-share-reader",
+        path,
+        find: "Shared with me.",
+        replacement: "Changed.",
+      }),
+    ).toMatchObject({ ok: false });
+    expect(await fileText(temp, path)).toBe("# Trip\n\nShared with me.\n");
+  } finally {
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
 test("an agent creates a document and comments on it where the person reads comments", async ({}, testInfo) => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();

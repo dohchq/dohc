@@ -52,9 +52,9 @@ const SIDE_BY_SIDE_PX = 720;
 // a thread from one never opens in another.
 export function ThreadedChat(props: {
   testIdPrefix: string;
-  // The conversation's thread, once it has one, so an agent's notice about
+  // The conversation's threads, once it has one, so an agent's notice about
   // a run shown here is skipped.
-  chatId?: string | null;
+  chatIds?: readonly string[];
   messages: readonly ChatMessageRecord[];
   loading: boolean;
   emptyLabel: string;
@@ -143,12 +143,13 @@ export function ThreadedChat(props: {
     return () => observer.disconnect();
   }, []);
 
-  const { chatId } = props;
+  const chatIds = props.chatIds?.join("\n") ?? "";
   useEffect(() => {
     const node = rootRef.current;
-    if (!node || !chatId) return;
-    return showChat(chatId, node);
-  }, [chatId]);
+    if (!node || !chatIds) return;
+    const hides = chatIds.split("\n").map((id) => showChat(id, node));
+    return () => hides.forEach((hide) => hide());
+  }, [chatIds]);
 
   const threads = useMemo(() => splitThreads(props.messages), [props.messages]);
   const stream = threads.top;

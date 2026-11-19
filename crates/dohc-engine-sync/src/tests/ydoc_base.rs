@@ -2717,7 +2717,9 @@ fn resolve_seed_conflict_with_faults(
             crate::prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict).map_err(map_error)
         },
         |tx, result, prepared| {
-            crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result).map_err(map_error)
+            crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                .map(drop)
+                .map_err(map_error)
         },
     );
     if crash_after_commit {

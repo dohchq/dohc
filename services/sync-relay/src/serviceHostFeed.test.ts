@@ -792,6 +792,108 @@ it.each(["access ended", "stopped", "paused"] as const)(
   },
 );
 
+const last = blob("last save"),
+  owner = blob("owner save"),
+  second = blob("second computer save");
+it.each([
+  {
+    name: "the owner after a Stop",
+    retire: true,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: owner,
+  },
+  {
+    name: "the owner after a Pause",
+    retire: false,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: last,
+  },
+  {
+    name: "a push without the owner's account",
+    retire: true,
+    userId: undefined,
+    saves: [[A, owner]],
+    stored: last,
+  },
+  {
+    name: "the owner's save from another file",
+    retire: true,
+    userId: "owner-1",
+    saves: [[C, owner]],
+    stored: last,
+  },
+  {
+    name: "a second save from the same old file",
+    retire: true,
+    userId: "owner-1",
+    saves: [
+      [A, owner],
+      [A, second],
+    ],
+    stored: owner,
+  },
+] as const)("lets the owner's save replace the host's last one: $name", async (input) => {
+  const f = await fixture();
+  retainServiceActivation(f.raw, namespace, true);
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceByteLength',?)",
+    )
+    .run(last.sha256, last.content.byteLength);
+  for (const content of [A, last]) await f.upload(content);
+  for (const content of [owner, second])
+    f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
+  preparedStop(f.storage, {
+    workspaceId: ws,
+    path: "docs/a.md",
+    ownerUserId: "owner-1",
+    enabled: false,
+    retire: input.retire,
+    nowMs: 20,
+    guard() {},
+  });
+  const from = (before: Blob) => ({
+    beforePresent: true,
+    payloadBeforePath: "docs/a.md",
+    payloadBeforeBlobSha256: before.sha256,
+  });
+  await f.push([
+    [
+      "moment.append",
+      write(binding.objectId, "docs/a.md", last, {
+        momentId: "moment-1",
+        metadata: {},
+        ...from(A),
+      }),
+    ],
+  ]);
+  f.storage.appendLogBatch({
+    workspaceId: ws,
+    originId: "owner-laptop",
+    ops: input.saves.map(([before, after], originSeq) =>
+      parseLogOp({
+        originSeq,
+        opKind: "moment.append",
+        recordedAtMs: 4,
+        payload: write(binding.objectId, "docs/a.md", after, {
+          momentId: `moment-owner-${originSeq}`,
+          ...from(before),
+        }),
+      }),
+    ),
+    ...(input.userId === undefined
+      ? {}
+      : { workReferences: { userId: input.userId, references: [] } }),
+  });
+  expect(
+    f.raw
+      .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+      .get(ws, "docs/a.md")!.blob_sha256,
+  ).toBe(input.stored.sha256);
+});
+
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
   const replacement = blob("replacement");
