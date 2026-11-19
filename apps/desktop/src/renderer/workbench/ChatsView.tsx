@@ -5593,6 +5593,7 @@ export function ChatsView(props: {
             onOpenAgentSettings={props.onSetupAgent}
             revision={props.threadRevision ?? 0}
             agentSetup={props.agentSetup}
+            agents={settingsAgents}
             onAgentWaitsForTrust={props.onAgentWaitsForTrust}
             workspacePath={props.workspacePath}
             {...(nav.focusMessageId === undefined ? {} : { focusMessageId: nav.focusMessageId })}
