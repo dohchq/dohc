@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   readChangeAnswer,
+  readCreateAnswer,
+  readDeleteAnswer,
   readDescription,
   readPage,
   type CollectionField,
@@ -38,6 +40,8 @@ const table: CollectionTable = {
   name: "People",
   primaryFieldId: "f-name",
   fields: [name, paid, status],
+  canCreate: true,
+  canDelete: false,
 };
 const described = {
   datasetId: D,
@@ -83,6 +87,14 @@ describe("a Collection's description", () => {
     expect(readDescription(withField(unflagged), D)).toBeNull();
     expect(readDescription(withField({ ...status, options: undefined }), D)).toBeNull();
     expect(readDescription(withField({ ...status, options: ["Paid", 7] }), D)).toBeNull();
+  });
+
+  it("refuses a table without whether it takes new records and deletions", () => {
+    const { canCreate: _, ...noCreate } = table;
+    const { canDelete: __, ...noDelete } = table;
+    expect(readDescription({ ...described, tables: [noCreate] }, D)).toBeNull();
+    expect(readDescription({ ...described, tables: [noDelete] }, D)).toBeNull();
+    expect(readDescription({ ...described, tables: [{ ...table, canDelete: 1 }] }, D)).toBeNull();
   });
 
   it("never marks a field reversible that the phone can't edit", () => {
@@ -181,5 +193,35 @@ describe("the answer to a change", () => {
     expect(readChangeAnswer({ refused: { code: "", message: "x" } })).toBeNull();
     expect(readChangeAnswer({ refused: { code: "x" } })).toBeNull();
     expect(readChangeAnswer({ rulesChanged: "yes" })).toBeNull();
+  });
+});
+
+describe("the answer to a new record or a deletion", () => {
+  it("reads a new record's key, version and described values", () => {
+    expect(
+      readCreateAnswer(
+        { saved: { id: "r-1", version: 1, values: { "f-paid": false, "f-secret": "x" } } },
+        table,
+      ),
+    ).toEqual({ kind: "saved", record: { id: "r-1", version: 1, values: { "f-paid": false } } });
+    expect(readCreateAnswer({ saved: { id: 7, version: 1, values: {} } }, table)).toEqual({
+      kind: "saved",
+      record: { id: 7, version: 1, values: {} },
+    });
+  });
+
+  it("reads a deletion, and either's refusal and rules change", () => {
+    expect(readDeleteAnswer({ saved: {} })).toEqual({ kind: "saved" });
+    const refused = { refused: { code: "stale_record", message: "This record changed." } };
+    expect(readDeleteAnswer(refused)).toEqual({ kind: "refused", ...refused.refused });
+    expect(readCreateAnswer({ rulesChanged: true }, table)).toEqual({ kind: "rulesChanged" });
+  });
+
+  it("refuses an answer it can't read", () => {
+    expect(readCreateAnswer({ saved: { id: "", version: 1, values: {} } }, table)).toBeNull();
+    expect(readCreateAnswer({ saved: { id: "r-1", version: 0, values: {} } }, table)).toBeNull();
+    expect(readCreateAnswer({ saved: { id: "r-1", version: 1 } }, table)).toBeNull();
+    expect(readDeleteAnswer({ saved: true })).toBeNull();
+    expect(readDeleteAnswer({})).toBeNull();
   });
 });

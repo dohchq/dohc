@@ -1,8 +1,8 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
-import { Stack, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
-import { ChevronRight, Square, SquareCheck, Undo2 } from "lucide-react-native";
+import { Stack, useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
+import { ChevronRight, Plus, Square, SquareCheck, Trash2, Undo2 } from "lucide-react-native";
 import { memo, useCallback, useEffect, useSyncExternalStore } from "react";
 import {
   ActivityIndicator,
@@ -19,6 +19,7 @@ import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { outsideLink } from "../apps/appNavigation";
 import { offerLink } from "../apps/offerLink";
+import { confirm } from "../confirm";
 import { ActionPill } from "../notices/ActionPill";
 import type {
   CollectionField,
@@ -34,14 +35,17 @@ import { useProblemText } from "../workspace/useView";
 import { editorKind, rowText, shownValue } from "./collectionFields";
 import {
   canUndo,
+  newRecordKey,
   recordKey,
+  type RecordAction,
   type RecordChange,
   type WorkspaceCollections,
 } from "./collectionStore";
 
 // A Collection's records, from Home, and one record. The list reads its first table, or the one chosen, 50 records at
 // a time, the next page as it nears its end. Pulling down, and a return to the foreground, read the Collection again.
-// Errors show in place, as on any screen outside the tabs.
+// Errors show in place, as on any screen outside the tabs. With phone writes on, New record in the list's header adds
+// a record and opens it, and Delete in a record's header asks first, then deletes it and leaves its screen.
 
 const nothing = () => () => undefined;
 
@@ -67,8 +71,10 @@ function Records({
 }) {
   const theme = useTheme();
   const router = useRouter();
+  const navigation = useNavigation();
   const problemText = useProblemText();
   const state = useSyncExternalStore(collections.subscribe, collections.view);
+  const actions = useSyncExternalStore(collections.subscribe, collections.actions);
   useEffect(() => {
     void collections.open(datasetId);
     return () => collections.close(datasetId);
@@ -96,8 +102,38 @@ function Records({
     },
     [router, collections],
   );
+  // The new record opens on its own screen, if the list is still on top.
+  const added = (opened: boolean) => {
+    if (opened && navigation.isFocused()) router.push("/collection-record");
+  };
+  const newKey = table ? newRecordKey(datasetId, table.tableId) : null;
+  const adding = newKey ? actions.get(newKey) : undefined;
 
-  const title = <Stack.Screen options={{ title: description?.name ?? "" }} />;
+  const title = (
+    <Stack.Screen
+      options={{
+        title: description?.name ?? "",
+        headerRight:
+          phoneWrites && table?.canCreate
+            ? () =>
+                adding?.state.kind === "saving" ? (
+                  <ActivityIndicator accessibilityLabel={collectionWords.saving} />
+                ) : (
+                  <Pressable
+                    onPress={() => void collections.create().then(added)}
+                    disabled={adding !== undefined}
+                    hitSlop={8}
+                    style={styles.headerButton}
+                    accessibilityRole="button"
+                    accessibilityLabel={collectionWords.newRecord}
+                  >
+                    <Plus size={24} color={theme.ink} strokeWidth={2} />
+                  </Pressable>
+                )
+            : undefined,
+      }}
+    />
+  );
   if (!view || !description)
     return (
       <>
@@ -154,6 +190,16 @@ function Records({
               table ? collectionWords.recordsFailed(table.name) : collectionWords.collectionFailed
             } ${problemText(view.problem.cause)}`}
             onRetry={view.problem.more ? more : reload}
+          />
+        </View>
+      ) : null}
+      {newKey && adding ? (
+        <View style={styles.problem}>
+          <ChangeLine
+            state={adding.state}
+            cause={problemText}
+            onRetry={() => void collections.retryAction(newKey).then(added)}
+            onDiscard={() => collections.discardAction(newKey)}
           />
         </View>
       ) : null}
@@ -248,14 +294,41 @@ export function RecordScreen() {
     collections?.subscribe ?? nothing,
     useCallback(() => collections?.changes() ?? NO_CHANGES, [collections]),
   );
+  const actions = useSyncExternalStore(
+    collections?.subscribe ?? nothing,
+    useCallback(() => collections?.actions() ?? NO_ACTIONS, [collections]),
+  );
   useEffect(() => () => collections?.closeRecord(), [collections]);
   const opened = view?.opened;
   const table = view?.description?.tables.find((table) => table.tableId === opened?.tableId);
+  const deletion =
+    view && opened
+      ? actions.get(recordKey(view.datasetId, opened.tableId, opened.record.id))
+      : undefined;
+  const deleted = deletion?.state.kind === "saved";
+  // A deleted record's screen leaves once it's on top.
+  useFocusEffect(
+    useCallback(() => {
+      if (deleted && router.canGoBack()) router.back();
+    }, [deleted, router]),
+  );
   if (!collections || !view || !opened || !table)
     return <ScreenFailure text={collectionWords.recordMissing} />;
   const { record, files } = opened;
   const key = recordKey(view.datasetId, table.tableId, record.id);
   const last = changes.get(key);
+  const deleting = deleted || deletion?.state.kind === "saving";
+  const askDelete = async () => {
+    if (
+      await confirm({
+        title: collectionWords.deleteRecordTitle,
+        message: collectionWords.deleteRecordBody,
+        confirm: collectionWords.deleteRecord,
+        destructive: true,
+      })
+    )
+      collections.remove();
+  };
   const lead = leadField(table);
   const title =
     (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
@@ -273,7 +346,8 @@ export function RecordScreen() {
     if (from && recordKey(from.datasetId, from.tableId, from.recordId) === key)
       edit(change.fieldId, change.value);
   };
-  const undo = phoneWrites && canUndo(last);
+  const undo = phoneWrites && !deleting && canUndo(last);
+  const canDelete = phoneWrites && table.canDelete && record.version !== null;
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -283,25 +357,57 @@ export function RecordScreen() {
       <Stack.Screen
         options={{
           title,
-          headerRight: undo
-            ? () => (
-                <Pressable
-                  onPress={() => collections.undo(key)}
-                  hitSlop={8}
-                  style={styles.headerButton}
-                  accessibilityRole="button"
-                  accessibilityLabel={collectionWords.undoLastEdit}
-                >
-                  <Undo2 size={22} color={theme.ink} strokeWidth={2} />
-                </Pressable>
-              )
-            : undefined,
+          headerRight:
+            undo || canDelete
+              ? () => (
+                  <View style={styles.headerButtons}>
+                    {undo ? (
+                      <Pressable
+                        onPress={() => collections.undo(key)}
+                        hitSlop={8}
+                        style={styles.headerButton}
+                        accessibilityRole="button"
+                        accessibilityLabel={collectionWords.undoLastEdit}
+                      >
+                        <Undo2 size={22} color={theme.ink} strokeWidth={2} />
+                      </Pressable>
+                    ) : null}
+                    {!canDelete ? null : deleting ? (
+                      <View style={styles.headerButton}>
+                        <ActivityIndicator accessibilityLabel={collectionWords.saving} />
+                      </View>
+                    ) : (
+                      <Pressable
+                        onPress={() => void askDelete()}
+                        disabled={last?.state.kind === "saving"}
+                        hitSlop={8}
+                        style={styles.headerButton}
+                        accessibilityRole="button"
+                        accessibilityLabel={collectionWords.deleteRecord}
+                      >
+                        <Trash2 size={22} color={theme.danger} strokeWidth={2} />
+                      </Pressable>
+                    )}
+                  </View>
+                )
+              : undefined,
         }}
       />
       {view.problem ? (
         <ProblemLine
           text={`${collectionWords.recordsFailed(table.name)} ${problemText(view.problem.cause)}`}
           onRetry={() => void (view.problem?.more ? collections.more() : collections.reload())}
+        />
+      ) : null}
+      {deletion ? (
+        <ChangeLine
+          state={deletion.state}
+          cause={problemText}
+          onRetry={() => void collections.retryAction(key)}
+          onReload={() =>
+            void collections.reloadRecord().then((read) => read && collections.discardAction(key))
+          }
+          onDiscard={() => collections.discardAction(key)}
         />
       ) : null}
       {table.fields.map((field) => {
@@ -316,7 +422,8 @@ export function RecordScreen() {
           field.editable &&
           editorKind(field) !== null &&
           record.version !== null &&
-          last?.state.kind !== "saving";
+          last?.state.kind !== "saving" &&
+          !deleting;
         const body = (
           <>
             <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
@@ -347,7 +454,7 @@ export function RecordScreen() {
             )}
             {pending ? (
               <ChangeLine
-                change={pending}
+                state={pending.state}
                 cause={(problem) => problemText(problem)}
                 onRetry={() => collections.retry(key)}
                 onReload={() => void reload(pending)}
@@ -362,17 +469,21 @@ export function RecordScreen() {
 }
 
 const NO_CHANGES: ReadonlyMap<string, RecordChange> = new Map();
+const NO_ACTIONS: ReadonlyMap<string, RecordAction> = new Map();
 
-/** Why a change didn't save, and what to do next: send it again, read the record again, or drop it. */
+/**
+ * Why a change, a new record or a deletion didn't save, and what to do next: send it again, read the record again
+ * where that helps, or drop it.
+ */
 function ChangeLine(props: {
-  change: RecordChange;
+  state: RecordChange["state"] | RecordAction["state"];
   cause(problem: ReadProblem): string;
   onRetry(): void;
-  onReload(): void;
+  onReload?(): void;
   onDiscard(): void;
 }) {
   const theme = useTheme();
-  const { state } = props.change;
+  const { state } = props;
   if (state.kind === "saving" || state.kind === "saved") return null;
   const stale = state.kind === "refused" && state.code === "stale_record";
   const text =
@@ -391,7 +502,7 @@ function ChangeLine(props: {
       <View style={styles.actions}>
         {state.kind === "failed" ? (
           <ActionPill label={noticesWords.tryAgain} onPress={props.onRetry} />
-        ) : state.kind === "rulesChanged" || stale ? (
+        ) : props.onReload && (state.kind === "rulesChanged" || stale) ? (
           <ActionPill label={collectionWords.reload} onPress={props.onReload} />
         ) : null}
         <ActionPill label={chatWords.discard} onPress={props.onDiscard} />
@@ -475,6 +586,7 @@ const styles = StyleSheet.create({
   valueLine: { flexDirection: "row", alignItems: "center", gap: 8 },
   valueText: { flex: 1 },
   headerButton: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
+  headerButtons: { flexDirection: "row" },
   change: { gap: 8, paddingTop: 8 },
   changeText: { fontSize: 15, lineHeight: 20 },
   actions: { flexDirection: "row", gap: 8 },

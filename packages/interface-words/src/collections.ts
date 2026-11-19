@@ -20,6 +20,11 @@ export const collectionWords = {
   rulesChanged:
     "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
   undoLastEdit: "Undo last edit",
+  newRecord: "New record",
+  // DeleteCollectionRecordDialog.tsx's button; its title and body are the phone's.
+  deleteRecord: "Delete record",
+  deleteRecordTitle: "Delete this record?",
+  deleteRecordBody: "This can't be undone.",
 
   // The phone's.
   /** A table whose Collection has no operation that reads it. */

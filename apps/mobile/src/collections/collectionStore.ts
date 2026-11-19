@@ -7,11 +7,15 @@ import {
   type CollectionDescription,
   type CollectionField,
   type CollectionRecord,
+  type CollectionTable,
   type FieldChange,
   type PhoneCollection,
+  type RecordCreate,
   type RecordCursor,
+  type RecordDelete,
   type RecordId,
   type RecordValue,
+  type WriteRefusal,
 } from "../server/phoneCollections";
 import type { ReadProblem } from "../server/workspaceData";
 
@@ -39,8 +43,25 @@ export interface FieldEdit {
   readonly from: Omit<FieldChange, "idempotencyKey">;
 }
 
+/**
+ * A new record or a deletion and where it stands, one at a time: a new record per table, under `newRecordKey`, and a
+ * deletion per record, under `recordKey`. A saved deletion stays, so its record's screen leaves and no read shows it.
+ */
+export type RecordAction = (
+  | { readonly kind: "create"; readonly request: RecordCreate; readonly table: CollectionTable }
+  | { readonly kind: "delete"; readonly request: RecordDelete }
+) & {
+  readonly state:
+    | { readonly kind: "saving" }
+    | { readonly kind: "saved" }
+    | WriteRefusal
+    | { readonly kind: "failed"; readonly problem: ReadProblem };
+};
+
 export const recordKey = (datasetId: string, tableId: string, id: RecordId): string =>
   JSON.stringify([datasetId, tableId, id]);
+export const newRecordKey = (datasetId: string, tableId: string): string =>
+  JSON.stringify([datasetId, tableId]);
 
 export const canUndo = (last: RecordChange | undefined): boolean =>
   last?.state.kind === "saved" && last.reversible && "priorValue" in last.state;
@@ -125,6 +146,19 @@ export interface WorkspaceCollections {
   undo(key: string): void;
   /** Reads the Collection's rules and the open record again, and drops its change. False when that failed. */
   reloadRecord(): Promise<boolean>;
+  /** New records and deletions, by `newRecordKey` and `recordKey`. */
+  actions(): ReadonlyMap<string, RecordAction>;
+  /**
+   * Adds a record to the table on screen, unless the last one hasn't saved. True once it saved and opened, when no
+   * other record opened or closed meanwhile; it leads the table's records either way.
+   */
+  create(): Promise<boolean>;
+  /** Deletes the open record, unless it or a change to it is on its way. */
+  remove(): void;
+  /** Sends a failed new record or deletion again, as it was. True as `create`. */
+  retryAction(key: string): Promise<boolean>;
+  /** Drops a new record or deletion that didn't save. */
+  discardAction(key: string): void;
   stop(): void;
 }
 
@@ -145,7 +179,12 @@ export function createWorkspaceCollections(
   let list = NO_LIST;
   let view: CollectionView | null = null;
   let changes: ReadonlyMap<string, RecordChange> = new Map();
+  let actions: ReadonlyMap<string, RecordAction> = new Map();
   const isLive = () => !stopped && signIn.isCurrent();
+  const busy = (key: string) => {
+    const action = actions.get(key)?.state.kind;
+    return action === "saving" || action === "saved" || changes.get(key)?.state.kind === "saving";
+  };
   const emit = () => {
     for (const listener of listeners) listener();
   };
@@ -164,6 +203,7 @@ export function createWorkspaceCollections(
     list = NO_LIST;
     view = null;
     changes = new Map();
+    actions = new Map();
     emit();
   };
   const remove = ends.add({ signIn, workspaceId }, { end: clear });
@@ -213,6 +253,59 @@ export function createWorkspaceCollections(
     }
   }
 
+  const setAction = (key: string, next: RecordAction | null) => {
+    const copy = new Map(actions);
+    if (next) copy.set(key, next);
+    else copy.delete(key);
+    actions = copy;
+    emit();
+  };
+  // As `send`: an answer lands only while its action is still the key's.
+  async function act(key: string, entry: RecordAction): Promise<boolean> {
+    if (!isLive()) return false;
+    const sent: RecordAction = { ...entry, state: { kind: "saving" } };
+    setAction(key, sent);
+    const lands = () => isLive() && actions.get(key) === sent;
+    // A new record opens only if no record opened or closed while it saved.
+    const screen = sent.kind === "create" ? recordReads.next() : null;
+    try {
+      const { datasetId, tableId } = sent.request;
+      const shown = () => (view?.datasetId === datasetId && view.tableId === tableId ? view : null);
+      if (sent.kind === "delete") {
+        const answer = await operations.remove(sent.request);
+        if (!lands()) return false;
+        setAction(key, { ...sent, state: answer });
+        if (answer.kind !== "saved") return false;
+        setChange(key, null);
+        const { recordId } = sent.request;
+        const now = shown();
+        if (now) update(datasetId, { rows: now.rows.filter((row) => row.id !== recordId) });
+        return true;
+      }
+      const answer = await operations.create(sent.request, sent.table);
+      if (!lands()) return false;
+      if (answer.kind !== "saved") {
+        setAction(key, { ...sent, state: answer });
+        return false;
+      }
+      setAction(key, null);
+      const now = shown();
+      if (!now) return false;
+      const { record } = answer;
+      const opens = screen !== null && recordReads.isLatest(screen);
+      update(datasetId, {
+        rows: [record, ...now.rows.filter((row) => row.id !== record.id)],
+        ...(opens ? { opened: { tableId, record, files: {} } } : {}),
+      });
+      return opens;
+    } catch (error) {
+      const problem = shownProblem(error);
+      if (lands() && problem !== null)
+        setAction(key, { ...sent, state: { kind: "failed", problem } });
+      return false;
+    }
+  }
+
   const refresh = async () => {
     if (!isLive()) return;
     const request = listReads.next();
@@ -257,7 +350,14 @@ export function createWorkspaceCollections(
           ? view.rows.map((row) => [JSON.stringify(row.id), row])
           : [],
       );
-      const rows = (ready?.rows ?? []).map((row) => newest(row, held.get(JSON.stringify(row.id))));
+      // A read that started before a deletion saved can still hold the record.
+      const rows = (ready?.rows ?? [])
+        .filter(
+          (row) =>
+            !table ||
+            actions.get(recordKey(datasetId, table.tableId, row.id))?.state.kind !== "saved",
+        )
+        .map((row) => newest(row, held.get(JSON.stringify(row.id))));
       const fresh =
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
@@ -348,8 +448,7 @@ export function createWorkspaceCollections(
         !description ||
         !field?.editable ||
         opened.record.version === null ||
-        changes.get(recordKey(view.datasetId, opened.tableId, opened.record.id))?.state.kind ===
-          "saving"
+        busy(recordKey(view.datasetId, opened.tableId, opened.record.id))
       )
         return null;
       return {
@@ -368,7 +467,7 @@ export function createWorkspaceCollections(
     },
     change({ field, from }, value) {
       const key = recordKey(from.datasetId, from.tableId, from.recordId);
-      if (changes.get(key)?.state.kind === "saving") return;
+      if (busy(key)) return;
       void send(key, {
         change: { ...from, value, idempotencyKey: crypto.randomUUID() },
         reversible: field.reversible,
@@ -435,6 +534,59 @@ export function createWorkspaceCollections(
         if (lands() && cause) update(datasetId, { problem: { cause, more: false } });
         return false;
       }
+    },
+    actions: () => actions,
+    create() {
+      const now = view;
+      const description = now?.description;
+      const table = description?.tables.find((table) => table.tableId === now?.tableId);
+      if (!now || !description || !table?.canCreate) return Promise.resolve(false);
+      // One that didn't save waits for Try again or Discard, since a failed one may have saved.
+      const key = newRecordKey(now.datasetId, table.tableId);
+      if (actions.has(key)) return Promise.resolve(false);
+      return act(key, {
+        kind: "create",
+        table,
+        request: {
+          datasetId: now.datasetId,
+          tableId: table.tableId,
+          revision: description.revision,
+          revisionSha256: description.revisionSha256,
+          idempotencyKey: crypto.randomUUID(),
+        },
+        state: { kind: "saving" },
+      });
+    },
+    remove() {
+      const now = view;
+      const opened = now?.opened;
+      const description = now?.description;
+      const table = description?.tables.find((table) => table.tableId === opened?.tableId);
+      if (!now || !opened || !description || !table?.canDelete || opened.record.version === null)
+        return;
+      const key = recordKey(now.datasetId, table.tableId, opened.record.id);
+      if (busy(key)) return;
+      void act(key, {
+        kind: "delete",
+        request: {
+          datasetId: now.datasetId,
+          tableId: table.tableId,
+          recordId: opened.record.id,
+          expectedVersion: opened.record.version,
+          revision: description.revision,
+          revisionSha256: description.revisionSha256,
+          idempotencyKey: crypto.randomUUID(),
+        },
+        state: { kind: "saving" },
+      });
+    },
+    retryAction(key) {
+      const last = actions.get(key);
+      return last?.state.kind === "failed" ? act(key, last) : Promise.resolve(false);
+    },
+    discardAction(key) {
+      const kind = actions.get(key)?.state.kind;
+      if (kind !== undefined && kind !== "saving" && kind !== "saved") setAction(key, null);
     },
     stop() {
       if (stopped) return;

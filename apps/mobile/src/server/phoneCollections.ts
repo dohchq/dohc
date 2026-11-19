@@ -1,8 +1,8 @@
 import { accountOperations, each, isFields, text } from "./api";
 import type { ServerClient } from "./client";
 
-// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, and a
-// change to one field of a record.
+// The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, a
+// change to one field of a record, and a new record or a deletion.
 
 export type CollectionFieldType =
   | "text"
@@ -31,6 +31,9 @@ export interface CollectionTable {
   /** The field that names a record, or null when it's one the phone doesn't show. */
   readonly primaryFieldId: string | null;
   readonly fields: readonly CollectionField[];
+  /** Whether the phone can add a record, which starts with the values the desktop gives a new one. */
+  readonly canCreate: boolean;
+  readonly canDelete: boolean;
 }
 
 export interface PhoneCollection {
@@ -76,6 +79,26 @@ export interface FieldChange extends RulesStamp {
   readonly idempotencyKey: string;
 }
 
+/** A new record in a table, with the values the desktop gives one, which the relay picks. */
+export interface RecordCreate extends RulesStamp {
+  readonly datasetId: string;
+  readonly tableId: string;
+  /** A random UUID, the same on every try. */
+  readonly idempotencyKey: string;
+}
+
+export interface RecordDelete extends RecordCreate {
+  readonly recordId: RecordId;
+  readonly expectedVersion: number;
+}
+
+/** Why a write didn't save. */
+export type WriteRefusal =
+  /** The Collection's operation refused it, as `stale_record` for a record changed since the phone read it. */
+  | { readonly kind: "refused"; readonly code: string; readonly message: string }
+  /** It named rules the Collection has replaced, so it never ran. */
+  | { readonly kind: "rulesChanged" };
+
 export type ChangeAnswer =
   /** `priorValue` is absent when the edit gave none, so nothing can undo it. */
   | {
@@ -83,10 +106,12 @@ export type ChangeAnswer =
       readonly version: number;
       readonly priorValue?: RecordValue;
     }
-  /** The Collection's operation refused it, as `stale_record` for a record changed since the phone read it. */
-  | { readonly kind: "refused"; readonly code: string; readonly message: string }
-  /** It named rules the Collection has replaced, so it never ran. */
-  | { readonly kind: "rulesChanged" };
+  | WriteRefusal;
+
+export type CreateAnswer =
+  | { readonly kind: "saved"; readonly record: CollectionRecord }
+  | WriteRefusal;
+export type DeleteAnswer = { readonly kind: "saved" } | WriteRefusal;
 
 /** Where the next page starts: the last record's ID and its sort value, as the read gave them. */
 export interface RecordCursor {
@@ -157,7 +182,14 @@ function readField(item: unknown): CollectionField | null {
 }
 
 function readTable(item: unknown): CollectionTable | null {
-  if (!isFields(item) || !text(item.tableId, 64) || !text(item.name, 1024)) return null;
+  if (
+    !isFields(item) ||
+    !text(item.tableId, 64) ||
+    !text(item.name, 1024) ||
+    typeof item.canCreate !== "boolean" ||
+    typeof item.canDelete !== "boolean"
+  )
+    return null;
   const fields = each(item.fields, readField);
   const primary = item.primaryFieldId;
   if (!fields || (primary !== null && !fields.some((field) => field.fieldId === primary)))
@@ -167,6 +199,8 @@ function readTable(item: unknown): CollectionTable | null {
     name: item.name,
     primaryFieldId: primary as string | null,
     fields,
+    canCreate: item.canCreate,
+    canDelete: item.canDelete,
   };
 }
 
@@ -183,7 +217,11 @@ export function readDescription(result: unknown, datasetId: string): CollectionD
     : null;
 }
 
-export function readChangeAnswer(result: unknown): ChangeAnswer | null {
+/** A write's answer: its refusal, or what `readSaved` makes of what it saved. */
+function readWrite<T>(
+  result: unknown,
+  readSaved: (saved: Readonly<Record<string, unknown>>) => T | null,
+): T | WriteRefusal | null {
   if (!isFields(result)) return null;
   const { saved, refused } = result;
   if (result.rulesChanged === true) return { kind: "rulesChanged" };
@@ -191,13 +229,43 @@ export function readChangeAnswer(result: unknown): ChangeAnswer | null {
     return text(refused.code, 64) && text(refused.message, 1024)
       ? { kind: "refused", code: refused.code, message: refused.message }
       : null;
-  if (!isFields(saved) || !isCount(saved.version)) return null;
-  return {
-    kind: "saved",
-    version: saved.version,
-    ...(Object.hasOwn(saved, "priorValue") ? { priorValue: saved.priorValue as RecordValue } : {}),
-  };
+  return isFields(saved) ? readSaved(saved) : null;
 }
+
+export const readChangeAnswer = (result: unknown): ChangeAnswer | null =>
+  readWrite(result, (saved) =>
+    isCount(saved.version)
+      ? {
+          kind: "saved" as const,
+          version: saved.version,
+          ...(Object.hasOwn(saved, "priorValue")
+            ? { priorValue: saved.priorValue as RecordValue }
+            : {}),
+        }
+      : null,
+  );
+
+/** A new record, keeping only the fields the table describes. */
+export const readCreateAnswer = (result: unknown, table: CollectionTable): CreateAnswer | null =>
+  readWrite(result, (saved) =>
+    recordId(saved.id) && isCount(saved.version) && isFields(saved.values)
+      ? {
+          kind: "saved" as const,
+          record: { id: saved.id, version: saved.version, values: described(saved.values, table) },
+        }
+      : null,
+  );
+
+export const readDeleteAnswer = (result: unknown): DeleteAnswer | null =>
+  readWrite(result, () => ({ kind: "saved" as const }));
+
+const described = (values: Readonly<Record<string, unknown>>, table: CollectionTable) => {
+  const kept: Record<string, RecordValue> = {};
+  for (const field of table.fields)
+    if (Object.hasOwn(values, field.fieldId))
+      kept[field.fieldId] = values[field.fieldId] as RecordValue;
+  return kept;
+};
 
 /** A page of a table's records, each keeping only the fields the table describes. */
 export function readPage(result: unknown, table: CollectionTable): RecordPage | null {
@@ -217,11 +285,11 @@ export function readPage(result: unknown, table: CollectionTable): RecordPage | 
     const key = JSON.stringify(row.id);
     if (seen.has(key)) return null;
     seen.add(key);
-    const values: Record<string, RecordValue> = {};
-    for (const field of table.fields)
-      if (Object.hasOwn(row.values, field.fieldId))
-        values[field.fieldId] = row.values[field.fieldId] as RecordValue;
-    return { id: row.id, version: isCount(row.version) ? row.version : null, values };
+    return {
+      id: row.id,
+      version: isCount(row.version) ? row.version : null,
+      values: described(row.values, table),
+    };
   });
   const cursor = result.nextCursor;
   const next =
@@ -276,6 +344,11 @@ export function collectionOperations(
       ),
 
     change: (change: FieldChange) => run("collectionEdit", change, readChangeAnswer),
+
+    create: (create: RecordCreate, table: CollectionTable) =>
+      run("collectionCreate", create, (result) => readCreateAnswer(result, table)),
+
+    remove: (remove: RecordDelete) => run("collectionDelete", remove, readDeleteAnswer),
   };
 }
 

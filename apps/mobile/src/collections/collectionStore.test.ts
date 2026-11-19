@@ -8,6 +8,7 @@ import type { RecordValue } from "../server/phoneCollections";
 import {
   canUndo,
   createWorkspaceCollections,
+  newRecordKey,
   recordKey,
   type WorkspaceCollections,
 } from "./collectionStore";
@@ -27,6 +28,8 @@ const table = (tableId: string, name: string) => ({
   name,
   primaryFieldId: "f-name",
   fields: [field("f-name", "Name", "text", true), field("f-paid", "Paid", "checkbox", false)],
+  canCreate: true,
+  canDelete: true,
 });
 const describedAs = (revision: number): Answer => ({
   status: 200,
@@ -711,6 +714,171 @@ describe("a record's change", () => {
     held.resolve(ok({ saved: { version: 2 } }));
     await new Promise((done) => setTimeout(done, 0));
     expect(collections.changes().size).toBe(0);
+    expect(collections.view()).toBeNull();
+    expect(painted).toBe(0);
+  });
+});
+
+describe("a new record and a deletion", () => {
+  const CREATE = `${OPS}/collectionCreate`;
+  const DELETE = `${OPS}/collectionDelete`;
+  const NEW = newRecordKey(D, "t-people");
+  const A0 = recordKey(D, "t-people", "a0");
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const created = ok({ saved: { id: "n1", version: 1, values: { "f-paid": false } } });
+  const bodies = (server: ReturnType<typeof testServer>, path: string) =>
+    server.calls.filter((call) => call.path === path).map((call) => call.body);
+  async function onList() {
+    const f = setup();
+    pages(f.server);
+    await f.collections.open(D);
+    return f;
+  }
+  async function onRecord() {
+    const f = await onList();
+    f.collections.openRecord(f.collections.view()!.rows[0]!);
+    return f;
+  }
+  async function settled(collections: WorkspaceCollections, key: string) {
+    while (collections.actions().get(key)?.state.kind === "saving")
+      await new Promise((done) => setTimeout(done, 0));
+  }
+
+  it("adds a record with a random key and the rules' stamp, lists it first, and opens it", async () => {
+    const { server, collections } = await onList();
+    server.on("POST", CREATE, created);
+    expect(await collections.create()).toBe(true);
+    expect(bodies(server, CREATE)).toEqual([
+      {
+        datasetId: D,
+        tableId: "t-people",
+        revision: 3,
+        revisionSha256: SHA,
+        idempotencyKey: expect.stringMatching(UUID),
+      },
+    ]);
+    const record = { id: "n1", version: 1, values: { "f-paid": false } };
+    expect(collections.view()?.rows[0]).toEqual(record);
+    expect(names(collections.view()?.rows)).toEqual(["n1", "a0", "a1"]);
+    expect(collections.view()?.opened).toEqual({ tableId: "t-people", record, files: {} });
+    expect(collections.actions().size).toBe(0);
+  });
+
+  it("lists a new record, but doesn't open it, when a record opened while it saved", async () => {
+    const { server, collections } = await onList();
+    const held = deferred<Answer>();
+    server.on("POST", CREATE, () => held.promise);
+    const adding = collections.create();
+    // A second press while it saves sends nothing.
+    expect(await collections.create()).toBe(false);
+    collections.openRecord(collections.view()!.rows[1]!);
+    held.resolve(created);
+    expect(await adding).toBe(false);
+    expect(names(collections.view()?.rows)).toEqual(["n1", "a0", "a1"]);
+    expect(collections.view()?.opened?.record.id).toBe("a1");
+    expect(bodies(server, CREATE)).toHaveLength(1);
+  });
+
+  it("keeps a new record that got no answer, and Try again sends the same key and stamp", async () => {
+    const { server, collections } = await onList();
+    server.on("POST", CREATE, "offline", created);
+    expect(await collections.create()).toBe(false);
+    expect(collections.actions().get(NEW)?.state).toEqual({ kind: "failed", problem: "offline" });
+    // It may have saved, so another waits for Try again or Discard.
+    expect(await collections.create()).toBe(false);
+    expect(bodies(server, CREATE)).toHaveLength(1);
+    expect(await collections.retryAction(NEW)).toBe(true);
+    const [first, again] = bodies(server, CREATE);
+    expect(again).toEqual(first);
+    expect(collections.view()?.opened?.record.id).toBe("n1");
+  });
+
+  it("deletes the open record, drops its row, and keeps any read that started before from showing it", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", DELETE, ok({ saved: {} }));
+    collections.remove();
+    await settled(collections, A0);
+    expect(bodies(server, DELETE)).toEqual([
+      {
+        datasetId: D,
+        tableId: "t-people",
+        recordId: "a0",
+        expectedVersion: 1,
+        revision: 3,
+        revisionSha256: SHA,
+        idempotencyKey: expect.stringMatching(UUID),
+      },
+    ]);
+    expect(collections.actions().get(A0)?.state).toEqual({ kind: "saved" });
+    expect(names(collections.view()?.rows)).toEqual(["a1"]);
+    // Its screen takes no change and no second deletion.
+    expect(collections.edit("f-name")).toBeNull();
+    collections.remove();
+    expect(bodies(server, DELETE)).toHaveLength(1);
+    await collections.reload();
+    expect(names(collections.view()?.rows)).toEqual(["a1"]);
+  });
+
+  it("keeps a record whose deletion was refused, and Discard lets it be deleted again with a new key", async () => {
+    const { server, collections } = await onRecord();
+    const refusal = { code: "stale_record", message: "This record changed." };
+    server.on("POST", DELETE, ok({ refused: refusal }), ok({ saved: {} }));
+    collections.remove();
+    await settled(collections, A0);
+    expect(collections.actions().get(A0)?.state).toEqual({ kind: "refused", ...refusal });
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1"]);
+    // Try again is only for one with no answer.
+    await collections.retryAction(A0);
+    expect(bodies(server, DELETE)).toHaveLength(1);
+    collections.discardAction(A0);
+    expect(collections.actions().size).toBe(0);
+    collections.remove();
+    await settled(collections, A0);
+    const [first, second] = bodies(server, DELETE) as [
+      { idempotencyKey: string },
+      { idempotencyKey: string },
+    ];
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(names(collections.view()?.rows)).toEqual(["a1"]);
+  });
+
+  it("deletes nothing while a change to the record saves, and changes nothing while it deletes", async () => {
+    const { server, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionEdit`, () => held.promise);
+    server.on("POST", DELETE, ok({ saved: {} }));
+    collections.change(collections.edit("f-name")!, "Maya");
+    collections.remove();
+    expect(bodies(server, DELETE)).toHaveLength(0);
+    held.resolve(ok({ saved: { version: 2 } }));
+    while (collections.changes().get(A0)?.state.kind === "saving")
+      await new Promise((done) => setTimeout(done, 0));
+    collections.remove();
+    expect(collections.edit("f-name")).toBeNull();
+    await settled(collections, A0);
+    // At the version the saved change left it.
+    expect(bodies(server, DELETE)).toEqual([expect.objectContaining({ expectedVersion: 2 })]);
+    expect(collections.changes().size).toBe(0);
+  });
+
+  it("lands neither a new record nor a deletion after a workspace switch", async () => {
+    const { server, stores, collections } = await onRecord();
+    const create = deferred<Answer>();
+    const remove = deferred<Answer>();
+    server.on("POST", CREATE, () => create.promise);
+    server.on("POST", DELETE, () => remove.promise);
+    collections.remove();
+    const adding = collections.create();
+    await sent(server, 4);
+    appTeardown(stores).open("ws-2");
+    expect(collections.actions().size).toBe(0);
+    let painted = 0;
+    collections.subscribe(() => painted++);
+    create.resolve(created);
+    remove.resolve(ok({ saved: {} }));
+    expect(await adding).toBe(false);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(collections.actions().size).toBe(0);
     expect(collections.view()).toBeNull();
     expect(painted).toBe(0);
   });
