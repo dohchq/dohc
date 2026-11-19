@@ -842,10 +842,10 @@ function signInPage(
   );
 }
 
-// The browser's account doesn't own the workspace in the agent's address.
-// Right after the relay began the request that is the only reason it can
-// refuse; later the request may also have ended, which the relay doesn't
-// tell apart.
+// The browser's account neither owns nor is a member of the workspace in the
+// agent's address. Right after the relay began the request that is the only
+// reason it can refuse; later the request may also have ended, which the
+// relay doesn't tell apart.
 function ownershipPage(
   origin: string,
   returnQuery: string,
@@ -853,9 +853,9 @@ function ownershipPage(
   justBegun: boolean,
 ): Response {
   const message = justBegun
-    ? `${email} does not own the workspace in this agent's link. Sign in as the workspace's owner to continue.`
-    : `${email} does not own the workspace in this agent's link, or this sign-in request ended. ` +
-      `Sign in as the workspace's owner, or ${START_AGAIN.charAt(0).toLowerCase()}${START_AGAIN.slice(1)}`;
+    ? `${email} is not in the workspace in this agent's link. Sign in as its owner or a member to continue.`
+    : `${email} is not in the workspace in this agent's link, or this sign-in request ended. ` +
+      `Sign in as its owner or a member, or ${START_AGAIN.charAt(0).toLowerCase()}${START_AGAIN.slice(1)}`;
   return page(
     origin,
     { title: "dohc could not sign in this agent" },

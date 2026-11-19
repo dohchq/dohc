@@ -742,6 +742,29 @@ it("lists joined workspaces after owned ones, marked Member or Admin, with no Ed
   });
 });
 
+it("gives an agent link on Add agent and Sign in again in a joined workspace, named by its id on the relay", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  renderList({ workspaceId: "local-copy", membersWorkspaceId: "ws-3", workspaceName: "Community" });
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+
+  await openAgent("Nova");
+  const copy = page().getByTestId<HTMLButtonElement>("personal-agent-link-copy");
+  expect(copy.disabled).toBe(false);
+  expect(page().queryByTestId("personal-agent-link-reason")).toBeNull();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+  await userEvent.click(copy);
+  expect(writeText).toHaveBeenCalledExactlyOnceWith("https://relay.test/mcp/agent/w/ws-3");
+  writeText.mockRestore();
+  await back();
+
+  await openAdd();
+  await userEvent.click(runsWith("link"));
+  expect(screen.getByTestId("agent-add-link").textContent).toContain("relay.test");
+  expect(screen.getByTestId("agent-add-link-note").textContent).not.toContain(
+    "Sync this workspace",
+  );
+});
+
 it("shows a workspace whose membership ended with Remove, and says why in a toast when Remove fails", async () => {
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
   const { onError } = renderList();

@@ -77,6 +77,7 @@ const SESSIONS: Record<string, string> = {
   "owner-session": OWNER,
   "owner-new-session": OWNER,
   "other-session": OTHER,
+  "joiner-session": "joiner-account",
 };
 
 type Handler = ReturnType<typeof createSyncRelayHandler>;
@@ -2179,6 +2180,54 @@ const BOTH_COMMENT: Reach = [
 ];
 
 describe("a personal agent in a workspace its person joined", () => {
+  it("signs in at a joined workspace for a member who owns none, again once signed out, and never once the membership ends", async () => {
+    const f = await fixture();
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Community",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community",
+        nowMs: 5,
+      }),
+    ).toMatchObject({ ok: true });
+    const session = "joiner-session";
+    const reach: Reach = [{ workspaceId: COMMUNITY, level: "comment" }];
+    const clientId = await registerClient(f);
+    const asked = await beginRequest(f, clientId, COMMUNITY);
+    expect(await ok(await consent(f, asked, session))).toMatchObject({
+      workspaceId: COMMUNITY,
+      workspaces: [expect.objectContaining({ workspaceId: COMMUNITY, name: "Community" })],
+    });
+    await expectRefused(await consent(f, asked));
+    const agent = await signIn(f, { clientId, workspaceId: COMMUNITY, session, reach });
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: COMMUNITY, role: "member" }),
+    ]);
+
+    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }, "joiner-account"));
+    const again = await signIn(f, {
+      clientId,
+      workspaceId: COMMUNITY,
+      session,
+      reach,
+      agent: { kind: "existing", agentId: agent.agentId },
+    });
+    expect(again.agentId).toBe(agent.agentId);
+
+    const response = await f.h(
+      request(OTHER, `/sync/${COMMUNITY}/members/member-joiner/remove`, jsonBody({})),
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const ended = await beginRequest(f, clientId, COMMUNITY);
+    await expectRefused(await consent(f, ended, session));
+    await expectRefused(await allow(f, ended, { session, reach }));
+  });
+
   it("takes a joined workspace into reach, never one its person isn't a member of, and appends no chat there", async () => {
     const f = await fixture();
     joinCommunity(f);

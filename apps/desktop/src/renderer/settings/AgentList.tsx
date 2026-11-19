@@ -626,6 +626,9 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
  */
 export function AgentList(props: {
   workspaceId: string;
+  // A joined workspace's id on the relay. Its agent link names this id, not
+  // the copy's own.
+  membersWorkspaceId?: string;
   // What the open workspace goes by, for its agent link.
   workspaceName: string;
   settings: DesktopUserSettings;
@@ -670,6 +673,7 @@ export function AgentList(props: {
   const listening = useAgentsListening();
   // Opening Settings › Agents reads the relay again.
   const personal = usePersonalAgents(workspaceId, true);
+  const linkWorkspaceId = props.membersWorkspaceId ?? workspaceId;
   // What the read failures below have told this workspace's Notices. It
   // outlives the list while a page is open.
   const reportedAccounts = useMemo(() => new Map<string, string>(), [workspaceId]);
@@ -1216,7 +1220,7 @@ export function AgentList(props: {
           <PersonalAgentPage
             key={`${personalPage.account.accountKey}:${agent.agentId}`}
             entry={personalPage}
-            workspaceId={workspaceId}
+            workspaceId={linkWorkspaceId}
             nameField={
               renaming === agent.agentId ? (
                 <AgentNameField
@@ -1403,7 +1407,7 @@ export function AgentList(props: {
           mcpConfig={mcpConfig}
           mcpUnavailable={mcpUnavailable}
           mcpAgentId={idFor(false, "agent")}
-          agentLink={agentLinkChoice(personal.state, workspaceId, props.workspaceName)}
+          agentLink={agentLinkChoice(personal.state, linkWorkspaceId, props.workspaceName)}
           takenElsewhere={takenByPersonal}
           adding={adding}
           addError={addError}

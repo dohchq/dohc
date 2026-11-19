@@ -395,6 +395,8 @@ export const WorkspaceSummary = z.object({
       // A membership's role as the relay last named it. It shows admin actions
       // before the next check; the relay decides each one.
       role: z.enum(["admin", "member"]).optional(),
+      // The owner's workspace id on the relay, which a membership's agent link names.
+      membersWorkspaceId: OPAQUE_ID.optional(),
       // A membership's Group levels from its stored reach: each listed Group's,
       // else `groupDefault`. Chats locks a Group's composer at View. Main
       // refuses the post either way.

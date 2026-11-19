@@ -161,6 +161,8 @@ export function SettingsDialog(props: {
    */
   sharedView?: boolean;
   membership?: boolean;
+  // A joined workspace's id on the relay, which its agent link names.
+  membersWorkspaceId?: string;
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   // The part a Customize… command opened Settings for: its row is marked and
@@ -849,6 +851,9 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
+              {...(props.membersWorkspaceId
+                ? { membersWorkspaceId: props.membersWorkspaceId }
+                : {})}
               workspaceName={
                 props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
               }

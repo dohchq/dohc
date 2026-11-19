@@ -122,11 +122,11 @@ export function personalEntries(accounts: readonly PersonalAgentsAccount[]): Per
   });
 }
 
-/** Whether the account owns this workspace on its server, which an agent link needs. */
+/** Whether the account owns this workspace on its server or is a member there, which an agent link needs. */
 export function syncsTo(roster: PersonalAgentRoster | null, workspaceId: string): boolean {
   return (
     roster?.workspaces.some(
-      (workspace) => workspace.workspaceId === workspaceId && workspace.role === "owner",
+      (workspace) => workspace.workspaceId === workspaceId && workspace.role !== "ended",
     ) ?? false
   );
 }
@@ -337,6 +337,7 @@ export function PersonalReachSheet(props: {
  */
 export function PersonalAgentPage(props: {
   entry: PersonalEntry;
+  // The workspace's id on the server, which Sign in again's link names.
   workspaceId: string;
   nameField: ReactNode | null;
   onRename: () => void;
