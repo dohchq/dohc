@@ -432,6 +432,31 @@ it("refuses output before PowerShell says it is ready", async () => {
   expect(child.kill).toHaveReturnedWith(true);
 });
 
+it("accepts the ready line and the answer however the output is split", async () => {
+  const output = "ready\r\nok 1\r\n";
+  for (let split = 1; split < output.length; split++) {
+    vi.mocked(spawn).mockImplementationOnce(() => fakeChild({ ready: false }));
+    const acl = openWindowsCredentialAcl("check");
+    const first = acl.check("C:\\private", true, false, false);
+    const child = children.at(-1)!;
+    await child.request(0);
+    child.reply(output.slice(0, split));
+    child.reply(output.slice(split));
+    await first;
+    expect(child.kill).not.toHaveBeenCalled();
+    await acl.close();
+  }
+});
+
+it("refuses a second ready line", async () => {
+  const acl = openWindowsCredentialAcl("check");
+  const first = acl.check("C:\\private", true, false, false);
+  const child = children[0]!;
+  await child.request(0);
+  child.reply("ready\r\n");
+  await expect(first).rejects.toThrow("Unexpected credential ACL response.");
+});
+
 it("gives each later request its own deadline and counts the final exit within it", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const acl = openWindowsCredentialAcl("check");
