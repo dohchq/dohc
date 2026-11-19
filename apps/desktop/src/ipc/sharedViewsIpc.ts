@@ -950,7 +950,13 @@ export function registerSharedViewsIpcHandlers<
               if (committed?.ended) return { status: "ended" };
               const committedPin = recordedShareSelector(committed?.grantedSelector);
               return committed?.shareId === view.shareId && committedPin
-                ? { status: "current", access: committedPin.access }
+                ? {
+                    status: "current",
+                    access: committedPin.access,
+                    ...(shareAccessRank(statedAccess) > shareAccessRank(committedPin.access)
+                      ? { relayStatesMore: true as const }
+                      : {}),
+                  }
                 : { status: "unverified" };
             },
           );

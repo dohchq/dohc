@@ -2459,7 +2459,7 @@ export function DesktopWorkspaceShell(props: {
         ? shareReopenMessage
         : "dohc can't read what this share grants. Open the share again to restore it."
       : shareHadEditRef.current
-        ? "Your access to this share changed. Ask for Edit access, then reopen the share."
+        ? "Your access to this share changed. Ask for Edit access, then return to this window."
         : "This share does not have Edit access.";
   const shareWriteRefusalRef = useRef(shareWriteRefusal);
   shareWriteRefusalRef.current = shareWriteRefusal;
@@ -3079,6 +3079,7 @@ export function DesktopWorkspaceShell(props: {
         : !!syncStatus.syncFailure,
     pull: async (pressBurst) =>
       (await refreshShareViewRef.current(pressBurst ? "press-burst" : "background")) === "changed",
+    followStatedLevel: () => refreshShareViewRef.current("manual"),
     onPersistentFailure: (error) =>
       reportShellError("Couldn't refresh the shared view.", error, () => {
         if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
@@ -3096,7 +3097,7 @@ export function DesktopWorkspaceShell(props: {
             : result.status === "needs-reopen"
               ? shareReopenMessage
               : shareHadEditRef.current
-                ? "Your access to this share changed. Ask for Edit access, then reopen the share."
+                ? "Your access to this share changed. Ask for Edit access, then return to this window."
                 : "This share does not have Edit access.";
         shareViewEndedRef.current = result.status === "ended";
         shareViewWritableRef.current = false;
