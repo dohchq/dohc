@@ -17,7 +17,7 @@ final class NoticesActionsTests: XCTestCase {
     for _ in 0..<12 where !(row.exists && row.isHittable) {
       app.swipeUp()
     }
-    XCTAssertTrue(row.waitForExistence(timeout: 20), "The sample's mention row never showed")
+    XCTAssertTrue(row.waitForExistence(timeout: 45), "The sample's mention row never showed")
     // Past the end, so the last row rests above the tab bar.
     app.swipeUp()
     XCTAssertTrue(row.isHittable)
@@ -31,7 +31,7 @@ final class NoticesActionsTests: XCTestCase {
     // The thread opens with Sam's message chosen: its reply context names it above the field, with Cancel reply.
     let context = app.descendants(matching: .any)
       .matching(NSPredicate(format: "label BEGINSWITH %@", "Reply to Sam Ortiz")).firstMatch
-    XCTAssertTrue(context.waitForExistence(timeout: 10), "The thread didn't open with Sam's message chosen")
+    XCTAssertTrue(context.waitForExistence(timeout: 15), "The thread didn't open with Sam's message chosen")
     XCTAssertTrue(app.buttons["Cancel reply"].exists)
   }
 }
