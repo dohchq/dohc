@@ -57,17 +57,17 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // committed marks applied. A mark the server took is applied to the row held then, unless a newer change to the row
 // arrived meanwhile, and its row goes in the same commit as the list it left. Once the store has stopped, as after a
 // 401, it adds no mark and saves no list, but still removes the rows of marks the server answered: those answered
-// before the stop, those whose removal waited behind a commit on its way, and those whose answer arrived after the
-// sign-in ended. A stopped store tries each such removal once, after any commit on its way, with no backing off. Only
-// Sign out's hold stops a removal. Marks wait through a 401, and send after a sign-in to their own server and account.
-// Only Sign out deletes them, with the outbox's rows, and nothing writes or sends while Sign out holds kept.db. The list
-// goes at each change of sign-in.
+// before the stop, those whose removal waited on a commit or its backing off, and those whose answer arrived after the
+// sign-in ended. A stopped store commits its removals once at the stop, after any commit on its way, and once more
+// each time another removal arrives, with no backing off. A removal that failed goes again in that next commit, and
+// deleting a row again changes nothing. Only Sign out's hold stops a removal. Marks wait through a 401, and send after
+// a sign-in to their own server and account. Only Sign out deletes them, with the outbox's rows, and nothing writes or
+// sends while Sign out holds kept.db. The list goes at each change of sign-in.
 //
-// What this doesn't promise. A mark goes again when the server took it but the commit that removes its row never
-// lands: the app closed while that commit failed, or a stopped store's one try failed. The relay can't tell a repeat:
-// a mark carries no base sequence. So if another device changed the row in between, the repeat undoes that change. The
-// old file protocol had the same gap whenever its own record of the answer failed. The fix is on the relay: ignore a
-// mark made against an older row.
+// Sending again. A mark goes again when the server took it but the commit that removes its row never lands: the app
+// closed while that commit failed, or a stopped store's tries failed. Each send carries the mark's key, so the relay
+// leaves a mark it already applied as it is, even when another device changed the row in between, and names its key
+// in the answer. The phone then applies nothing for that mark, and keeps the row as the relay last served it.
 
 export const NOTICE_RETRY_MS = 1000;
 export const NOTICE_RETRY_MAX_MS = 30_000;
@@ -677,8 +677,9 @@ export function createNoticeStore(options: {
         // Each row as sent, so a taken mark's result never builds on a newer change.
         const sentRows = new Map(batch.map((entry) => [entry.noticeId, rows.get(entry.noticeId)]));
         let refused = false;
+        let repeated: ReadonlySet<string> = new Set();
         try {
-          await sendNoticeMarks(signIn.client, batch, everything.signal);
+          repeated = await sendNoticeMarks(signIn.client, batch, everything.signal);
         } catch (error) {
           if (!live() || ended(error)) return;
           // Only a refusal the relay means for good, a 4xx, drops the request's marks. It says so, and the list is
@@ -727,6 +728,7 @@ export function createNoticeStore(options: {
         gone.push(...batch.map((entry) => entry.key));
         if (!refused)
           for (const entry of batch) {
+            if (repeated.has(entry.key)) continue;
             const sent = sentRows.get(entry.noticeId);
             const result = taken(entry, sent);
             if (!sent || !result) continue;
@@ -870,6 +872,7 @@ export function createNoticeStore(options: {
       saveWait?.abort();
       pull?.abort();
       everything.abort();
+      persist();
     },
     refresh() {
       if (running) restart();
