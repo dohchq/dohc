@@ -254,7 +254,11 @@ describe("settleOwnerLivePauses", () => {
   it("keeps the owner's typing during the pause for the next pass when the copy can't be written", async () => {
     const f = fixture();
     typeDuringPause(f);
-    f.render.mockRejectedValueOnce(new Error("render failed"));
+    // The projection worker takes the state's buffer, then fails.
+    f.render.mockImplementationOnce(async (state) => {
+      structuredClone(state, { transfer: [state.buffer as ArrayBuffer] });
+      throw new Error("render failed");
+    });
     expect(await f.settle()).toEqual([]);
     expect(f.errors).toHaveLength(1);
     expect(f.relay.copyWritten).not.toHaveBeenCalled();

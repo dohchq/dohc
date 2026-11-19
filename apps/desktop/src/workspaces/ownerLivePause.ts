@@ -154,7 +154,8 @@ export async function settleOwnerLivePauses(input: {
   ) => {
     const objectId = held.stop.document.objectId;
     const late = [...input.tried.values()].find((t) => t.objectId === objectId && t.state)?.state;
-    const withLate = late ? await input.render(late) : null;
+    // Rendering may take the bytes it gets, and a retry needs these.
+    const withLate = late ? await input.render(late.slice()) : null;
     const path = (await input.writes.exists(held.stop.paused.copyPath))
       ? await freeName(near, input.writes)
       : held.stop.paused.copyPath;
