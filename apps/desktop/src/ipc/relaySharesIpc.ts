@@ -1422,11 +1422,12 @@ export function createRelaySharesIpcHandlers<
       `/sync/shares/${encodeURIComponent(input.shareId)}/leave`,
       { method: "POST", body: JSON.stringify({ ended: input.ended }) },
     );
-    dependencies.receivedSharesChanged();
     const parsed = RelayShareLeaveResponse.safeParse(relayResult);
     if (!parsed.success) {
+      dependencies.receivedSharesChanged();
       throw new Error(relayShareErrorCopy(500, null));
     }
+    if (parsed.data.left) dependencies.receivedSharesChanged();
     return LeaveRelayShareResult.parse({ left: parsed.data.left });
   };
 

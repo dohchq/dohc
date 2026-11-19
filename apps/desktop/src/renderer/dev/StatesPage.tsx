@@ -2400,7 +2400,7 @@ function SharingSpecimen(props: {
         notSentWhileOpen={[]}
         invitations
         confirmShareId={props.confirmShareId ?? null}
-        busyShareId={null}
+        busyShareIds={new Set()}
         actions={SHARING_ACTIONS}
       />
     </div>

@@ -418,6 +418,25 @@ describe("account received observations", () => {
     expect(h.list).toHaveBeenCalledTimes(2);
   });
 
+  it("reads again after a change made while a reading was under way", async () => {
+    const h = harness();
+    const a = h.acquisition();
+    const before = deferred<unknown>();
+    h.list.mockImplementationOnce(() => before.promise);
+    const underWay = a.refresh();
+
+    a.changedHere();
+    const afterChange = a.refresh();
+    const joined = a.refresh();
+    before.resolve(inventory());
+
+    expect(await underWay).toBe("requested");
+    expect(await afterChange).toBe("requested");
+    expect(await joined).toBe("joined");
+    expect(h.list).toHaveBeenCalledTimes(2);
+    expect(a.observation().freshness).toBe("fresh");
+  });
+
   it("checks the current generation again while reconciliation is waiting", async () => {
     const h = harness();
     let current: (() => boolean) | undefined;

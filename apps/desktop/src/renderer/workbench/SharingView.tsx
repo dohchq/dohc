@@ -963,7 +963,7 @@ export function SharingPanel(props: {
   skipView: SkipView;
   invitations: boolean;
   confirmShareId: string | null;
-  busyShareId: string | null;
+  busyShareIds: ReadonlySet<string>;
   actions: SharingActions;
   ref?: Ref<HTMLDivElement>;
 }) {
@@ -997,7 +997,7 @@ export function SharingPanel(props: {
       listed={listed}
       skipsShown={skipsShown(mount, props.skipView)}
       confirming={props.confirmShareId === (row?.shareId ?? mount!.shareId)}
-      busy={props.busyShareId === (row?.shareId ?? mount!.shareId)}
+      busy={props.busyShareIds.has(row?.shareId ?? mount!.shareId)}
       actions={actions}
     />
   );
@@ -1049,7 +1049,7 @@ export function SharingPanel(props: {
                 notSentWhileOpen={props.notSentWhileOpen}
                 invitations={props.invitations}
                 confirming={props.confirmShareId === group.shareId}
-                busy={props.busyShareId === group.shareId}
+                busy={props.busyShareIds.has(group.shareId)}
                 actions={actions}
               />
             ));
@@ -1147,7 +1147,14 @@ export function SharingView(props: {
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
-  const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  const [busyShareIds, setBusyShareIds] = useState<ReadonlySet<string>>(new Set());
+  const setBusy = (shareId: string, busy: boolean) =>
+    setBusyShareIds((current) => {
+      const next = new Set(current);
+      if (busy) next.add(shareId);
+      else next.delete(shareId);
+      return next;
+    });
   const [skipView, setSkipView] = useState<SkipView>(new Map());
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
@@ -1269,7 +1276,7 @@ export function SharingView(props: {
     if (!group.rows.some(endsOnEnd)) return;
     const token = epoch.current();
     const subject = `the share of ${subjectOf(liveGrant(group)).title} with ${recipientsOf(group)}`;
-    setBusyShareId(group.shareId);
+    setBusy(group.shareId, true);
     try {
       const result = await bridge().revokeRelayShare({ shareId: group.shareId });
       // The shell counts the removal and its Undo; the open view reads again then.
@@ -1292,13 +1299,13 @@ export function SharingView(props: {
         retry: () => void end(group),
       });
     } finally {
-      if (epoch.isCurrent(token)) setBusyShareId(null);
+      if (epoch.isCurrent(token)) setBusy(group.shareId, false);
     }
   }
 
   async function mount(shareId: string) {
     const token = epoch.current();
-    setBusyShareId(shareId);
+    setBusy(shareId, true);
     try {
       const found = await bridge().getRelayReceivedShare({ shareId });
       if (!found.found)
@@ -1313,23 +1320,23 @@ export function SharingView(props: {
         () => void mount(shareId),
       );
     } finally {
-      if (epoch.isCurrent(token)) setBusyShareId(null);
+      if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
   }
 
   async function unmount(target: ShareMount) {
     const token = epoch.current();
-    setBusyShareId(target.shareId);
+    setBusy(target.shareId, true);
     try {
       await props.onUnmount(`shared-with-me/${target.label}`);
     } finally {
-      if (epoch.isCurrent(token)) setBusyShareId(null);
+      if (epoch.isCurrent(token)) setBusy(target.shareId, false);
     }
   }
 
   async function leave(shareId: string, mounted: ShareMount | undefined, ended: boolean) {
     const token = epoch.current();
-    setBusyShareId(shareId);
+    setBusy(shareId, true);
     try {
       if (ended && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
       const { left } = await bridge().leaveRelayShare({ shareId, ended });
@@ -1347,7 +1354,7 @@ export function SharingView(props: {
         () => void leave(shareId, ended ? undefined : mounted, ended),
       );
     } finally {
-      if (epoch.isCurrent(token)) setBusyShareId(null);
+      if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
   }
 
@@ -1435,7 +1442,7 @@ export function SharingView(props: {
       skipView={skipView}
       invitations={invitations}
       confirmShareId={confirmShareId}
-      busyShareId={busyShareId}
+      busyShareIds={busyShareIds}
       actions={actions}
       ref={panel}
     />
