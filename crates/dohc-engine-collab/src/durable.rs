@@ -1221,19 +1221,17 @@ pub(crate) fn self_bound_log(
             if below_threshold(pending, DEFAULT_COMPACTION_THRESHOLD) {
                 return Ok(());
             }
-            // Best-effort fold; a fault-injected compaction crash is harmless
-            // (the append is already durable) and leaves the log for the next
-            // fold. `maybe_compact` no-ops below threshold.
-            match maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)? {
-                TxnOutcome::Committed(CompactOutcome::Compacted {
+            match maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms) {
+                Ok(TxnOutcome::Committed(CompactOutcome::Compacted {
                     up_to_seq,
                     snapshot_sha,
                     ..
-                }) => cache.note_compacted(store, key, up_to_seq, &snapshot_sha),
-                TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+                })) => cache.note_compacted(store, key, up_to_seq, &snapshot_sha),
+                Ok(TxnOutcome::Committed(CompactOutcome::Skipped { .. })) => {}
                 // The fold may or may not be durable; the cached entry's
                 // tuple can no longer be trusted to describe it. Fail safe.
-                TxnOutcome::Crashed { .. } => cache.remove(key),
+                Ok(TxnOutcome::Crashed { .. }) => cache.remove(key),
+                Err(error) => eprintln!("engine: Y.Doc compaction deferred: {}", error.code()),
             }
         }
     }
@@ -3942,6 +3940,58 @@ mod append_compaction_query_tests {
             read_marker_count(),
             0,
             "a below-threshold append must not enter maybe_compact's marker read"
+        );
+    }
+
+    #[test]
+    fn an_append_that_commits_answers_committed_when_its_fold_fails() {
+        let scratch = ScratchDir::new_named("append-fold-fails").expect("scratch");
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).expect("open store");
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        store
+            .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+                tx.execute_batch(
+                    "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                     VALUES ('ws', 'main'); \
+                     INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES ('ws', 'object', 1); \
+                     CREATE TRIGGER fold_refused BEFORE INSERT ON ydoc_snapshots \
+                     WHEN NEW.up_to_seq > 0 BEGIN SELECT RAISE(FAIL, 'fold refused'); END;",
+                )
+                .map_err(map_sql)
+            })
+            .expect("seed parents and refuse every fold");
+        ensure_marker(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            2,
+        )
+        .expect("ensure marker");
+
+        let doc = Ydoc::wire();
+        let mut cache = WriterDocCache::new();
+        for seq in 1..=i64::from(DEFAULT_COMPACTION_THRESHOLD) {
+            let update = doc.plaintext_insert(0, "x");
+            let append = record_local_update(
+                &mut store,
+                &mut cache,
+                &key,
+                &update,
+                LocalAppend::default(),
+                &NoFaults,
+                2 + seq,
+                |_tx, _outcome, _update_sha| Ok(()),
+            )
+            .expect("a committed append answers committed");
+            assert!(matches!(append, TxnOutcome::Committed(ref app) if app.seq == seq));
+        }
+        let marker = read_marker(&store, &key).expect("marker").expect("marker row");
+        assert_eq!(
+            (marker.head_update_seq, marker.head_snapshot_seq),
+            (i64::from(DEFAULT_COMPACTION_THRESHOLD), 0)
         );
     }
 }
