@@ -389,6 +389,7 @@ export function openSyncRelayStorage(
       reusePreparedStatements(db),
       {
         pushConfigured: options.pushConfigured ?? false,
+        apnsConfigured: options.apnsConfigured ?? false,
         workspaceQuotaBytes,
         blobGraceMs,
         linkSessionsPerGrantLimit,

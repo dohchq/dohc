@@ -2146,6 +2146,8 @@ export interface SqliteDb {
 
 export interface OpenSyncRelayStorageOptions {
   pushConfigured?: boolean;
+  // Phone alerts can be sent: messages and run Notices queue them.
+  apnsConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;

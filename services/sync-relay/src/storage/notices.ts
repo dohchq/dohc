@@ -34,7 +34,8 @@ import { badRequest, relayError, RelayError } from "../errors";
 import { notifyNoticeChange } from "../relayWriteChanges";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { fileSideOf, parseStoredAnyShareSelectorJson, type ShareSelector } from "../shareFilter";
-import { threadPathsInTransaction } from "./accountFeed";
+import { threadShownOnPhone } from "./accountFeed";
+import { recordNoticePushDeliveries } from "./pushDeliveries";
 import type { StorageContext } from "./context";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import type { SyncRelayShareRow } from "./types";
@@ -170,6 +171,23 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
       body = automationFailureBodyForPermission(body, canEdit, isOwner);
     }
     insertNotice(storage, { ...input, body, noticeId, placement });
+    // Only your own agent's run, naming its reply, may alert your phone.
+    const { thread, message } = input.target;
+    if (
+      self &&
+      input.kind === "agent-run" &&
+      placement.workspaceId !== null &&
+      thread !== undefined &&
+      message !== undefined
+    )
+      recordNoticePushDeliveries(storage, {
+        userId: input.recipientUserId,
+        workspaceId: placement.workspaceId,
+        threadId: thread,
+        messageId: message,
+        noticeId,
+        nowMs: input.nowMs,
+      });
   });
 }
 
@@ -814,12 +832,7 @@ function phoneNotices(
     const key = JSON.stringify([workspaceId, threadId]);
     let known = threads.get(key);
     if (known === undefined) {
-      const paths = threadPathsInTransaction(storage, workspaceId, threadId);
-      known =
-        paths.created &&
-        !paths.named.some(hiddenFile) &&
-        (paths.linkedObjectId === null ||
-          (paths.lastKnownPath !== null && !hiddenFile(paths.lastKnownPath)));
+      known = threadShownOnPhone(storage, workspaceId, threadId);
       threads.set(key, known);
     }
     return known;
