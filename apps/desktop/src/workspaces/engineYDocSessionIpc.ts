@@ -88,6 +88,11 @@ import {
 // the app quits. Every other note sends each update at once, so a crash
 // loses no more of it than before.
 const PAUSED_TYPING_BATCH_MS = 1_000;
+// Saving a note to its file holds the engine, and typing that arrives
+// meanwhile is recorded only when the save ends. Updates a second apart would
+// let the usual 0.8 s pause start that save mid-typing, so a paused note waits
+// for a gathered second plus that pause.
+const PAUSED_SAVE_DELAY_MS = 2_000;
 
 /** The session holds no claim yet, and every binding names one. */
 class OwnerClaimNotLearned extends Error {
@@ -1144,6 +1149,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           this.#localPersonId,
         );
         const sharedView = this.#isSharedView(owned.workspace);
+        const objectId = owned.provider.objectId;
+        const paused =
+          !sharedView &&
+          objectId !== undefined &&
+          this.#livePaused?.(owned.workspace.workspaceId, objectId) === true;
         try {
           owned.provider.applyLocalUpdate(
             input.update,
@@ -1157,6 +1167,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   idempotencyKey: input.requestId,
                   actorOriginId: person,
                   attribution: { actorKind: "human", onBehalfOf: person, depth: 0 },
+                  ...(paused ? { settleDelayMs: PAUSED_SAVE_DELAY_MS } : {}),
                 },
           );
         } catch (error) {
@@ -1165,10 +1176,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           }
           throw error;
         }
-        const objectId = owned.provider.objectId;
-        return !sharedView &&
-          objectId !== undefined &&
-          this.#livePaused?.(owned.workspace.workspaceId, objectId)
+        return paused
           ? { accepted: true, batchDelayMs: PAUSED_TYPING_BATCH_MS }
           : { accepted: true };
       },

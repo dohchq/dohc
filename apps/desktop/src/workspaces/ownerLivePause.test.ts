@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { settleOwnerLivePauses, type OwnerLivePause, type RelayLivePause } from "./ownerLivePause";
+import {
+  holdsDeliveries,
+  settleOwnerLivePauses,
+  type OwnerLivePause,
+  type RelayLivePause,
+} from "./ownerLivePause";
 
 const binding = {
   workspaceId: "ws",
@@ -118,6 +123,28 @@ function fixture() {
     setStop: (value: Stop | null) => (stop = value),
   };
 }
+
+describe("holdsDeliveries", () => {
+  it("holds a refused or failing note's edits for Resume, and none for an ended one", () => {
+    const pause = (objectId: string, cause: OwnerLivePause["cause"]): OwnerLivePause => ({
+      pauseId: `pause-${objectId}`,
+      objectId,
+      path: `${objectId}.md`,
+      cause,
+      names: [],
+      copyPath: null,
+      leftOut: false,
+    });
+    const pauses = [
+      pause("refused", "refused"),
+      pause("failing", "failing"),
+      pause("ended", "ended"),
+    ];
+    expect(
+      ["refused", "failing", "ended", "other"].map((id) => holdsDeliveries(pauses, id)),
+    ).toEqual([true, true, false, false]);
+  });
+});
 
 describe("settleOwnerLivePauses", () => {
   it("pauses with the room's copy, writes the copy next to the note, then lets the server delete its own", async () => {

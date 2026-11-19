@@ -127,6 +127,33 @@ describe("server automation draft declarations", () => {
   );
 });
 
+describe("a settle delay named by an update", () => {
+  it("arms that update's settle with its own delay", async () => {
+    const engine = seedPlaintextEngine("seed");
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: scheduler.schedule,
+      settleDebounceMs: 800,
+    });
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => text.insert(0, "a")),
+    );
+    await provider.applyLocalUpdate(
+      plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(0, "b")),
+      { settleDelayMs: 2_000 },
+    );
+    expect(scheduler.delays).toEqual([800, 2_000]);
+    expect(scheduler.armed).toHaveLength(1);
+    await provider.evict();
+  });
+});
+
 describe("closing a settled revision", () => {
   it.each(["untouched", "edited"])(
     "settles an absent lineage on close only after an edit (%s)",

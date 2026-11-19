@@ -336,6 +336,9 @@ describe("engine Y.Doc IPC adapter", () => {
             ? { accepted: true, batchDelayMs: 1_000 }
             : { accepted: true },
         );
+        expect(vi.mocked(h.session.applyLocalUpdate).mock.calls[0]?.[2]?.settleDelayMs).toBe(
+          objectId === "object-paused" ? 2_000 : undefined,
+        );
       } finally {
         await h.ipc.shutdown();
       }
