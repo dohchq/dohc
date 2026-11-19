@@ -288,10 +288,10 @@ fn lex(
                 continue;
             }
         }
-        if !in_link && starts_url(rest) {
+        if !in_link && starts_url(rest, work)? {
             return Err(Unsure);
         }
-        let length = inline_text(rest);
+        let length = inline_text(rest, work)?;
         let text = &rest[..length];
         if text.last() != Some(&u16::from(b'_')) {
             previous = text.last().copied();
@@ -311,9 +311,10 @@ fn email_unit(unit: u16) -> bool {
         .is_some_and(|byte| byte.is_ascii_alphanumeric() || b".!#$%&'*+/=?_`{|}~-".contains(&byte))
 }
 
-fn email_ahead(src: &[u16]) -> bool {
+fn email_ahead(src: &[u16], work: &mut usize) -> Read<bool> {
     let run = src.iter().take_while(|unit| email_unit(**unit)).count();
-    run > 0 && src.get(run) == Some(&u16::from(b'@'))
+    spend(work, run)?;
+    Ok(run > 0 && src.get(run) == Some(&u16::from(b'@')))
 }
 
 fn lower(src: &[u16], at: usize, word: &str) -> bool {
@@ -330,9 +331,9 @@ fn protocol_at(src: &[u16], at: usize) -> bool {
         .any(|word| lower(src, at, word))
 }
 
-fn starts_url(src: &[u16]) -> bool {
+fn starts_url(src: &[u16], work: &mut usize) -> Read<bool> {
     if protocol_at(src, 0) || lower(src, 0, "www.") {
-        return true;
+        return Ok(true);
     }
     let local = src
         .iter()
@@ -341,12 +342,13 @@ fn starts_url(src: &[u16]) -> bool {
                 .is_some_and(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
         })
         .count();
-    local > 0 && src.get(local) == Some(&u16::from(b'@'))
+    spend(work, local)?;
+    Ok(local > 0 && src.get(local) == Some(&u16::from(b'@')))
 }
 
 // marked's GFM text rule: one character, or a run of backticks and tildes,
 // then up to the next character that can open a token.
-fn inline_text(src: &[u16]) -> usize {
+fn inline_text(src: &[u16], work: &mut usize) -> Read<usize> {
     let first = if matches!(ascii(src[0]), Some(b'`' | b'~')) {
         src.iter()
             .take_while(|unit| matches!(ascii(**unit), Some(b'`' | b'~')))
@@ -356,8 +358,8 @@ fn inline_text(src: &[u16]) -> usize {
     } else {
         1
     };
-    if email_ahead(&src[first..]) {
-        return first;
+    if email_ahead(&src[first..], work)? {
+        return Ok(first);
     }
     let mut at = first;
     while at < src.len() {
@@ -367,14 +369,14 @@ fn inline_text(src: &[u16]) -> usize {
         ) || protocol_at(src, at)
             || lower(src, at, "www.")
         {
-            return at;
+            return Ok(at);
         }
-        if !email_unit(src[at]) && email_ahead(&src[at + 1..]) {
-            return at + 1;
+        if !email_unit(src[at]) && email_ahead(&src[at + 1..], work)? {
+            return Ok(at + 1);
         }
         at += 1;
     }
-    at
+    Ok(at)
 }
 
 fn em_strong(
@@ -1155,5 +1157,12 @@ Run `make` and see [`npm install`](https://docs.example/install).
         }
         let text = format!("{}end", "**word** ".repeat(20_000));
         assert!(read_inline(&text, true).is_some());
+    }
+
+    #[test]
+    fn a_long_run_of_intraword_underscores_stops_the_reading_early() {
+        assert!(read_inline(&"a_".repeat(20_000), true).is_none());
+        let prose = format!("{}end", "plain words and *one* more ".repeat(5_000));
+        assert!(read_inline(&prose, true).is_some());
     }
 }
