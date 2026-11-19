@@ -290,12 +290,15 @@ export function createWorkspaceCollections(
         return false;
       }
       // The record as it is now: with the rules' defaults, and any change since, if this answer was a replay.
+      const created = recordKey(datasetId, tableId, answer.id);
+      const deletionBefore = actions.get(created);
       const current = await operations.record(datasetId, sent.table, answer.id);
       if (!lands()) return false;
       setAction(key, null);
       const now = shown();
-      if (!now || !current.record) return false;
-      forget(recordKey(datasetId, tableId, answer.id));
+      // A deletion that saved while this read was on its way wins over what the read saw.
+      if (!now || !current.record || actions.get(created) !== deletionBefore) return false;
+      forget(created);
       const record = newest(
         current.record,
         now.rows.find((row) => row.id === answer.id),
@@ -360,6 +363,7 @@ export function createWorkspaceCollections(
           : [],
       );
       const rows = (ready?.rows ?? []).map((row) => newest(row, held.get(JSON.stringify(row.id))));
+      const pageRows = new Map(rows.map((row) => [JSON.stringify(row.id), row]));
       const fresh =
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
@@ -369,7 +373,10 @@ export function createWorkspaceCollections(
         tableId: table?.tableId ?? null,
         // A record added here can come again in a later page.
         rows: more
-          ? [...view.rows, ...rows.filter((row) => !held.has(JSON.stringify(row.id)))]
+          ? [
+              ...view.rows.map((row) => pageRows.get(JSON.stringify(row.id)) ?? row),
+              ...rows.filter((row) => !held.has(JSON.stringify(row.id))),
+            ]
           : rows,
         files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
         next: ready?.next ?? null,

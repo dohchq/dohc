@@ -914,6 +914,50 @@ describe("a new record and a deletion", () => {
     expect(names(collections.view()?.rows)).toEqual(["n1", "a0", "a1", "a2"]);
   });
 
+  it("takes a next page's newer version of a record it already lists", async () => {
+    const { server, collections, stored } = await onList();
+    server.on("POST", CREATE, adds(stored));
+    await collections.create();
+    // Another device changes the new record before the next page brings it.
+    stored.set("n1", { ...N1, version: 2, values: { ...N1.values, "f-name": "Maya" } });
+    await collections.more();
+    const listed = collections.view()?.rows.find((row) => row.id === "n1");
+    expect(listed?.version).toBe(2);
+    collections.openRecord(listed!);
+    expect(collections.edit("f-name")?.from.expectedVersion).toBe(2);
+  });
+
+  it("doesn't bring back a record deleted while a replayed create read it back", async () => {
+    const { server, collections, stored } = await onList();
+    const answer = people(stored);
+    const held = deferred<void>();
+    let holding = false;
+    server.on("POST", RECORDS, (call: Call) => {
+      const now = answer(call);
+      const byKey = (call.body as { recordId?: unknown }).recordId !== undefined;
+      if (!holding || !byKey) return now;
+      holding = false;
+      return held.promise.then(() => now);
+    });
+    server.on("POST", CREATE, adds(stored, N1, "offline"), created);
+    server.on("POST", DELETE, deletes(stored));
+    await collections.create();
+    await collections.more();
+    // Try again replays the create; its read-back is held until after the deletion saves.
+    holding = true;
+    const retried = collections.retryAction(NEW);
+    while (holding) await tick();
+    collections.openRecord(collections.view()!.rows.find((row) => row.id === "n1")!);
+    collections.remove();
+    await settled(collections, recordKey(D, "t-people", "n1"));
+    held.resolve();
+    expect(await retried).toBe(false);
+    expect(names(collections.view()?.rows)).toEqual(["a0", "a1", "a2"]);
+    expect(collections.actions().get(recordKey(D, "t-people", "n1"))?.state).toEqual({
+      kind: "saved",
+    });
+  });
+
   it("deletes the open record, drops its row, and keeps a read that started before from showing it", async () => {
     const { server, collections, stored } = await onRecord();
     const answer = people(stored);
