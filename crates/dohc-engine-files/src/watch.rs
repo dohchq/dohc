@@ -60,6 +60,53 @@ const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
 /// [`WatchedRoot`] -- and is cheap (one `stat`, once per interval, only while
 /// otherwise idle).
 const WATCH_ROOT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const OTHER_COMPUTERS_READ_INTERVAL: Duration = Duration::from_secs(10);
+
+#[cfg(windows)]
+fn other_computers_write_to(root: &Path) -> bool {
+    use std::path::Prefix;
+    let network = |path: &Path| {
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::VerbatimUNC(..) | Prefix::UNC(..))
+        )
+    };
+    std::fs::canonicalize(root).is_ok_and(|path| network(&path))
+}
+
+#[cfg(target_os = "linux")]
+fn other_computers_write_to(root: &Path) -> bool {
+    const SHARED_FILESYSTEMS: [u32; 11] = [
+        0x6969,
+        0x517b,
+        0xff53_4d42,
+        0xfe53_4d42,
+        0x0102_1997,
+        0x6573_5546,
+        0x00c3_6400,
+        0x5346_414f,
+        0x786f_4256,
+        0x7c7c_6673,
+        0x0bd0_0bd0,
+    ];
+    rustix::fs::statfs(root).is_ok_and(|stat| SHARED_FILESYSTEMS.contains(&(stat.f_type as u32)))
+}
+
+#[cfg(target_os = "macos")]
+fn other_computers_write_to(root: &Path) -> bool {
+    const MNT_LOCAL: u32 = 0x1000;
+    rustix::fs::statfs(root).is_ok_and(|stat| stat.f_flags & MNT_LOCAL == 0)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn other_computers_write_to(_root: &Path) -> bool {
+    false
+}
+
+fn timed_read_interval(root: &Path) -> Option<Duration> {
+    other_computers_write_to(root).then_some(OTHER_COMPUTERS_READ_INTERVAL)
+}
 
 /// A watcher event. Both kinds mark the generation dirty (a full
 /// rescan supersedes any per-path delta), so the modeled property is
@@ -263,7 +310,8 @@ impl NativeWatcher {
         dirty: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<NativeWatcher, FilesError> {
         Self::start_thread(WATCH_STARTUP_DEADLINE, move |rx, tx, state, ready| {
-            watcher_thread(root, dirty, rx, tx, state, ready);
+            let timed_read = timed_read_interval(&root);
+            watcher_thread(root, dirty, rx, tx, state, ready, timed_read);
         })
         .await
     }
@@ -317,6 +365,7 @@ impl NativeWatcher {
     ) -> Result<WatchStart, FilesError> {
         let thread_handle = handle.clone();
         let mut watcher = Self::start_thread(startup_deadline, move |rx, tx, state, ready| {
+            let timed_read = timed_read_interval(&root);
             watcher_thread(
                 root,
                 Arc::new(move || thread_handle.notify_overflow()),
@@ -324,6 +373,7 @@ impl NativeWatcher {
                 tx,
                 state,
                 ready,
+                timed_read,
             );
         })
         .await?;
@@ -587,6 +637,7 @@ fn watcher_thread(
     callback_tx: SyncSender<ThreadMessage>,
     state: Arc<WatchState>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
+    timed_read: Option<Duration>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
     let unavailable = &state.unavailable;
@@ -634,6 +685,7 @@ fn watcher_thread(
     }
 
     let mut debounce = Debounce::default();
+    let mut next_timed_read = timed_read.map(|interval| Instant::now() + interval);
     loop {
         // Consume the non-droppable backend-error signal first, so a re-attach
         // request set by the callback is never lost to a full event queue.
@@ -662,9 +714,21 @@ fn watcher_thread(
             // blocking on `rx.recv()` forever) to independently verify the
             // watched root is still the same directory object the watch was
             // bound to -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
-            None => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
+            None => match rx.recv_timeout(next_timed_read.map_or(
+                WATCH_ROOT_HEALTH_POLL_INTERVAL,
+                |at| {
+                    at.saturating_duration_since(Instant::now())
+                        .min(WATCH_ROOT_HEALTH_POLL_INTERVAL)
+                },
+            )) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
+                    if let (Some(interval), Some(at)) = (timed_read, next_timed_read)
+                        && Instant::now() >= at
+                    {
+                        dirty();
+                        next_timed_read = Some(Instant::now() + interval);
+                    }
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         state.disruptions.fetch_add(1, Ordering::AcqRel);
                         dirty();
@@ -1158,5 +1222,52 @@ mod tests {
             elapsed < Duration::from_millis(400),
             "the startup deadline must not block on the slow worker thread: {elapsed:?}"
         );
+    }
+
+    fn start_counting(
+        root: PathBuf,
+        timed_read: Option<Duration>,
+    ) -> (
+        impl std::future::Future<Output = Result<NativeWatcher, FilesError>>,
+        mpsc::Receiver<()>,
+    ) {
+        let (reads_tx, reads_rx) = mpsc::channel();
+        let reads_tx = std::sync::Mutex::new(reads_tx);
+        let dirty: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = reads_tx.lock().map(|tx| tx.send(()));
+        });
+        let started =
+            NativeWatcher::start_thread(WATCH_STARTUP_DEADLINE, move |rx, tx, state, ready| {
+                watcher_thread(root, dirty, rx, tx, state, ready, timed_read);
+            });
+        (started, reads_rx)
+    }
+
+    #[tokio::test]
+    async fn a_folder_other_computers_write_is_read_again_with_no_event() {
+        let root = dohc_test_scratch::ScratchDir::new().unwrap();
+        let (started, reads) =
+            start_counting(root.path().to_owned(), Some(Duration::from_millis(50)));
+        let mut watcher = started.await.unwrap();
+        for _ in 0..3 {
+            reads
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the folder is read again on the timer");
+        }
+        watcher.stop().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_folder_only_this_computer_writes_is_never_read_on_a_timer() {
+        let root = dohc_test_scratch::ScratchDir::new().unwrap();
+        assert_eq!(timed_read_interval(root.path()), None);
+        let (started, reads) = start_counting(root.path().to_owned(), None);
+        let mut watcher = started.await.unwrap();
+        assert!(
+            reads
+                .recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL * 2)
+                .is_err()
+        );
+        watcher.stop().unwrap();
     }
 }
