@@ -1542,6 +1542,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           "authorId",
           "kind",
           "displayName",
+          "agentId",
         ]);
         const authorId = normalizeTrimmed(
           requiredString(author, "authorId", "invalid-sender"),
@@ -1565,6 +1566,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
           authorId,
           normalizedReplicationAuthorId ?? "",
           requiredString(author, "kind", "invalid-sender"),
+          optionalString(author, "agentId") ?? "",
           normalizeTrimmed(
             requiredString(author, "displayName", "invalid-sender"),
             "invalid-sender",
