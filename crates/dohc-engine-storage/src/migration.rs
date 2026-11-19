@@ -3779,6 +3779,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE INDEX snapshots_by_path ON snapshots(workspace_id, version_id, path);",
         sets_user_version: None,
     },
+    // The DACL a Windows file had when it was staged, saved before dohc
+    // makes the file private so it gets that DACL back when it returns, or
+    // why dohc left the file's DACL as it is.
+    Migration {
+        ordinal: 108,
+        id: "v2-materialization-staged-dacls",
+        sql: V2_MATERIALIZATION_STAGED_DACLS_DDL,
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -4874,6 +4883,15 @@ const V2_OWNER_LIVE_STOP_COPY_DDL: &str = "\
 ALTER TABLE owner_live_stops ADD COLUMN copy_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT;
 ";
 
+const V2_MATERIALIZATION_STAGED_DACLS_DDL: &str = "CREATE TABLE materialization_staged_dacls (
+    file_identity TEXT PRIMARY KEY,
+    dacl TEXT,
+    left_reason TEXT CHECK (left_reason IN ('hard-links', 'other-owner')),
+    created_at_ms INTEGER NOT NULL,
+    CHECK ((dacl IS NULL) = (left_reason IS NOT NULL))
+) STRICT;
+";
+
 const V2_OWNER_TAKEN_ROWS_DDL: &str = "\
 CREATE TABLE ydoc_owner_taken_rows (
     workspace_id TEXT NOT NULL,
@@ -5821,6 +5839,10 @@ mod tests {
             (
                 "v2-snapshots-by-path",
                 "c27a48dbc124e26d73ead8e8758d08a9f4883ad0f17f66fcc7bc2155eab502bc",
+            ),
+            (
+                "v2-materialization-staged-dacls",
+                "b82b1268b5c72b32fcd47bea78a8b970dbdb44764b0eae6e0b73f9793d6ca1e9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

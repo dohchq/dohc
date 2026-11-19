@@ -6,6 +6,7 @@ use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, JobStatus, MaterializationJob,
+    StagedDacl,
 };
 use crate::schema::{OPEN_WORK_STEP_OPS, open_engine_db, open_engine_db_read_only};
 use crate::{blob, materialize};
@@ -1310,6 +1311,88 @@ impl EngineStore {
             .optional()
             .map_err(StorageError::corrupt)
     }
+    /// What dohc saved for the staged file with this identity.
+    pub fn staged_dacl(&self, file_identity: &str) -> Result<Option<StagedDacl>, StorageError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT dacl, left_reason FROM materialization_staged_dacls WHERE file_identity=?1",
+                [file_identity],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StorageError::corrupt)?
+            .map(|row| match row {
+                (Some(dacl), None) => Ok(StagedDacl::Saved(dacl)),
+                (None, Some(reason)) => Ok(StagedDacl::Left(reason)),
+                _ => Err(StorageError::corrupt(std::io::Error::other(
+                    "a staged DACL row is neither saved nor left",
+                ))),
+            })
+            .transpose()
+    }
+
+    /// FULL precedes any change to a staged file's DACL. A saved DACL is the
+    /// file's own and is never replaced; a left file's reason can become its
+    /// saved DACL, because dohc never changed it.
+    pub fn save_staged_dacl(
+        &self,
+        file_identity: &str,
+        saved: &StagedDacl,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        let (dacl, reason) = match saved {
+            StagedDacl::Saved(dacl) => (Some(dacl.as_str()), None),
+            StagedDacl::Left(reason) => (None, Some(reason.as_str())),
+        };
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute(
+                "INSERT INTO materialization_staged_dacls(file_identity,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4) ON CONFLICT(file_identity) DO UPDATE SET                  left_reason=CASE WHEN dacl IS NOT NULL OR excluded.dacl IS NOT NULL THEN NULL                  ELSE excluded.left_reason END, dacl=COALESCE(dacl, excluded.dacl)",
+                rusqlite::params![file_identity, dacl, reason, now_ms],
+            )
+            .map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+
+    /// Forget staged files that are no longer staged, in a FULL commit, so a
+    /// file staged again later saves the DACL it has then.
+    pub fn forget_staged_dacls(&self, file_identities: &[String]) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        if file_identities.is_empty() {
+            return Ok(());
+        }
+        materialize::with_full_commit(&self.conn, |tx| {
+            for identity in file_identities {
+                tx.execute(
+                    "DELETE FROM materialization_staged_dacls WHERE file_identity=?1",
+                    [identity],
+                )
+                .map_err(StorageError::persist)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn staged_dacl_identities(&self) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare(
+                "SELECT file_identity FROM materialization_staged_dacls ORDER BY file_identity",
+            )
+            .map_err(StorageError::corrupt)?;
+        q.query_map([], |r| r.get(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(StorageError::corrupt)
+    }
+
     pub fn staging_locations(&self) -> Result<Vec<String>, StorageError> {
         let mut q = self
             .conn

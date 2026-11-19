@@ -140,14 +140,22 @@ pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
 /// caller keeps using the folder it checked, and the folders above it stay
 /// where they are.
 pub fn ensure_private_dir(base: &Path, relative: &Path) -> io::Result<File> {
-    make_private_dir(base, relative, &System::REAL).map(|(folder, _)| folder)
+    make_private_dir(base, relative, None, &System::REAL).map(|(folder, _)| folder)
+}
+
+/// [`ensure_private_dir`], except that the folder `leave` in it, if there,
+/// gets the private DACL on itself alone before the folder's DACL changes,
+/// and everything in `leave` keeps the DACL it has. The caller records each
+/// of those items' DACLs and makes the item private itself.
+pub fn ensure_private_dir_leaving(base: &Path, relative: &Path, leave: &OsStr) -> io::Result<File> {
+    make_private_dir(base, relative, Some(leave), &System::REAL).map(|(folder, _)| folder)
 }
 
 /// What [`make_private_dir`] asks of the system, which tests stand in for.
-struct System {
+pub(crate) struct System {
     /// The owner to report for the item at a path, as a string SID, in place
     /// of its own. Only an administrator can make another account an owner.
-    owner_of: fn(&Path) -> Option<&'static str>,
+    pub(crate) owner_of: fn(&Path) -> Option<&'static str>,
     /// The error one kind of security call returns in place of its result.
     fail: Option<(Call, u32)>,
     /// The folder to keep [`Records`] in, in place of `%LOCALAPPDATA%`.
@@ -155,11 +163,20 @@ struct System {
 }
 
 impl System {
-    const REAL: System = System {
+    pub(crate) const REAL: System = System {
         owner_of: |_| None,
         fail: None,
         records_in: None,
     };
+
+    /// The real system, but reporting the owner `owner_of` gives.
+    #[cfg(test)]
+    pub(crate) const fn owned_by(owner_of: fn(&Path) -> Option<&'static str>) -> System {
+        System {
+            owner_of,
+            ..System::REAL
+        }
+    }
 
     fn fails(&self, call: Call) -> io::Result<()> {
         match self.fail {
@@ -180,7 +197,12 @@ enum Call {
 
 /// [`ensure_private_dir`], returning too whether it checked everything in
 /// the folder.
-fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result<(File, bool)> {
+fn make_private_dir(
+    base: &Path,
+    relative: &Path,
+    leave: Option<&OsStr>,
+    system: &System,
+) -> io::Result<(File, bool)> {
     let mut names = Vec::new();
     for part in relative.components() {
         match part {
@@ -237,6 +259,15 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
             _ => {}
         }
     }
+    // Windows passes nothing down through a protected DACL, so `leave` takes
+    // the private DACL first and its items keep theirs.
+    let _left = match leave {
+        Some(name) => {
+            let left_shown = format!("{shown}/{}", name.to_string_lossy());
+            leave_folder(&path.join(name), &left_shown, private, system)?
+        }
+        None => None,
+    };
     if !folder_private {
         let protected = PROTECTED_DACL_SECURITY_INFORMATION;
         match set_security(&folder, protected, private.dacl()?, system) {
@@ -246,7 +277,7 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
     }
     // Only this user, Administrators and SYSTEM can add an item from here
     // on, so the check sees everything Windows passed over.
-    check_items(&path, &shown, private, system)?;
+    check_items(&path, &shown, leave, private, system)?;
     // Without its record, the next open checks everything again.
     if let (Some(records), Some(record)) = (&records, &record) {
         let _ = File::create(record);
@@ -344,32 +375,7 @@ impl Records {
 
     /// Where `folder`'s record is.
     fn of(&self, folder: &File) -> Option<PathBuf> {
-        let mut id = FILE_ID_INFO::default();
-        // SAFETY: The handle is open and `id` is writable for this
-        // synchronous call, which retains neither.
-        #[allow(unsafe_code)]
-        let read = unsafe {
-            GetFileInformationByHandleEx(
-                folder.as_raw_handle() as HANDLE,
-                FileIdInfo,
-                std::ptr::from_mut(&mut id).cast(),
-                size_of::<FILE_ID_INFO>() as u32,
-            )
-        };
-        if read == 0 {
-            return None;
-        }
-        let file_id: String = id
-            .FileId
-            .Identifier
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        Some(
-            self.held
-                .path
-                .join(format!("{:016x}-{file_id}", id.VolumeSerialNumber)),
-        )
+        Some(self.held.path.join(file_id(folder)?))
     }
 
     /// Remove the oldest records past [`MOST_RECORDS`].
@@ -388,6 +394,89 @@ impl Records {
         for (_, record) in &records[..excess] {
             let _ = std::fs::remove_file(record);
         }
+    }
+}
+
+/// The item's volume and file ID, as `{volume}-{file id}` in lowercase
+/// hex: the same for every name of one file, and for no other file.
+pub(crate) fn file_id(item: &File) -> Option<String> {
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: The handle is open and `id` is writable for this synchronous
+    // call, which retains neither.
+    #[allow(unsafe_code)]
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            item.as_raw_handle() as HANDLE,
+            FileIdInfo,
+            std::ptr::from_mut(&mut id).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return None;
+    }
+    let file_id: String = id
+        .FileId
+        .Identifier
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(format!("{:016x}-{file_id}", id.VolumeSerialNumber))
+}
+
+/// Give the folder at `path`, named `shown`, the private DACL on itself
+/// alone, as a folder on the way gets it, and return it held. `None` when
+/// nothing is there.
+fn leave_folder(
+    path: &Path,
+    shown: &str,
+    private: &PrivateDescriptor,
+    system: &System,
+) -> io::Result<Option<File>> {
+    match open_folder(path, shown, FILE_READ_ATTRIBUTES) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        opened => drop(opened?),
+    }
+    take_private_folder(path, shown, private, system).map(Some)
+}
+
+/// Take the folder at `path`, named `shown`, as [`take_folder`] does, refuse
+/// it when another account owns it, and give it the private DACL on itself
+/// alone unless it has it or inherits only that. Its items keep their DACLs.
+fn take_private_folder(
+    path: &Path,
+    shown: &str,
+    private: &PrivateDescriptor,
+    system: &System,
+) -> io::Result<File> {
+    let folder = take_folder(path, shown, Some(private), system)?;
+    let security = Security::read(&folder, system)?;
+    private.check_owner(&security, path, shown, system)?;
+    if !private.is_private_folder(&security)? && !private.is_inherited_only(&security)? {
+        set_own_dacl(&folder, private, system).map_err(denied_as(shown, NOT_CHANGEABLE))?;
+    }
+    Ok(folder)
+}
+
+/// Create the folder at `path`, or take the one there, and give it the
+/// private DACL on itself alone: a folder dohc stages files in outside the
+/// engine's folder. Everything already in it keeps its DACL. A link,
+/// anything but a folder, a folder another account owns, and one whose DACL
+/// this user can't change are refused as [`NotPrivate`]. On a volume that
+/// keeps no DACL, or a network share, the folder is created and taken as it
+/// is.
+pub fn ensure_private_staging_dir(path: &Path) -> io::Result<()> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::ErrorKind::InvalidInput.into());
+    };
+    let shown = name.to_string_lossy();
+    if !keeps_dacl(&open(parent, FILE_READ_ATTRIBUTES, 0)?)? {
+        return take_folder(path, &shown, None, &System::REAL).map(drop);
+    }
+    let private = PrivateDescriptor::get()?;
+    match take_private_folder(path, &shown, private, &System::REAL) {
+        Err(err) if unsupported(&err) => Ok(()),
+        taken => taken.map(drop),
     }
 }
 
@@ -568,14 +657,14 @@ pub(crate) fn keeps_dacl(item: &File) -> io::Result<bool> {
 }
 
 /// An item's owner and DACL, read in one call.
-struct Security {
+pub(crate) struct Security {
     descriptor: Local<core::ffi::c_void>,
     owner: PSID,
     dacl: *mut ACL,
 }
 
 impl Security {
-    fn read(item: &File, system: &System) -> io::Result<Self> {
+    pub(crate) fn read(item: &File, system: &System) -> io::Result<Self> {
         system.fails(Call::Read)?;
         let (mut owner, mut dacl) = (std::ptr::null_mut(), std::ptr::null_mut());
         let mut descriptor = std::ptr::null_mut();
@@ -604,7 +693,12 @@ impl Security {
         })
     }
 
-    fn protected(&self) -> io::Result<bool> {
+    /// The owner, as a string SID.
+    pub(crate) fn owner(&self) -> io::Result<String> {
+        sid_string(self.owner)
+    }
+
+    pub(crate) fn protected(&self) -> io::Result<bool> {
         let (mut control, mut revision) = (0, 0);
         // SAFETY: The descriptor is valid while `self` is.
         #[allow(unsafe_code)]
@@ -618,7 +712,11 @@ impl Security {
 
     /// Whether the DACL allows full control to exactly `sids`, one entry
     /// each in any order, with flags `flags_fit` accepts, and nothing else.
-    fn allows_only(&self, sids: &[&str], flags_fit: impl Fn(u32) -> bool) -> io::Result<bool> {
+    pub(crate) fn allows_only(
+        &self,
+        sids: &[&str],
+        flags_fit: impl Fn(u32) -> bool,
+    ) -> io::Result<bool> {
         // SAFETY: The DACL, if any, lies in the descriptor, which is alive.
         // A null DACL admits everyone.
         #[allow(unsafe_code)]
@@ -728,11 +826,15 @@ fn inherit_only(item: &File, system: &System) -> io::Result<()> {
 fn check_items(
     path: &Path,
     shown: &str,
+    leave: Option<&OsStr>,
     private: &PrivateDescriptor,
     system: &System,
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
+        if leave == Some(entry.file_name().as_os_str()) {
+            continue;
+        }
         let item_path = entry.path();
         let item_shown = format!("{shown}/{}", entry.file_name().to_string_lossy());
         let access = READ_CONTROL | WRITE_DAC;
@@ -755,7 +857,7 @@ fn check_items(
             }
         }
         if entry.file_type()?.is_dir() {
-            check_items(&item_path, &item_shown, private, system)?;
+            check_items(&item_path, &item_shown, None, private, system)?;
         }
     }
     Ok(())
@@ -795,7 +897,7 @@ impl<T> Drop for Local<T> {
 
 /// A security descriptor with the DACL of a user's profile folder, for this
 /// user, protected from the folders above.
-struct PrivateDescriptor {
+pub(crate) struct PrivateDescriptor {
     descriptor: Local<core::ffi::c_void>,
     user: String,
 }
@@ -810,7 +912,7 @@ unsafe impl Sync for PrivateDescriptor {}
 impl PrivateDescriptor {
     /// This process's descriptor, made once: parsing it costs more than the
     /// rest of an open that finds the folder private.
-    fn get() -> io::Result<&'static Self> {
+    pub(crate) fn get() -> io::Result<&'static Self> {
         static PRIVATE: std::sync::OnceLock<PrivateDescriptor> = std::sync::OnceLock::new();
         if let Some(private) = PRIVATE.get() {
             return Ok(private);
@@ -863,7 +965,7 @@ impl PrivateDescriptor {
     }
 
     /// Who the DACL admits, and who may own the folder and what is in it.
-    fn sids(&self) -> [&str; 3] {
+    pub(crate) fn sids(&self) -> [&str; 3] {
         [SYSTEM, ADMINISTRATORS, &self.user]
     }
 
@@ -954,7 +1056,7 @@ fn sid_string(sid: PSID) -> io::Result<String> {
 }
 
 /// A string Windows allocated, ending with a null.
-fn local_string(text: Local<u16>) -> String {
+pub(crate) fn local_string(text: Local<u16>) -> String {
     // SAFETY: Windows wrote a string that ends with a null, and `text` keeps
     // it allocated while it is read.
     #[allow(unsafe_code)]
@@ -977,7 +1079,7 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use dohc_test_scratch::ScratchDir;
     use std::ffi::OsStr;
@@ -1003,7 +1105,7 @@ mod tests {
     const AUTHENTICATED_USERS: &str = "S-1-5-11";
 
     fn open_engine(root: &Path, system: &System) -> io::Result<bool> {
-        make_private_dir(root, Path::new(ENGINE), system).map(|(_, checked)| checked)
+        make_private_dir(root, Path::new(ENGINE), None, system).map(|(_, checked)| checked)
     }
 
     /// A workspace root whose test DACL grants Users read access.
@@ -1042,7 +1144,7 @@ mod tests {
         assert!(status.success(), "{program} {args:?}");
     }
 
-    fn icacls(path: &Path, args: &[&str]) {
+    pub(crate) fn icacls(path: &Path, args: &[&str]) {
         let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
         run("icacls", &[&[path.as_os_str()][..], &args].concat());
     }
@@ -1250,7 +1352,7 @@ mod tests {
         assert_ne!(rights_of(&dohc, AUTHENTICATED_USERS) & DELETE, 0);
 
         let open = |relative: &str| {
-            drop(make_private_dir(&root, Path::new(relative), &real).expect("open"))
+            drop(make_private_dir(&root, Path::new(relative), None, &real).expect("open"))
         };
         open(ENGINE);
         open(".dohc/local");
@@ -1336,6 +1438,40 @@ mod tests {
 
     /// An open that stopped after the folder's DACL changed, before every
     /// item was checked, left no record. The next open finishes it.
+    /// The folder dohc stages old versions in becomes private on its own,
+    /// and each file in it keeps its DACL for dohc to save first.
+    #[test]
+    fn an_open_leaving_a_folder_makes_only_that_folder_private() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let (root, engine) = older_workspace(&scratch, "root");
+        let displaced = engine.join("displaced");
+        let staged = displaced.join("6a6f62.0");
+        std::fs::write(&staged, b"history").expect("staged");
+        let before = sddl(&staged);
+        assert!(before.contains("(A;ID;FR;;;BU)"), "{before}");
+        make_private_dir(
+            &root,
+            Path::new(ENGINE),
+            Some(OsStr::new("displaced")),
+            &real,
+        )
+        .expect("open");
+        let [folder, _, file] = private_dacls(true);
+        assert_eq!(sddl(&displaced), folder);
+        assert_eq!(sddl(&engine.join("engine.db")), private_dacls(false)[2]);
+        assert_ne!(file, before);
+        assert_eq!(sddl(&staged), before);
+        make_private_dir(
+            &root,
+            Path::new(ENGINE),
+            Some(OsStr::new("displaced")),
+            &real,
+        )
+        .expect("again");
+        assert_eq!(sddl(&staged), before);
+    }
+
     #[test]
     fn an_open_that_stopped_partway_is_finished_by_the_next() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -1767,7 +1903,7 @@ mod tests {
         let (root, engine) = older_workspace(&scratch, "root");
         let aside = root.join(".dohc").join("aside");
         let (held, _) =
-            make_private_dir(&root, Path::new(ENGINE), &system(&scratch)).expect("open");
+            make_private_dir(&root, Path::new(ENGINE), None, &system(&scratch)).expect("open");
         assert!(std::fs::rename(&engine, &aside).is_err());
         drop(held);
         std::fs::rename(&engine, &aside).expect("rename once released");
