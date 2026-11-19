@@ -1,7 +1,7 @@
 import { appendFileSync, globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { carriedOver, cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { reportFlaky } from "./flaky.mjs";
 import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
 import {
@@ -11,6 +11,20 @@ import {
   RUST_SHARDS,
   RUST_TEST_PROOFS,
 } from "./cloud-rust.mjs";
+
+export function newestAttemptFiles(directory, file) {
+  const newest = new Map();
+  for (const path of globSync(`${directory}/*/**/${file}`)) {
+    const [artifact] = relative(directory, path).split(sep);
+    const [, base, number] = /^(.+)-(\d+)$/u.exec(artifact) ?? [];
+    if (!base) throw new Error(`Downloaded artifact ${artifact} names no attempt.`);
+    const attempt = Number(number),
+      kept = newest.get(base);
+    if (!kept || attempt > kept.attempt) newest.set(base, { attempt, paths: [path] });
+    else if (attempt === kept.attempt) kept.paths.push(path);
+  }
+  return [...newest.values()].flatMap(({ paths }) => paths);
+}
 
 export function aggregateJavascript(records) {
   const preparation = records.filter((record) => record.part === "prepare-0");
@@ -160,12 +174,7 @@ function jobReadyAt(job, metadata) {
     )
   )
     return createdAt;
-  // A partial re-run can carry old jobs. Do not count the pause between attempts as a scheduling wait.
-  if (
-    job.run_attempt &&
-    dependencies.every((dependency) => dependency.run_attempt < job.run_attempt)
-  )
-    return createdAt;
+  if (!carriedOver(job) && dependencies.every(carriedOver)) return createdAt;
   const readyAt = Math.max(
     ...dependencies.map((dependency) => Date.parse(dependency.completed_at)),
   );
@@ -232,8 +241,10 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
   const budgetSeconds = scope === "js" ? 400 : 700;
+  const rerun = required.some(carriedOver);
   // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
   const excused =
+    rerun ||
     longest.runnerWaitSeconds > 30 ||
     (transferSeconds > 30 && seconds - transferSeconds <= budgetSeconds);
   const timing =
@@ -250,6 +261,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
       ? "runner wait"
       : "wait for GitHub to start";
   const delay = [
+    rerun ? "part of the gate passed in an earlier attempt and did not run again" : null,
     longest.runnerWaitSeconds > 30
       ? `longest ${waitingFor} ${longest.name}: ${longest.runnerWaitSeconds}s`
       : null,
@@ -363,7 +375,10 @@ export async function verifyCompletedCloud(
   };
   try {
     if (scope === "js") {
-      const aggregate = JSON.parse(readFileSync(`${outputDirectory}/js-result.json`, "utf8"));
+      const results = newestAttemptFiles(outputDirectory, "js-result.json");
+      if (results.length !== 1)
+        throw new Error(`Expected one JavaScript aggregate, found ${results.length}.`);
+      const aggregate = JSON.parse(readFileSync(results[0], "utf8"));
       if (aggregate.verdict !== "PASS" || !env.GITHUB_SHA || aggregate.commit !== env.GITHUB_SHA)
         throw new Error("The JavaScript aggregate does not cover the checked-out commit.");
       report.flaky = aggregate.flaky ?? [];
@@ -457,7 +472,7 @@ export async function aggregateCloud(
   const verificationStartedAt = now();
   const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
   try {
-    const records = [...globSync(`${directory}/**/result.json`)]
+    const records = newestAttemptFiles(directory, "result.json")
       .map((path) => JSON.parse(readFileSync(path, "utf8")))
       .filter((record) => record.scope === scope);
     if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
