@@ -6218,6 +6218,35 @@ describe("people and links on one surface", () => {
     );
   });
 
+  it("keeps a newer level the list shows when an older answer to a change arrives", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(
+        sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "comment", generation: 3 })]),
+      )
+      .mockRejectedValue(new Error("offline"));
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+
+    await waitFor(() => expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect((screen.getByTestId("share-person-access-ana") as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    expect(screen.getByTestId("share-person-access-ana").textContent).toBe("Can comment");
+  });
+
   it("keeps the level and says why when the change fails", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
       sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit" })]),
