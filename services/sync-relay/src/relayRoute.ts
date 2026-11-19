@@ -300,6 +300,13 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         grantId: parseShareId(parts[4]),
       };
     }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "retune") {
+      return {
+        route: "share-grant-retune",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
     if (parts.length === 6 && parts[3] === "grants" && parts[5] === "revoke") {
       return {
         route: "share-grant-revoke",

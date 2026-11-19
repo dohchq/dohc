@@ -1846,6 +1846,13 @@ export interface SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult;
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult;
   revokeShareGrant(input: {
     shareId: string;
     grantId: string;

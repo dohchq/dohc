@@ -20,7 +20,7 @@ const HISTORY = "They can see the full History.";
 
 // What each level gives, said where a person chooses it. Only a share of
 // files can be edited live in a browser.
-function accessOptions(
+export function accessOptions(
   target: RelayShareTarget,
 ): ReadonlyArray<{ value: ShareAccess; description: string; testId: string }> {
   const live =
