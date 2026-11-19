@@ -1,10 +1,10 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { describe, expect, it } from "vitest";
-import type { CollectionFieldType } from "../server/phoneCollections";
+import type { DatasetColumnFieldType } from "@dohc/security-contract/dataset";
 import { draftOf, editorKind, rowText, shownValue, valueOf } from "./collectionFields";
 
 const files = { "file-1234567890abcdef": "receipt.pdf" };
-const shown = (type: CollectionFieldType, value: Parameters<typeof shownValue>[1]) =>
+const shown = (type: DatasetColumnFieldType, value: Parameters<typeof shownValue>[1]) =>
   shownValue({ type }, value, files);
 
 describe("a field's value", () => {
@@ -80,7 +80,7 @@ describe("a value in a record's row", () => {
 });
 
 describe("a field's editor", () => {
-  const field = (type: CollectionFieldType, options: string[] = []) => ({ type, options });
+  const field = (type: DatasetColumnFieldType, options: string[] = []) => ({ type, options });
   const choices = ["Unpaid", "Paid", "Waived"];
 
   it("edits the types the phone has an editor for, and not a date, a relation or an attachment", () => {
