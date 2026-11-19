@@ -4,7 +4,10 @@
 //! link, so a folder swapped for a link during a scan can't send the walk
 //! outside the workspace. A folder moved out of the workspace while
 //! its handle is held is still listed under its old path for that scan.
-//! Windows still reads by path.
+//! On Windows a folder or file opens by its path and is refused unless the
+//! handle is still at that path, so a link on the way can't lead outside
+//! either. No folder stays open there while its subfolders are walked, since
+//! that would stop their ancestors from being renamed.
 
 use std::io;
 
@@ -22,6 +25,7 @@ pub(super) enum Kind {
     Folder,
     File,
     Symlink,
+    #[cfg(unix)]
     Other,
 }
 
@@ -271,109 +275,115 @@ mod unix {
     }
 }
 
-#[cfg(not(unix))]
-pub(super) use by_path::{Child, Folder};
+#[cfg(windows)]
+pub(super) use windows::{Child, Folder};
 
-#[cfg(not(unix))]
-mod by_path {
+#[cfg(windows)]
+mod windows {
     use super::{Contents, Facts, Kind};
+    use dohc_windows_files::in_place::{self, Entry};
     use std::borrow::Cow;
     use std::io;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
+    /// A folder by its path from the workspace root's real path. Each open
+    /// under it is refused unless it is still at that path.
     #[derive(Clone)]
-    pub(in super::super) struct Folder(std::rc::Rc<PathBuf>);
+    pub(in super::super) struct Folder(Rc<PathBuf>);
 
-    pub(in super::super) struct Child {
-        path: PathBuf,
-        /// Holds the listing's metadata, so reading it costs no open.
-        entry: Option<std::fs::DirEntry>,
-    }
+    pub(in super::super) struct Child(Entry);
 
     impl Child {
         pub(in super::super) fn name(&self) -> Cow<'_, str> {
-            self.path
-                .file_name()
-                .map_or(Cow::Borrowed(""), |name| name.to_string_lossy())
+            self.0.name.to_string_lossy()
         }
     }
 
     impl Folder {
+        /// The workspace root. A link at the root itself is followed, as the
+        /// workspace path names it.
         pub(in super::super) fn root(path: &std::path::Path) -> io::Result<Self> {
-            Ok(Self(std::rc::Rc::new(path.to_path_buf())))
+            Ok(Self(Rc::new(in_place::root(path)?)))
         }
 
         pub(in super::super) fn open(&self, child: &Child) -> io::Result<Self> {
-            Ok(Self(std::rc::Rc::new(child.path.clone())))
+            Ok(Self(Rc::new(self.0.join(&child.0.name))))
         }
 
         pub(in super::super) fn list(
             &self,
         ) -> io::Result<impl Iterator<Item = io::Result<Child>> + use<>> {
-            Ok(std::fs::read_dir(&*self.0)?.map(|entry| {
-                entry.map(|entry| Child {
-                    path: entry.path(),
-                    entry: Some(entry),
-                })
-            }))
+            Ok(in_place::list(&self.0)?.map(|entry| entry.map(Child)))
         }
 
         pub(in super::super) fn kind(&self, child: &Child) -> io::Result<Kind> {
-            let kind = match &child.entry {
-                Some(entry) => entry.file_type()?,
-                None => std::fs::symlink_metadata(&child.path)?.file_type(),
-            };
-            Ok(if kind.is_dir() {
-                Kind::Folder
-            } else if kind.is_file() {
-                Kind::File
-            } else if kind.is_symlink() {
+            Ok(if child.0.link {
                 Kind::Symlink
+            } else if child.0.folder {
+                Kind::Folder
             } else {
-                Kind::Other
+                Kind::File
             })
         }
 
         pub(in super::super) fn facts(&self, child: &Child) -> io::Result<Facts> {
-            let metadata = match &child.entry {
-                Some(entry) => entry.metadata()?,
-                None => std::fs::symlink_metadata(&child.path)?,
-            };
-            Ok(facts(&metadata))
+            Ok(Facts {
+                symlink: child.0.link,
+                size: child.0.size,
+                modified: child.0.modified,
+            })
         }
 
         pub(in super::super) fn read(&self, child: &Child, cap: u64) -> Contents {
-            let digest = std::fs::File::open(&child.path)
-                .ok()
-                .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
-                .and_then(|file| super::digest(file, cap));
-            Contents {
-                facts: None,
-                digest,
+            let opened = in_place::open_file(&self.0.join(&child.0.name))
+                .and_then(|file| Ok((file.metadata()?, file)));
+            match opened {
+                Ok((metadata, file)) if metadata.is_file() => {
+                    let facts = facts(&metadata);
+                    let digest = (facts.size <= cap)
+                        .then(|| super::digest(file, cap))
+                        .flatten();
+                    Contents {
+                        facts: Some(facts),
+                        digest,
+                    }
+                }
+                _ => Contents {
+                    facts: None,
+                    digest: None,
+                },
             }
         }
 
+        /// `.dohc/visibility.toml`, with the folder that holds it, or the
+        /// facts of a `.dohc` that isn't a folder. Neither is followed.
         pub(in super::super) fn policy(&self) -> io::Result<(Facts, Option<(Self, Child)>)> {
             let dohc = self.0.join(".dohc");
-            let parent = std::fs::symlink_metadata(&dohc)?;
-            if !parent.is_dir() || parent.file_type().is_symlink() {
+            let parent = in_place::open_entry(&dohc)?.metadata()?;
+            if !parent.is_dir() {
                 // A link or file in its place still changes the policy
                 // verdict, so its own facts are listed.
                 return Ok((facts(&parent), None));
             }
+            // Tests swap `.dohc` here, after it opened and before its file is read.
             super::super::before_open(".dohc");
-            let child = Child {
-                path: dohc.join("visibility.toml"),
-                entry: None,
-            };
-            let facts = facts(&std::fs::symlink_metadata(&child.path)?);
-            Ok((facts, Some((Self(std::rc::Rc::new(dohc)), child))))
+            let folder = Self(Rc::new(dohc));
+            let metadata = in_place::open_entry(&folder.0.join("visibility.toml"))?.metadata()?;
+            let child = Child(Entry {
+                name: "visibility.toml".into(),
+                folder: metadata.is_dir(),
+                link: metadata.is_symlink(),
+                size: metadata.len(),
+                modified: metadata.modified().ok(),
+            });
+            Ok((facts(&metadata), Some((folder, child))))
         }
     }
 
     fn facts(metadata: &std::fs::Metadata) -> Facts {
         Facts {
-            symlink: metadata.file_type().is_symlink(),
+            symlink: metadata.is_symlink(),
             size: metadata.len(),
             modified: metadata.modified().ok(),
         }
