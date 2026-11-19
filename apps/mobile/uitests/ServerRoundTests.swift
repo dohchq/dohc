@@ -425,4 +425,53 @@ final class ServerRoundTests: XCTestCase {
     reread(app, value)
     only(value, "The server should have \(value) again")
   }
+
+  // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the Collection test9 reads, whose first table takes a new
+  // record with its defaults, as a table made on the desktop does, holds fewer than 50 records, so a new one reads back
+  // on the first page, and shows first a text field an edit changes. Adds a record, names it, finds it after a pull to
+  // refresh, deletes it, and finds it gone after another.
+  @MainActor
+  func test12_addsAndDeletesARecord() throws {
+    let name = try need("DOHC_SERVER_COLLECTION")
+    let value = try need("DOHC_SERVER_RECORD")
+    let added = "Added on the phone \(UUID().uuidString.prefix(8))"
+    let app = XCUIApplication()
+    app.launch()
+    tab(app, "Home")
+    let collection = app.buttons[name]
+    XCTAssertTrue(collection.waitForExistence(timeout: 30), "Home should list the Collection \(name)")
+    collection.tap()
+    let seeded = NSPredicate(format: "label CONTAINS %@", value)
+    XCTAssertTrue(app.buttons.matching(seeded).firstMatch.waitForExistence(timeout: 30), "\(name) should show its records")
+    let new = app.navigationBars.buttons["New record"]
+    XCTAssertTrue(new.waitForExistence(timeout: 10), "\(name) should offer New record")
+    new.tap()
+
+    // The new record opens on its own screen; its first field names it.
+    let first = app.otherElements.matching(identifier: "record-field").firstMatch
+    XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s")
+    edit(app, first, typing: added)
+    let named = app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
+    XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
+    settled(app, named, "Naming the new record")
+    reread(app, added)
+    XCTAssertTrue(named.waitForExistence(timeout: 10), "The server should have the new record named \(added)")
+
+    let delete = app.navigationBars.buttons["Delete record"]
+    XCTAssertTrue(delete.waitForExistence(timeout: 10), "The record should offer Delete")
+    delete.tap()
+    let sheet = app.sheets.firstMatch
+    XCTAssertTrue(sheet.waitForExistence(timeout: 10), "Delete should ask first")
+    sheet.buttons["Delete record"].tap()
+    // The record's screen leaves once it's deleted, and the list drops its row.
+    let list = app.scrollViews.containing(seeded).firstMatch
+    XCTAssertTrue(list.waitForExistence(timeout: 60), "The deleted record's screen should leave within 60 s")
+    let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
+    XCTAssertTrue(row.waitForNonExistence(timeout: 10), "The list should drop the deleted record")
+    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
+    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
+    XCTAssertTrue(app.buttons.matching(seeded).firstMatch.waitForExistence(timeout: 30), "The records read again should show \(value)")
+    XCTAssertFalse(row.exists, "The server should no longer have the record named \(added)")
+  }
 }

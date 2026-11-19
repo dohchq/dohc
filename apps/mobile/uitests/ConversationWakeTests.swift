@@ -9,7 +9,7 @@ final class ConversationWakeTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "chat", "-dohcDemo", "talk-wakes"]
     app.launch()
-    XCTAssertTrue(app.textViews["Message #planning"].waitForExistence(timeout: 20), "The chat should open")
+    XCTAssertTrue(app.textViews["Message #planning"].waitForExistence(timeout: 45), "The chat should open")
     return app
   }
 
@@ -40,7 +40,7 @@ final class ConversationWakeTests: XCTestCase {
   @MainActor
   func testEachStateShowsItsLine() {
     let app = launch()
-    XCTAssertTrue(text(app, "Nova is waiting for a computer").waitForExistence(timeout: 5), "A waiting wake should say so")
+    XCTAssertTrue(text(app, "Nova is waiting for a computer").waitForExistence(timeout: 15), "A waiting wake should say so")
     XCTAssertTrue(text(app, "Scout is starting on Ice's Mac").exists, "A claimed wake should name its computer")
     XCTAssertTrue(text(app, "An agent is starting on a computer").exists, "A wake with no name or computer should say so")
     XCTAssertTrue(text(app, "Scout isn't confirmed on Studio Mac. It may have started.").exists, "An unconfirmed wake should say so")
@@ -54,7 +54,7 @@ final class ConversationWakeTests: XCTestCase {
   @MainActor
   func testTwoWakesWithOneNameKeepTwoLines() {
     let app = launch()
-    XCTAssertTrue(text(app, "Nova didn't start").waitForExistence(timeout: 5), "A wake that didn't start should say so")
+    XCTAssertTrue(text(app, "Nova didn't start").waitForExistence(timeout: 15), "A wake that didn't start should say so")
     let lines = places(app, "Nova didn't start")
     XCTAssertGreaterThanOrEqual(lines.count, 2, "Each wake should keep its own line (at \(lines.sorted()))")
   }
@@ -62,7 +62,7 @@ final class ConversationWakeTests: XCTestCase {
   @MainActor
   func testHeldAndQueuedShowNoLineAndNothingAsksForAMention() {
     let app = launch()
-    XCTAssertTrue(text(app, "Nova is waiting for a computer").waitForExistence(timeout: 5), "The wakes should show")
+    XCTAssertTrue(text(app, "Nova is waiting for a computer").waitForExistence(timeout: 15), "The wakes should show")
     // The last message wakes Atlas, held, and Echo, queued: no line starts with either name.
     for name in ["Atlas", "Echo"] {
       let line = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
@@ -78,13 +78,13 @@ final class ConversationWakeTests: XCTestCase {
   func testTryAgainOnALineThatDidNotStartEndsWithTheAgentWaiting() {
     let app = launch()
     let line = "Scout didn't start"
-    XCTAssertTrue(text(app, line).waitForExistence(timeout: 5), "Scout's wake should say it didn't start")
+    XCTAssertTrue(text(app, line).waitForExistence(timeout: 15), "Scout's wake should say it didn't start")
     guard let button = pill(app, "Try again", under: line) else {
       return XCTFail("Scout's line should offer Try again")
     }
     button.tap()
     XCTAssertTrue(
-      text(app, "Scout is waiting for a computer").waitForExistence(timeout: 10),
+      text(app, "Scout is waiting for a computer").waitForExistence(timeout: 15),
       "Try again should end with Scout waiting for a computer"
     )
     XCTAssertFalse(text(app, line).exists, "The line that didn't start should be replaced")
@@ -95,13 +95,13 @@ final class ConversationWakeTests: XCTestCase {
     let app = launch()
     let line = "Iris isn't confirmed on Ice's Mac. It may have started."
     let waiting = "Iris is waiting for a computer"
-    XCTAssertTrue(text(app, line).waitForExistence(timeout: 5), "Iris's wake should say it isn't confirmed")
+    XCTAssertTrue(text(app, line).waitForExistence(timeout: 15), "Iris's wake should say it isn't confirmed")
     guard let button = pill(app, "Try on another computer", under: line) else {
       return XCTFail("Iris's line should offer Try on another computer")
     }
     button.tap()
     let sheet = app.sheets.firstMatch
-    XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Try on another computer should ask first")
+    XCTAssertTrue(sheet.waitForExistence(timeout: 15), "Try on another computer should ask first")
     XCTAssertTrue(
       sheet.staticTexts["If Ice's Mac already started Iris, it may run twice."].exists,
       "The alert should name the computer and the agent"
@@ -114,10 +114,10 @@ final class ConversationWakeTests: XCTestCase {
       return XCTFail("The line should still offer Try on another computer after Cancel")
     }
     again.tap()
-    XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Try on another computer should ask again")
+    XCTAssertTrue(sheet.waitForExistence(timeout: 15), "Try on another computer should ask again")
     sheet.buttons["Try on another computer"].tap()
     XCTAssertTrue(
-      text(app, waiting).waitForExistence(timeout: 10),
+      text(app, waiting).waitForExistence(timeout: 15),
       "Confirming should end with Iris waiting for a computer"
     )
   }

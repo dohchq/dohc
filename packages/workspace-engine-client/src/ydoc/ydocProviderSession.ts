@@ -168,8 +168,13 @@ export interface EngineYdocProviderSession {
   resync?(): Promise<void>;
   // Runs `leave` between this document's edits, given the edits the engine
   // has not acknowledged. Once it succeeds, `onLineageReplaced` announces the
-  // engine's state in place of this document.
-  leaveLiveEditing?<T>(leave: (unsent: Uint8Array) => Promise<T>): Promise<T>;
+  // engine's state in place of this document. A caller that queues edits
+  // in front of this session can hand those that arrived while `leave` ran,
+  // which no longer reach the engine, to `late`.
+  leaveLiveEditing?<T>(
+    leave: (unsent: Uint8Array) => Promise<T>,
+    late?: (edits: Uint8Array) => void,
+  ): Promise<T>;
   adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
   settleNow(options?: {
     summary?: string;

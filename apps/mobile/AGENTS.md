@@ -43,7 +43,7 @@ Any other build signs in to a server first (`src/account/Connect.tsx`), then rea
 Search shows "Not built yet".
 
 Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
-Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, and a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`).
+Keep every write control behind `phoneWrites`: the composer, New post, Reply, reactions, a question's or poll's answers, Send and Discard on outbox messages and reactions, an app's Approve and Open, editing a page, a Collection record's field editors and Undo (`collectionEdit`, `src/collections/FieldEditor.tsx`), and a Collection's New record and Delete (`collectionCreate`, `collectionDelete`).
 An app's Revoke is the one exception: an approval holds on every phone of the account, so every phone shows its way back (`src/apps/AppReview.tsx`).
 Apps open only on iOS (`src/apps/canOpenApps.ts`): on Android, react-native-webview doesn't ask about every frame's loads and saves downloads, so the runner's rules don't hold.
 A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.

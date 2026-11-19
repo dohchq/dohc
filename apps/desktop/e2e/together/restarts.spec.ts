@@ -77,7 +77,15 @@ test("the relay is killed and started again while two people type", async ({ sta
         timeout: 90_000,
       })
       .toBe(true);
-  await both("AFTER");
+  // Neither person clicks into the note again: their next word goes where they left off.
+  for (const [person, word] of [
+    [one, "ONEAFTER"],
+    [two, "TWOAFTER"],
+  ] as const) {
+    await type(person, ` ${word}`);
+    await expect(editor(person.page), `${person.name}'s page dropped ${word}`).toContainText(word);
+    words.push(word);
+  }
   await expect(editor(one.page)).toContainText("TWOAFTER", { timeout: 60_000 });
   await expect(editor(two.page)).toContainText("ONEAFTER", { timeout: 60_000 });
 
