@@ -404,24 +404,31 @@ impl Drop for NativeWatcher {
 /// a fake worker, without a real `notify` backend.
 async fn await_ready_with_deadline(
     deadline: Duration,
-    ready_rx: tokio::sync::oneshot::Receiver<Result<(), FilesError>>,
+    mut ready_rx: tokio::sync::oneshot::Receiver<Result<(), FilesError>>,
     worker: &mut Option<JoinHandle<()>>,
     stop_tx: &SyncSender<ThreadMessage>,
     unavailable: &AtomicBool,
 ) -> Result<(), FilesError> {
-    match tokio::time::timeout(deadline, ready_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(err))) => Err(err),
-        Ok(Err(_)) => Err(FilesError::WatcherUnavailable {
+    let answer = match tokio::time::timeout(deadline, &mut ready_rx).await {
+        Ok(answer) => Some(answer),
+        Err(_) => {
+            ready_rx.close();
+            ready_rx.try_recv().ok().map(Ok)
+        }
+    };
+    match answer {
+        Some(Ok(Ok(()))) => Ok(()),
+        Some(Ok(Err(err))) => Err(err),
+        Some(Err(_)) => Err(FilesError::WatcherUnavailable {
             reason: "watcher thread ended during startup",
         }),
-        Err(_) => {
+        None => {
             // The worker has not signaled readiness within the deadline.
             // `notify`'s attach call is not cancellable, so it may genuinely
             // be stuck in a native OS call; synchronously joining it here
             // would risk hanging this caller too. Signal Stop (so if/when the
             // thread does reach its command loop it exits immediately -- it
-            // also self-exits via the dropped `ready` receiver before the
+            // also self-exits via the closed `ready` receiver before the
             // loop), then detach the join onto a background reaper: this
             // caller gets a bounded, observable failure now, and the worker is
             // still eventually reclaimed, rather than a synchronous hang OR a
