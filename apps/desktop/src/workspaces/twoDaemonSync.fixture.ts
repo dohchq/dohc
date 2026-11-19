@@ -1012,6 +1012,7 @@ async function runRenameRepro(
       listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
+      receivedSharesChanged: unexpected,
       reconcileReceivedShares: unexpected,
     });
     registerOperations(
@@ -2124,6 +2125,7 @@ async function runDeleteRepro(
       listOwnerLiveRecoveryPackages: unexpected,
       sendRendererActivity: () => {},
       sharesChanged: unexpected,
+      receivedSharesChanged: unexpected,
       reconcileReceivedShares: unexpected,
     });
     registerOperations(

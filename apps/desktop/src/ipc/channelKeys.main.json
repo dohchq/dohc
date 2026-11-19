@@ -107,6 +107,7 @@
   "installUpdate",
   "joinSharedChannel",
   "leaveDm",
+  "leaveRelayShare",
   "leaveSharedChannel",
   "listAutomationButtons",
   "listAutomationGroups",

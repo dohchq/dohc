@@ -49,6 +49,8 @@ import {
   ListRelaySharesResult,
   GetRelayReceivedSharePayload,
   GetRelayReceivedShareResult,
+  LeaveRelaySharePayload,
+  LeaveRelayShareResult,
   RevokeRelaySharePayload,
   RevokeRelayShareResult,
   UndoRelaySharePayload,
@@ -413,6 +415,14 @@ export const relayShareOperations = {
     guard: "trusted-sender",
     payload: RevokeRelaySharePayload,
     result: RevokeRelayShareResult,
+  },
+  leaveRelayShare: {
+    capabilityId: "share.leave",
+    channel: "desktop:leave-relay-share",
+    scope: "device",
+    guard: "trusted-sender",
+    payload: LeaveRelaySharePayload,
+    result: LeaveRelayShareResult,
   },
   undoRelayShare: {
     capabilityId: "share.revoke.undo",

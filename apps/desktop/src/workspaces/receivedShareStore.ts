@@ -193,7 +193,13 @@ export function createReceivedShareAcquisition(dependencies: {
 }) {
   const nowMs = dependencies.nowMs ?? (() => performance.now());
   const wallNowMs = dependencies.wallNowMs ?? Date.now;
-  let pending: { scope: ReceivedScope; token: symbol; promise: Promise<void> } | null = null;
+  let pending: {
+    scope: ReceivedScope;
+    token: symbol;
+    promise: Promise<void>;
+    changesHere: number;
+  } | null = null;
+  let changesHere = 0;
   let attempt: { scope: ReceivedScope; atMs: number } | null = null;
   let live: {
     scope: ReceivedScope;
@@ -215,9 +221,14 @@ export function createReceivedShareAcquisition(dependencies: {
     pending = null;
     failed = false;
   }
-  return {
+  const acquisition = {
     invalidate(): void {
       invalidation += 1;
+    },
+    changedHere(): void {
+      invalidation += 1;
+      changesHere += 1;
+      attempt = null;
     },
     retire,
     credentialsChanged(current: ReceivedScope | null, settled = true): void {
@@ -260,7 +271,11 @@ export function createReceivedShareAcquisition(dependencies: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult["status"]> {
       const scope = dependencies.scope();
       if (!scope) return Promise.resolve("unavailable");
-      if (pending && same(scope, pending.scope)) return pending.promise.then(() => "joined");
+      if (pending && same(scope, pending.scope)) {
+        return pending.changesHere === changesHere
+          ? pending.promise.then(() => "joined")
+          : pending.promise.then(() => acquisition.refresh());
+      }
       if (attempt && same(scope, attempt.scope) && nowMs() - attempt.atMs < 60_000)
         return Promise.resolve("paced");
       attempt = { scope, atMs: nowMs() };
@@ -302,8 +317,9 @@ export function createReceivedShareAcquisition(dependencies: {
           if (pending?.token === token) pending = null;
         }
       })();
-      pending = { scope, token, promise };
+      pending = { scope, token, promise, changesHere };
       return promise.then(() => "requested");
     },
   };
+  return acquisition;
 }

@@ -174,6 +174,7 @@ export function createRealShareMountHarness(input: {
     listOwnerLiveRecoveryPackages: unexpected,
     sendRendererActivity: () => {},
     sharesChanged: unexpected,
+    receivedSharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
   registerOperations(

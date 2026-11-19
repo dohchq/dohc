@@ -2364,6 +2364,9 @@ const SHARING_ACTIONS: SharingActions = {
   end: noop,
   mount: noop,
   unmount: noop,
+  startLeave: noop,
+  leave: noop,
+  clear: noop,
   copy: async () => null,
   dismissSkips: noop,
   showSkips: noop,
@@ -2397,7 +2400,7 @@ function SharingSpecimen(props: {
         notSentWhileOpen={[]}
         invitations
         confirmShareId={props.confirmShareId ?? null}
-        busyShareId={null}
+        busyShareIds={new Set()}
         actions={SHARING_ACTIONS}
       />
     </div>
