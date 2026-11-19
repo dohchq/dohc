@@ -39,7 +39,10 @@ type InvitedPerson = {
   name: string;
   email: string | null;
   access: ShareAccess | null;
+  generation: number | null;
 };
+
+type ChangedAccess = { access: ShareAccess; generation: number };
 
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
@@ -174,6 +177,7 @@ function useInvitedPeople(input: {
             name: row.recipientEmail ?? row.recipientUserId ?? "Unnamed person",
             email: row.recipientEmail,
             access: isShareAccess(row.access) ? row.access : null,
+            generation: row.generation,
           });
         }
         if (answer.nextCursor === null) break;
@@ -230,7 +234,7 @@ export function RelayShareDialog(props: {
   const [invitedRevision, setInvitedRevision] = useState(0);
   const [changedAccess, setChangedAccess] = useState<{
     scope: string;
-    byGrant: Readonly<Record<string, ShareAccess>>;
+    byGrant: Readonly<Record<string, ChangedAccess>>;
   }>({ scope: linkPane.scope, byGrant: {} });
   const accessNow = changedAccess.scope === linkPane.scope ? changedAccess.byGrant : {};
   const invited = useInvitedPeople({
@@ -245,8 +249,13 @@ export function RelayShareDialog(props: {
   useEffect(() => {
     setChangedAccess((current) => {
       const kept = Object.entries(current.byGrant).filter(
-        ([grantId]) =>
-          !listedNow.some((person) => person.grantId === grantId && person.access !== null),
+        ([grantId, changed]) =>
+          !listedNow.some(
+            (person) =>
+              person.grantId === grantId &&
+              person.generation !== null &&
+              person.generation >= changed.generation,
+          ),
       );
       return kept.length === Object.keys(current.byGrant).length
         ? current
@@ -343,7 +352,7 @@ export function RelayShareDialog(props: {
                     scope,
                     people: [
                       ...(current.scope === scope ? current.people : []),
-                      { ...person, email: person.name },
+                      { ...person, email: person.name, generation: 1 },
                     ],
                   }));
                   setInvitedRevision((revision) => revision + 1);
@@ -370,15 +379,18 @@ export function RelayShareDialog(props: {
                     key={person.grantId}
                     workspaceId={props.workspaceId}
                     target={props.target}
-                    person={{ ...person, access: accessNow[person.grantId] ?? person.access }}
+                    person={{
+                      ...person,
+                      access: accessNow[person.grantId]?.access ?? person.access,
+                    }}
                     reload={loadInvited}
-                    onAccessChanged={(access) => {
+                    onAccessChanged={(changed) => {
                       const scope = linkPane.scope;
                       setChangedAccess((current) => ({
                         scope,
                         byGrant: {
                           ...(current.scope === scope ? current.byGrant : {}),
-                          [person.grantId]: access,
+                          [person.grantId]: changed,
                         },
                       }));
                       setInvitedRevision((revision) => revision + 1);
@@ -410,7 +422,7 @@ function InvitedPersonRow(props: {
   target: RelayShareTarget;
   person: InvitedPerson;
   reload: () => Promise<unknown>;
-  onAccessChanged: (access: ShareAccess) => void;
+  onAccessChanged: (changed: ChangedAccess) => void;
   onOpenSharing?: () => void;
 }) {
   const { person, target, workspaceId } = props;
@@ -459,7 +471,7 @@ function InvitedPersonRow(props: {
         access,
       });
       if (!current()) return;
-      props.onAccessChanged(changed.access);
+      props.onAccessChanged({ access: changed.access, generation: changed.generation });
       setAsked(null);
       automations.forget();
     } catch (cause) {
