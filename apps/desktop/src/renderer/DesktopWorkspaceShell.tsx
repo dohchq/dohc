@@ -8438,6 +8438,13 @@ export function DesktopWorkspaceShell(props: {
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
+                                  onShare: setShareTarget,
+                                  onOpenShare: ({ shareId, shareCode, liveEditing }) =>
+                                    setOpenShare({
+                                      resolvedShare: { shareId, shareCode },
+                                      liveEditing,
+                                      path: null,
+                                    }),
                                 }}
                                 selectedAppRoot={selectedAppRoot}
                                 openAppTab={openAppTab}

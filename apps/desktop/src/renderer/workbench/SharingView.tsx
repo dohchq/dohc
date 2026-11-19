@@ -1,36 +1,52 @@
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
+  ChevronRight,
   File,
   FileDiff,
   FolderInput,
   Layers,
-  Link,
   MessageSquare,
   TriangleAlert,
 } from "lucide-react";
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
-  type Ref,
 } from "react";
-import type { ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type { ShareAccess, ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { accessOptions } from "../EmailShareForm";
 import { ipcErrorMessage } from "../ipcError";
+import { opensForLiveEditing } from "../OpenSharedView";
+import type { RelayShareTarget } from "../RelayShareDialog";
+import { SHARE_ACCESS_WORDS, ShareAccessMenu, SharePersonRow } from "../shareAccess";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { DangerButton, EmptyState, Pill, RetryRow, SecondaryButton } from "../ui/controls";
-import { CopyButton } from "../ui/CopyButton";
+import { ShellErrorReporter } from "../shell/useShellError";
+import {
+  DangerButton,
+  EmptyState,
+  FieldError,
+  GhostButton,
+  Pill,
+  RetryRow,
+  SecondaryButton,
+} from "../ui/controls";
+import { COPY_WORDS, createCopy, type CopyFeedback, type CopySecret } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
+import { Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { NameLine } from "../ui/NameLine";
+import { useRadioGroup } from "../ui/SegmentedControl";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { notSentWords } from "../notSentWords";
 import { useRequestSequence } from "../useRequestSequence";
@@ -46,13 +62,15 @@ import {
   type AccessView,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
+import { neutralPresentation } from "./actorPresentation";
+import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { EMPTY_ART } from "./EmptyArt";
 import { shareSubject } from "./shareSubject";
 
-// The Sharing view: the shares this workspace granted, and the shares sent
-// to the person's account. Each list is pinned to what it covers and when
-// main checked it, so an empty list means "none within this coverage", never
-// "nothing is shared". Its rows carry every action on a share.
+// The Sharing view: what this workspace shares, by what is shared, and what
+// was shared with the person's account, by who shared it. One list shows at
+// a time. Each is pinned to what it covers and when main checked it, so an
+// empty list means "none within this coverage", never "nothing is shared".
 
 export type SharingLane = "granted" | "received";
 export type ShareMount = NonNullable<WorkspaceSummary["shareMounts"]>[number];
@@ -61,6 +79,8 @@ export type WaitingChanges = { count: number; senders: string[]; oldestProposalI
 // A row, or a lane's heading when no share is named, to focus on opening.
 export type SharingFocus = { lane: SharingLane; shareId: string | null };
 export type CopyWhat = "code" | "invitation";
+export type ChangedAccess = { access: ShareAccess; generation: number };
+export type OpenedShare = { shareId: string; shareCode: string; liveEditing: boolean };
 // Whether a mount's skipped changes show, against what its record says:
 // shown on request, or hidden up to the generation a Dismiss covered.
 type SkipState = "shown" | number;
@@ -152,25 +172,38 @@ type LeveledRow = AccessShareRow & { access: Level };
 // What a level lets a person do, widest first: the app's three verbs.
 const VERBS: readonly string[] = ["edit", "comment", "view"];
 const verbOf = (access: Level) => LEVELS[access].label.toLowerCase();
+const shareAccessOf = (access: Level): ShareAccess =>
+  access === "read-only" ? "view" : access === "read-write" ? "edit" : access;
+const levelWords = (access: Level) => SHARE_ACCESS_WORDS[shareAccessOf(access)];
 
-// Who can do what, as a row's second line says it, wrapped whole. `spoken`
-// is how a row's name reads it, when that differs. The title names each.
-type Who = { text: string; title: string; spoken?: string };
-const sentenceOf = (who: Who) => who.spoken ?? who.text;
-
-// How many people have each level, widest first: "1 person can edit", "2 can view".
-function countClauses(people: readonly LeveledRow[]): string[] {
-  return VERBS.map((verb) => ({
-    verb,
-    count: people.filter((row) => verbOf(row.access) === verb).length,
-  }))
-    .filter(({ count }) => count > 0)
-    .map(({ verb, count }, index) =>
-      index > 0
-        ? `${count} can ${verb}`
-        : `${count} ${count === 1 ? "person" : "people"} can ${verb}`,
-    );
+function filesOf(row: AccessShareRow) {
+  const selector = row.selector;
+  return selector !== null && selector.kind === undefined ? selector : null;
 }
+
+export function sharedItemKey(row: AccessShareRow): string {
+  const selector = row.selector;
+  if (!selector) return `share\0${row.shareId}`;
+  if (selector.kind === "chat" || selector.kind === "group")
+    return `${selector.kind}\0${selector.channelWireId}`;
+  return ["files", selector.versionId ?? "", ...[...new Set(selector.paths)].sort()].join("\0");
+}
+
+export const endedGroupKey = (lane: SharingLane) => `ended\0${lane}`;
+export const endConfirmKey = (shareId: string) => `end\0${shareId}`;
+const removeConfirmKey = (grantId: string) => `remove\0${grantId}`;
+const leaveConfirmKey = (shareId: string) => `leave\0${shareId}`;
+
+function shareTargetOf(row: AccessShareRow): RelayShareTarget | null {
+  const files = filesOf(row);
+  if (!files) return null;
+  const [first, ...rest] = files.paths;
+  if (first === undefined) return { kind: "version", versionId: files.versionId ?? "main" };
+  return files.versionId === null ? { kind: "paths", paths: [first, ...rest] } : null;
+}
+
+// Who can do what, as a row's second line says it, wrapped whole. The title names each.
+type Who = { text: string; title: string };
 
 // How many links have each level, widest first: "1 link lets anyone edit".
 function linkClauses(links: readonly LeveledRow[]): string[] {
@@ -183,45 +216,32 @@ function linkClauses(links: readonly LeveledRow[]): string[] {
     .map(({ verb, count }) => `${count} ${count === 1 ? "link lets" : "links let"} anyone ${verb}`);
 }
 
-// A share's live grants, widest level first. Anyone with a link has the
-// widest link's level, so only people above it are counted beside it.
-// Without a link, one person goes by name and several by count. The title
-// names each.
-function grantedWho(group: ShareGroup): Who | null {
-  const live = group.rows.filter(
-    (row): row is LeveledRow => row.status === "active" && row.access !== null,
-  );
-  const links = live
-    .filter((row) => row.via === "link")
-    .sort((a, b) => VERBS.indexOf(verbOf(a.access)) - VERBS.indexOf(verbOf(b.access)));
-  const people = live.filter((row) => row.via !== "link");
+const widestFirst = (a: LeveledRow, b: LeveledRow) =>
+  VERBS.indexOf(verbOf(a.access)) - VERBS.indexOf(verbOf(b.access));
+
+function itemWho(people: readonly LeveledRow[], links: readonly LeveledRow[]): Who | null {
+  const names = [...new Set(people.map(recipientOf))];
   const title = [
     ...(links.length > 0 ? linkClauses(links) : []),
     ...people.map((row) => `${recipientOf(row)} can ${verbOf(row.access)}`),
   ].join("\n");
   const [link] = links;
-  if (link) {
-    const linkVerb = verbOf(link.access);
-    const anyone = `with ${links.length === 1 ? "the" : "a"} link can ${linkVerb}`;
-    const above = people.filter(
-      (row) => VERBS.indexOf(verbOf(row.access)) < VERBS.indexOf(linkVerb),
-    );
-    const clauses = countClauses(above);
+  const [widest] = people.toSorted(widestFirst);
+  if (!link) {
+    if (!widest) return null;
     return {
-      text: clauses.length === 0 ? `Anyone ${anyone}` : [...clauses, `anyone ${anyone}`].join(", "),
+      text:
+        names.length === 1 ? `${names[0]} can ${verbOf(widest.access)}` : `${names.length} people`,
       title,
     };
   }
-  const [only] = people;
-  if (!only) return null;
-  if (people.length === 1)
-    return { text: `${recipientOf(only)} can ${verbOf(only.access)}`, title };
-  return { text: countClauses(people).join(", "), title };
-}
-
-// A share sent to the account, by its sender alone.
-function fromWho(sender: string, full: string): Who {
-  return { text: `From ${sender}`, title: `From ${full}`, spoken: `from ${sender}` };
+  const article = links.length === 1 ? "the" : "a";
+  if (names.length === 0)
+    return { text: `Anyone with ${article} link can ${verbOf(link.access)}`, title };
+  return {
+    text: `${names.length} ${names.length === 1 ? "person" : "people"} and anyone with ${article} link`,
+    title,
+  };
 }
 
 /** The names a list shows more than once: those rows show their folder too. */
@@ -273,39 +293,37 @@ function recipientsOf(group: ShareGroup): string {
 function endable(group: ShareGroup): boolean {
   if (!group.rows.every((row) => row.via === "named")) return false;
   if (group.rows.some((row) => row.status === "damaged")) return true;
-  const selector = liveGrant(group).selector;
+  return filesOf(liveGrant(group)) !== null && group.rows.some((row) => row.status === "active");
+}
+
+// A named person's browser invitation, where the server makes one: a live
+// edit of files (`isLiveEditShareSelector` on the relay).
+function invitable(row: AccessShareRow): boolean {
+  const files = filesOf(row);
   return (
-    !!selector && selector.kind === undefined && group.rows.some((row) => row.status === "active")
+    row.status === "active" &&
+    row.via === "named" &&
+    row.access === "edit" &&
+    files !== null &&
+    files.versionId === null &&
+    files.paths.length > 0
   );
 }
 
-// What a row can hand out: the share's code from a live named or dependent
-// grant, and a named person's browser invitation where the server makes one
-// (a live edit of files, `isLiveEditShareSelector` on the relay). A link's
-// grant and a damaged one have nothing to copy.
-function copiesOf(group: ShareGroup): {
-  code: AccessShareRow | null;
-  invitation: AccessShareRow | null;
-} {
-  const files = group.rows.filter(
-    (row) =>
-      row.status === "active" &&
-      row.selector !== null &&
-      row.selector.kind === undefined &&
-      (row.via === "named" || row.via === "dependent"),
+function copyable(row: AccessShareRow): boolean {
+  return (
+    row.status === "active" &&
+    filesOf(row) !== null &&
+    (row.via === "named" || row.via === "dependent")
   );
-  const named = files.filter((row) => row.via === "named");
-  // One invitation per person: a row that names several cannot say whose.
-  const only = named.length === 1 ? named[0]! : null;
-  const selector = only?.selector;
-  const liveEdit =
-    only?.access === "edit" &&
-    !!selector &&
-    selector.kind === undefined &&
-    selector.versionId === null &&
-    selector.paths.length > 0;
-  return { code: files[0] ?? null, invitation: liveEdit ? only : null };
 }
+
+function retunable(row: LeveledRow): row is LeveledRow & { access: ShareAccess } {
+  return row.via === "named" && filesOf(row) !== null && row.access in SHARE_ACCESS_WORDS;
+}
+
+const listedSince = (row: AccessShareRow, changed: ChangedAccess) =>
+  row.generation !== null && row.generation >= changed.generation;
 
 // The plain question names who loses the share; with changes waiting, it
 // names who sent them.
@@ -322,22 +340,215 @@ function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined)
     : `End this share and decline ${waiting.count} changes ${who} sent? Undo restores the share, not the declined changes.`;
 }
 
-type Word = "damaged" | "ended" | "removed";
-const WORD_SHOWN: Record<Word, string> = { damaged: "Damaged", ended: "Ended", removed: "Removed" };
+function waitingFor(
+  shares: readonly ShareGroup[],
+  waiting: ReadonlyMap<string, WaitingChanges>,
+): WaitingChanges | undefined {
+  const found = shares.flatMap((share) => waiting.get(share.shareId) ?? []);
+  const [first] = found;
+  if (!first) return undefined;
+  return {
+    count: found.reduce((count, each) => count + each.count, 0),
+    senders: [...new Set(found.flatMap((each) => each.senders))],
+    oldestProposalId: first.oldestProposalId,
+  };
+}
 
-function StatusPill(props: { word: Word }) {
+type GrantedItem = {
+  key: string;
+  shares: ShareGroup[];
+  first: AccessShareRow;
+  subject: Subject;
+  name: string;
+  people: LeveledRow[];
+  links: LeveledRow[];
+  waiting: WaitingChanges | undefined;
+};
+type EndedShare = { group: ShareGroup; first: AccessShareRow; subject: Subject; name: string };
+
+function listGranted(
+  rows: AccessAnswer["rows"],
+  waiting: ReadonlyMap<string, WaitingChanges>,
+): { items: GrantedItem[]; ended: EndedShare[] } {
+  const byKey = new Map<string, ShareGroup[]>();
+  const over: ShareGroup[] = [];
+  for (const group of groupShares(rows)) {
+    if (!group.rows.some((row) => row.status === "active")) {
+      over.push(group);
+      continue;
+    }
+    const key = sharedItemKey(liveGrant(group));
+    byKey.set(key, [...(byKey.get(key) ?? []), group]);
+  }
+  const drafts = [...byKey].map(([key, shares]) => {
+    const first = liveGrant(shares[0]!);
+    const live = shares
+      .flatMap((share) => share.rows)
+      .filter((row): row is LeveledRow => row.status === "active" && row.access !== null);
+    return {
+      key,
+      shares,
+      first,
+      subject: subjectOf(first),
+      people: live.filter((row) => row.via !== "link"),
+      links: live.filter((row) => row.via === "link").sort(widestFirst),
+      waiting: waitingFor(shares, waiting),
+    };
+  });
+  const repeated = repeatedNames(drafts.map((draft) => draft.subject.name));
+  const items = drafts
+    .map((draft) => ({ ...draft, name: shownName(draft.subject, repeated) }))
+    .sort(
+      (a, b) =>
+        Number(b.waiting !== undefined) - Number(a.waiting !== undefined) ||
+        a.name.localeCompare(b.name),
+    );
+  const endedDrafts = over.map((group) => {
+    const first = liveGrant(group);
+    return { group, first, subject: subjectOf(first) };
+  });
+  const endedRepeated = repeatedNames(endedDrafts.map((draft) => draft.subject.name));
+  return {
+    items,
+    ended: endedDrafts.map((draft) => ({
+      ...draft,
+      name: shownName(draft.subject, endedRepeated),
+    })),
+  };
+}
+
+type ReceivedEntry = {
+  key: string;
+  shareId: string;
+  row: AccessShareRow | null;
+  mount: ShareMount | undefined;
+  subject: Subject;
+  sender: { key: string; name: string; heading: string; full: string };
+  status: string;
+  active: boolean;
+  removed: boolean;
+  damaged: boolean;
+  ended: boolean;
+  files: boolean;
+};
+
+// A share sent to the account, or a mount the relay no longer lists (`row`
+// null). A mount with no live grant behind it reads as removed once the
+// whole listing was read.
+function receivedEntry(
+  row: AccessShareRow | null,
+  mount: ShareMount | undefined,
+  listed: boolean,
+): ReceivedEntry {
+  const shareId = row?.shareId ?? mount!.shareId;
+  const removed = row ? row.status === "removed" : listed;
+  const damaged = row ? row.status === "damaged" : mount?.damaged === true;
+  const active = row?.status === "active";
+  // A grant that no longer says what it covered goes by its folder's name.
+  const subject: Subject =
+    mount && !row?.selector
+      ? {
+          glyph: damaged ? (
+            <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
+          ) : (
+            <File size={15} aria-hidden className={GLYPH_CLASS} />
+          ),
+          name: mount.label,
+          folder: null,
+          title: `shared-with-me/${mount.label}`,
+        }
+      : subjectOf(row!);
+  const parts = shareSenderParts(row?.sharerName, row?.granterEmail ?? mount?.granterEmail);
+  const shown = parts.displayName ?? parts.full;
+  return {
+    key: row ? `${row.shareId}\0${row.grantId}` : `mount\0${mount!.shareId}`,
+    shareId,
+    row,
+    mount,
+    subject,
+    sender: {
+      key: (parts.address ?? parts.full).toLowerCase(),
+      name: shown,
+      heading: parts.address ? shown : `${shown[0]!.toUpperCase()}${shown.slice(1)}`,
+      full: parts.full,
+    },
+    status: row?.status ?? (damaged ? "damaged" : removed ? "removed" : "unlisted"),
+    active,
+    removed,
+    damaged,
+    ended: removed || (row !== null && !active && !damaged),
+    files: row !== null && filesOf(row) !== null,
+  };
+}
+
+const knownAnswer = (view: AccessView): AccessAnswer | null =>
+  view.status === "ready" &&
+  view.answer.freshness !== "unknown" &&
+  view.answer.coverage.kind !== "unavailable"
+    ? view.answer
+    : null;
+
+type SenderGroup = { sender: ReceivedEntry["sender"]; entries: ReceivedEntry[] };
+
+function listReceived(view: AccessView, mounts: readonly ShareMount[]) {
+  const known = knownAnswer(view);
+  const rows =
+    view.status === "ready"
+      ? view.answer.rows.filter((row): row is AccessShareRow => row.kind === "share")
+      : [];
+  // Only a whole listing can say the relay no longer lists a mount; a
+  // partial one may on a later page.
+  const whole = known?.nextCursor === null;
+  const entries = [
+    ...(known
+      ? rows.map((row) =>
+          receivedEntry(
+            row,
+            mounts.find((mount) => mount.shareId === row.shareId),
+            true,
+          ),
+        )
+      : []),
+    ...(view.status === "loading"
+      ? []
+      : mounts
+          .filter((mount) => !rows.some((row) => row.shareId === mount.shareId))
+          .map((mount) => receivedEntry(null, mount, whole))),
+  ];
+  const repeated = repeatedNames(entries.map((entry) => entry.subject.name));
+  const bySender = new Map<string, SenderGroup>();
+  for (const entry of entries) {
+    if (entry.ended) continue;
+    const group = bySender.get(entry.sender.key) ?? { sender: entry.sender, entries: [] };
+    group.entries.push(entry);
+    bySender.set(entry.sender.key, group);
+  }
+  const groups = [...bySender.values()]
+    .map((group) => ({
+      ...group,
+      entries: group.entries.toSorted((a, b) =>
+        shownName(a.subject, repeated).localeCompare(shownName(b.subject, repeated)),
+      ),
+    }))
+    .sort((a, b) => a.sender.heading.localeCompare(b.sender.heading));
+  return { groups, ended: entries.filter((entry) => entry.ended), repeated, total: entries.length };
+}
+
+function DamagedPill() {
   return (
     <span data-testid="sharing-row-status" className="mr-1">
-      <Pill tone={props.word === "damaged" ? "danger" : "muted"}>{WORD_SHOWN[props.word]}</Pill>
+      <Pill tone="danger">Damaged</Pill>
     </span>
   );
 }
 
-// A block under a row: the question that ends a share, or what a mount's pulls skipped.
 const CARD = "mb-1 flex flex-col gap-2 rounded-lg border border-line bg-bg p-3";
-
-// Wide enough for the rows' longest item, "Remove from workspace".
 const ROW_MENU_WIDTH = 200;
+const ROW =
+  "group relative flex w-full gap-2 rounded-md px-2 py-0.5 text-left text-[13px] text-muted transition-colors duration-75 keyboard:focus-within:bg-hover has-[[aria-haspopup=menu][aria-expanded=true]]:bg-hover";
+const MARK_COLUMN = "flex h-5 w-[18px] shrink-0 items-center justify-center";
+const CHEVRON_COLUMN = "flex h-5 w-3 shrink-0 items-center justify-center text-subtle";
+const QUIET_LEVEL = "shrink-0 text-[12px] text-muted";
 
 // Over the end of the row's last line, on a 16px fade into the row's hover
 // fill. Hidden at rest; shown on hover, keyboard focus, and while its menu
@@ -351,97 +562,59 @@ const ROW_ACTIONS = [
   "has-[[aria-expanded=true]]:pointer-events-auto has-[[aria-expanded=true]]:opacity-100",
 ].join(" ");
 
-// A row: the glyph, then the name and the marks that say what waits and
-// where the share lives, over who can do what. An ended, removed or damaged
-// row starts its second line with a pill that says so. The second line and
-// the note wrap whole; no row changes height on hover, and the name line is
-// never covered except on a row of one line. The view focuses a row when it
-// opens on it, and the row is named for a screen reader by what it shows.
-function ShareRow(props: {
-  lane: SharingLane;
-  shareId: string;
-  status: string;
-  subject: Subject;
-  // The name the row shows: the subject's, after its folder when the list repeats it.
-  name: string;
-  who: Who | null;
-  // Words a row must show whole, wrapped under the second line.
-  note?: string | null;
-  word?: Word | null;
-  lead?: ReactNode;
-  mark?: ReactNode;
-  copies?: ReactNode;
-  menu: readonly MoreMenuItem[];
-  children?: ReactNode;
-}) {
-  const { subject, who } = props;
-  const acts = props.copies !== undefined || props.menu.length > 0;
-  const label = [props.name, who ? sentenceOf(who) : null, props.word].filter(Boolean).join(", ");
-  // The note is sentences: it describes the row rather than joining its name.
-  const noteId = `${useId()}-note`;
-  const oneLine = !who && !props.word && !props.note;
+function Chevron(props: { open: boolean }) {
   return (
-    <li
-      data-testid={`sharing-${props.lane}-row`}
-      data-share-id={props.shareId}
-      data-status={props.status}
+    <span className={CHEVRON_COLUMN}>
+      <ChevronRight
+        size={12}
+        aria-hidden
+        className={`transition-transform duration-150 ease-out ${props.open ? "rotate-90" : ""}`}
+      />
+    </span>
+  );
+}
+
+function ConfirmCard(props: {
+  testId: "sharing-end" | "sharing-leave";
+  words: ReactNode;
+  verb: string;
+  running: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, []);
+  return (
+    <div
+      data-testid={`${props.testId}-confirm`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") props.onCancel();
+      }}
+      className={CARD}
     >
-      <div
-        role="group"
-        aria-label={label}
-        aria-describedby={props.note ? noteId : undefined}
-        data-sharing-row-focus
-        className={`group relative flex min-h-10 w-full gap-2 rounded-md px-2 py-0.5 text-left text-[13px] text-muted transition-colors duration-75 ${oneLine ? "items-center" : "items-start"} hover:bg-hover keyboard:focus-within:bg-hover has-[[aria-expanded=true]]:bg-hover dohc-focus-row`}
-      >
-        <span className="flex h-5 shrink-0 items-center">{subject.glyph}</span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="flex h-5 min-w-0 items-center gap-2">
-            <NameLine
-              name={props.name}
-              title={subject.title}
-              className={`flex-1 leading-5 ${props.word ? "" : "text-ink"}`}
-            />
-            {props.lead || props.mark ? (
-              <span className="flex shrink-0 items-center gap-1">
-                {props.lead}
-                {props.mark}
-              </span>
-            ) : null}
-          </span>
-          {who || props.word ? (
-            // 4px under the name line, so the 24px actions over the last line never reach it.
-            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
-              {props.word ? <StatusPill word={props.word} /> : null}
-              {props.word && who ? " " : null}
-              {who ? (
-                <span data-testid="sharing-row-who" title={who.title}>
-                  {who.text}
-                </span>
-              ) : null}
-            </span>
-          ) : null}
-          {props.note ? (
-            <span id={noteId} data-testid="sharing-row-note" className="mt-1 text-[12px] leading-4">
-              {props.note}
-            </span>
-          ) : null}
-        </span>
-        {acts ? (
-          <span data-testid={`sharing-${props.lane}-actions`} className={ROW_ACTIONS}>
-            {props.copies}
-            {props.menu.length > 0 ? (
-              <MoreMenu
-                label="Share actions"
-                testId={`sharing-${props.lane}-menu`}
-                items={props.menu}
-                width={ROW_MENU_WIDTH}
-              />
-            ) : null}
-          </span>
-        ) : null}
+      <p className="m-0 text-[12px] leading-4 text-ink">{props.words}</p>
+      <div className="flex justify-end gap-2">
+        <SecondaryButton
+          ref={cancelRef}
+          size="compact"
+          data-testid={`${props.testId}-cancel`}
+          onClick={props.onCancel}
+        >
+          Cancel
+        </SecondaryButton>
+        <DangerButton
+          size="compact"
+          data-testid={props.testId}
+          disabled={props.busy}
+          onClick={props.onConfirm}
+        >
+          {props.busy ? props.running : props.verb}
+        </DangerButton>
       </div>
-      {props.children}
-    </li>
+    </div>
   );
 }
 
@@ -449,14 +622,19 @@ export type SharingActions = {
   retry: (lane: SharingLane) => void;
   more: (lane: SharingLane, answer: AccessAnswer) => void;
   reviewChanges: (proposalId: string) => void;
-  startEnd: (shareId: string) => void;
+  startEnd: (confirmKey: string) => void;
   cancelEnd: () => void;
-  end: (group: ShareGroup) => void;
+  end: (shares: readonly ShareGroup[]) => void;
+  removePerson: (grant: AccessShareRow, title: string) => void;
+  retune: (grant: AccessShareRow, access: ShareAccess) => Promise<void>;
+  share: ((target: RelayShareTarget) => void) | null;
   mount: (shareId: string) => void;
   unmount: (mount: ShareMount) => void;
-  startLeave: (shareId: string) => void;
+  openToEdit: ((shareId: string) => void) | null;
+  startLeave: (confirmKey: string) => void;
   leave: (shareId: string, mount: ShareMount | undefined) => void;
   clear: (shareId: string, mount: ShareMount | undefined) => void;
+  clearAll: (shareIds: readonly string[]) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
   dismissSkips: (mount: ShareMount) => void;
@@ -464,101 +642,328 @@ export type SharingActions = {
   reviewConflicts: () => void;
 };
 
-function GrantedRow(props: {
-  group: ShareGroup;
-  repeated: ReadonlySet<string>;
+type PersonCopy = { label: string; secret: CopySecret; getText: () => Promise<string | null> };
+type PersonRemoval = { label: string; disabled: boolean; onSelect: () => void };
+
+function PersonMenu(props: {
+  name: string;
+  grantId: string;
+  copy: PersonCopy | null;
+  removal: PersonRemoval | null;
+}) {
+  const report = useContext(ShellErrorReporter);
+  const [open, setOpen] = useState(false);
+  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
+  const latest = useRef({ copy: props.copy, report });
+  latest.current = { copy: props.copy, report };
+  const answered = useRef(false);
+  const action = useRef<ReturnType<typeof createCopy> | null>(null);
+  useLayoutEffect(() => {
+    const made = createCopy({
+      getText: () => latest.current.copy?.getText() ?? null,
+      report: () => latest.current.report,
+      secret: () => latest.current.copy?.secret,
+      show: (next) => {
+        if (next) {
+          answered.current = true;
+          setFeedback(next);
+          return;
+        }
+        if (!answered.current) return;
+        answered.current = false;
+        setFeedback(null);
+        setOpen(false);
+      },
+    });
+    action.current = made;
+    return () => made.dispose();
+  }, []);
+  const { copy, removal } = props;
+  if (!copy && !removal) return null;
+  return (
+    <Menu
+      label={`Options for ${props.name}`}
+      testId={`sharing-person-menu-${props.grantId}`}
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) return;
+        answered.current = false;
+        setFeedback(null);
+      }}
+      closeOnPick={false}
+      width={ROW_MENU_WIDTH}
+      items={[
+        ...(copy
+          ? [
+              {
+                id: "copy",
+                label: feedback ? COPY_WORDS[feedback] : copy.label,
+                onSelect: () => void action.current?.copy(),
+              },
+            ]
+          : []),
+        ...(removal
+          ? [
+              {
+                id: "remove",
+                label: removal.label,
+                danger: true,
+                disabled: removal.disabled,
+                onSelect: () => {
+                  setOpen(false);
+                  removal.onSelect();
+                },
+              },
+            ]
+          : []),
+      ]}
+    >
+      <span role="status" aria-live="polite" className="sr-only">
+        {feedback ? COPY_WORDS[feedback] : ""}
+      </span>
+    </Menu>
+  );
+}
+
+function removalOf(grant: AccessShareRow, share: ShareGroup): "share" | "grant" | "all" | null {
+  if (grant.via !== "named") return null;
+  const whole = endable(share);
+  if (whole && share.rows.filter(endsOnEnd).length === 1) return "share";
+  if (grant.recipientUserId !== null && filesOf(grant) !== null) return "grant";
+  return whole ? "all" : null;
+}
+
+function PersonRow(props: {
+  grant: LeveledRow;
+  share: ShareGroup;
+  title: string;
+  target: RelayShareTarget | null;
+  changed: ChangedAccess | undefined;
   waiting: WaitingChanges | undefined;
-  // New notes the server has no file for until their open editor is left.
-  notSentWhileOpen: readonly string[];
-  confirming: boolean;
+  confirmKey: string | null;
   busy: boolean;
-  // Whether this server has shown that it makes browser invitations.
   invitations: boolean;
   actions: SharingActions;
 }) {
-  const { group, waiting, actions } = props;
-  const first = liveGrant(group);
-  const active = group.rows.find((row) => row.status === "active");
-  const subject = subjectOf(first);
-  const canEnd = endable(group);
-  const copies = copiesOf(group);
-  const code = copies.code;
-  const invitation = props.invitations ? copies.invitation : null;
-  const word: Word | null = active ? null : first.status === "damaged" ? "damaged" : "ended";
+  const { grant, share, actions } = props;
+  const name = recipientOf(grant);
+  const [retuning, setRetuning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requests = useRequestSequence();
+  const errorId = useId();
+  const access =
+    props.changed && !listedSince(grant, props.changed) ? props.changed.access : grant.access;
+  const offered: ReadonlyArray<{ value: ShareAccess; description?: string }> = props.target
+    ? accessOptions(props.target).map(({ value, description }) => ({ value, description }))
+    : [{ value: "view" }, { value: "edit" }];
+  const options = (
+    access === "comment"
+      ? [offered[0]!, { value: "comment" as const }, ...offered.slice(1)]
+      : offered
+  ).map((option) => ({
+    ...option,
+    testId: `sharing-person-access-${grant.grantId}-${option.value}`,
+  }));
+
+  async function change(next: ShareAccess) {
+    if (retuning || next === access) return;
+    const token = requests.next();
+    setError(null);
+    setRetuning(true);
+    try {
+      await actions.retune(grant, next);
+    } catch (cause) {
+      if (requests.isCurrent(token))
+        setError(ipcErrorMessage(cause, `dohc could not change ${name}'s access.`));
+    } finally {
+      if (requests.isCurrent(token)) setRetuning(false);
+    }
+  }
+
+  const removal = removalOf(grant, share);
+  const confirmKey = removeConfirmKey(grant.grantId);
+  const invitation = props.invitations && invitable(grant);
+  const copy: PersonCopy | null = copyable(grant)
+    ? {
+        label: grant.via === "named" ? "Copy invitation" : "Copy code",
+        secret: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
+        getText: () => actions.copy(grant, invitation ? "invitation" : "code"),
+      }
+    : null;
+  return (
+    <li data-testid="sharing-person" data-grant-id={grant.grantId} className="flex flex-col gap-1">
+      <SharePersonRow
+        name={name}
+        detail={
+          filesOf(grant) === null
+            ? ""
+            : grant.via === "named"
+              ? "Invited by email"
+              : grant.via === "dependent"
+                ? "Joined through a link"
+                : ""
+        }
+      >
+        {retunable({ ...grant, access }) ? (
+          <ShareAccessMenu
+            label={`Access for ${name}`}
+            access={shareAccessOf(access)}
+            options={options}
+            disabled={retuning || props.busy}
+            testId={`sharing-person-access-${grant.grantId}`}
+            width={288}
+            align="end"
+            onPick={(next) => void change(next)}
+          />
+        ) : (
+          <span className={QUIET_LEVEL}>{levelWords(access)}</span>
+        )}
+        <PersonMenu
+          name={name}
+          grantId={grant.grantId}
+          copy={copy}
+          removal={
+            removal
+              ? {
+                  label: removal === "all" ? "End share…" : "Remove access",
+                  disabled: props.busy,
+                  onSelect: () => actions.startEnd(confirmKey),
+                }
+              : null
+          }
+        />
+      </SharePersonRow>
+      {error ? (
+        <FieldError id={errorId} testId={`sharing-person-error-${grant.grantId}`}>
+          {error}
+        </FieldError>
+      ) : null}
+      {removal && props.confirmKey === confirmKey ? (
+        removal === "grant" ? (
+          <ConfirmCard
+            testId="sharing-end"
+            words={`Remove ${name}'s access? They lose access right away. Copies they already made stay with them.`}
+            verb="Remove access"
+            running="Removing…"
+            busy={props.busy}
+            onCancel={actions.cancelEnd}
+            onConfirm={() => actions.removePerson(grant, props.title)}
+          />
+        ) : (
+          <ConfirmCard
+            testId="sharing-end"
+            words={endConfirmWords(share, props.waiting)}
+            verb="End share"
+            running="Ending…"
+            busy={props.busy}
+            onCancel={actions.cancelEnd}
+            onConfirm={() => actions.end([share])}
+          />
+        )
+      ) : null}
+    </li>
+  );
+}
+
+function ItemRow(props: {
+  item: GrantedItem;
+  open: boolean;
+  onToggle: () => void;
+  waitingByShare: ReadonlyMap<string, WaitingChanges>;
+  notSentWhileOpen: readonly string[];
+  changedAccess: Readonly<Record<string, ChangedAccess>>;
+  confirmKey: string | null;
+  busyShareIds: ReadonlySet<string>;
+  invitations: boolean;
+  actions: SharingActions;
+}) {
+  const { item, actions } = props;
+  const { first, subject, waiting } = item;
+  const panelId = useId();
+  const noteId = `${panelId}-note`;
+  const who = itemWho(item.people, item.links);
+  const files = filesOf(first);
   // The engine names held notes by path only, so a share of a version has none.
   const notSent =
-    active &&
-    first.selector &&
-    first.selector.kind === undefined &&
-    first.selector.versionId === null
-      ? notSentWords(first.selector.paths, props.notSentWhileOpen)
-      : null;
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (props.confirming) cancelRef.current?.focus();
-  }, [props.confirming]);
+    files && files.versionId === null ? notSentWords(files.paths, props.notSentWhileOpen) : null;
+  const ending = item.shares.filter(endable);
+  const busy = item.shares.some((share) => props.busyShareIds.has(share.shareId));
+  const confirmKey = endConfirmKey(item.shares[0]!.shareId);
+  const target = shareTargetOf(first);
+  const share = actions.share;
+  const review = waiting
+    ? waiting.count > 1
+      ? `Review changes (${waiting.count})`
+      : "Review changes"
+    : null;
   const menu: MoreMenuItem[] = [
-    ...(waiting
-      ? [
-          {
-            label: waiting.count > 1 ? `Review changes (${waiting.count})` : "Review changes",
-            onSelect: () => actions.reviewChanges(waiting.oldestProposalId),
-          },
-        ]
+    ...(waiting && review
+      ? [{ label: review, onSelect: () => actions.reviewChanges(waiting.oldestProposalId) }]
       : []),
-    ...(canEnd
+    ...(ending.length > 0
       ? [
           {
             label: "End share…",
-            onSelect: () => actions.startEnd(group.shareId),
-            disabled: props.busy,
+            onSelect: () => actions.startEnd(confirmKey),
+            disabled: busy,
             danger: true,
           },
         ]
       : []),
   ];
   return (
-    <ShareRow
-      lane="granted"
-      shareId={group.shareId}
-      status={active ? "active" : first.status}
-      subject={subject}
-      name={shownName(subject, props.repeated)}
-      who={word ? null : grantedWho(group)}
-      note={notSent ? `${notSent.state} ${notSent.next}` : null}
-      word={word}
-      menu={menu}
-      copies={
-        code || invitation ? (
-          <>
-            {invitation ? (
-              <CopyButton
-                iconOnly
-                icon={Link}
-                testId="sharing-copy-invitation"
-                label="Copy invitation"
-                sensitive={BROWSER_INVITATION_SECRET}
-                getText={() => actions.copy(invitation, "invitation")}
-              />
+    <li
+      data-testid="sharing-granted-row"
+      data-share-id={item.shares[0]!.shareId}
+      data-share-ids={item.shares.map((each) => each.shareId).join(" ")}
+      data-status="active"
+    >
+      <div
+        role="group"
+        aria-label={[item.name, who?.text].filter(Boolean).join(", ")}
+        className={`${ROW} min-h-10 dohc-row-open ${who || notSent ? "items-start" : "items-center"}`}
+      >
+        <button
+          type="button"
+          data-sharing-row-focus
+          data-testid="sharing-item-toggle"
+          title={subject.title}
+          aria-expanded={props.open}
+          aria-controls={props.open ? panelId : undefined}
+          aria-describedby={notSent ? noteId : undefined}
+          onClick={props.onToggle}
+          className="dohc-row-open-target flex min-w-0 flex-1 items-start gap-2 text-left"
+        >
+          <Chevron open={props.open} />
+          <span className={MARK_COLUMN}>{subject.glyph}</span>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <NameLine name={item.name} title={subject.title} className="h-5 leading-5 text-ink" />
+            {who ? (
+              <span
+                data-testid="sharing-row-who"
+                title={who.title}
+                className="mt-1 text-[12px] leading-4 wrap-anywhere"
+              >
+                {who.text}
+              </span>
             ) : null}
-            {code ? (
-              <CopyButton
-                iconOnly
-                testId="sharing-copy-code"
-                label="Copy code"
-                sensitive={SHARE_CODE_SECRET}
-                getText={() => actions.copy(code, "code")}
-              />
+            {notSent ? (
+              <span
+                id={noteId}
+                data-testid="sharing-row-note"
+                className="mt-1 text-[12px] leading-4"
+              >
+                {notSent.state} {notSent.next}
+              </span>
             ) : null}
-          </>
-        ) : undefined
-      }
-      lead={
-        waiting ? (
+          </span>
+        </button>
+        {waiting && review ? (
           <button
             type="button"
             data-testid="sharing-review"
-            aria-label={waiting.count > 1 ? `Review changes (${waiting.count})` : "Review changes"}
+            aria-label={review}
             title="Review changes"
             onClick={() => actions.reviewChanges(waiting.oldestProposalId)}
             className="flex h-5 shrink-0 items-center gap-1 rounded-full border border-line bg-panel-2 px-1.5 text-[11px] tabular-nums text-muted hover:bg-hover hover:text-ink"
@@ -566,39 +971,158 @@ function GrantedRow(props: {
             <FileDiff size={11} aria-hidden />
             {waiting.count}
           </button>
-        ) : undefined
-      }
-    >
-      {props.confirming && group.rows.some(endsOnEnd) ? (
+        ) : null}
+        {menu.length > 0 ? (
+          <span data-testid="sharing-granted-actions" className={ROW_ACTIONS}>
+            <MoreMenu
+              label="Share actions"
+              testId="sharing-granted-menu"
+              items={menu}
+              width={ROW_MENU_WIDTH}
+            />
+          </span>
+        ) : null}
+      </div>
+      {props.confirmKey === confirmKey && ending.length > 0 ? (
+        <ConfirmCard
+          testId="sharing-end"
+          words={endConfirmWords(
+            { shareId: confirmKey, rows: ending.flatMap((each) => each.rows) },
+            waitingFor(ending, props.waitingByShare),
+          )}
+          verb="End share"
+          running="Ending…"
+          busy={busy}
+          onCancel={actions.cancelEnd}
+          onConfirm={() => actions.end(ending)}
+        />
+      ) : null}
+      {props.open ? (
         <div
-          data-testid="sharing-end-confirm"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") actions.cancelEnd();
-          }}
-          className={CARD}
+          id={panelId}
+          data-testid="sharing-item-people"
+          className="mb-2 ml-5 flex flex-col gap-1 pl-2 pr-1"
         >
-          <p className="m-0 text-[12px] leading-4 text-ink">{endConfirmWords(group, waiting)}</p>
-          <div className="flex justify-end gap-2">
-            <SecondaryButton
-              ref={cancelRef}
-              size="compact"
-              data-testid="sharing-end-cancel"
-              onClick={actions.cancelEnd}
+          <ul aria-label={`Who has ${item.name}`} className="m-0 flex list-none flex-col p-0">
+            {item.people.map((grant) => {
+              const owner = item.shares.find((each) => each.shareId === grant.shareId)!;
+              return (
+                <PersonRow
+                  key={grant.grantId}
+                  grant={grant}
+                  share={owner}
+                  title={subject.title}
+                  target={target}
+                  changed={props.changedAccess[grant.grantId]}
+                  waiting={props.waitingByShare.get(owner.shareId)}
+                  confirmKey={props.confirmKey}
+                  busy={props.busyShareIds.has(owner.shareId)}
+                  invitations={props.invitations}
+                  actions={actions}
+                />
+              );
+            })}
+            {item.links.map((link) => (
+              <li
+                key={link.grantId}
+                data-testid="sharing-link"
+                className="flex min-h-8 items-center gap-2"
+              >
+                <LinkMark />
+                <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
+                  Anyone with the link
+                </span>
+                <span className={QUIET_LEVEL}>{levelWords(link.access)}</span>
+              </li>
+            ))}
+          </ul>
+          {target && share ? (
+            <GhostButton
+              data-testid="sharing-open-share"
+              className="-ml-2 self-start"
+              onClick={() => share(target)}
             >
-              Cancel
-            </SecondaryButton>
-            <DangerButton
-              size="compact"
-              data-testid="sharing-end"
-              disabled={props.busy}
-              onClick={() => actions.end(group)}
-            >
-              {props.busy ? "Ending…" : "End share"}
-            </DangerButton>
-          </div>
+              Open Share…
+            </GhostButton>
+          ) : null}
         </div>
       ) : null}
-    </ShareRow>
+    </li>
+  );
+}
+
+function EndedGrantedRow(props: {
+  ended: EndedShare;
+  waiting: WaitingChanges | undefined;
+  confirmKey: string | null;
+  busy: boolean;
+  actions: SharingActions;
+}) {
+  const { group, first, subject, name } = props.ended;
+  const { actions } = props;
+  const damaged = first.status === "damaged";
+  const confirmKey = endConfirmKey(group.shareId);
+  const canEnd = endable(group);
+  const people = [...new Set(group.rows.filter((row) => row.via !== "link").map(recipientOf))];
+  const who =
+    people.length > 0
+      ? `With ${namesOf(people, "")}`
+      : group.rows.some((row) => row.via === "link")
+        ? "With anyone who had the link"
+        : null;
+  return (
+    <li
+      data-testid="sharing-granted-row"
+      data-share-id={group.shareId}
+      data-share-ids={group.shareId}
+      data-status={first.status}
+    >
+      <div
+        role="group"
+        aria-label={[name, damaged ? "Damaged" : null, who].filter(Boolean).join(", ")}
+        data-sharing-row-focus
+        className={`${ROW} min-h-8 items-start pl-7 hover:bg-hover dohc-focus-row`}
+      >
+        <span className={MARK_COLUMN}>{subject.glyph}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <NameLine name={name} title={subject.title} className="h-5 leading-5" />
+          {damaged || who ? (
+            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
+              {damaged ? <DamagedPill /> : null}
+              {who ? <span data-testid="sharing-row-who">{who}</span> : null}
+            </span>
+          ) : null}
+        </span>
+        {canEnd ? (
+          <span data-testid="sharing-granted-actions" className={ROW_ACTIONS}>
+            <MoreMenu
+              label="Share actions"
+              testId="sharing-granted-menu"
+              width={ROW_MENU_WIDTH}
+              items={[
+                {
+                  label: "End share…",
+                  onSelect: () => actions.startEnd(confirmKey),
+                  disabled: props.busy,
+                  danger: true,
+                },
+              ]}
+            />
+          </span>
+        ) : null}
+      </div>
+      {props.confirmKey === confirmKey && group.rows.some(endsOnEnd) ? (
+        <ConfirmCard
+          testId="sharing-end"
+          words={endConfirmWords(group, props.waiting)}
+          verb="End share"
+          running="Ending…"
+          busy={props.busy}
+          onCancel={actions.cancelEnd}
+          onConfirm={() => actions.end([group])}
+        />
+      ) : null}
+    </li>
   );
 }
 
@@ -610,7 +1134,6 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
   if (!skipped) return null;
   return (
     <div className={`${CARD} text-[12px] text-warning`}>
-      {/* The lines take the block's width; Dismiss sits under them at its end. */}
       <ul className="m-0 flex min-w-0 list-none flex-col gap-0.5 p-0">
         {shareSkipNoticeLines(skipped, props.mount.granterEmail).map((line) => (
           <li
@@ -632,11 +1155,11 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
         data-testid="sharing-skipped-dismiss"
         aria-label="Dismiss skipped changes"
         onClick={(event) => {
-          // The lines go; the menu that shows them again takes focus.
-          event.currentTarget
-            .closest("li")
-            ?.querySelector<HTMLElement>('[data-testid="sharing-received-menu"]')
-            ?.focus();
+          const row = event.currentTarget.closest("li");
+          (
+            row?.querySelector<HTMLElement>('[data-testid="sharing-received-menu"]') ??
+            row?.querySelector<HTMLElement>('[data-testid="sharing-row-primary"]')
+          )?.focus();
           props.actions.dismissSkips(props.mount);
         }}
       >
@@ -646,171 +1169,266 @@ function SkippedChanges(props: { mount: ShareMount; actions: SharingActions }) {
   );
 }
 
-// A share sent to the account, or a mount the relay no longer lists (`row`
-// null). A mount with no live grant behind it reads as removed, in the
-// relay's words when it has them, and keeps its Remove.
+type RowAction = { label: string; onSelect: () => void };
+
+function receivedActions(
+  entry: ReceivedEntry,
+  skipsHidden: boolean,
+  actions: SharingActions,
+): { primary: RowAction | null; menu: MoreMenuItem[] } {
+  const { row, mount, shareId } = entry;
+  const showSkips: MoreMenuItem[] =
+    mount?.skippedOps && skipsHidden
+      ? [{ label: "Show skipped changes", onSelect: () => actions.showSkips(shareId) }]
+      : [];
+  if (entry.ended) {
+    const primary = mount
+      ? {
+          label: "Remove from workspace",
+          onSelect: () =>
+            row && entry.removed ? actions.clear(shareId, mount) : actions.unmount(mount),
+        }
+      : row && entry.removed
+        ? { label: "Remove from list", onSelect: () => actions.clear(shareId, undefined) }
+        : null;
+    return { primary, menu: showSkips };
+  }
+  const live = entry.files && entry.active;
+  const openToEdit = actions.openToEdit;
+  const files = row ? filesOf(row) : null;
+  const editable =
+    live &&
+    openToEdit !== null &&
+    row?.access === "edit" &&
+    (files?.versionId === null || files?.versionId === "main");
+  const add: RowAction | null =
+    live && !mount ? { label: "Add to workspace", onSelect: () => actions.mount(shareId) } : null;
+  return {
+    primary: editable ? { label: "Open to edit", onSelect: () => openToEdit(shareId) } : add,
+    menu: [
+      ...(editable && add ? [add] : []),
+      ...(mount
+        ? [{ label: "Remove from workspace", onSelect: () => actions.unmount(mount) }]
+        : []),
+      ...showSkips,
+      ...(live
+        ? [
+            {
+              label: "Leave share…",
+              onSelect: () => actions.startLeave(leaveConfirmKey(shareId)),
+              danger: true,
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
 function ReceivedRow(props: {
-  row: AccessShareRow | null;
-  mount: ShareMount | undefined;
+  entry: ReceivedEntry;
   repeated: ReadonlySet<string>;
-  // Whether the relay's listing was read, so a missing grant means removed.
-  listed: boolean;
   skipsShown: boolean;
   confirming: boolean;
   busy: boolean;
   actions: SharingActions;
 }) {
-  const { row, mount, actions } = props;
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (props.confirming) cancelRef.current?.focus();
-  }, [props.confirming]);
-  const shareId = row?.shareId ?? mount!.shareId;
-  const removed = row ? row.status === "removed" : props.listed;
-  const damaged = row ? row.status === "damaged" : mount?.damaged === true;
-  // A grant that no longer says what it covered goes by its folder's name.
-  const subject: Subject =
-    mount && !row?.selector
-      ? {
-          glyph: damaged ? (
-            <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
-          ) : (
-            <File size={15} aria-hidden className={GLYPH_CLASS} />
-          ),
-          name: mount.label,
-          folder: null,
-          title: `shared-with-me/${mount.label}`,
-        }
-      : subjectOf(row!);
-  // The row names the sender as the drawing does; the full label is its title.
-  const parts = shareSenderParts(row?.sharerName, row?.granterEmail ?? mount?.granterEmail);
-  const sender = parts.displayName ?? parts.full;
-  const files = row !== null && row.selector !== null && row.selector.kind === undefined;
+  const { entry, actions } = props;
+  const { row, mount, subject, sender, shareId } = entry;
+  const name = shownName(subject, props.repeated);
   // A mounted share shows its pinned level: the pin is what its pulls enforce.
-  const access = mount ? (mount.damaged ? null : mount.access) : row?.access;
-  const active = row?.status === "active";
-  const skipped = mount?.skippedOps;
-  const leaves: MoreMenuItem[] =
-    files && active
-      ? [
-          {
-            label: "Leave share…",
-            onSelect: () => actions.startLeave(shareId),
-            disabled: props.busy,
-            danger: true,
-          },
-        ]
-      : [];
-  const menu: MoreMenuItem[] = mount
-    ? [
-        {
-          label: "Remove from workspace",
-          onSelect: () => (row && removed ? actions.clear(shareId, mount) : actions.unmount(mount)),
-          disabled: props.busy,
-        },
-        ...(skipped && !props.skipsShown
-          ? [{ label: "Show skipped changes", onSelect: () => actions.showSkips(mount.shareId) }]
-          : []),
-        ...leaves,
-      ]
-    : files && active
-      ? [
-          {
-            label: "Add to workspace",
-            onSelect: () => actions.mount(shareId),
-            disabled: props.busy,
-          },
-          ...leaves,
-        ]
-      : row && removed
-        ? [
-            {
-              label: "Remove from list",
-              onSelect: () => actions.clear(shareId, undefined),
-              disabled: props.busy,
-            },
-          ]
-        : [];
-  const word: Word | null = damaged
-    ? "damaged"
-    : removed
-      ? "removed"
-      : active || !row
-        ? null
-        : "ended";
-  const who: Who =
-    access && !word
-      ? {
-          text: `${sender} lets you ${verbOf(access)}`,
-          title: `${parts.full} lets you ${verbOf(access)}`,
-        }
-      : fromWho(sender, parts.full);
-  const where = mount ? `In this workspace as shared-with-me/${mount.label}` : null;
-  const note = removed
+  const access = entry.ended ? null : mount ? (mount.damaged ? null : mount.access) : row?.access;
+  const { primary, menu } = receivedActions(entry, !props.skipsShown, actions);
+  const where =
+    mount && !entry.ended
+      ? access === "edit" || row?.access === "edit"
+        ? "In this workspace as a read-only copy"
+        : "In this workspace"
+      : null;
+  const from = entry.ended ? `From ${sender.name}` : null;
+  const note = entry.removed
     ? [row?.removalMessage, mount ? "Your copy stays readable but won't update." : null]
         .filter(Boolean)
         .join(" ") || null
     : null;
+  const noteId = `${useId()}-note`;
+  const second = entry.damaged || from;
   return (
-    <ShareRow
-      lane="received"
-      shareId={shareId}
-      status={row?.status ?? (damaged ? "damaged" : removed ? "removed" : "unlisted")}
-      subject={subject}
-      name={shownName(subject, props.repeated)}
-      who={who}
-      note={note}
-      word={word}
-      menu={menu}
-      mark={
-        where ? (
-          <span
-            role="img"
-            aria-label={where}
-            title={where}
-            data-testid="sharing-mounted"
-            className="shrink-0 text-subtle"
-          >
-            <FolderInput size={13} aria-hidden />
+    <li data-testid="sharing-received-row" data-share-id={shareId} data-status={entry.status}>
+      <div
+        role="group"
+        aria-label={[
+          name,
+          entry.damaged ? "Damaged" : null,
+          access ? levelWords(access) : null,
+          `from ${sender.name}`,
+          where,
+        ]
+          .filter(Boolean)
+          .join(", ")}
+        aria-describedby={note ? noteId : undefined}
+        data-sharing-row-focus
+        className={`${ROW} min-h-8 hover:bg-hover dohc-focus-row ${entry.ended ? "pl-7" : ""} ${second || where || note || primary ? "items-start" : "items-center"}`}
+      >
+        <span className={MARK_COLUMN}>{subject.glyph}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="flex h-5 min-w-0 items-center gap-2">
+            <NameLine
+              name={name}
+              title={subject.title}
+              className={`flex-1 leading-5 ${entry.ended ? "" : "text-ink"}`}
+            />
+            {access ? (
+              <span data-testid="sharing-row-level" className={QUIET_LEVEL}>
+                {levelWords(access)}
+              </span>
+            ) : null}
           </span>
-        ) : undefined
-      }
-    >
-      {mount && props.skipsShown ? <SkippedChanges mount={mount} actions={actions} /> : null}
-      {props.confirming && files && active ? (
-        <div
-          data-testid="sharing-leave-confirm"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") actions.cancelEnd();
-          }}
-          className={CARD}
-        >
-          <p className="m-0 text-[12px] leading-4 text-ink">
-            Leave this share? You lose access to {subject.name}
-            {mount ? ", and its folder leaves this workspace" : ""}. {sender} can share it with you
-            again.
-          </p>
-          <div className="flex justify-end gap-2">
+          {second ? (
+            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
+              {entry.damaged ? <DamagedPill /> : null}
+              {from ? (
+                <span data-testid="sharing-row-who" title={`From ${sender.full}`}>
+                  {from}
+                </span>
+              ) : null}
+            </span>
+          ) : null}
+          {where ? (
+            <span
+              data-testid="sharing-mounted"
+              title={`shared-with-me/${mount!.label}`}
+              className="mt-1 flex items-start gap-1 text-[12px] leading-4"
+            >
+              <FolderInput size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+              {where}
+            </span>
+          ) : null}
+          {note ? (
+            <span id={noteId} data-testid="sharing-row-note" className="mt-1 text-[12px] leading-4">
+              {note}
+            </span>
+          ) : null}
+          {primary ? (
             <SecondaryButton
-              ref={cancelRef}
-              size="compact"
-              data-testid="sharing-leave-cancel"
-              onClick={actions.cancelEnd}
-            >
-              Cancel
-            </SecondaryButton>
-            <DangerButton
-              size="compact"
-              data-testid="sharing-leave"
+              size="row"
+              data-testid="sharing-row-primary"
+              className="my-1 self-start"
               disabled={props.busy}
-              onClick={() => actions.leave(shareId, mount)}
+              onClick={primary.onSelect}
             >
-              {props.busy ? "Leaving…" : "Leave share"}
-            </DangerButton>
-          </div>
-        </div>
+              {primary.label}
+            </SecondaryButton>
+          ) : null}
+        </span>
+        {menu.length > 0 ? (
+          <span data-testid="sharing-received-actions" className="flex h-5 shrink-0 items-center">
+            <MoreMenu
+              label="Share actions"
+              testId="sharing-received-menu"
+              items={menu.map((item) => ({
+                ...item,
+                disabled: props.busy && item.label !== "Show skipped changes",
+              }))}
+              width={ROW_MENU_WIDTH}
+            />
+          </span>
+        ) : entry.ended ? null : (
+          <span aria-hidden className="size-6 shrink-0" />
+        )}
+      </div>
+      {mount && props.skipsShown ? <SkippedChanges mount={mount} actions={actions} /> : null}
+      {props.confirming && entry.files && entry.active ? (
+        <ConfirmCard
+          testId="sharing-leave"
+          words={`Leave this share? You lose access to ${subject.name}${
+            mount ? ", and its folder leaves this workspace" : ""
+          }. ${sender.heading} can share it with you again.`}
+          verb="Leave share"
+          running="Leaving…"
+          busy={props.busy}
+          onCancel={actions.cancelEnd}
+          onConfirm={() => actions.leave(shareId, mount)}
+        />
       ) : null}
-    </ShareRow>
+    </li>
+  );
+}
+
+function SenderRows(props: { group: SenderGroup; children: ReactNode }) {
+  const { sender } = props.group;
+  const headingId = useId();
+  return (
+    <li data-testid="sharing-sender" data-sender={sender.key} className="not-first:mt-3">
+      <h4
+        id={headingId}
+        title={sender.full}
+        className="m-0 flex h-7 items-center gap-2 px-2 text-[12px] font-medium text-muted"
+      >
+        <ChatAvatar
+          presentation={neutralPresentation}
+          name={sender.heading}
+          kind="human"
+          size="strip"
+        />
+        <span className="min-w-0 truncate">{sender.heading}</span>
+      </h4>
+      <ul aria-labelledby={headingId} className="m-0 list-none p-0">
+        {props.children}
+      </ul>
+    </li>
+  );
+}
+
+function EndedGroup(props: {
+  lane: SharingLane;
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  damaged?: number;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const listId = useId();
+  if (props.count === 0) return null;
+  const damaged = props.damaged ?? 0;
+  return (
+    <div data-testid={`sharing-${props.lane}-ended`} className="mt-4">
+      <div className="flex h-7 items-center gap-1">
+        <button
+          type="button"
+          data-testid={`sharing-${props.lane}-ended-toggle`}
+          aria-expanded={props.open}
+          aria-controls={props.open ? listId : undefined}
+          onClick={props.onToggle}
+          className="dohc-focus-row flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+        >
+          <Chevron open={props.open} />
+          Ended
+          <span
+            data-testid={`sharing-${props.lane}-ended-count`}
+            className="text-[11px] font-normal tabular-nums"
+          >
+            {props.count}
+          </span>
+          {damaged > 0 ? (
+            <span
+              role="img"
+              aria-label={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
+              title={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
+              className="flex text-danger"
+            >
+              <TriangleAlert size={12} aria-hidden />
+            </span>
+          ) : null}
+        </button>
+        {props.action}
+      </div>
+      {props.open ? (
+        <ul id={listId} aria-label="Ended" className="m-0 list-none p-0">
+          {props.children}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -828,59 +1446,79 @@ export function skipsShown(mount: ShareMount | undefined, view: SkipView): boole
   );
 }
 
-// Every share the list shows, whatever its status, and the rows this
-// computer adds. "24+" while more can load, read as "24 or more shares".
-function ListCount(props: { lane: SharingLane; answer: AccessAnswer; local: number }) {
-  const { lane, answer } = props;
-  const listed =
-    lane === "granted"
-      ? groupShares(answer.rows).length
-      : answer.rows.filter((row) => row.kind === "share").length;
-  const count = listed + props.local;
+const LANES: ReadonlyArray<{ value: SharingLane; label: string }> = [
+  { value: "granted", label: LANE.granted.label },
+  { value: "received", label: LANE.received.label },
+];
+
+// What a lane shows now, apart from its Ended group. "24+" while more can
+// load, read as "24 or more shares".
+function LaneCount(props: { lane: SharingLane; count: number; more: boolean }) {
   return (
     <span
-      data-testid={`sharing-${lane}-count`}
-      className="ml-auto text-[11px] font-normal tabular-nums normal-case tracking-normal"
+      data-testid={`sharing-${props.lane}-count`}
+      className="text-[11px] font-normal tabular-nums text-muted"
     >
-      {answer.nextCursor ? (
+      {props.more ? (
         <>
-          <span aria-hidden>{count}+</span>
-          <span className="sr-only">{count} or more shares</span>
+          <span aria-hidden>{props.count}+</span>
+          <span className="sr-only">{props.count} or more shares</span>
         </>
       ) : (
-        count
+        props.count
       )}
     </span>
   );
 }
 
-function Section(props: {
+function LaneSwitch(props: {
+  lane: SharingLane;
+  onChange: (lane: SharingLane) => void;
+  counts: Record<SharingLane, ReactNode>;
+}) {
+  const group = useRadioGroup({ value: props.lane, options: LANES, onChange: props.onChange });
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Sharing"
+      data-testid="sharing-lanes"
+      onKeyDown={group.onKeyDown}
+      className="mx-3 mb-2 flex rounded-lg border border-line bg-panel-2 p-0.5"
+    >
+      {LANES.map((option, index) => (
+        <button
+          key={option.value}
+          {...group.radio(index)}
+          data-testid={`sharing-lane-${option.value}`}
+          data-sharing-lane-focus={option.value}
+          className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+            props.lane === option.value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+          }`}
+        >
+          <span className="truncate">{option.label}</span>
+          {props.counts[option.value]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Lane(props: {
   lane: SharingLane;
   view: AccessView;
   setup: AccessSetup;
   actions: SharingActions;
-  children: (answer: AccessAnswer) => ReactNode;
-  // Rows this computer knows without the listing: they show whatever it says.
-  local?: (known: boolean) => ReactNode[];
+  heading: ReactNode;
+  empty: boolean;
+  local?: ReactNode;
+  ended?: ReactNode;
+  children: ReactNode;
 }) {
   const { lane, view, actions } = props;
   const words = LANE[lane];
-  const known =
-    view.status === "ready" &&
-    view.answer.freshness !== "unknown" &&
-    view.answer.coverage.kind !== "unavailable";
-  const local = view.status === "loading" ? [] : (props.local?.(known) ?? []);
-  const localList = local.length > 0 ? <ul className="m-0 list-none p-0">{local}</ul> : null;
   return (
-    <section data-testid={`sharing-${lane}`} aria-label={words.label} className="not-first:mt-4">
-      <h3
-        tabIndex={-1}
-        data-sharing-lane-focus
-        className="dohc-section-label m-0 flex h-6 items-center rounded-md px-3"
-      >
-        {words.label}
-        {known ? <ListCount lane={lane} answer={view.answer} local={local.length} /> : null}
-      </h3>
+    <section data-testid={`sharing-${lane}`} aria-label={words.label}>
+      {props.heading}
       <div className="px-1 pb-1">
         {view.status === "loading" ? (
           <SkeletonLines rows={2} className="px-2 py-1" />
@@ -889,7 +1527,7 @@ function Section(props: {
             <RetryRow testId={`sharing-${lane}-failed`} onRetry={() => actions.retry(lane)}>
               {words.failed}
             </RetryRow>
-            {localList}
+            {props.local}
           </>
         ) : (
           <div
@@ -897,7 +1535,7 @@ function Section(props: {
             data-freshness={view.answer.freshness}
             data-coverage={view.answer.coverage.kind}
           >
-            {!known ? (
+            {knownAnswer(view) === null ? (
               <>
                 <AccessUnknown
                   testId={`sharing-${lane}`}
@@ -907,7 +1545,7 @@ function Section(props: {
                   setup={props.setup}
                   onRetry={() => actions.retry(lane)}
                 />
-                {localList}
+                {props.local}
               </>
             ) : (
               <>
@@ -916,7 +1554,7 @@ function Section(props: {
                   answer={view.answer}
                   scope={words.scope}
                 />
-                {view.answer.rows.length === 0 && local.length === 0 ? (
+                {props.empty ? (
                   <div className="flex py-4">
                     <EmptyState
                       data-testid={`sharing-${lane}-empty`}
@@ -925,21 +1563,19 @@ function Section(props: {
                     />
                   </div>
                 ) : (
-                  <ul className="m-0 list-none p-0">
-                    {props.children(view.answer)}
-                    {local}
-                  </ul>
+                  props.children
                 )}
                 {view.answer.nextCursor !== null ? (
                   <button
                     type="button"
                     data-testid={`sharing-${lane}-more`}
                     onClick={() => actions.more(lane, view.answer)}
-                    className={`${ABOUT_ROW} h-7 cursor-pointer text-[12px] hover:bg-hover hover:text-ink`}
+                    className={`${ABOUT_ROW} dohc-focus-row h-7 cursor-pointer text-[12px] hover:bg-hover hover:text-ink`}
                   >
                     Show more
                   </button>
                 ) : null}
+                {props.ended}
               </>
             )}
           </div>
@@ -962,61 +1598,135 @@ export function SharingPanel(props: {
   mounts: readonly ShareMount[];
   skipView: SkipView;
   invitations: boolean;
-  confirmShareId: string | null;
+  changedAccess: Readonly<Record<string, ChangedAccess>>;
+  confirmKey: string | null;
   busyShareIds: ReadonlySet<string>;
   actions: SharingActions;
-  ref?: Ref<HTMLDivElement>;
+  focus?: SharingFocus | null;
+  onFocused?: () => void;
+  initialLane?: SharingLane;
+  initialOpen?: readonly string[];
 }) {
-  const { actions, mounts, received } = props;
-  const receivedRows =
-    received.status === "ready"
-      ? received.answer.rows.filter((row): row is AccessShareRow => row.kind === "share")
-      : [];
-  const mountOf = (shareId: string) => mounts.find((mount) => mount.shareId === shareId);
-  const unlistedMounts = mounts.filter(
-    (mount) => !receivedRows.some((row) => row.shareId === mount.shareId),
+  const { actions, focus, onFocused } = props;
+  const panel = useRef<HTMLDivElement>(null);
+  const [chosen, setLane] = useState<SharingLane>(props.initialLane ?? "granted");
+  const lane = props.granted ? chosen : "received";
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set(props.initialOpen));
+  const toggle = (key: string) =>
+    setOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+
+  const grantedView = props.granted;
+  const granted = useMemo(
+    () => listGranted((grantedView && knownAnswer(grantedView))?.rows ?? [], props.waiting),
+    [grantedView, props.waiting],
   );
-  const receivedRepeated = repeatedNames([
-    // A grant that no longer says what it covered goes by its folder's name, as its row does.
-    ...receivedRows.map((row) => {
-      const mount = mountOf(row.shareId);
-      return mount && !row.selector ? mount.label : shareSubject(row).name;
-    }),
-    ...unlistedMounts.map((mount) => mount.label),
-  ]);
-  const receivedRow = (
-    row: AccessShareRow | null,
-    mount: ShareMount | undefined,
-    listed: boolean,
-  ) => (
+  const received = useMemo(
+    () => listReceived(props.received, props.mounts),
+    [props.mounts, props.received],
+  );
+
+  const focusView = focus ? (focus.lane === "granted" ? props.granted : props.received) : null;
+  const focusEnded =
+    focus?.shareId != null &&
+    (focus.lane === "granted"
+      ? granted.ended.some((each) => each.group.shareId === focus.shareId)
+      : received.ended.some((each) => each.shareId === focus.shareId));
+  const endedOpen = focus ? open.has(endedGroupKey(focus.lane)) : false;
+  useEffect(() => {
+    if (!focus || !focusView || focusView.status === "loading") return;
+    if (lane !== focus.lane) {
+      setLane(focus.lane);
+      return;
+    }
+    if (focusEnded && !endedOpen) {
+      setOpen((current) => new Set(current).add(endedGroupKey(focus.lane)));
+      return;
+    }
+    const root = panel.current;
+    const row =
+      focus.shareId === null
+        ? null
+        : [
+            ...(root?.querySelectorAll<HTMLElement>(`[data-testid="sharing-${focus.lane}-row"]`) ??
+              []),
+          ].find((element) =>
+            (element.dataset.shareIds ?? element.dataset.shareId ?? "")
+              .split(" ")
+              .includes(focus.shareId!),
+          );
+    const rowTarget = row?.querySelector<HTMLElement>("[data-sharing-row-focus]");
+    const target =
+      rowTarget ??
+      root?.querySelector<HTMLElement>(`[data-sharing-lane-focus="${focus.lane}"]`) ??
+      null;
+    // A row that is not a control takes focus only for this jump, so a click never leaves it selected.
+    if (rowTarget && !(rowTarget instanceof HTMLButtonElement)) {
+      rowTarget.tabIndex = -1;
+      rowTarget.addEventListener("blur", () => rowTarget.removeAttribute("tabindex"), {
+        once: true,
+      });
+    }
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView?.({ block: "nearest" });
+    onFocused?.();
+  }, [endedOpen, focus, focusEnded, focusView, lane, onFocused]);
+
+  const count = (which: SharingLane) => {
+    const view = which === "granted" ? props.granted : props.received;
+    const known = view && knownAnswer(view);
+    if (!known) return null;
+    return (
+      <LaneCount
+        lane={which}
+        count={
+          which === "granted"
+            ? granted.items.length
+            : received.groups.reduce((sum, group) => sum + group.entries.length, 0)
+        }
+        more={known.nextCursor !== null}
+      />
+    );
+  };
+
+  const receivedRow = (entry: ReceivedEntry) => (
     <ReceivedRow
-      key={row ? `${row.shareId}\0${row.grantId}` : `mount\0${mount!.shareId}`}
-      row={row}
-      mount={mount}
-      repeated={receivedRepeated}
-      listed={listed}
-      skipsShown={skipsShown(mount, props.skipView)}
-      confirming={props.confirmShareId === (row?.shareId ?? mount!.shareId)}
-      busy={props.busyShareIds.has(row?.shareId ?? mount!.shareId)}
+      key={entry.key}
+      entry={entry}
+      repeated={received.repeated}
+      skipsShown={skipsShown(entry.mount, props.skipView)}
+      confirming={props.confirmKey === leaveConfirmKey(entry.shareId)}
+      busy={props.busyShareIds.has(entry.shareId)}
       actions={actions}
     />
   );
-  // Only a whole listing can say the relay no longer lists a mount; a
-  // partial one may on a later page.
-  const unlisted = (known: boolean) => {
-    const listed = known && received.status === "ready" && received.answer.nextCursor === null;
-    return unlistedMounts.map((mount) => receivedRow(null, mount, listed));
-  };
+  const senders =
+    received.groups.length > 0 ? (
+      <ul className="m-0 list-none p-0">
+        {received.groups.map((group) => (
+          <SenderRows key={group.sender.key} group={group}>
+            {group.entries.map(receivedRow)}
+          </SenderRows>
+        ))}
+      </ul>
+    ) : null;
+  const clearable = received.ended
+    .filter((entry) => entry.row && entry.removed && !entry.mount)
+    .map((entry) => entry.shareId);
+
   return (
     <div
-      ref={props.ref}
+      ref={panel}
       data-testid="sharing-view"
-      className="min-h-0 flex-1 overflow-y-auto pb-2 pt-2"
+      className="min-h-0 flex-1 overflow-y-auto pb-2 pt-2 [&_:focus-visible]:-outline-offset-2"
     >
       {props.conflictCount !== null ? (
         <div
           data-testid="sharing-conflicts"
-          className="mx-1 flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 text-[13px]"
+          className="mx-1 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 text-[13px]"
         >
           <TriangleAlert size={15} aria-hidden className="shrink-0 text-danger" />
           <span className="min-w-0 flex-1 leading-4 text-ink">
@@ -1034,37 +1744,107 @@ export function SharingPanel(props: {
         </div>
       ) : null}
       {props.granted ? (
-        <Section lane="granted" view={props.granted} setup={props.grantedSetup} actions={actions}>
-          {(answer) => {
-            const groups = groupShares(answer.rows);
-            const repeated = repeatedNames(
-              groups.map((group) => shareSubject(liveGrant(group)).name),
-            );
-            return groups.map((group) => (
-              <GrantedRow
-                key={group.shareId}
-                group={group}
-                repeated={repeated}
-                waiting={props.waiting.get(group.shareId)}
-                notSentWhileOpen={props.notSentWhileOpen}
-                invitations={props.invitations}
-                confirming={props.confirmShareId === group.shareId}
-                busy={props.busyShareIds.has(group.shareId)}
-                actions={actions}
-              />
-            ));
-          }}
-        </Section>
+        <LaneSwitch
+          lane={lane}
+          onChange={setLane}
+          counts={{ granted: count("granted"), received: count("received") }}
+        />
       ) : null}
-      <Section
-        lane="received"
-        view={received}
-        setup={props.receivedSetup}
-        actions={actions}
-        local={unlisted}
-      >
-        {() => receivedRows.map((row) => receivedRow(row, mountOf(row.shareId), true))}
-      </Section>
+      {props.granted && lane === "granted" ? (
+        <Lane
+          lane="granted"
+          view={props.granted}
+          setup={props.grantedSetup}
+          actions={actions}
+          heading={null}
+          empty={granted.items.length === 0 && granted.ended.length === 0}
+          ended={
+            <EndedGroup
+              lane="granted"
+              count={granted.ended.length}
+              open={open.has(endedGroupKey("granted"))}
+              onToggle={() => toggle(endedGroupKey("granted"))}
+              damaged={granted.ended.filter((each) => each.first.status === "damaged").length}
+            >
+              {granted.ended.map((each) => (
+                <EndedGrantedRow
+                  key={each.group.shareId}
+                  ended={each}
+                  waiting={props.waiting.get(each.group.shareId)}
+                  confirmKey={props.confirmKey}
+                  busy={props.busyShareIds.has(each.group.shareId)}
+                  actions={actions}
+                />
+              ))}
+            </EndedGroup>
+          }
+        >
+          {granted.items.length > 0 ? (
+            <ul className="m-0 list-none p-0">
+              {granted.items.map((item) => (
+                <ItemRow
+                  key={item.key}
+                  item={item}
+                  open={open.has(item.key)}
+                  onToggle={() => toggle(item.key)}
+                  waitingByShare={props.waiting}
+                  notSentWhileOpen={props.notSentWhileOpen}
+                  changedAccess={props.changedAccess}
+                  confirmKey={props.confirmKey}
+                  busyShareIds={props.busyShareIds}
+                  invitations={props.invitations}
+                  actions={actions}
+                />
+              ))}
+            </ul>
+          ) : null}
+        </Lane>
+      ) : null}
+      {lane === "received" ? (
+        <Lane
+          lane="received"
+          view={props.received}
+          setup={props.receivedSetup}
+          actions={actions}
+          heading={
+            props.granted ? null : (
+              <h3
+                tabIndex={-1}
+                data-sharing-lane-focus="received"
+                className="dohc-section-label m-0 flex h-6 items-center justify-between rounded-md px-3"
+              >
+                {LANE.received.label}
+                {count("received")}
+              </h3>
+            )
+          }
+          empty={received.total === 0}
+          local={senders}
+          ended={
+            <EndedGroup
+              lane="received"
+              count={received.ended.length}
+              open={open.has(endedGroupKey("received"))}
+              onToggle={() => toggle(endedGroupKey("received"))}
+              action={
+                clearable.length > 0 ? (
+                  <GhostButton
+                    data-testid="sharing-received-clear-all"
+                    disabled={clearable.some((shareId) => props.busyShareIds.has(shareId))}
+                    onClick={() => actions.clearAll(clearable)}
+                  >
+                    Remove all
+                  </GhostButton>
+                ) : null
+              }
+            >
+              {received.ended.map(receivedRow)}
+            </EndedGroup>
+          }
+        >
+          {senders}
+        </Lane>
+      ) : null}
     </div>
   );
 }
@@ -1134,8 +1914,10 @@ export function SharingView(props: {
   onFocused: () => void;
   // New notes the server has no file for until their open editor is left.
   notSentWhileOpen?: readonly string[];
+  onShare?: (target: RelayShareTarget) => void;
+  onOpenShare?: (share: OpenedShare) => void;
 }) {
-  const { workspaceId, context, focus, onFocused } = props;
+  const { workspaceId, context, onShare, onOpenShare } = props;
   const { facts, openSyncSettings, connect } = context;
   const refresh = useCallback(
     () =>
@@ -1146,7 +1928,9 @@ export function SharingView(props: {
   );
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
-  const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const confirmNow = useRef(confirmKey);
+  confirmNow.current = confirmKey;
   const [busyShareIds, setBusyShareIds] = useState<ReadonlySet<string>>(new Set());
   const setBusy = (shareId: string, busy: boolean) =>
     setBusyShareIds((current) => {
@@ -1156,41 +1940,14 @@ export function SharingView(props: {
       return next;
     });
   const [skipView, setSkipView] = useState<SkipView>(new Map());
+  const [changedAccess, setChangedAccess] = useState<Readonly<Record<string, ChangedAccess>>>({});
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
-  const panel = useRef<HTMLDivElement>(null);
 
-  // Settings search opened the view on a row or a lane. Focus it once its
-  // lane has answered; a share the lane no longer lists focuses the lane.
-  const focusView = focus ? (focus.lane === "granted" ? granted.view : received.view) : null;
-  useEffect(() => {
-    if (!focus || !focusView || focusView.status === "loading") return;
-    const lane = panel.current?.querySelector<HTMLElement>(`[data-testid="sharing-${focus.lane}"]`);
-    const row =
-      focus.shareId === null
-        ? null
-        : [
-            ...(lane?.querySelectorAll<HTMLElement>(`[data-testid="sharing-${focus.lane}-row"]`) ??
-              []),
-          ].find((element) => element.dataset.shareId === focus.shareId);
-    const rowTarget = row?.querySelector<HTMLElement>("[data-sharing-row-focus]");
-    const target = rowTarget ?? lane?.querySelector<HTMLElement>("[data-sharing-lane-focus]");
-    // A row takes focus only for this jump, so a click never leaves it selected.
-    if (rowTarget) {
-      rowTarget.tabIndex = -1;
-      rowTarget.addEventListener("blur", () => rowTarget.removeAttribute("tabindex"), {
-        once: true,
-      });
-    }
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView?.({ block: "nearest" });
-    onFocused();
-  }, [focus, focusView, onFocused]);
-
-  // Copy invitation shows only once this server has made one: the relay
-  // makes them only when its browser deployment is set up. One probe per
-  // view open, for the first row that could have one; only the answer's
-  // yes or no is kept, never the link.
+  // Copy invitation hands out a browser invitation only once this server has
+  // made one: the relay makes them only when its browser deployment is set
+  // up. One probe per view open, for the first person who could have one;
+  // only the answer's yes or no is kept, never the link.
   const [invitations, setInvitations] = useState(false);
   const probed = useRef(false);
   // Mount-only, so StrictMode's replay sets it again before the probe answers.
@@ -1204,9 +1961,9 @@ export function SharingView(props: {
   const grantedView = granted.view;
   useEffect(() => {
     if (probed.current || grantedView.status !== "ready") return;
-    const grant = groupShares(grantedView.answer.rows)
-      .map((group) => copiesOf(group).invitation)
-      .find((row) => row !== null);
+    const grant = grantedView.answer.rows.find(
+      (row): row is AccessShareRow => row.kind === "share" && invitable(row),
+    );
     if (!grant) return;
     // A started probe stands for the view's life; a lane reload does not ask again.
     probed.current = true;
@@ -1269,11 +2026,13 @@ export function SharingView(props: {
     [connect, facts, openSyncSettings],
   );
   const waiting = useMemo(() => waitingByShare(props.proposals), [props.proposals]);
+  const closeConfirm = (key: string | null) =>
+    setConfirmKey((confirming) => (confirming === key ? null : confirming));
 
   // An action's outcome reaches the shell even after the view closes; the
   // shell lives for one workspace. Only the view's own state checks `epoch`.
-  async function end(group: ShareGroup) {
-    if (!group.rows.some(endsOnEnd)) return;
+  async function endShare(group: ShareGroup): Promise<boolean> {
+    if (!group.rows.some(endsOnEnd)) return true;
     const token = epoch.current();
     const subject = `the share of ${subjectOf(liveGrant(group)).title} with ${recipientsOf(group)}`;
     setBusy(group.shareId, true);
@@ -1289,35 +2048,116 @@ export function SharingView(props: {
           : `${subject[0]!.toUpperCase()}${subject.slice(1)} has already ended.`,
         restoredMessage: `Restored ${subject}.`,
       });
-      if (epoch.isCurrent(token))
-        setConfirmShareId((confirming) => (confirming === group.shareId ? null : confirming));
+      return true;
     } catch (cause) {
       props.shareRemovals.failed({
         workspaceId,
         message: `dohc could not end ${subject}.`,
         cause,
-        retry: () => void end(group),
+        retry: () => void endShare(group),
       });
+      return false;
     } finally {
       if (epoch.isCurrent(token)) setBusy(group.shareId, false);
     }
+  }
+
+  async function end(shares: readonly ShareGroup[]) {
+    const token = epoch.current();
+    const asked = confirmNow.current;
+    const ended = await Promise.all(shares.map(endShare));
+    if (epoch.isCurrent(token) && ended.every(Boolean)) closeConfirm(asked);
+  }
+
+  async function removePerson(grant: AccessShareRow, title: string) {
+    const token = epoch.current();
+    const asked = confirmNow.current;
+    const subject = `${recipientOf(grant)}'s access to ${title}`;
+    setBusy(grant.shareId, true);
+    try {
+      const result = await bridge().revokeRelayShareGrant({
+        workspaceId,
+        shareId: grant.shareId,
+        grantId: grant.grantId,
+      });
+      props.shareRemovals.removed({
+        workspaceId,
+        shareId: grant.shareId,
+        undo: result.undo,
+        message: `Ended ${subject}.`,
+        restoredMessage: `Restored ${subject}.`,
+      });
+      if (epoch.isCurrent(token)) closeConfirm(asked);
+    } catch (cause) {
+      props.shareRemovals.failed({
+        workspaceId,
+        message: `dohc could not end ${subject}.`,
+        cause,
+        retry: () => void removePerson(grant, title),
+      });
+    } finally {
+      if (epoch.isCurrent(token)) setBusy(grant.shareId, false);
+    }
+  }
+
+  async function retune(grant: AccessShareRow, access: ShareAccess) {
+    const token = epoch.current();
+    const changed = await bridge().retuneRelayShareGrant({
+      workspaceId,
+      shareId: grant.shareId,
+      grantId: grant.grantId,
+      access,
+    });
+    if (!epoch.isCurrent(token)) return;
+    setChangedAccess((current) => ({
+      ...current,
+      [grant.grantId]: { access: changed.access, generation: changed.generation },
+    }));
+    void loadGranted({ refreshed: refresh() });
+  }
+
+  async function receivedFiles(shareId: string) {
+    const found = await bridge().getRelayReceivedShare({ shareId });
+    if (!found.found)
+      throw new Error(found.removed?.message ?? "This share is no longer shared with you.");
+    if ("chats" in found) throw new Error("Join this from Chats.");
+    return found.share;
   }
 
   async function mount(shareId: string) {
     const token = epoch.current();
     setBusy(shareId, true);
     try {
-      const found = await bridge().getRelayReceivedShare({ shareId });
-      if (!found.found)
-        throw new Error(found.removed?.message ?? "This share is no longer shared with you.");
-      if ("chats" in found) throw new Error("Join this from Chats.");
-      await bridge().mountShare({ workspaceId, shareCode: found.share.shareCode });
+      const share = await receivedFiles(shareId);
+      await bridge().mountShare({ workspaceId, shareCode: share.shareCode });
       props.onMountsChanged();
     } catch (cause) {
       props.reportError(
         "dohc could not add this share to the workspace.",
         cause,
         () => void mount(shareId),
+      );
+    } finally {
+      if (epoch.isCurrent(token)) setBusy(shareId, false);
+    }
+  }
+
+  async function openToEdit(shareId: string, open: (share: OpenedShare) => void) {
+    const token = epoch.current();
+    setBusy(shareId, true);
+    try {
+      const share = await receivedFiles(shareId);
+      if (epoch.isCurrent(token))
+        open({
+          shareId: share.shareId,
+          shareCode: share.shareCode,
+          liveEditing: opensForLiveEditing(share),
+        });
+    } catch (cause) {
+      props.reportError(
+        "dohc could not open this share.",
+        cause,
+        () => void openToEdit(shareId, open),
       );
     } finally {
       if (epoch.isCurrent(token)) setBusy(shareId, false);
@@ -1342,7 +2182,7 @@ export function SharingView(props: {
       const { left } = await bridge().leaveRelayShare({ shareId, ended });
       if (!ended && left && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
       if (epoch.isCurrent(token)) {
-        setConfirmShareId((confirming) => (confirming === shareId ? null : confirming));
+        closeConfirm(leaveConfirmKey(shareId));
         void loadReceived({ refreshed: refresh() });
       }
     } catch (cause) {
@@ -1356,6 +2196,27 @@ export function SharingView(props: {
     } finally {
       if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
+  }
+
+  async function clearAll(shareIds: readonly string[]) {
+    const token = epoch.current();
+    for (const shareId of shareIds) setBusy(shareId, true);
+    const answers = await Promise.allSettled(
+      shareIds.map((shareId) => bridge().leaveRelayShare({ shareId, ended: true })),
+    );
+    const failed = shareIds.filter((_, index) => answers[index]!.status === "rejected");
+    const refused = answers.find((answer) => answer.status === "rejected");
+    if (refused)
+      props.reportError(
+        failed.length === 1
+          ? "dohc could not take this share off your list."
+          : `dohc could not take ${failed.length} shares off your list.`,
+        refused.reason,
+        () => void clearAll(failed),
+      );
+    if (!epoch.isCurrent(token)) return;
+    for (const shareId of shareIds) setBusy(shareId, false);
+    void loadReceived({ refreshed: refresh() });
   }
 
   // A share that ended since the list was read has nothing to copy. The row
@@ -1416,14 +2277,19 @@ export function SharingView(props: {
     more: (lane, answer) =>
       void (lane === "granted" ? loadGranted : loadReceived)({ after: answer }),
     reviewChanges: props.onReviewChanges,
-    startEnd: setConfirmShareId,
-    cancelEnd: () => setConfirmShareId(null),
-    end: (group) => void end(group),
+    startEnd: setConfirmKey,
+    cancelEnd: () => setConfirmKey(null),
+    end: (shares) => void end(shares),
+    removePerson: (grant, title) => void removePerson(grant, title),
+    retune,
+    share: onShare ?? null,
     mount: (shareId) => void mount(shareId),
     unmount: (target) => void unmount(target),
-    startLeave: setConfirmShareId,
+    openToEdit: onOpenShare ? (shareId) => void openToEdit(shareId, onOpenShare) : null,
+    startLeave: setConfirmKey,
     leave: (shareId, mounted) => void leave(shareId, mounted, false),
     clear: (shareId, mounted) => void leave(shareId, mounted, true),
+    clearAll: (shareIds) => void clearAll(shareIds),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
     showSkips: (shareId) => setSkip(shareId, "shown"),
@@ -1441,10 +2307,12 @@ export function SharingView(props: {
       mounts={props.mounts}
       skipView={skipView}
       invitations={invitations}
-      confirmShareId={confirmShareId}
+      changedAccess={changedAccess}
+      confirmKey={confirmKey}
       busyShareIds={busyShareIds}
       actions={actions}
-      ref={panel}
+      focus={props.focus}
+      onFocused={props.onFocused}
     />
   );
 }
