@@ -26,7 +26,7 @@ import { accessOptions } from "../EmailShareForm";
 import { ipcErrorMessage } from "../ipcError";
 import { opensForLiveEditing } from "../OpenSharedView";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { SHARE_ACCESS_WORDS, ShareAccessMenu, SharePersonRow } from "../shareAccess";
+import { SHARE_ACCESS_WORDS, ShareAccessMenu } from "../shareAccess";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
@@ -35,7 +35,6 @@ import { ShellErrorReporter } from "../shell/useShellError";
 import {
   DangerButton,
   EmptyState,
-  FieldError,
   GhostButton,
   Pill,
   RetryRow,
@@ -75,11 +74,18 @@ import { shareSubject } from "./shareSubject";
 export type SharingLane = "granted" | "received";
 export type ShareMount = NonNullable<WorkspaceSummary["shareMounts"]>[number];
 export type ShareGroup = { shareId: string; rows: AccessShareRow[] };
-export type WaitingChanges = { count: number; senders: string[]; oldestProposalId: string };
+export type WaitingChanges = {
+  count: number;
+  senders: string[];
+  oldestProposalId: string;
+  oldestAtMs: number;
+};
 // A row, or a lane's heading when no share is named, to focus on opening.
 export type SharingFocus = { lane: SharingLane; shareId: string | null };
 export type CopyWhat = "code" | "invitation";
 export type ChangedAccess = { access: ShareAccess; generation: number };
+export type AccessChange = { asked: ShareAccess | null; answered: ChangedAccess | null };
+export type AccessChanges = Readonly<Record<string, AccessChange>>;
 export type OpenedShare = { shareId: string; shareCode: string; liveEditing: boolean };
 // Whether a mount's skipped changes show, against what its record says:
 // shown on request, or hidden up to the generation a Dismiss covered.
@@ -126,17 +132,17 @@ export function groupShares(rows: AccessAnswer["rows"]): ShareGroup[] {
 export function waitingByShare(
   proposals: readonly ShareProposalRow[],
 ): Map<string, WaitingChanges> {
-  const waiting = new Map<string, WaitingChanges & { at: number }>();
+  const waiting = new Map<string, WaitingChanges>();
   for (const proposal of proposals) {
     const seen = waiting.get(proposal.shareId);
-    const older = !seen || proposal.createdAtMs < seen.at;
+    const older = !seen || proposal.createdAtMs < seen.oldestAtMs;
     // The relay may not know who sent a change; it stays counted.
     const sender = proposal.proposedByEmail ?? "someone";
     waiting.set(proposal.shareId, {
       count: (seen?.count ?? 0) + 1,
       senders: seen?.senders.includes(sender) ? seen.senders : [...(seen?.senders ?? []), sender],
       oldestProposalId: older ? proposal.proposalId : seen.oldestProposalId,
-      at: older ? proposal.createdAtMs : seen.at,
+      oldestAtMs: older ? proposal.createdAtMs : seen.oldestAtMs,
     });
   }
   return waiting;
@@ -325,19 +331,64 @@ function retunable(row: LeveledRow): row is LeveledRow & { access: ShareAccess }
 const listedSince = (row: AccessShareRow, changed: ChangedAccess) =>
   row.generation !== null && row.generation >= changed.generation;
 
-// The plain question names who loses the share; with changes waiting, it
-// names who sent them.
-function endConfirmWords(group: ShareGroup, waiting: WaitingChanges | undefined): string {
+function levelNow(row: LeveledRow, change: AccessChange | undefined): Level {
+  if (change?.asked) return change.asked;
+  const answered = change?.answered;
+  return answered && !listedSince(row, answered) ? answered.access : row.access;
+}
+
+const changingAccess = (change: AccessChange | undefined) => !!change?.asked;
+
+const END_LINKS_IN_SHARE = "End links in Share.";
+const HELD_WHO: Who = {
+  text: "Show more to see who has it",
+  title: "dohc has not loaded all of this share yet.",
+};
+
+function endConfirmWords(
+  group: ShareGroup,
+  waiting: WaitingChanges | undefined,
+  also: { more: boolean; link: boolean },
+): string {
+  const names = recipientNames(group);
+  const several = also.more || names.length > 1;
+  const people = also.more
+    ? `${names.length} or more people`
+    : several
+      ? `${names.length} people`
+      : "1 person";
+  const link = also.link ? ` Anyone with the link keeps access. ${END_LINKS_IN_SHARE}` : "";
   if (!waiting) {
-    const who = recipientsOf(group);
-    return recipientNames(group).length > 1
-      ? `End this share? ${who} keep read-only copies and stop receiving updates.`
-      : `End this share? ${who} keeps a read-only copy and stops receiving updates.`;
+    const who = also.more || names.length > 3 ? "They" : namesOf(names, "The recipient");
+    return `End this share with ${people}? ${who} ${
+      several ? "keep read-only copies and stop" : "keeps a read-only copy and stops"
+    } receiving updates.${link}`;
   }
-  const who = namesOf(waiting.senders, "someone");
-  return waiting.count === 1
-    ? `End this share and decline 1 change ${who} sent? Undo restores the share, not the declined change.`
-    : `End this share and decline ${waiting.count} changes ${who} sent? Undo restores the share, not the declined changes.`;
+  const senders = namesOf(waiting.senders, "someone");
+  return `End this share with ${people} and decline ${
+    waiting.count === 1 ? "1 change" : `${waiting.count} changes`
+  } ${senders} sent? Undo restores the share, not the declined ${
+    waiting.count === 1 ? "change" : "changes"
+  }.${link}`;
+}
+
+const removable = (grant: AccessShareRow) =>
+  (grant.via === "named" || grant.via === "dependent") && filesOf(grant) !== null;
+const invitedOnly = (grant: AccessShareRow) =>
+  grant.via === "named" && grant.recipientUserId === null;
+
+function removalConfirmWords(grant: AccessShareRow, item: string): string {
+  const what =
+    grant.via === "dependent"
+      ? "This ends the access they got by joining through a link. The link stays active."
+      : invitedOnly(grant)
+        ? "This ends the email invitation they have not used yet."
+        : "This ends the access their email invitation gave. Copies they already made stay with them.";
+  return `Remove ${recipientOf(grant)}'s access to ${item}? ${what}`;
+}
+
+function removalSubject(grant: AccessShareRow, title: string): string {
+  return `${recipientOf(grant)}'s ${invitedOnly(grant) ? "email invitation" : "access"} to ${title}`;
 }
 
 function waitingFor(
@@ -345,12 +396,14 @@ function waitingFor(
   waiting: ReadonlyMap<string, WaitingChanges>,
 ): WaitingChanges | undefined {
   const found = shares.flatMap((share) => waiting.get(share.shareId) ?? []);
-  const [first] = found;
+  const [first, ...rest] = found;
   if (!first) return undefined;
+  const oldest = rest.reduce((a, b) => (b.oldestAtMs < a.oldestAtMs ? b : a), first);
   return {
     count: found.reduce((count, each) => count + each.count, 0),
     senders: [...new Set(found.flatMap((each) => each.senders))],
-    oldestProposalId: first.oldestProposalId,
+    oldestProposalId: oldest.oldestProposalId,
+    oldestAtMs: oldest.oldestAtMs,
   };
 }
 
@@ -363,17 +416,31 @@ type GrantedItem = {
   people: LeveledRow[];
   links: LeveledRow[];
   waiting: WaitingChanges | undefined;
+  held: boolean;
+  unfinishedShareId: string | undefined;
 };
-type EndedShare = { group: ShareGroup; first: AccessShareRow; subject: Subject; name: string };
+type EndedShare = {
+  group: ShareGroup;
+  first: AccessShareRow;
+  subject: Subject;
+  name: string;
+  unfinished: boolean;
+};
 
 function listGranted(
   rows: AccessAnswer["rows"],
   waiting: ReadonlyMap<string, WaitingChanges>,
+  more: boolean,
 ): { items: GrantedItem[]; ended: EndedShare[] } {
   const byKey = new Map<string, ShareGroup[]>();
   const over: ShareGroup[] = [];
-  for (const group of groupShares(rows)) {
-    if (!group.rows.some((row) => row.status === "active")) {
+  const groups = groupShares(rows);
+  const unfinishedShareId = more ? groups.at(-1)?.shareId : undefined;
+  for (const group of groups) {
+    const live = group.rows.some((row) => row.status === "active");
+    const held =
+      group.shareId === unfinishedShareId && !group.rows.some((row) => row.status === "damaged");
+    if (!live && !held) {
       over.push(group);
       continue;
     }
@@ -393,6 +460,8 @@ function listGranted(
       people: live.filter((row) => row.via !== "link"),
       links: live.filter((row) => row.via === "link").sort(widestFirst),
       waiting: waitingFor(shares, waiting),
+      held: !shares.some((share) => share.rows.some((row) => row.status === "active")),
+      unfinishedShareId,
     };
   });
   const repeated = repeatedNames(drafts.map((draft) => draft.subject.name));
@@ -413,6 +482,7 @@ function listGranted(
     ended: endedDrafts.map((draft) => ({
       ...draft,
       name: shownName(draft.subject, endedRepeated),
+      unfinished: draft.group.shareId === unfinishedShareId,
     })),
   };
 }
@@ -441,7 +511,7 @@ function receivedEntry(
   listed: boolean,
 ): ReceivedEntry {
   const shareId = row?.shareId ?? mount!.shareId;
-  const removed = row ? row.status === "removed" : listed;
+  const removed = row ? row.status === "removed" : listed || mount?.ended === true;
   const damaged = row ? row.status === "damaged" : mount?.damaged === true;
   const active = row?.status === "active";
   // A grant that no longer says what it covered goes by its folder's name.
@@ -467,7 +537,9 @@ function receivedEntry(
     mount,
     subject,
     sender: {
-      key: (parts.address ?? parts.full).toLowerCase(),
+      key: row?.granterUserId
+        ? `user:${row.granterUserId}`
+        : `label:${(parts.address ?? parts.full).toLowerCase()}`,
       name: shown,
       heading: parts.address ? shown : `${shown[0]!.toUpperCase()}${shown.slice(1)}`,
       full: parts.full,
@@ -523,15 +595,28 @@ function listReceived(view: AccessView, mounts: readonly ShareMount[]) {
     group.entries.push(entry);
     bySender.set(entry.sender.key, group);
   }
+  const sameHeading = repeatedNames([...bySender.values()].map((group) => group.sender.heading));
   const groups = [...bySender.values()]
     .map((group) => ({
-      ...group,
+      sender: sameHeading.has(group.sender.heading)
+        ? { ...group.sender, heading: group.sender.full }
+        : group.sender,
       entries: group.entries.toSorted((a, b) =>
         shownName(a.subject, repeated).localeCompare(shownName(b.subject, repeated)),
       ),
     }))
-    .sort((a, b) => a.sender.heading.localeCompare(b.sender.heading));
-  return { groups, ended: entries.filter((entry) => entry.ended), repeated, total: entries.length };
+    .sort(
+      (a, b) =>
+        a.sender.heading.localeCompare(b.sender.heading) ||
+        a.sender.key.localeCompare(b.sender.key),
+    );
+  return {
+    groups,
+    ended: entries.filter((entry) => entry.ended),
+    repeated,
+    total: entries.length,
+    live: entries.filter((entry) => entry.active).length,
+  };
 }
 
 function DamagedPill() {
@@ -584,14 +669,21 @@ function ConfirmCard(props: {
   onConfirm: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   useEffect(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
     cancelRef.current?.focus();
   }, []);
+  const cancel = () => {
+    props.onCancel();
+    if (opener.current?.isConnected) opener.current.focus();
+  };
   return (
     <div
       data-testid={`${props.testId}-confirm`}
       onKeyDown={(event) => {
-        if (event.key === "Escape") props.onCancel();
+        if (event.key === "Escape") cancel();
       }}
       className={CARD}
     >
@@ -601,7 +693,7 @@ function ConfirmCard(props: {
           ref={cancelRef}
           size="compact"
           data-testid={`${props.testId}-cancel`}
-          onClick={props.onCancel}
+          onClick={cancel}
         >
           Cancel
         </SecondaryButton>
@@ -626,7 +718,7 @@ export type SharingActions = {
   cancelEnd: () => void;
   end: (shares: readonly ShareGroup[]) => void;
   removePerson: (grant: AccessShareRow, title: string) => void;
-  retune: (grant: AccessShareRow, access: ShareAccess) => Promise<void>;
+  retune: (grant: AccessShareRow, access: ShareAccess, title: string) => void;
   share: ((target: RelayShareTarget) => void) | null;
   mount: (shareId: string) => void;
   unmount: (mount: ShareMount) => void;
@@ -634,7 +726,6 @@ export type SharingActions = {
   startLeave: (confirmKey: string) => void;
   leave: (shareId: string, mount: ShareMount | undefined) => void;
   clear: (shareId: string, mount: ShareMount | undefined) => void;
-  clearAll: (shareIds: readonly string[]) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
   dismissSkips: (mount: ShareMount) => void;
@@ -643,7 +734,7 @@ export type SharingActions = {
 };
 
 type PersonCopy = { label: string; secret: CopySecret; getText: () => Promise<string | null> };
-type PersonRemoval = { label: string; disabled: boolean; onSelect: () => void };
+type PersonRemoval = { disabled: boolean; why: string | null; onSelect: () => void };
 
 function PersonMenu(props: {
   name: string;
@@ -657,6 +748,8 @@ function PersonMenu(props: {
   const latest = useRef({ copy: props.copy, report });
   latest.current = { copy: props.copy, report };
   const answered = useRef(false);
+  const usingKeyboard = useRef(false);
+  const status = useRef<HTMLSpanElement>(null);
   const action = useRef<ReturnType<typeof createCopy> | null>(null);
   useLayoutEffect(() => {
     const made = createCopy({
@@ -672,7 +765,9 @@ function PersonMenu(props: {
         if (!answered.current) return;
         answered.current = false;
         setFeedback(null);
-        setOpen(false);
+        const focusInside =
+          status.current?.closest('[role="menu"]')?.contains(document.activeElement) === true;
+        if (!(usingKeyboard.current && focusInside)) setOpen(false);
       },
     });
     action.current = made;
@@ -681,79 +776,78 @@ function PersonMenu(props: {
   const { copy, removal } = props;
   if (!copy && !removal) return null;
   return (
-    <Menu
-      label={`Options for ${props.name}`}
-      testId={`sharing-person-menu-${props.grantId}`}
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) return;
-        answered.current = false;
-        setFeedback(null);
+    <span
+      className="contents"
+      onKeyDown={() => {
+        usingKeyboard.current = true;
       }}
-      closeOnPick={false}
-      width={ROW_MENU_WIDTH}
-      items={[
-        ...(copy
-          ? [
-              {
-                id: "copy",
-                label: feedback ? COPY_WORDS[feedback] : copy.label,
-                onSelect: () => void action.current?.copy(),
-              },
-            ]
-          : []),
-        ...(removal
-          ? [
-              {
-                id: "remove",
-                label: removal.label,
-                danger: true,
-                disabled: removal.disabled,
-                onSelect: () => {
-                  setOpen(false);
-                  removal.onSelect();
-                },
-              },
-            ]
-          : []),
-      ]}
+      onPointerDown={() => {
+        usingKeyboard.current = false;
+      }}
     >
-      <span role="status" aria-live="polite" className="sr-only">
-        {feedback ? COPY_WORDS[feedback] : ""}
-      </span>
-    </Menu>
+      <Menu
+        label={`Options for ${props.name}`}
+        testId={`sharing-person-menu-${props.grantId}`}
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (next) return;
+          answered.current = false;
+          setFeedback(null);
+        }}
+        closeOnPick={false}
+        width={ROW_MENU_WIDTH}
+        items={[
+          ...(copy
+            ? [
+                {
+                  id: "copy",
+                  label: feedback ? COPY_WORDS[feedback] : copy.label,
+                  onSelect: () => void action.current?.copy(),
+                },
+              ]
+            : []),
+          ...(removal
+            ? [
+                {
+                  id: "remove",
+                  label: "Remove access",
+                  danger: true,
+                  disabled: removal.disabled,
+                  ...(removal.why ? { description: removal.why } : {}),
+                  onSelect: () => {
+                    setOpen(false);
+                    removal.onSelect();
+                  },
+                },
+              ]
+            : []),
+        ]}
+      >
+        <span ref={status} role="status" aria-live="polite" className="sr-only">
+          {feedback ? COPY_WORDS[feedback] : ""}
+        </span>
+      </Menu>
+    </span>
   );
-}
-
-function removalOf(grant: AccessShareRow, share: ShareGroup): "share" | "grant" | "all" | null {
-  if (grant.via !== "named") return null;
-  const whole = endable(share);
-  if (whole && share.rows.filter(endsOnEnd).length === 1) return "share";
-  if (grant.recipientUserId !== null && filesOf(grant) !== null) return "grant";
-  return whole ? "all" : null;
 }
 
 function PersonRow(props: {
   grant: LeveledRow;
-  share: ShareGroup;
+  item: string;
   title: string;
   target: RelayShareTarget | null;
-  changed: ChangedAccess | undefined;
-  waiting: WaitingChanges | undefined;
+  change: AccessChange | undefined;
   confirmKey: string | null;
   busy: boolean;
   invitations: boolean;
   actions: SharingActions;
 }) {
-  const { grant, share, actions } = props;
+  const { grant, actions } = props;
   const name = recipientOf(grant);
-  const [retuning, setRetuning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const requests = useRequestSequence();
-  const errorId = useId();
-  const access =
-    props.changed && !listedSince(grant, props.changed) ? props.changed.access : grant.access;
+  const nameId = useId();
+  const access = levelNow(grant, props.change);
+  const changing = changingAccess(props.change);
   const offered: ReadonlyArray<{ value: ShareAccess; description?: string }> = props.target
     ? accessOptions(props.target).map(({ value, description }) => ({ value, description }))
     : [{ value: "view" }, { value: "edit" }];
@@ -766,23 +860,15 @@ function PersonRow(props: {
     testId: `sharing-person-access-${grant.grantId}-${option.value}`,
   }));
 
-  async function change(next: ShareAccess) {
-    if (retuning || next === access) return;
-    const token = requests.next();
-    setError(null);
-    setRetuning(true);
-    try {
-      await actions.retune(grant, next);
-    } catch (cause) {
-      if (requests.isCurrent(token))
-        setError(ipcErrorMessage(cause, `dohc could not change ${name}'s access.`));
-    } finally {
-      if (requests.isCurrent(token)) setRetuning(false);
-    }
-  }
-
-  const removal = removalOf(grant, share);
   const confirmKey = removeConfirmKey(grant.grantId);
+  const detail =
+    filesOf(grant) === null
+      ? ""
+      : grant.via === "named"
+        ? "Invited by email"
+        : grant.via === "dependent"
+          ? "Joined through a link"
+          : "";
   const invitation = props.invitations && invitable(grant);
   const copy: PersonCopy | null = copyable(grant)
     ? {
@@ -793,28 +879,32 @@ function PersonRow(props: {
     : null;
   return (
     <li data-testid="sharing-person" data-grant-id={grant.grantId} className="flex flex-col gap-1">
-      <SharePersonRow
-        name={name}
-        detail={
-          filesOf(grant) === null
-            ? ""
-            : grant.via === "named"
-              ? "Invited by email"
-              : grant.via === "dependent"
-                ? "Joined through a link"
-                : ""
-        }
-      >
+      <div className="flex min-h-8 items-center gap-2">
+        <ChatAvatar presentation={neutralPresentation} name={name} kind="human" size="strip" />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span
+            id={nameId}
+            data-testid="sharing-person-name"
+            title={name}
+            className="truncate text-[13px] text-ink"
+          >
+            {name}
+          </span>
+          <span className="text-[12px] text-subtle">{detail}</span>
+        </span>
         {retunable({ ...grant, access }) ? (
           <ShareAccessMenu
             label={`Access for ${name}`}
+            describedBy={nameId}
             access={shareAccessOf(access)}
             options={options}
-            disabled={retuning || props.busy}
+            disabled={changing || props.busy}
             testId={`sharing-person-access-${grant.grantId}`}
             width={288}
             align="end"
-            onPick={(next) => void change(next)}
+            onPick={(next) => {
+              if (next !== access) actions.retune(grant, next, props.title);
+            }}
           />
         ) : (
           <span className={QUIET_LEVEL}>{levelWords(access)}</span>
@@ -824,43 +914,26 @@ function PersonRow(props: {
           grantId={grant.grantId}
           copy={copy}
           removal={
-            removal
+            removable(grant)
               ? {
-                  label: removal === "all" ? "End share…" : "Remove access",
-                  disabled: props.busy,
+                  disabled: changing || props.busy,
+                  why: changing ? "dohc is changing this access." : null,
                   onSelect: () => actions.startEnd(confirmKey),
                 }
               : null
           }
         />
-      </SharePersonRow>
-      {error ? (
-        <FieldError id={errorId} testId={`sharing-person-error-${grant.grantId}`}>
-          {error}
-        </FieldError>
-      ) : null}
-      {removal && props.confirmKey === confirmKey ? (
-        removal === "grant" ? (
-          <ConfirmCard
-            testId="sharing-end"
-            words={`Remove ${name}'s access? They lose access right away. Copies they already made stay with them.`}
-            verb="Remove access"
-            running="Removing…"
-            busy={props.busy}
-            onCancel={actions.cancelEnd}
-            onConfirm={() => actions.removePerson(grant, props.title)}
-          />
-        ) : (
-          <ConfirmCard
-            testId="sharing-end"
-            words={endConfirmWords(share, props.waiting)}
-            verb="End share"
-            running="Ending…"
-            busy={props.busy}
-            onCancel={actions.cancelEnd}
-            onConfirm={() => actions.end([share])}
-          />
-        )
+      </div>
+      {removable(grant) && props.confirmKey === confirmKey ? (
+        <ConfirmCard
+          testId="sharing-end"
+          words={removalConfirmWords(grant, props.item)}
+          verb="Remove access"
+          running="Removing…"
+          busy={props.busy}
+          onCancel={actions.cancelEnd}
+          onConfirm={() => actions.removePerson(grant, props.title)}
+        />
       ) : null}
     </li>
   );
@@ -872,7 +945,7 @@ function ItemRow(props: {
   onToggle: () => void;
   waitingByShare: ReadonlyMap<string, WaitingChanges>;
   notSentWhileOpen: readonly string[];
-  changedAccess: Readonly<Record<string, ChangedAccess>>;
+  accessChanges: AccessChanges;
   confirmKey: string | null;
   busyShareIds: ReadonlySet<string>;
   invitations: boolean;
@@ -882,7 +955,15 @@ function ItemRow(props: {
   const { first, subject, waiting } = item;
   const panelId = useId();
   const noteId = `${panelId}-note`;
-  const who = itemWho(item.people, item.links);
+  const who = item.held
+    ? HELD_WHO
+    : itemWho(
+        item.people.map((row) => ({
+          ...row,
+          access: levelNow(row, props.accessChanges[row.grantId]),
+        })),
+        item.links,
+      );
   const files = filesOf(first);
   // The engine names held notes by path only, so a share of a version has none.
   const notSent =
@@ -892,6 +973,9 @@ function ItemRow(props: {
   const confirmKey = endConfirmKey(item.shares[0]!.shareId);
   const target = shareTargetOf(first);
   const share = actions.share;
+  const linksOnly = item.links.length > 0 && ending.length === 0;
+  const hasPanel =
+    item.people.length + item.links.length > 0 || (target !== null && share !== null);
   const review = waiting
     ? waiting.count > 1
       ? `Review changes (${waiting.count})`
@@ -917,7 +1001,7 @@ function ItemRow(props: {
       data-testid="sharing-granted-row"
       data-share-id={item.shares[0]!.shareId}
       data-share-ids={item.shares.map((each) => each.shareId).join(" ")}
-      data-status="active"
+      data-status={item.held ? "unconfirmed" : "active"}
     >
       <div
         role="group"
@@ -930,7 +1014,7 @@ function ItemRow(props: {
           data-testid="sharing-item-toggle"
           title={subject.title}
           aria-expanded={props.open}
-          aria-controls={props.open ? panelId : undefined}
+          aria-controls={props.open && hasPanel ? panelId : undefined}
           aria-describedby={notSent ? noteId : undefined}
           onClick={props.onToggle}
           className="dohc-row-open-target flex min-w-0 flex-1 items-start gap-2 text-left"
@@ -989,6 +1073,10 @@ function ItemRow(props: {
           words={endConfirmWords(
             { shareId: confirmKey, rows: ending.flatMap((each) => each.rows) },
             waitingFor(ending, props.waitingByShare),
+            {
+              more: ending.some((each) => each.shareId === item.unfinishedShareId),
+              link: item.links.length > 0,
+            },
           )}
           verb="End share"
           running="Ending…"
@@ -997,31 +1085,27 @@ function ItemRow(props: {
           onConfirm={() => actions.end(ending)}
         />
       ) : null}
-      {props.open ? (
+      {props.open && hasPanel ? (
         <div
           id={panelId}
           data-testid="sharing-item-people"
           className="mb-2 ml-5 flex flex-col gap-1 pl-2 pr-1"
         >
           <ul aria-label={`Who has ${item.name}`} className="m-0 flex list-none flex-col p-0">
-            {item.people.map((grant) => {
-              const owner = item.shares.find((each) => each.shareId === grant.shareId)!;
-              return (
-                <PersonRow
-                  key={grant.grantId}
-                  grant={grant}
-                  share={owner}
-                  title={subject.title}
-                  target={target}
-                  changed={props.changedAccess[grant.grantId]}
-                  waiting={props.waitingByShare.get(owner.shareId)}
-                  confirmKey={props.confirmKey}
-                  busy={props.busyShareIds.has(owner.shareId)}
-                  invitations={props.invitations}
-                  actions={actions}
-                />
-              );
-            })}
+            {item.people.map((grant) => (
+              <PersonRow
+                key={grant.grantId}
+                grant={grant}
+                item={item.name}
+                title={subject.title}
+                target={target}
+                change={props.accessChanges[grant.grantId]}
+                confirmKey={props.confirmKey}
+                busy={props.busyShareIds.has(grant.shareId)}
+                invitations={props.invitations}
+                actions={actions}
+              />
+            ))}
             {item.links.map((link) => (
               <li
                 key={link.grantId}
@@ -1036,6 +1120,11 @@ function ItemRow(props: {
               </li>
             ))}
           </ul>
+          {linksOnly ? (
+            <p data-testid="sharing-links-note" className="m-0 text-[12px] leading-4 text-muted">
+              {END_LINKS_IN_SHARE}
+            </p>
+          ) : null}
           {target && share ? (
             <GhostButton
               data-testid="sharing-open-share"
@@ -1114,7 +1203,10 @@ function EndedGrantedRow(props: {
       {props.confirmKey === confirmKey && group.rows.some(endsOnEnd) ? (
         <ConfirmCard
           testId="sharing-end"
-          words={endConfirmWords(group, props.waiting)}
+          words={endConfirmWords(group, props.waiting, {
+            more: props.ended.unfinished,
+            link: false,
+          })}
           verb="End share"
           running="Ending…"
           busy={props.busy}
@@ -1385,7 +1477,6 @@ function EndedGroup(props: {
   open: boolean;
   onToggle: () => void;
   damaged?: number;
-  action?: ReactNode;
   children: ReactNode;
 }) {
   const listId = useId();
@@ -1393,36 +1484,33 @@ function EndedGroup(props: {
   const damaged = props.damaged ?? 0;
   return (
     <div data-testid={`sharing-${props.lane}-ended`} className="mt-4">
-      <div className="flex h-7 items-center gap-1">
-        <button
-          type="button"
-          data-testid={`sharing-${props.lane}-ended-toggle`}
-          aria-expanded={props.open}
-          aria-controls={props.open ? listId : undefined}
-          onClick={props.onToggle}
-          className="dohc-focus-row flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+      <button
+        type="button"
+        data-testid={`sharing-${props.lane}-ended-toggle`}
+        aria-expanded={props.open}
+        aria-controls={props.open ? listId : undefined}
+        onClick={props.onToggle}
+        className="dohc-focus-row flex h-7 w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[12px] font-medium text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+      >
+        <Chevron open={props.open} />
+        Ended
+        <span
+          data-testid={`sharing-${props.lane}-ended-count`}
+          className="text-[11px] font-normal tabular-nums"
         >
-          <Chevron open={props.open} />
-          Ended
+          {props.count}
+        </span>
+        {damaged > 0 ? (
           <span
-            data-testid={`sharing-${props.lane}-ended-count`}
-            className="text-[11px] font-normal tabular-nums"
+            role="img"
+            aria-label={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
+            title={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
+            className="flex text-danger"
           >
-            {props.count}
+            <TriangleAlert size={12} aria-hidden />
           </span>
-          {damaged > 0 ? (
-            <span
-              role="img"
-              aria-label={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
-              title={damaged === 1 ? "1 damaged share" : `${damaged} damaged shares`}
-              className="flex text-danger"
-            >
-              <TriangleAlert size={12} aria-hidden />
-            </span>
-          ) : null}
-        </button>
-        {props.action}
-      </div>
+        ) : null}
+      </button>
       {props.open ? (
         <ul id={listId} aria-label="Ended" className="m-0 list-none p-0">
           {props.children}
@@ -1598,19 +1686,23 @@ export function SharingPanel(props: {
   mounts: readonly ShareMount[];
   skipView: SkipView;
   invitations: boolean;
-  changedAccess: Readonly<Record<string, ChangedAccess>>;
+  accessChanges: AccessChanges;
   confirmKey: string | null;
   busyShareIds: ReadonlySet<string>;
   actions: SharingActions;
   focus?: SharingFocus | null;
   onFocused?: () => void;
+  onLaneShown?: (lane: SharingLane) => void;
   initialLane?: SharingLane;
   initialOpen?: readonly string[];
 }) {
-  const { actions, focus, onFocused } = props;
+  const { actions, focus, onFocused, onLaneShown } = props;
   const panel = useRef<HTMLDivElement>(null);
   const [chosen, setLane] = useState<SharingLane>(props.initialLane ?? "granted");
   const lane = props.granted ? chosen : "received";
+  useEffect(() => {
+    onLaneShown?.(lane);
+  }, [lane, onLaneShown]);
   const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set(props.initialOpen));
   const toggle = (key: string) =>
     setOpen((current) => {
@@ -1620,10 +1712,14 @@ export function SharingPanel(props: {
     });
 
   const grantedView = props.granted;
-  const granted = useMemo(
-    () => listGranted((grantedView && knownAnswer(grantedView))?.rows ?? [], props.waiting),
-    [grantedView, props.waiting],
-  );
+  const granted = useMemo(() => {
+    const known = grantedView && knownAnswer(grantedView);
+    return listGranted(
+      known?.rows ?? [],
+      props.waiting,
+      known != null && known.nextCursor !== null,
+    );
+  }, [grantedView, props.waiting]);
   const received = useMemo(
     () => listReceived(props.received, props.mounts),
     [props.mounts, props.received],
@@ -1683,9 +1779,7 @@ export function SharingPanel(props: {
       <LaneCount
         lane={which}
         count={
-          which === "granted"
-            ? granted.items.length
-            : received.groups.reduce((sum, group) => sum + group.entries.length, 0)
+          which === "granted" ? granted.items.filter((item) => !item.held).length : received.live
         }
         more={known.nextCursor !== null}
       />
@@ -1713,9 +1807,16 @@ export function SharingPanel(props: {
         ))}
       </ul>
     ) : null;
-  const clearable = received.ended
-    .filter((entry) => entry.row && entry.removed && !entry.mount)
-    .map((entry) => entry.shareId);
+  const receivedEnded = (
+    <EndedGroup
+      lane="received"
+      count={received.ended.length}
+      open={open.has(endedGroupKey("received"))}
+      onToggle={() => toggle(endedGroupKey("received"))}
+    >
+      {received.ended.map(receivedRow)}
+    </EndedGroup>
+  );
 
   return (
     <div
@@ -1789,7 +1890,7 @@ export function SharingPanel(props: {
                   onToggle={() => toggle(item.key)}
                   waitingByShare={props.waiting}
                   notSentWhileOpen={props.notSentWhileOpen}
-                  changedAccess={props.changedAccess}
+                  accessChanges={props.accessChanges}
                   confirmKey={props.confirmKey}
                   busyShareIds={props.busyShareIds}
                   invitations={props.invitations}
@@ -1819,28 +1920,13 @@ export function SharingPanel(props: {
             )
           }
           empty={received.total === 0}
-          local={senders}
-          ended={
-            <EndedGroup
-              lane="received"
-              count={received.ended.length}
-              open={open.has(endedGroupKey("received"))}
-              onToggle={() => toggle(endedGroupKey("received"))}
-              action={
-                clearable.length > 0 ? (
-                  <GhostButton
-                    data-testid="sharing-received-clear-all"
-                    disabled={clearable.some((shareId) => props.busyShareIds.has(shareId))}
-                    onClick={() => actions.clearAll(clearable)}
-                  >
-                    Remove all
-                  </GhostButton>
-                ) : null
-              }
-            >
-              {received.ended.map(receivedRow)}
-            </EndedGroup>
+          local={
+            <>
+              {senders}
+              {receivedEnded}
+            </>
           }
+          ended={receivedEnded}
         >
           {senders}
         </Lane>
@@ -1940,9 +2026,24 @@ export function SharingView(props: {
       return next;
     });
   const [skipView, setSkipView] = useState<SkipView>(new Map());
-  const [changedAccess, setChangedAccess] = useState<Readonly<Record<string, ChangedAccess>>>({});
+  const [accessChanges, setAccessChanges] = useState<AccessChanges>({});
+  const [changesFor, setChangesFor] = useState(workspaceId);
+  if (changesFor !== workspaceId) {
+    setChangesFor(workspaceId);
+    setAccessChanges({});
+  }
+  const changesNow = useRef(accessChanges);
+  changesNow.current = accessChanges;
+  const changeAccess = (
+    grantId: string,
+    next: (held: AccessChange | undefined) => AccessChange,
+  ) => {
+    changesNow.current = { ...changesNow.current, [grantId]: next(changesNow.current[grantId]) };
+    setAccessChanges(changesNow.current);
+  };
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
+  const openLookups = useRequestSequence([workspaceId]);
 
   // Copy invitation hands out a browser invitation only once this server has
   // made one: the relay makes them only when its browser deployment is set
@@ -2072,7 +2173,7 @@ export function SharingView(props: {
   async function removePerson(grant: AccessShareRow, title: string) {
     const token = epoch.current();
     const asked = confirmNow.current;
-    const subject = `${recipientOf(grant)}'s access to ${title}`;
+    const subject = removalSubject(grant, title);
     setBusy(grant.shareId, true);
     try {
       const result = await bridge().revokeRelayShareGrant({
@@ -2084,14 +2185,14 @@ export function SharingView(props: {
         workspaceId,
         shareId: grant.shareId,
         undo: result.undo,
-        message: `Ended ${subject}.`,
+        message: `Removed ${subject}.`,
         restoredMessage: `Restored ${subject}.`,
       });
       if (epoch.isCurrent(token)) closeConfirm(asked);
     } catch (cause) {
       props.shareRemovals.failed({
         workspaceId,
-        message: `dohc could not end ${subject}.`,
+        message: `dohc could not remove ${subject}.`,
         cause,
         retry: () => void removePerson(grant, title),
       });
@@ -2100,20 +2201,35 @@ export function SharingView(props: {
     }
   }
 
-  async function retune(grant: AccessShareRow, access: ShareAccess) {
+  async function retune(grant: AccessShareRow, access: ShareAccess, title: string) {
+    if (changingAccess(changesNow.current[grant.grantId])) return;
     const token = epoch.current();
-    const changed = await bridge().retuneRelayShareGrant({
-      workspaceId,
-      shareId: grant.shareId,
-      grantId: grant.grantId,
-      access,
-    });
-    if (!epoch.isCurrent(token)) return;
-    setChangedAccess((current) => ({
-      ...current,
-      [grant.grantId]: { access: changed.access, generation: changed.generation },
-    }));
-    void loadGranted({ refreshed: refresh() });
+    changeAccess(grant.grantId, (held) => ({ asked: access, answered: held?.answered ?? null }));
+    try {
+      const changed = await bridge().retuneRelayShareGrant({
+        workspaceId,
+        shareId: grant.shareId,
+        grantId: grant.grantId,
+        access,
+      });
+      if (!epoch.isCurrent(token)) return;
+      changeAccess(grant.grantId, (held) => ({
+        asked: null,
+        answered:
+          held?.answered && held.answered.generation > changed.generation
+            ? held.answered
+            : { access: changed.access, generation: changed.generation },
+      }));
+      void loadGranted({ refreshed: refresh() });
+    } catch (cause) {
+      if (epoch.isCurrent(token))
+        changeAccess(grant.grantId, (held) => ({ asked: null, answered: held?.answered ?? null }));
+      props.reportError(
+        `dohc could not change ${recipientOf(grant)}'s access to ${title}.`,
+        cause,
+        () => void retune(grant, access, title),
+      );
+    }
   }
 
   async function receivedFiles(shareId: string) {
@@ -2144,21 +2260,22 @@ export function SharingView(props: {
 
   async function openToEdit(shareId: string, open: (share: OpenedShare) => void) {
     const token = epoch.current();
+    const lookup = openLookups.next();
+    const retry = () => void openToEdit(shareId, open);
     setBusy(shareId, true);
     try {
       const share = await receivedFiles(shareId);
-      if (epoch.isCurrent(token))
-        open({
-          shareId: share.shareId,
-          shareCode: share.shareCode,
-          liveEditing: opensForLiveEditing(share),
-        });
+      if (!openLookups.isCurrent(lookup)) return;
+      if (!opensForLiveEditing(share)) {
+        const message = "The owner changed your access to this share. It no longer opens to edit.";
+        props.reportError(message, new Error(message), retry);
+        void loadReceived({ refreshed: refresh() });
+        return;
+      }
+      open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true });
     } catch (cause) {
-      props.reportError(
-        "dohc could not open this share.",
-        cause,
-        () => void openToEdit(shareId, open),
-      );
+      if (openLookups.isCurrent(lookup))
+        props.reportError("dohc could not open this share.", cause, retry);
     } finally {
       if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
@@ -2196,27 +2313,6 @@ export function SharingView(props: {
     } finally {
       if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
-  }
-
-  async function clearAll(shareIds: readonly string[]) {
-    const token = epoch.current();
-    for (const shareId of shareIds) setBusy(shareId, true);
-    const answers = await Promise.allSettled(
-      shareIds.map((shareId) => bridge().leaveRelayShare({ shareId, ended: true })),
-    );
-    const failed = shareIds.filter((_, index) => answers[index]!.status === "rejected");
-    const refused = answers.find((answer) => answer.status === "rejected");
-    if (refused)
-      props.reportError(
-        failed.length === 1
-          ? "dohc could not take this share off your list."
-          : `dohc could not take ${failed.length} shares off your list.`,
-        refused.reason,
-        () => void clearAll(failed),
-      );
-    if (!epoch.isCurrent(token)) return;
-    for (const shareId of shareIds) setBusy(shareId, false);
-    void loadReceived({ refreshed: refresh() });
   }
 
   // A share that ended since the list was read has nothing to copy. The row
@@ -2281,7 +2377,7 @@ export function SharingView(props: {
     cancelEnd: () => setConfirmKey(null),
     end: (shares) => void end(shares),
     removePerson: (grant, title) => void removePerson(grant, title),
-    retune,
+    retune: (grant, access, title) => void retune(grant, access, title),
     share: onShare ?? null,
     mount: (shareId) => void mount(shareId),
     unmount: (target) => void unmount(target),
@@ -2289,7 +2385,6 @@ export function SharingView(props: {
     startLeave: setConfirmKey,
     leave: (shareId, mounted) => void leave(shareId, mounted, false),
     clear: (shareId, mounted) => void leave(shareId, mounted, true),
-    clearAll: (shareIds) => void clearAll(shareIds),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
     showSkips: (shareId) => setSkip(shareId, "shown"),
@@ -2307,12 +2402,13 @@ export function SharingView(props: {
       mounts={props.mounts}
       skipView={skipView}
       invitations={invitations}
-      changedAccess={changedAccess}
+      accessChanges={accessChanges}
       confirmKey={confirmKey}
       busyShareIds={busyShareIds}
       actions={actions}
       focus={props.focus}
       onFocused={props.onFocused}
+      onLaneShown={openLookups.next}
     />
   );
 }

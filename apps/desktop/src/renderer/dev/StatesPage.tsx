@@ -2248,6 +2248,7 @@ const SHARING_RECEIVED: AccessAnswer = {
       shareId: "in-funnel",
       grantId: "in-1",
       via: "received",
+      granterUserId: "sam",
       sharerName: "Sam",
       granterEmail: "sam@hollis.studio",
       recipientUserId: "me",
@@ -2260,6 +2261,7 @@ const SHARING_RECEIVED: AccessAnswer = {
       shareId: "in-research",
       grantId: "in-2",
       via: "received",
+      granterUserId: "sam",
       sharerName: "Sam",
       granterEmail: "sam@hollis.studio",
       recipientUserId: "me",
@@ -2272,6 +2274,7 @@ const SHARING_RECEIVED: AccessAnswer = {
       shareId: "in-itinerary",
       grantId: "in-4",
       via: "received",
+      granterUserId: "kim",
       sharerName: null,
       granterEmail: "kim@example.com",
       recipientUserId: "me",
@@ -2372,7 +2375,15 @@ const SHARING_DAMAGED: AccessAnswer = {
 const SHARING_TRIP = SHARING_GRANTED.rows[1] as AccessShareRow;
 const SHARING_LINK_ABOVE_GRANT = SHARING_LINK_ABOVE.rows[0] as AccessShareRow;
 const SHARING_WAITING = new Map([
-  ["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }],
+  [
+    "share-plan",
+    {
+      count: 2,
+      senders: ["sam@hollis.studio"],
+      oldestProposalId: "proposal-1",
+      oldestAtMs: SHARING_CHECKED_AT,
+    },
+  ],
 ]);
 const SHARING_ACTIONS: SharingActions = {
   retry: noop,
@@ -2382,7 +2393,7 @@ const SHARING_ACTIONS: SharingActions = {
   cancelEnd: noop,
   end: noop,
   removePerson: noop,
-  retune: async () => undefined,
+  retune: noop,
   share: noop,
   mount: noop,
   unmount: noop,
@@ -2390,7 +2401,6 @@ const SHARING_ACTIONS: SharingActions = {
   startLeave: noop,
   leave: noop,
   clear: noop,
-  clearAll: noop,
   copy: async () => null,
   dismissSkips: noop,
   showSkips: noop,
@@ -2425,7 +2435,7 @@ function SharingSpecimen(props: {
         skipView={props.skipView ?? new Map()}
         notSentWhileOpen={[]}
         invitations
-        changedAccess={{}}
+        accessChanges={{}}
         confirmKey={props.confirmKey ?? null}
         busyShareIds={new Set()}
         actions={SHARING_ACTIONS}
@@ -4549,6 +4559,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="Shared by me: a link, and a person who can do more">
           <SharingSpecimen
             granted={ready(SHARING_LINK_ABOVE)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_LINK_ABOVE_GRANT)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: only a link, which ends in Share">
+          <SharingSpecimen
+            granted={ready({ ...SHARING_LINK_ABOVE, rows: [SHARING_LINK_ABOVE_GRANT] })}
             received={ready({ ...SHARING_RECEIVED, rows: [] })}
             mounts={[]}
             open={[sharedItemKey(SHARING_LINK_ABOVE_GRANT)]}
