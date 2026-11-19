@@ -1,17 +1,20 @@
 import { CloudOff, CloudUpload, LogIn, Share2, X, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
-import { EmailShareForm } from "./EmailShareForm";
+import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
+import { accessOptions, EmailShareForm } from "./EmailShareForm";
+import { ipcErrorMessage } from "./ipcError";
 import { notSentWords } from "./notSentWords";
-import { SHARE_ACCESS_WORDS, SharePersonRow } from "./shareAccess";
+import { SHARE_ACCESS_WORDS, ShareAccessMenu, SharePersonRow } from "./shareAccess";
 import { INVITATION_SECRET } from "./shareCopySecrets";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
-import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
+import { FieldError, IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
 import { CopyButton } from "./ui/CopyButton";
 import { MoreMenu } from "./ui/MoreMenu";
 import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
+import { useRequestSequence } from "./useRequestSequence";
 import {
   accessReasonForLane,
   serverName,
@@ -30,7 +33,13 @@ export type RelayShareTarget =
 // toasts, so a long link pane grows it downward and its body scrolls.
 const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
-type InvitedPerson = { shareId: string; grantId: string; name: string; access: ShareAccess | null };
+type InvitedPerson = {
+  shareId: string;
+  grantId: string;
+  name: string;
+  email: string | null;
+  access: ShareAccess | null;
+};
 
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
@@ -163,6 +172,7 @@ function useInvitedPeople(input: {
             shareId: row.shareId,
             grantId: row.grantId,
             name: row.recipientEmail ?? row.recipientUserId ?? "Unnamed person",
+            email: row.recipientEmail,
             access: isShareAccess(row.access) ? row.access : null,
           });
         }
@@ -218,6 +228,11 @@ export function RelayShareDialog(props: {
     people: [],
   });
   const [invitedRevision, setInvitedRevision] = useState(0);
+  const [changedAccess, setChangedAccess] = useState<{
+    scope: string;
+    byGrant: Readonly<Record<string, ShareAccess>>;
+  }>({ scope: linkPane.scope, byGrant: {} });
+  const accessNow = changedAccess.scope === linkPane.scope ? changedAccess.byGrant : {};
   const invited = useInvitedPeople({
     workspaceId: props.workspaceId,
     target: props.target,
@@ -314,7 +329,10 @@ export function RelayShareDialog(props: {
                   const scope = linkPane.scope;
                   setInvitedHere((current) => ({
                     scope,
-                    people: [...(current.scope === scope ? current.people : []), person],
+                    people: [
+                      ...(current.scope === scope ? current.people : []),
+                      { ...person, email: person.name },
+                    ],
                   }));
                   setInvitedRevision((revision) => revision + 1);
                 }}
@@ -336,30 +354,32 @@ export function RelayShareDialog(props: {
                   </RetryRow>
                 ) : null}
                 {invitedPeople.map((person) => (
-                  <div key={person.grantId} data-testid={`share-invited-${person.grantId}`}>
-                    <SharePersonRow
-                      name={person.name}
-                      detail={`${person.access ? `${SHARE_ACCESS_WORDS[person.access]} · ` : ""}Invited by email`}
-                    >
-                      <CopyInvitation person={person} reload={loadInvited} />
-                      {onOpenSharing ? (
-                        <MoreMenu
-                          label="Share options"
-                          topLayer
-                          testId={`share-invited-options-${person.grantId}`}
-                          items={[
-                            {
-                              label: "Open in Sharing",
-                              onSelect: () => {
-                                linkPane.close();
-                                onOpenSharing({ lane: "granted", shareId: person.shareId });
-                              },
-                            },
-                          ]}
-                        />
-                      ) : null}
-                    </SharePersonRow>
-                  </div>
+                  <InvitedPersonRow
+                    key={person.grantId}
+                    workspaceId={props.workspaceId}
+                    target={props.target}
+                    person={{ ...person, access: accessNow[person.grantId] ?? person.access }}
+                    reload={loadInvited}
+                    onAccessChanged={(access) => {
+                      const scope = linkPane.scope;
+                      setChangedAccess((current) => ({
+                        scope,
+                        byGrant: {
+                          ...(current.scope === scope ? current.byGrant : {}),
+                          [person.grantId]: access,
+                        },
+                      }));
+                      setInvitedRevision((revision) => revision + 1);
+                    }}
+                    {...(onOpenSharing
+                      ? {
+                          onOpenSharing: () => {
+                            linkPane.close();
+                            onOpenSharing({ lane: "granted", shareId: person.shareId });
+                          },
+                        }
+                      : {})}
+                  />
                 ))}
                 {linkPane.people}
               </section>
@@ -369,6 +389,104 @@ export function RelayShareDialog(props: {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function InvitedPersonRow(props: {
+  workspaceId: string;
+  target: RelayShareTarget;
+  person: InvitedPerson;
+  reload: () => Promise<unknown>;
+  onAccessChanged: (access: ShareAccess) => void;
+  onOpenSharing?: () => void;
+}) {
+  const { person, target, workspaceId } = props;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [asked, setAsked] = useState<ShareAccess | null>(null);
+  const errorId = useId();
+  const requests = useRequestSequence([workspaceId]);
+  const automations = useAutomationShareCheck(workspaceId, target);
+  const options = useMemo(() => {
+    const offered = accessOptions(target).map(({ value, description }) => ({
+      value,
+      description,
+      testId: `share-person-access-${person.grantId}-${value}`,
+    }));
+    return person.access === "comment"
+      ? [offered[0]!, { value: "comment" as const }, ...offered.slice(1)]
+      : offered;
+  }, [person.access, person.grantId, target.kind]);
+  const shareOf = (access: ShareAccess) => ({
+    recipientEmail: person.email,
+    access,
+    shareId: person.shareId,
+  });
+  const note = asked ? automations.noteFor(shareOf(asked)) : null;
+
+  async function change(access: ShareAccess) {
+    if (busy || access === person.access) return;
+    const token = requests.next();
+    const current = () => requests.isCurrent(token);
+    setError(null);
+    setAsked(access);
+    setBusy(true);
+    try {
+      const share = shareOf(access);
+      if (
+        person.email !== null &&
+        automations.asks(share) &&
+        !(await automations.mayShare(share, current))
+      )
+        return;
+      const changed = await bridge().retuneRelayShareGrant({
+        workspaceId,
+        shareId: person.shareId,
+        grantId: person.grantId,
+        access,
+      });
+      props.onAccessChanged(changed.access);
+      if (current()) setAsked(null);
+    } catch (cause) {
+      if (current())
+        setError(ipcErrorMessage(cause, `dohc could not change ${person.name}'s access.`));
+    } finally {
+      if (current()) setBusy(false);
+    }
+  }
+
+  return (
+    <div data-testid={`share-invited-${person.grantId}`} className="flex flex-col gap-1">
+      <SharePersonRow name={person.name} detail="Invited by email">
+        {person.access ? (
+          <ShareAccessMenu
+            label={`Access for ${person.name}`}
+            access={person.access}
+            options={options}
+            disabled={busy}
+            testId={`share-person-access-${person.grantId}`}
+            width={288}
+            align="end"
+            onPick={(access) => void change(access)}
+          />
+        ) : null}
+        <CopyInvitation person={person} reload={props.reload} />
+        {props.onOpenSharing ? (
+          <MoreMenu
+            label="Share options"
+            topLayer
+            testId={`share-invited-options-${person.grantId}`}
+            items={[{ label: "Open in Sharing", onSelect: props.onOpenSharing }]}
+          />
+        ) : null}
+      </SharePersonRow>
+      {note?.warning ? <AutomationShareNote note={note} /> : null}
+      {error ? (
+        <FieldError id={errorId} testId={`share-person-error-${person.grantId}`}>
+          {error}
+        </FieldError>
+      ) : null}
     </div>
   );
 }

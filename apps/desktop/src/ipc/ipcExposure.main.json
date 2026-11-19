@@ -315,6 +315,7 @@
     "desktop:retry-share-handoff",
     "desktop:retry-stopped-run",
     "desktop:retry-workspace-path-open",
+    "desktop:retune-relay-share-grant",
     "desktop:retune-relay-share-link",
     "desktop:reveal-automation-holds",
     "desktop:reveal-explorer-path",

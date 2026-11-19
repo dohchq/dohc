@@ -1653,6 +1653,7 @@ export function createSyncRelayHandler({
         route.route === "share-link-rotate" ||
         route.route === "share-link-retune" ||
         route.route === "share-grant-promote" ||
+        route.route === "share-grant-retune" ||
         route.route === "share-grant-revoke" ||
         route.route === "share-undo" ||
         route.route === "share-revoke"

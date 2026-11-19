@@ -311,6 +311,9 @@ const LISTED_CAPABILITIES = {
     ipc: ["resumeRelayShareDiscussion"],
   }),
   "share.grant.promote": capability("Promote a share grant.", { ipc: ["promoteRelayShareGrant"] }),
+  "share.grant.access.set": capability("Change a person's access on a share.", {
+    ipc: ["retuneRelayShareGrant"],
+  }),
   "share.grant.revoke": capability("Revoke a share grant.", { ipc: ["revokeRelayShareGrant"] }),
   "share.live.document.stop": capability("Stop live editing for a document.", {
     ipc: ["stopOwnerLiveDocument"],
