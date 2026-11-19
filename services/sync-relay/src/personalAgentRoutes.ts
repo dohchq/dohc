@@ -377,8 +377,9 @@ export function createPersonalAgentToolRoutes(input: {
     return jsonResponse({ ok: true, message });
   }
 
-  // The relay deletes only a message at the agent's own origin, in a place it
-  // reads. The storage write reads the agent's authority and reach again.
+  // The relay deletes only a message at the agent's own origin, in a workspace
+  // its account owns or in a place its person reads. The storage write reads
+  // the agent's authority and reach again.
   function deleteMessage(authority: PersonalAuthority, body: Record<string, unknown>): Response {
     fields(body, ["workspaceId", "threadId", "messageId"], []);
     const workspaceId = parseWorkspaceId(body.workspaceId);
