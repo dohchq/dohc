@@ -13,6 +13,8 @@ import {
   type ReceivedShareListing,
 } from "./recipientShareReconciliation";
 import type { JoinedSharedChannel, RegistryEntry, ShareMountRecord } from "./registryStore";
+import type { ShareViewSelector } from "./shareViewInfo";
+import { workspaceSummaryFor } from "./workspaceSummaryProjection";
 
 const credentials: CloudCredentials = {
   serverUrl: "https://account.test",
@@ -60,10 +62,15 @@ function entry(overrides: Partial<RegistryEntry> = {}): RegistryEntry {
   };
 }
 
-function listing(received: string[], removed: Array<[string, number]> = []): ReceivedShareListing {
+function listing(
+  received: string[],
+  removed: Array<[string, number]> = [],
+  stated: Record<string, ShareViewSelector> = {},
+): ReceivedShareListing {
   return {
     received: new Set(received),
     removed: removed.map(([shareId, removedAtMs]) => ({ shareId, removedAtMs })),
+    statedFileSelectors: new Map(Object.entries(stated)),
   };
 }
 
@@ -77,11 +84,184 @@ describe("readReceivedShareListing", () => {
           { shareId: "c" },
         ],
       }),
-    ).toEqual({ received: new Set(["a"]), removed: [{ shareId: "b", removedAtMs: 5 }] });
+    ).toEqual({
+      received: new Set(["a"]),
+      removed: [{ shareId: "b", removedAtMs: 5 }],
+      statedFileSelectors: new Map(),
+    });
     expect(readReceivedShareListing({})).toBeNull();
     expect(readReceivedShareListing({ received: "a" })).toBeNull();
     expect(readReceivedShareListing({ removed: {} })).toBeNull();
     expect(readReceivedShareListing(null)).toBeNull();
+  });
+
+  it("reads what the relay states for each share of files, and nothing for a row it cannot read", () => {
+    const files = { paths: ["docs"], versionId: null };
+    expect(
+      readReceivedShareListing({
+        received: [
+          { shareId: "files", selector: files, access: "edit" },
+          { shareId: "version", selector: { paths: [], versionId: "saved" }, access: "comment" },
+          { shareId: "chat", selector: { kind: "chat", channelWireId: "w" }, access: "read-write" },
+          {
+            shareId: "group",
+            selector: { kind: "group", channelWireId: "w", paths: ["docs"], versionId: null },
+            access: "read-write",
+          },
+          { shareId: "no-level", selector: files },
+          { shareId: "unknown-level", selector: files, access: "owner" },
+          { shareId: "no-selector", access: "edit" },
+          { shareId: "damaged", selector: files, access: "edit", damaged: true },
+        ],
+        removed: [],
+      })?.statedFileSelectors,
+    ).toEqual(
+      new Map([
+        ["files", { paths: ["docs"], versionId: null, access: "edit" }],
+        ["version", { paths: [], versionId: "saved", access: "comment" }],
+      ]),
+    );
+  });
+});
+
+describe("a mount's pinned level", () => {
+  const edit = { paths: ["docs"], versionId: null, access: "edit" as const };
+
+  it.each([
+    ["view", "edit"],
+    ["edit", "view"],
+  ] as const)(
+    "follows the listed level from %s to %s, and the Sharing row's level with it",
+    (from, to) => {
+      const before = entry({
+        shareMounts: [
+          mount("mount", { grantedSelector: { ...selector, access: from } }),
+          mount("unchanged"),
+        ],
+      });
+      const after = reconcileRecipientShares(
+        before,
+        listing(["mount", "unchanged"], [], {
+          mount: { ...selector, access: to },
+          unchanged: selector,
+        }),
+        credentials,
+        new Set(),
+      );
+      expect(after?.shareMounts).toEqual([
+        mount("mount", { grantedSelector: { paths: ["docs"], versionId: null, access: to } }),
+        mount("unchanged"),
+      ]);
+      expect(after?.shareMounts?.[1]).toBe(before.shareMounts![1]);
+      expect(workspaceSummaryFor(after!).shareMounts?.map((row) => row.access)).toEqual([
+        to,
+        "view",
+      ]);
+    },
+  );
+
+  it("changes nothing when the listed level is the pinned one", () => {
+    expect(
+      reconcileRecipientShares(
+        entry({ shareMounts: [mount("mount")] }),
+        listing(["mount"], [], { mount: selector }),
+        credentials,
+        new Set(),
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["other paths", { paths: ["everything"], versionId: null, access: "edit" as const }],
+    ["more paths", { paths: ["docs", "plans"], versionId: null, access: "edit" as const }],
+    ["a version", { paths: ["docs"], versionId: "saved-version", access: "edit" as const }],
+  ])("keeps the pin when the listing states %s for the share", (_name, stated) => {
+    expect(
+      reconcileRecipientShares(
+        entry({ shareMounts: [mount("mount")] }),
+        listing(["mount"], [], { mount: stated }),
+        credentials,
+        new Set(),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps the pin of a share the listing does not state, lists as removed, or shows ended", () => {
+    for (const [received, removed, ended] of [
+      [[], [], false],
+      [["mount"], [["mount", 10]], false],
+      [["mount"], [], true],
+    ] as Array<[string[], Array<[string, number]>, boolean]>) {
+      const before = entry({ shareMounts: [mount("mount", ended ? { ended: true } : {})] });
+      const after = reconcileRecipientShares(
+        before,
+        listing(received, removed, { mount: edit }),
+        credentials,
+        new Set(),
+      );
+      expect((after ?? before).shareMounts?.[0]?.grantedSelector).toBe(selector);
+    }
+  });
+
+  it("keeps the pin of a mount another account or another relay holds", () => {
+    const before = entry({
+      shareMounts: [
+        mount("other-account", { recipientEmail: "someone@test.example" }),
+        mount("other-relay", { relayUrl: "https://elsewhere.test" }),
+      ],
+    });
+    expect(
+      reconcileRecipientShares(
+        before,
+        listing(["other-account", "other-relay"], [], {
+          "other-account": edit,
+          "other-relay": edit,
+        }),
+        credentials,
+        new Set(),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps a pin dohc cannot read", () => {
+    const damaged = { paths: ["docs"], versionId: null } as unknown as ShareViewSelector;
+    expect(
+      reconcileRecipientShares(
+        entry({ shareMounts: [mount("mount", { grantedSelector: damaged })] }),
+        listing(["mount"], [], { mount: edit }),
+        credentials,
+        new Set(),
+      ),
+    ).toBeNull();
+  });
+
+  it("gives a mount that resumes the listed level in the same pass", () => {
+    const after = reconcileRecipientShares(
+      entry({ shareMounts: [mount("mount", { ended: true })] }),
+      listing(["mount"], [], { mount: edit }),
+      credentials,
+      new Set(["mount"]),
+    );
+    expect(after?.shareMounts).toEqual([mount("mount", { grantedSelector: edit })]);
+  });
+
+  it("leaves a share opened in its own window to that window's refresh", () => {
+    const view = {
+      shareId: "view",
+      granterEmail: null,
+      genericChatWritable: false,
+      grantedSelector: selector,
+      relayUrl: credentials.relayUrl!,
+      recipientUserId: credentials.userId,
+    };
+    expect(
+      reconcileRecipientShares(
+        entry({ shareView: view }),
+        listing(["view"], [], { view: edit }),
+        credentials,
+        new Set(["view"]),
+      ),
+    ).toBeNull();
   });
 });
 
