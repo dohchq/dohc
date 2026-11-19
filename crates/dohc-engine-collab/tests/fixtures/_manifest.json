@@ -87,6 +87,7 @@
   "offsetProbe.json",
   "surrogateProbe.json",
   "nestedFrontmatter.json",
-  "markedOracle.json"
+  "markedOracle.json",
+  "readerParity.json"
  ]
 }
