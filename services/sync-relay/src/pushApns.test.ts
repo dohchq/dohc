@@ -95,7 +95,8 @@ async function fakeApns() {
       void Promise.resolve(answer(request)).then((reply) => {
         if (stream.destroyed || stream.closed) return;
         stream.respond({ ":status": reply.status });
-        if (reply.reset) return stream.close(constants.NGHTTP2_CANCEL);
+        if (reply.reset)
+          return stream.write('{"reason":"Unreg', () => stream.close(constants.NGHTTP2_CANCEL));
         stream.end(reply.body === undefined ? undefined : JSON.stringify(reply.body));
       });
     });
@@ -594,7 +595,7 @@ it.each([
   expect(f.binding("ben")).toEqual({ generation: f.generations.get("ben") });
 });
 
-it("keeps the binding when a 410's stream is reset before its body arrives", async () => {
+it("keeps the binding when a 410's stream is reset before its body is complete", async () => {
   const f = await relay();
   f.say("alice", "owner", "message", "team-thread", "@Kim hi");
   f.apple.answer(() => ({ status: 410, reset: true }));
