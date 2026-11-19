@@ -50,22 +50,28 @@ impl LeftReason {
     }
 }
 
-/// What a staged file's DACL is to dohc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StagedSecurity {
-    /// The file's own DACL in SDDL, to give back when it returns, and
-    /// whether the file already has only the private DACL.
-    Own { dacl: String, private: bool },
-    /// dohc leaves the file's DACL as it is.
-    Left(LeftReason),
-}
-
 /// A staged file: who it is, and its DACL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedFile {
     /// Its volume and file ID, the same for every name of the file.
     pub identity: String,
-    pub security: StagedSecurity,
+    /// Its DACL in SDDL, with its protection and inheritance flags.
+    pub dacl: String,
+    /// Whether that DACL is the private one dohc gives a staged file.
+    pub private: bool,
+    /// Why dohc leaves the file's DACL as it is, if it does.
+    pub left: Option<LeftReason>,
+}
+
+/// What [`make_staged_private`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restricted {
+    /// The file has the private DACL.
+    Private,
+    /// The file keeps its DACL, for this reason.
+    Left(LeftReason),
+    /// Nothing, or another file, is at the name.
+    NotThere,
 }
 
 /// Open the regular file at `path` without following a link. `None` when
@@ -88,22 +94,11 @@ fn open_file(path: &Path, access: u32) -> io::Result<Option<File>> {
     Ok((kind.is_file() && !kind.is_symlink()).then_some(file))
 }
 
-fn identity_of(file: &File) -> io::Result<String> {
-    file_id(file).ok_or_else(io::Error::last_os_error)
-}
-
-/// The identity of the regular file at `path`, or `None` when nothing, a
-/// link or a folder is there.
-pub fn file_identity(path: &Path) -> io::Result<Option<String>> {
-    open_file(path, FILE_READ_ATTRIBUTES)?
-        .map(|file| identity_of(&file))
-        .transpose()
-}
-
-/// Read the staged file at `path`: its identity, and its own DACL unless
-/// another account owns it or it has other names. `None` when nothing, a
-/// link or a folder is there, and on a volume that keeps no DACL or a
-/// network share, where dohc keeps nothing private.
+/// Read the staged file at `path`: its identity and DACL, and whether dohc
+/// leaves it as it is. `None` when nothing, a link or a folder is there, and
+/// on a volume that keeps no DACL or file IDs, or a network share, where dohc
+/// keeps nothing private. A file whose DACL Windows can't read on a volume
+/// that keeps one is [`io::ErrorKind::Unsupported`].
 pub fn read_staged(path: &Path) -> io::Result<Option<StagedFile>> {
     read_staged_in(path, &System::REAL)
 }
@@ -115,40 +110,70 @@ fn read_staged_in(path: &Path, system: &System) -> io::Result<Option<StagedFile>
     if !keeps_dacl(&file)? {
         return Ok(None);
     }
-    let identity = identity_of(&file)?;
+    let Some(identity) = file_id(&file) else {
+        return Ok(None);
+    };
     let security = match Security::read(&file, system) {
-        Err(err) if unsupported(&err) => return Ok(None),
+        Err(err) if unsupported(&err) => {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, err));
+        }
         read => read?,
     };
     let private = PrivateDescriptor::get()?;
+    Ok(Some(StagedFile {
+        identity,
+        dacl: dacl_sddl(&file)?,
+        private: security.protected()?
+            && security.allows_only(&private.sids(), |flags| flags == 0)?,
+        left: left_reason(&file, path, &security, private, system)?,
+    }))
+}
+
+/// Why dohc leaves the file `file`, at `path`, as it is: another account
+/// owns it, or it has other names.
+fn left_reason(
+    file: &File,
+    path: &Path,
+    security: &Security,
+    private: &PrivateDescriptor,
+    system: &System,
+) -> io::Result<Option<LeftReason>> {
     let owner = match (system.owner_of)(path) {
         Some(owner) => owner.to_owned(),
         None => security.owner()?,
     };
-    let security = if !private.sids().contains(&owner.as_str()) {
-        StagedSecurity::Left(LeftReason::OtherOwner)
-    } else if links(&file)? > 1 {
-        StagedSecurity::Left(LeftReason::HardLinks)
+    Ok(if !private.sids().contains(&owner.as_str()) {
+        Some(LeftReason::OtherOwner)
+    } else if links(file)? > 1 {
+        Some(LeftReason::HardLinks)
     } else {
-        StagedSecurity::Own {
-            dacl: dacl_sddl(&file)?,
-            private: security.protected()?
-                && security.allows_only(&private.sids(), |flags| flags == 0)?,
-        }
-    };
-    Ok(Some(StagedFile { identity, security }))
+        None
+    })
 }
 
 /// Give the file at `path`, when it is the file `identity` names, the DACL
 /// of a private file: protected, with full control for this user, SYSTEM
-/// and Administrators. `false` when nothing or another file is there.
-pub fn make_staged_private(path: &Path, identity: &str) -> io::Result<bool> {
+/// and Administrators. Whether another account owns it, or it has other
+/// names, is checked again on the handle that changes it, just before.
+pub fn make_staged_private(path: &Path, identity: &str) -> io::Result<Restricted> {
+    make_staged_private_in(path, identity, &System::REAL)
+}
+
+fn make_staged_private_in(path: &Path, identity: &str, system: &System) -> io::Result<Restricted> {
+    let Some(file) = open_identified(path, identity)? else {
+        return Ok(Restricted::NotThere);
+    };
+    let security = Security::read(&file, system)?;
+    let private = PrivateDescriptor::get()?;
+    if let Some(reason) = left_reason(&file, path, &security, private, system)? {
+        return Ok(Restricted::Left(reason));
+    }
     let user = current_user()?;
-    set_dacl_of(
-        path,
-        identity,
+    set_dacl(
+        &file,
         &format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user})"),
-    )
+    )?;
+    Ok(Restricted::Private)
 }
 
 /// Give the file at `path`, when it is the file `identity` names, the DACL
@@ -156,17 +181,24 @@ pub fn make_staged_private(path: &Path, identity: &str) -> io::Result<bool> {
 /// nothing down to it from its folder. `false` when nothing or another file
 /// is there.
 pub fn restore_dacl(path: &Path, identity: &str, dacl: &str) -> io::Result<bool> {
-    set_dacl_of(path, identity, dacl)
-}
-
-fn set_dacl_of(path: &Path, identity: &str, dacl: &str) -> io::Result<bool> {
-    let access = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
-    let Some(file) = open_file(path, access)? else {
+    let Some(file) = open_identified(path, identity)? else {
         return Ok(false);
     };
-    if identity_of(&file)? != identity {
-        return Ok(false);
-    }
+    set_dacl(&file, dacl)?;
+    Ok(true)
+}
+
+/// Open the file at `path` to change its DACL, when it is the file
+/// `identity` names.
+fn open_identified(path: &Path, identity: &str) -> io::Result<Option<File>> {
+    let access = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
+    let Some(file) = open_file(path, access)? else {
+        return Ok(None);
+    };
+    Ok((file_id(&file).as_deref() == Some(identity)).then_some(file))
+}
+
+fn set_dacl(file: &File, dacl: &str) -> io::Result<()> {
     if dacl.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -227,7 +259,7 @@ fn set_dacl_of(path: &Path, identity: &str, dacl: &str) -> io::Result<bool> {
     if set == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(true)
+    Ok(())
 }
 
 /// How many names the file has.
@@ -311,17 +343,14 @@ mod tests {
             .expect("dacl")
     }
 
+    fn staged(file: &Path) -> StagedFile {
+        read_staged(file).expect("read").expect("staged")
+    }
+
     fn own(file: &Path) -> (String, String) {
-        match read_staged(file).expect("read").expect("staged") {
-            StagedFile {
-                identity,
-                security: StagedSecurity::Own { dacl, private },
-            } => {
-                assert!(!private, "{dacl}");
-                (identity, dacl)
-            }
-            other => panic!("{other:?}"),
-        }
+        let staged = staged(file);
+        assert!(!staged.private && staged.left.is_none(), "{staged:?}");
+        (staged.identity, staged.dacl)
     }
 
     /// Save a file's DACL, make it private, and give the DACL back: the file
@@ -330,16 +359,16 @@ mod tests {
         let before = sddl(file);
         let (identity, dacl) = own(file);
         assert_eq!(dacl, before);
-        assert!(make_staged_private(file, &identity).expect("private"));
+        assert_eq!(
+            make_staged_private(file, &identity).expect("private"),
+            Restricted::Private
+        );
         let user = current_user().expect("user");
         assert_eq!(
             sddl(file),
             format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{user})")
         );
-        assert!(matches!(
-            read_staged(file).expect("read").expect("staged").security,
-            StagedSecurity::Own { private: true, .. }
-        ));
+        assert!(staged(file).private);
         assert!(restore_dacl(file, &identity, &dacl).expect("restore"));
         assert_eq!(sddl(file), before);
     }
@@ -382,7 +411,7 @@ mod tests {
     fn a_null_dacl_comes_back_null() {
         let scratch = ScratchDir::new().expect("scratch");
         let file = shared_file(&scratch);
-        let identity = file_identity(&file).expect("identity").expect("file");
+        let identity = staged(&file).identity;
         assert!(restore_dacl(&file, &identity, "D:NO_ACCESS_CONTROL").expect("null"));
         assert_eq!(sddl(&file), "D:NO_ACCESS_CONTROL");
         round_trip(&file);
@@ -433,8 +462,11 @@ mod tests {
         for empty in ["D:P", "D:"] {
             let scratch = ScratchDir::new().expect("scratch");
             let file = shared_file(&scratch);
-            let identity = file_identity(&file).expect("identity").expect("file");
-            assert!(make_staged_private(&file, &identity).expect("private"));
+            let identity = staged(&file).identity;
+            assert_eq!(
+                make_staged_private(&file, &identity).expect("private"),
+                Restricted::Private
+            );
             assert!(restore_dacl(&file, &identity, empty).expect("empty"));
             assert_eq!(stored_sddl(&file), empty);
             let refused = read_staged(&file).expect_err("empty");
@@ -451,10 +483,16 @@ mod tests {
         let file = shared_file(&scratch);
         let (identity, _) = own(&file);
         std::fs::remove_file(&file).expect("remove");
-        assert!(!make_staged_private(&file, &identity).expect("missing"));
+        assert_eq!(
+            make_staged_private(&file, &identity).expect("missing"),
+            Restricted::NotThere
+        );
         std::fs::write(&file, b"another").expect("another");
         let before = sddl(&file);
-        assert!(!make_staged_private(&file, &identity).expect("other"));
+        assert_eq!(
+            make_staged_private(&file, &identity).expect("other"),
+            Restricted::NotThere
+        );
         assert!(!restore_dacl(&file, &identity, "D:NO_ACCESS_CONTROL").expect("other"));
         assert_eq!(sddl(&file), before);
     }
@@ -464,8 +502,41 @@ mod tests {
         let scratch = ScratchDir::new().expect("scratch");
         let file = shared_file(&scratch);
         std::fs::hard_link(&file, file.with_file_name("other.md")).expect("link");
-        let staged = read_staged(&file).expect("read").expect("staged");
-        assert_eq!(staged.security, StagedSecurity::Left(LeftReason::HardLinks));
+        assert_eq!(staged(&file).left, Some(LeftReason::HardLinks));
+    }
+
+    /// A name added, or an owner changed, after the file was read and before
+    /// dohc changes its DACL is seen by the handle that would change it.
+    #[test]
+    fn a_name_or_owner_that_changed_since_the_read_leaves_the_file_as_it_is() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let file = shared_file(&scratch);
+        let (identity, before) = own(&file);
+        std::fs::hard_link(&file, file.with_file_name("other.md")).expect("link");
+        assert_eq!(
+            make_staged_private(&file, &identity).expect("linked"),
+            Restricted::Left(LeftReason::HardLinks)
+        );
+        assert_eq!(sddl(&file), before);
+
+        std::fs::remove_file(file.with_file_name("other.md")).expect("unlink");
+        let users_own_it = System::owned_by(|_| Some("S-1-5-32-545"));
+        assert_eq!(
+            make_staged_private_in(&file, &identity, &users_own_it).expect("owned"),
+            Restricted::Left(LeftReason::OtherOwner)
+        );
+        assert_eq!(sddl(&file), before);
+    }
+
+    /// A file whose DACL Windows can't read, on a volume that keeps one, is
+    /// still a staged file, so a sweep never takes it for nothing.
+    #[test]
+    fn a_file_whose_dacl_cannot_be_read_is_not_nothing() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let file = shared_file(&scratch);
+        let unsupported = System::reads_fail(windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED);
+        let refused = read_staged_in(&file, &unsupported).expect_err("unsupported");
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]
@@ -476,15 +547,12 @@ mod tests {
         let staged = read_staged_in(&file, &users_own_it)
             .expect("read")
             .expect("staged");
-        assert_eq!(
-            staged.security,
-            StagedSecurity::Left(LeftReason::OtherOwner)
-        );
+        assert_eq!(staged.left, Some(LeftReason::OtherOwner));
         let administrators_own_it = System::owned_by(|_| Some("S-1-5-32-544"));
         let staged = read_staged_in(&file, &administrators_own_it)
             .expect("read")
             .expect("staged");
-        assert!(matches!(staged.security, StagedSecurity::Own { .. }));
+        assert_eq!(staged.left, None);
     }
 
     /// A folder dohc stages files in beside the workspace admits only this
@@ -526,6 +594,5 @@ mod tests {
             None
         );
         assert_eq!(read_staged(scratch.path()).expect("folder"), None);
-        assert_eq!(file_identity(scratch.path()).expect("folder"), None);
     }
 }

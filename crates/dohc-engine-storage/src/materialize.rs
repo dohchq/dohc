@@ -1190,12 +1190,10 @@ pub(crate) fn record_retained_read(
 mod tests {
     use super::*;
 
-    /// A staged file's saved DACL is its own, so a later save, such as the
-    /// one a retry makes after dohc already made the file private, keeps it.
-    /// A left file's DACL was never changed, so its reason can become a
-    /// saved DACL.
+    /// Each save replaces what was saved for the file, a reason or a DACL,
+    /// and an unknown reason is refused.
     #[test]
-    fn a_saved_staged_dacl_is_never_replaced() {
+    fn a_staged_dacl_holds_the_last_save() {
         let dir = dohc_test_scratch::ScratchDir::new_named("staged-dacls").unwrap();
         let store = crate::EngineStore::open(&dir.join("engine.db"), 1).unwrap();
         let saved = |dacl: &str| StagedDacl::Saved(dacl.to_owned());
@@ -1206,11 +1204,12 @@ mod tests {
         store
             .save_staged_dacl("a", &saved("D:P(A;;FA;;;SY)"), 2)
             .unwrap();
-        store.save_staged_dacl("a", &left("hard-links"), 3).unwrap();
         assert_eq!(
             store.staged_dacl("a").unwrap(),
-            Some(saved("D:AI(A;ID;FR;;;BU)"))
+            Some(saved("D:P(A;;FA;;;SY)"))
         );
+        store.save_staged_dacl("a", &left("hard-links"), 3).unwrap();
+        assert_eq!(store.staged_dacl("a").unwrap(), Some(left("hard-links")));
 
         store.save_staged_dacl("b", &left("hard-links"), 1).unwrap();
         assert_eq!(store.staged_dacl("b").unwrap(), Some(left("hard-links")));

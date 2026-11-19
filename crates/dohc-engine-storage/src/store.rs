@@ -1337,9 +1337,8 @@ impl EngineStore {
             .transpose()
     }
 
-    /// FULL precedes any change to a staged file's DACL. A saved DACL is the
-    /// file's own and is never replaced; a left file's reason can become its
-    /// saved DACL, because dohc never changed it.
+    /// Save what dohc keeps for a staged file in place of what was saved,
+    /// in a FULL commit, which precedes any change to the file's DACL.
     pub fn save_staged_dacl(
         &self,
         file_identity: &str,
@@ -1353,7 +1352,7 @@ impl EngineStore {
         };
         materialize::with_full_commit(&self.conn, |tx| {
             tx.execute(
-                "INSERT INTO materialization_staged_dacls(file_identity,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4) ON CONFLICT(file_identity) DO UPDATE SET                  left_reason=CASE WHEN dacl IS NOT NULL OR excluded.dacl IS NOT NULL THEN NULL                  ELSE excluded.left_reason END, dacl=COALESCE(dacl, excluded.dacl)",
+                "INSERT INTO materialization_staged_dacls(file_identity,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4) ON CONFLICT(file_identity) DO UPDATE SET                  dacl=excluded.dacl, left_reason=excluded.left_reason",
                 rusqlite::params![file_identity, dacl, reason, now_ms],
             )
             .map_err(StorageError::persist)?;

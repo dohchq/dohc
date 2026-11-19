@@ -178,6 +178,15 @@ impl System {
         }
     }
 
+    /// The real system, but failing every security read with `code`.
+    #[cfg(test)]
+    pub(crate) const fn reads_fail(code: u32) -> System {
+        System {
+            fail: Some((Call::Read, code)),
+            ..System::REAL
+        }
+    }
+
     fn fails(&self, call: Call) -> io::Result<()> {
         match self.fail {
             Some((failing, code)) if failing == call => {
@@ -261,13 +270,14 @@ fn make_private_dir(
     }
     // Windows passes nothing down through a protected DACL, so `leave` takes
     // the private DACL first and its items keep theirs.
-    let _left = match leave {
+    let left = match leave {
         Some(name) => {
             let left_shown = format!("{shown}/{}", name.to_string_lossy());
             leave_folder(&path.join(name), &left_shown, private, system)?
         }
         None => None,
     };
+    let left_id = left.as_ref().and_then(file_id);
     if !folder_private {
         let protected = PROTECTED_DACL_SECURITY_INFORMATION;
         match set_security(&folder, protected, private.dacl()?, system) {
@@ -277,7 +287,7 @@ fn make_private_dir(
     }
     // Only this user, Administrators and SYSTEM can add an item from here
     // on, so the check sees everything Windows passed over.
-    check_items(&path, &shown, leave, private, system)?;
+    check_items(&path, &shown, left_id.as_deref(), private, system)?;
     // Without its record, the next open checks everything again.
     if let (Some(records), Some(record)) = (&records, &record) {
         let _ = File::create(record);
@@ -442,7 +452,8 @@ fn leave_folder(
 
 /// Take the folder at `path`, named `shown`, as [`take_folder`] does, refuse
 /// it when another account owns it, and give it the private DACL on itself
-/// alone unless it has it or inherits only that. Its items keep their DACLs.
+/// alone unless it has it. Its items keep their DACLs, and a change to the
+/// folders above never reaches them.
 fn take_private_folder(
     path: &Path,
     shown: &str,
@@ -452,7 +463,7 @@ fn take_private_folder(
     let folder = take_folder(path, shown, Some(private), system)?;
     let security = Security::read(&folder, system)?;
     private.check_owner(&security, path, shown, system)?;
-    if !private.is_private_folder(&security)? && !private.is_inherited_only(&security)? {
+    if !private.is_private_folder(&security)? {
         set_own_dacl(&folder, private, system).map_err(denied_as(shown, NOT_CHANGEABLE))?;
     }
     Ok(folder)
@@ -826,15 +837,12 @@ fn inherit_only(item: &File, system: &System) -> io::Result<()> {
 fn check_items(
     path: &Path,
     shown: &str,
-    leave: Option<&OsStr>,
+    left_id: Option<&str>,
     private: &PrivateDescriptor,
     system: &System,
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
-        if leave == Some(entry.file_name().as_os_str()) {
-            continue;
-        }
         let item_path = entry.path();
         let item_shown = format!("{shown}/{}", entry.file_name().to_string_lossy());
         let access = READ_CONTROL | WRITE_DAC;
@@ -845,6 +853,9 @@ fn check_items(
             }
             item => item?,
         };
+        if left_id.is_some() && file_id(&item).as_deref() == left_id {
+            continue;
+        }
         let security = Security::read(&item, system)?;
         private.check_owner(&security, &item_path, &item_shown, system)?;
         if !private.is_inherited_only(&security)? {
@@ -1436,8 +1447,6 @@ pub(crate) mod tests {
         assert_eq!(sddl(&protected), file);
     }
 
-    /// An open that stopped after the folder's DACL changed, before every
-    /// item was checked, left no record. The next open finishes it.
     /// The folder dohc stages old versions in becomes private on its own,
     /// and each file in it keeps its DACL for dohc to save first.
     #[test]
@@ -1472,6 +1481,71 @@ pub(crate) mod tests {
         assert_eq!(sddl(&staged), before);
     }
 
+    /// Leave a file from a shared workspace in `displaced`, with the entry it
+    /// took there for Users. Returns the root and the staged file.
+    fn staged_in(scratch: &ScratchDir, root: PathBuf, displaced: &str) -> (PathBuf, PathBuf) {
+        let staging = root.join(ENGINE).join(displaced);
+        std::fs::create_dir_all(&staging).expect("folders");
+        let file = shared_root(scratch, "workspace").join("notes.md");
+        std::fs::write(&file, b"notes").expect("file");
+        let staged = staging.join("6a6f62.0");
+        std::fs::rename(&file, &staged).expect("stage");
+        assert!(
+            sddl(&staged).contains("(A;ID;FR;;;BU)"),
+            "{}",
+            sddl(&staged)
+        );
+        (root, staged)
+    }
+
+    fn open_leaving_displaced(root: &Path, system: &System) {
+        make_private_dir(
+            root,
+            Path::new(ENGINE),
+            Some(OsStr::new("displaced")),
+            system,
+        )
+        .expect("open");
+    }
+
+    /// An engine folder that inherits only the private entries, as one in a
+    /// profile folder does, still gets the private DACL of its own. The
+    /// change to it never reaches a staged file, which keeps the entries it
+    /// inherited where it was.
+    #[test]
+    fn a_staged_file_keeps_its_entries_when_the_folders_inherit_only_private_ones() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let root = scratch.join("profile");
+        std::fs::create_dir(&root).expect("root");
+        set_folder_dacl(&root, &private_sddl());
+        let (root, staged) = staged_in(&scratch, root, "displaced");
+        let displaced = staged.parent().expect("displaced");
+        assert_eq!(sddl(displaced), private_dacls(true)[1]);
+        let before = sddl(&staged);
+        open_leaving_displaced(&root, &real);
+        assert_eq!(sddl(displaced), private_dacls(true)[0]);
+        assert_eq!(sddl(&staged), before);
+    }
+
+    /// Windows finds `displaced` whatever its case, so an earlier `Displaced`
+    /// is the folder left, and its files keep their DACLs.
+    #[test]
+    fn a_staging_folder_spelled_another_way_is_left_too() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let real = system(&scratch);
+        let (root, staged) = staged_in(&scratch, shared_root(&scratch, "root"), "Displaced");
+        let before = sddl(&staged);
+        open_leaving_displaced(&root, &real);
+        assert_eq!(
+            sddl(staged.parent().expect("displaced")),
+            private_dacls(true)[0]
+        );
+        assert_eq!(sddl(&staged), before);
+    }
+
+    /// An open that stopped after the folder's DACL changed, before every
+    /// item was checked, left no record. The next open finishes it.
     #[test]
     fn an_open_that_stopped_partway_is_finished_by_the_next() {
         let scratch = ScratchDir::new().expect("scratch");

@@ -17,8 +17,7 @@ pub use private_dir::{
 };
 #[cfg(windows)]
 pub use staged::{
-    LeftReason, StagedFile, StagedSecurity, file_identity, make_staged_private, read_staged,
-    restore_dacl,
+    LeftReason, Restricted, StagedFile, make_staged_private, read_staged, restore_dacl,
 };
 
 #[cfg(windows)]
