@@ -18,11 +18,12 @@ import {
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
-const VERSION_WARNING =
-  "Anyone with the link can open it without an account. The link shows this version as it is now. The sync relay serves the link, so it can read this content.";
+const RELAY_READS = "The sync relay serves the link, so it can read this content.";
+const VERSION_WARNING = `The link shows this version as it is now. ${RELAY_READS}`;
+const PATHS_WARNING = `If files are added to this selection later, the link includes them. ${RELAY_READS}`;
 
-const PATHS_WARNING =
-  "Anyone with the link can open it without an account. If files are added to this selection later, the link includes them. The sync relay serves the link, so it can read this content.";
+// The line under the invite field once a person is invited.
+const INVITED = /^Invited .*send it to them.$/;
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -347,6 +348,7 @@ const bridgeMock = {
   resumeRelayShareDiscussion: vi.fn(),
   promoteRelayShareGrant: vi.fn(),
   revokeRelayShareGrant: vi.fn(),
+  revokeRelayShare: vi.fn(),
 };
 
 vi.mock("./bridge", () => ({
@@ -423,6 +425,7 @@ beforeEach(() => {
     parentGrantId: null,
     undo: UNDO,
   });
+  bridgeMock.revokeRelayShare.mockResolvedValue({ undo: UNDO });
   // user-event's clipboard stub: every setup() in this file reuses it.
   userEvent.setup();
   writeText = vi.spyOn(navigator.clipboard, "writeText");
@@ -434,56 +437,105 @@ afterEach(() => {
 
 type User = ReturnType<typeof userEvent.setup>;
 
-async function openSeparateLink(user: User) {
-  await user.click(screen.getByRole("button", { name: "Create separate link" }));
-}
+type AccessWords = "Can view" | "Can comment" | "Can edit";
 
-async function chooseLinkOption(user: User, row: HTMLElement, name: "Reset link" | "End link") {
-  await user.click(within(row).getByRole("button", { name: "Link options" }));
+// Every action on a link but Copy link sits behind its ••• menu.
+async function chooseLinkOption(user: User, scope: HTMLElement, name: string | RegExp) {
+  await user.click(within(scope).getAllByRole("button", { name: "Link options" })[0]!);
   await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
 }
 
-async function chooseLinkAccess(
-  user: User,
-  row: HTMLElement,
-  name: "Can view" | "Can comment" | "Can edit",
-) {
+// What a link's ••• menu offers. Closes the menu again.
+async function linkOptions(user: User, scope: HTMLElement) {
+  const options = within(scope).getAllByRole("button", { name: "Link options" })[0]!;
+  await user.click(options);
+  const names = screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent);
+  await user.click(options);
+  expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+  return names;
+}
+
+async function openSeparateLink(user: User) {
+  await chooseLinkOption(user, document.body, "New separate link");
+}
+
+async function chooseLinkAccess(user: User, row: HTMLElement, name: AccessWords) {
   await user.click(within(row).getByRole("button", { name: /^Can (view|comment|edit)$/ }));
   await user.click(await screen.findByRole("menuitemradio", { name, hidden: true }));
 }
 
-async function addLinkWith(
+// The level a link not made yet will have: the new link's, or another link's by its test id.
+async function chooseNewLinkAccess(
   user: User,
-  group: HTMLElement,
-  name: "Can view" | "Can comment" | "Can edit",
+  name: AccessWords,
+  testId = "share-link-create-access",
 ) {
-  await user.click(within(group).getByRole("button", { name: "Add link" }));
-  await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
+  await user.click(await screen.findByTestId(testId));
+  await user.click(await screen.findByRole("menuitemradio", { name, hidden: true }));
 }
 
-// An active, readable link: its access opens a menu, and its ••• menu offers
-// Reset link and End link. Closes the ••• menu again.
-async function expectActiveLinkControls(
-  user: User,
-  row: HTMLElement,
-  access: "Can view" | "Can comment" | "Can edit",
-) {
+async function newLinkLevels(user: User, testId = "share-link-create-access") {
+  const access = await screen.findByTestId(testId);
+  await user.click(access);
+  const levels = screen
+    .getAllByRole("menuitemradio", { hidden: true })
+    .map((level) => level.textContent);
+  await user.click(access);
+  return levels;
+}
+
+async function addLinkWith(user: User, group: HTMLElement, name: AccessWords) {
+  const shareId = group.getAttribute("data-testid")!.replace("share-link-group-", "");
+  await chooseLinkOption(user, group, "Add another link");
+  if (name !== "Can view")
+    await chooseNewLinkAccess(user, name, `share-link-add-access-${shareId}`);
+  await user.click(screen.getByTestId(`share-link-add-submit-${shareId}`));
+}
+
+// An active, readable link: its access opens a menu, and its ••• menu ends
+// with Reset link and End link.
+async function expectActiveLinkControls(user: User, row: HTMLElement, access: AccessWords) {
   expect(within(row).getByRole("button", { name: access }).getAttribute("aria-haspopup")).toBe(
     "menu",
   );
-  const options = within(row).getByRole("button", { name: "Link options" });
-  await user.click(options);
-  expect(screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent)).toEqual(
-    ["Reset link", "End link"],
-  );
-  await user.click(options);
-  expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+  expect((await linkOptions(user, row)).slice(-2)).toEqual(["Reset link", "End link"]);
 }
 
-async function openOwnerComments(user: ReturnType<typeof userEvent.setup>, shareId: string) {
+async function toggleComments(user: User, group: HTMLElement) {
+  await chooseLinkOption(user, group, /^(Comments|Hide comments)$/);
+}
+
+async function openOwnerComments(user: User, shareId: string) {
   const group = await linkGroup(user, shareId);
-  await user.click(within(group).getByRole("button", { name: "Comments" }));
+  await toggleComments(user, group);
   return group;
+}
+
+// A person's other actions sit in their row's one menu, under the levels.
+async function choosePersonOption(user: User, row: HTMLElement, name: string) {
+  await user.click(
+    within(row).getByRole("button", { name: /^(Can (view|comment|edit)$|Options for )/ }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
+}
+
+// Copy invitation sits in the person's menu, under the levels.
+async function copyInvitation(user: User, grantId: string) {
+  await user.click(await screen.findByTestId(`share-person-access-${grantId}`));
+  await user.click(await screen.findByTestId(`share-copy-invitation-${grantId}`));
+}
+
+// The URL a link shows: beside a link just made, or under Link details.
+async function findLinkUrl(user: User, scope: HTMLElement = document.body) {
+  for (const details of within(scope).queryAllByRole("button", { name: "Link details" }))
+    if (details.getAttribute("aria-expanded") !== "true") await user.click(details);
+  return within(scope).findByTestId("share-link-url");
+}
+
+// The URL, the dates and the agents of each link in scope show once Link details opens.
+async function openLinkDetails(user: User, scope: HTMLElement = document.body) {
+  for (const details of await within(scope).findAllByRole("button", { name: "Link details" }))
+    if (details.getAttribute("aria-expanded") !== "true") await user.click(details);
 }
 
 async function chooseEmailAccess(user: ReturnType<typeof userEvent.setup>, level: "view" | "edit") {
@@ -590,16 +642,15 @@ describe("RelayShareDialog", () => {
             if (outcome === "success") oldCreate.resolve(emailResult("old"));
             else oldCreate.reject(new Error("Old share failed."));
           });
-          expect(screen.queryByTestId("share-code")).toBeNull();
+          expect(screen.queryByText(INVITED)).toBeNull();
           expect(screen.queryByTestId("share-error")).toBeNull();
           expect((screen.getByTestId("share-create") as HTMLButtonElement).disabled).toBe(true);
           expect(screen.getByTestId("share-create").textContent).toBe("Inviting…");
 
           await act(async () => currentCreate.resolve(emailResult("current")));
-          expect(screen.getByTestId("share-code").textContent).toBe(
-            emailResult("current").shareCode,
-          );
-          expect(screen.queryByText(emailResult("old").shareCode)).toBeNull();
+          expect(screen.getByText(INVITED)).toBeTruthy();
+          await user.click(screen.getByTestId("share-invitation-copy"));
+          expect(writeText).toHaveBeenCalledExactlyOnceWith(emailResult("current").shareCode);
           expect(screen.queryByTestId("share-error")).toBeNull();
         } finally {
           view.unmount();
@@ -613,7 +664,7 @@ describe("RelayShareDialog", () => {
     );
   });
 
-  it("does not mark a replacement email code copied when an old copy finishes", async () => {
+  it("does not mark a later invitation copied when an old copy finishes", async () => {
     const oldCopy = controllable<void>();
     bridgeMock.createRelayShare
       .mockResolvedValueOnce(emailResult("old"))
@@ -631,7 +682,7 @@ describe("RelayShareDialog", () => {
     try {
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
       await user.click(screen.getByTestId("share-create"));
-      await user.click(await screen.findByTestId("share-code-copy"));
+      await user.click(await screen.findByTestId("share-invitation-copy"));
       expect(writeText).toHaveBeenCalledWith(emailResult("old").shareCode);
 
       view.rerender(
@@ -641,19 +692,15 @@ describe("RelayShareDialog", () => {
           onClose={onClose}
         />,
       );
-      expect(screen.queryByTestId("share-code")).toBeNull();
+      expect(screen.queryByTestId("share-invitation-copy")).toBeNull();
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
       await user.click(screen.getByTestId("share-create"));
-      expect((await screen.findByTestId("share-code")).textContent).toBe(
-        emailResult("current").shareCode,
-      );
+      const copy = await screen.findByTestId("share-invitation-copy");
       await act(async () => oldCopy.resolve());
-      expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copy");
-      await user.click(screen.getByTestId("share-code-copy"));
+      expect(copy.textContent).toBe("Copy invitation");
+      await user.click(copy);
       expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
-      await waitFor(() =>
-        expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copied"),
-      );
+      await waitFor(() => expect(copy.textContent).toBe("Invitation copied"));
     } finally {
       view.unmount();
       await act(async () => {
@@ -699,14 +746,15 @@ describe("RelayShareDialog", () => {
 
       view.rerender(<RelayShareDialog workspaceId="ws-1" target={initial} onClose={onClose} />);
       await act(async () => create.resolve(emailResult("current")));
-      expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
-      await user.click(screen.getByTestId("share-code-copy"));
+      expect(screen.getByText(INVITED)).toBeTruthy();
+      expect(screen.getByTestId("share-access").textContent).toBe("Can edit");
+      await user.click(screen.getByTestId("share-invitation-copy"));
       expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
       view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
       await act(async () => copy.resolve());
-      expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
+      expect(screen.getByText(INVITED)).toBeTruthy();
       await waitFor(() =>
-        expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copied"),
+        expect(screen.getByTestId("share-invitation-copy").textContent).toBe("Invitation copied"),
       );
       expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
     } finally {
@@ -735,7 +783,43 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByTestId("share-people")).toBeNull();
   });
 
-  it("creates a version share addressed by version id and closes on Done", async () => {
+  it("names what it shares in its title, and cuts a long name in the middle", async () => {
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/2026/quarterly-product-plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    const title = screen.getByRole("heading", { level: 2 });
+    expect(title.textContent).toBe("Share quarterly-product-plan.md");
+    expect(within(title).getByTitle("docs/2026/quarterly-product-plan.md").textContent).toBe(
+      "quarterly-product-plan.md",
+    );
+    expect(within(title).getByText(".md")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/a.md", "docs/b.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Share 2 items");
+    expect(screen.getByTitle("docs/a.md, docs/b.md")).toBeTruthy();
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["sites/trip"], label: "Trip" }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Share Trip");
+  });
+
+  it("creates a version share addressed by version id, and stays open for the next person", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
@@ -745,9 +829,10 @@ describe("RelayShareDialog", () => {
         onClose={onClose}
       />,
     );
-    expect(screen.getByText(/version “review”/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: 'Share version "review"' })).toBeTruthy();
 
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    const field = screen.getByTestId<HTMLInputElement>("share-email");
+    await user.type(field, "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -755,12 +840,20 @@ describe("RelayShareDialog", () => {
       access: "view",
       versionId: "version-7",
     });
-    await user.click(await screen.findByTestId("share-done"));
-    expect(onClose).toHaveBeenCalledOnce();
+    expect((await screen.findByText(INVITED)).textContent).toBe(
+      "Invited friend@dohc.test. Copy the invitation and send it to them.",
+    );
+    expect(field.value).toBe("");
+    expect(document.activeElement).toBe(field);
+    expect(
+      within(await screen.findByTestId("share-invited-grant-1")).getByText("friend@dohc.test"),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("share-done")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("shows View and Comment link access with the exact paths warning", async () => {
-    userEvent.setup();
+  it("offers a link at View or Comment, and says what a link gives where its level is chosen", async () => {
+    const user = userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -769,18 +862,25 @@ describe("RelayShareDialog", () => {
       />,
     );
 
-    const linkAccess = screen.getByRole("radiogroup", { name: "Link access" });
-    expect(within(linkAccess).getByRole("radio", { name: "View" })).toBeTruthy();
-    expect(within(linkAccess).getByRole("radio", { name: "Comment" })).toBeTruthy();
-    expect(screen.queryByText("Edit")).toBeNull();
+    const row = await screen.findByTestId("share-link-create-section");
+    expect(row.textContent).toBe("No linkCan viewCreate link");
+    expect(screen.queryByText(PATHS_WARNING)).toBeNull();
+    expect(await newLinkLevels(user)).toEqual([
+      "Can viewAnyone with the link can read this without an account.",
+      "Can commentAnyone with the link can read this and comment.",
+    ]);
+    await user.click(screen.getByTestId("share-link-create-access"));
     expect(screen.getByText(PATHS_WARNING).tagName).toBe("P");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText(PATHS_WARNING)).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("share-link-create-access"));
     expect(screen.queryByText(/Settings/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Link options" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Reset|End link/ })).toBeNull();
   });
 
-  it("shows the exact version warning", async () => {
-    userEvent.setup();
+  it("says a version link shows the version as it is now", async () => {
+    const user = userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -789,8 +889,29 @@ describe("RelayShareDialog", () => {
       />,
     );
 
+    await user.click(await screen.findByTestId("share-link-create-access"));
     expect(screen.getByText(VERSION_WARNING).tagName).toBe("P");
     expect(screen.queryByText(PATHS_WARNING)).toBeNull();
+  });
+
+  it("says nothing about a link until the links are read", async () => {
+    const read = controllable<{ links: LinkRow[] }>();
+    bridgeMock.listRelayShareLinks.mockReturnValueOnce(read.promise);
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Anyone with the link" })).toBeTruthy();
+    expect(screen.queryByText("No link")).toBeNull();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
+
+    await act(async () => read.resolve({ links: [readableLink("kept", { url: LINK_URL })] }));
+    expect(await screen.findByTestId("share-link-row-kept")).toBeTruthy();
+    expect(screen.queryByText("No link")).toBeNull();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
   });
 
   it("loads links when the dialog opens, retries a stripped error, and leaves an empty inventory quiet", async () => {
@@ -948,6 +1069,9 @@ describe("RelayShareDialog", () => {
       "share-link-row-damaged-active",
     ]);
 
+    expect(screen.queryByText(/Created/)).toBeNull();
+    await openLinkDetails(user, rows[0]!);
+    await openLinkDetails(user, rows[1]!);
     expect(
       within(rows[0]!).getByText(
         `Not used yet · Created ${shortDate(CREATED_MS)} · Link reset ${shortDate(resetAt)}`,
@@ -959,7 +1083,7 @@ describe("RelayShareDialog", () => {
       ),
     ).toBeTruthy();
     expect(within(rows[2]!).getByText(`Ended ${shortDate(endedAt)}`)).toBeTruthy();
-    expect(within(rows[2]!).queryByRole("button", { name: "Link options" })).toBeNull();
+    expect(within(rows[2]!).queryByRole("button")).toBeNull();
     expect(
       within(rows[3]!).getByText("Unreadable link. dohc can't read what this link shares."),
     ).toBeTruthy();
@@ -1016,7 +1140,7 @@ describe("RelayShareDialog", () => {
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
@@ -1049,8 +1173,7 @@ describe("RelayShareDialog", () => {
         onClose={() => {}}
       />,
     );
-    const access = screen.getByRole("radiogroup", { name: "Link access" });
-    await user.click(await within(access).findByRole("radio", { name: "Edit" }));
+    await chooseNewLinkAccess(user, "Can edit");
     const create = screen.getByTestId("share-link-create");
     await user.click(create);
 
@@ -1083,7 +1206,7 @@ describe("RelayShareDialog", () => {
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
@@ -1103,7 +1226,7 @@ describe("RelayShareDialog", () => {
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     const pendingButton = screen.getByTestId("share-link-create");
     expect(pendingButton.textContent).toBe("Creating link…");
@@ -1135,9 +1258,9 @@ describe("RelayShareDialog", () => {
 
     expect(screen.queryByText(LINK_URL)).toBeNull();
     expect(writeText).not.toHaveBeenCalled();
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
-    const url = await screen.findByTestId("share-link-url");
+    const url = await findLinkUrl(user);
     expect(url.tagName).toBe("CODE");
     expect(url.textContent).toBe(LINK_URL);
     expect(writeText).not.toHaveBeenCalled();
@@ -1172,7 +1295,14 @@ describe("RelayShareDialog", () => {
     );
 
     const row = await screen.findByTestId("share-link-row-kept-link");
-    expect(within(row).getByTestId("share-link-url").textContent).toBe(LINK_URL_A);
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    const details = within(row).getByRole("button", { name: "Link details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    await user.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect((await findLinkUrl(user, row)).textContent).toBe(LINK_URL_A);
+    await user.click(details);
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
     expect(within(row).queryByTestId("share-link-no-copy")).toBeNull();
     expect(screen.queryByTestId("share-link-new")).toBeNull();
     expect(bridgeMock.createRelayShareLink).not.toHaveBeenCalled();
@@ -1204,11 +1334,13 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
   });
 
-  it("copies the address an agent signs in with beside the link, and never shows it", async () => {
+  it("copies the address an agent signs in with from the link's menu, and never shows it", async () => {
     const secret = "A".repeat(43);
     const shareLink = `https://share.dohc.test/s/#${secret}`;
     const agentAddress = `https://share.dohc.test/mcp/s/${secret}`;
-    bridgeMock.createRelayShareLink.mockResolvedValue(linkResult(shareLink));
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("grant-link-1", { url: shareLink })],
+    });
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -1217,24 +1349,65 @@ describe("RelayShareDialog", () => {
         onClose={() => {}}
       />,
     );
+    const row = await screen.findByTestId("share-link-row-grant-link-1");
     expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
-    await user.click(screen.getByTestId("share-link-create"));
-
-    const copy = await screen.findByTestId("share-link-agent-copy");
-    expect(copy.textContent).toBe("Copy for an agent");
-    expect(document.body.textContent).not.toContain(agentAddress);
+    expect(await linkOptions(user, row)).toEqual([
+      "Copy for an agent",
+      "Copy message for Grok Bot",
+      "Copy commands for Claude Code",
+      "Copy commands for Codex",
+      "Comments",
+      "Add another link",
+      "New separate link",
+      "Reset link",
+      "End link",
+    ]);
     expect(writeText).not.toHaveBeenCalled();
-    await user.click(copy);
+
+    await chooseLinkOption(user, row, "Copy for an agent");
     expect(writeText).toHaveBeenCalledExactlyOnceWith(agentAddress);
-    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
-    await user.click(screen.getByTestId("share-link-agent-apps"));
-    await user.click(screen.getByTestId("share-link-agent-apps-codex"));
+    await waitFor(() => expect(row.textContent).toContain("Copied for an agent"));
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    expect(document.activeElement).toBe(within(row).getByRole("button", { name: "Link options" }));
+    expect(document.body.textContent).not.toContain(agentAddress);
+
+    await chooseLinkOption(user, row, "Copy commands for Codex");
     expect(writeText).toHaveBeenLastCalledWith(`codex mcp add dohc-share --url ${agentAddress}
 codex mcp login dohc-share`);
     expect(document.body.textContent).not.toContain(agentAddress);
   });
 
+  it("reports a copy for an agent that failed, naming the address and not keeping it", async () => {
+    const secret = "A".repeat(43);
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("grant-link-1", { url: `https://share.dohc.test/s/#${secret}` })],
+    });
+    writeText.mockRejectedValueOnce(new Error("The clipboard is busy."));
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog
+          workspaceId="ws-1"
+          target={{ kind: "paths", paths: ["docs/plan.md"] }}
+          onClose={() => {}}
+        />
+      </ShellErrorReporter.Provider>,
+    );
+    const row = await screen.findByTestId("share-link-row-grant-link-1");
+    await chooseLinkOption(user, row, "Copy for an agent");
+    await waitFor(() => expect(row.textContent).toContain("Could not copy"));
+    expect(report).toHaveBeenCalledOnce();
+    expect(report.mock.calls[0]![0].message).toContain(
+      "dohc could not copy the address for an agent.",
+    );
+    expect(JSON.stringify(report.mock.calls[0]![0])).not.toContain(secret);
+  });
+
   it("offers no agent address for a link that is not a share link", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("grant-link-1", { url: LINK_URL })],
+    });
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -1243,12 +1416,17 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
-    await screen.findByTestId("share-link-url");
-    expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
+    const row = await screen.findByTestId("share-link-row-grant-link-1");
+    expect(await linkOptions(user, row)).toEqual([
+      "Comments",
+      "Add another link",
+      "New separate link",
+      "Reset link",
+      "End link",
+    ]);
   });
 
-  it("lists a link's agents in its row, and Disconnect takes one off", async () => {
+  it("lists a link's agents under Link details, and Disconnect takes one off", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1")] });
     bridgeMock.listRelayShareLinkAgents.mockResolvedValue({
       agents: [
@@ -1277,6 +1455,8 @@ codex mcp login dohc-share`);
     );
 
     const row = await screen.findByTestId("share-link-row-grant-link-1");
+    expect(screen.queryByRole("region", { name: "Agents" })).toBeNull();
+    await openLinkDetails(user, row);
     const agents = await within(row).findByRole("region", { name: "Agents" });
     expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -1313,7 +1493,7 @@ codex mcp login dohc-share`);
         readableLink("grant-link-2", { status: "revoked", revokedAtMs: CREATED_MS + 1 }),
       ],
     });
-    userEvent.setup();
+    const user = userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -1321,7 +1501,11 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await screen.findByTestId("share-link-row-grant-link-1");
+    await openLinkDetails(user, await screen.findByTestId("share-link-row-grant-link-1"));
+    await openMoreLinks(user);
+    expect(
+      within(screen.getByTestId("share-link-row-grant-link-2")).queryByRole("button"),
+    ).toBeNull();
     await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalled());
     await act(async () => {});
     expect(
@@ -1333,7 +1517,7 @@ codex mcp login dohc-share`);
     expect(screen.queryByText("dohc could not load this link's agents.")).toBeNull();
   });
 
-  it("reads a link's agents once when the dialog opens, and again when the links change", async () => {
+  it("reads a link's agents once when Link details opens, and again when the links change", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [readableLink("grant-link-1")] });
     const user = userEvent.setup();
     render(
@@ -1344,6 +1528,9 @@ codex mcp login dohc-share`);
       />,
     );
     const row = await screen.findByTestId("share-link-row-grant-link-1");
+    await act(async () => {});
+    expect(bridgeMock.listRelayShareLinkAgents).not.toHaveBeenCalled();
+    await openLinkDetails(user, row);
     await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(1));
     await act(async () => {});
     expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(1);
@@ -1486,10 +1673,10 @@ codex mcp login dohc-share`);
     await openOwnerComments(user, "share-1");
     const named = await screen.findByTestId("share-independent-named-1");
     expect(named.textContent).toContain("Can comment");
-    await user.click(within(named).getByRole("button", { name: "End access" }));
+    await choosePersonOption(user, named, "Remove access");
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
-        name: "End access",
+        name: "Remove access",
       }),
     );
     await vi.waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
@@ -1525,7 +1712,7 @@ codex mcp login dohc-share`);
     expect(shareRemovals.failed).not.toHaveBeenCalled();
   });
 
-  it("hands a refused End access and End link to the shell instead of an inline error", async () => {
+  it("hands a refused Remove access and End link to the shell instead of an inline error", async () => {
     const link = readableLink("link-1", {
       shareId: "share-1",
       selector: { paths: ["docs/plan.md"], versionId: null },
@@ -1560,10 +1747,10 @@ codex mcp login dohc-share`);
 
     const group = await openOwnerComments(user, "share-1");
     const named = await screen.findByTestId("share-independent-named-1");
-    await user.click(within(named).getByRole("button", { name: "End access" }));
+    await choosePersonOption(user, named, "Remove access");
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
-        name: "End access",
+        name: "Remove access",
       }),
     );
     await vi.waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(1));
@@ -1621,8 +1808,8 @@ codex mcp login dohc-share`);
     );
     await screen.findByTestId("share-link-row-grant-link-1");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL);
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     await vi.waitFor(() =>
       expect(report).toHaveBeenCalledWith({
@@ -1640,7 +1827,7 @@ codex mcp login dohc-share`);
         name: "Reset link",
       }),
     );
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
 
     writeText.mockClear();
     await act(async () => retry());
@@ -1674,8 +1861,8 @@ codex mcp login dohc-share`);
     );
     await screen.findByTestId("share-link-row-grant-link-1");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -1697,7 +1884,7 @@ codex mcp login dohc-share`);
       reset.resolve({ outcome: "rotated", url: LINK_URL_B });
     });
 
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
     expect(screen.queryByText(LINK_URL)).toBeNull();
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
     await vi.waitFor(() => {
@@ -1729,7 +1916,7 @@ codex mcp login dohc-share`);
     await screen.findByTestId("share-link-row-grant-link-1");
 
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -1760,8 +1947,8 @@ codex mcp login dohc-share`);
     );
     await screen.findByTestId("share-link-row-grant-link-1");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -1872,7 +2059,7 @@ codex mcp login dohc-share`);
 
     const linkRow = await screen.findByTestId("share-link-row-grant-link-1");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -2088,7 +2275,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     view.rerender(
       <RelayShareDialog
@@ -2097,7 +2284,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     await act(async () => {
       requestA.resolve(linkResult(LINK_URL_A));
@@ -2130,7 +2317,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     view.rerender(
       <RelayShareDialog
@@ -2139,7 +2326,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
 
     await act(async () => {
       requestA.reject(new Error("A failed after the target changed."));
@@ -2172,7 +2359,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     first.unmount();
     await act(async () => {
       success.resolve(linkResult(LINK_URL_A));
@@ -2185,7 +2372,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     second.unmount();
     await act(async () => {
       failure.reject(new Error("A failed after unmount."));
@@ -2215,8 +2402,8 @@ codex mcp login dohc-share`);
       />,
     );
 
-    await user.click(screen.getByRole("radio", { name: "Comment" }));
-    await user.click(screen.getByTestId("share-link-create"));
+    await chooseNewLinkAccess(user, "Can comment");
+    await user.click(await screen.findByTestId("share-link-create"));
     await act(async () => {
       create.reject(new Error("The Create link response was lost."));
     });
@@ -2227,7 +2414,9 @@ codex mcp login dohc-share`);
     });
     const committedRow = await screen.findByTestId("share-link-row-committed-create");
     await expectActiveLinkControls(user, committedRow, "Can comment");
+    await openLinkDetails(user, committedRow);
     expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledTimes(1);
   });
 
@@ -2328,7 +2517,9 @@ codex mcp login dohc-share`);
     });
     const committedRow = await screen.findByTestId("share-link-row-committed-link");
     await expectActiveLinkControls(user, committedRow, "Can comment");
+    await openLinkDetails(user, committedRow);
     expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
     expect(bridgeMock.addRelayShareLink).toHaveBeenCalledTimes(1);
   });
 
@@ -2390,21 +2581,23 @@ codex mcp login dohc-share`);
     const otherEvidence = screen.getByTestId("share-link-group-share-other-evidence");
     const damaged = screen.getByTestId("share-link-group-share-damaged");
 
-    for (const group of [ended, otherEvidence]) {
-      expect(within(group).queryByRole("button", { name: "Add link" })).toBeNull();
-      expect(within(group).queryByRole("button", { name: "Comments" })).toBeNull();
-    }
-    for (const group of [named, pending, damaged]) {
-      expect(within(group).getByRole("button", { name: "Add link" })).toBeTruthy();
-      expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
-    }
+    for (const group of [ended, otherEvidence])
+      expect(within(group).queryByRole("button", { name: "Link options" })).toBeNull();
+    // A share whose links all ended keeps its comments and takes another link.
+    for (const group of [named, pending])
+      expect(await linkOptions(user, group)).toEqual(["Comments", "Add another link"]);
+    expect(await linkOptions(user, damaged)).toEqual(["Comments", "Add another link", "End link"]);
 
-    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
-    expect(screen.queryByTestId("share-link-create")).toBeNull();
+    // No link works, so a new one is offered at once.
+    expect(screen.getByTestId("share-link-create-section").textContent).toBe(
+      "No linkCan viewCreate link",
+    );
 
-    await user.click(within(named).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, named);
     const namedGrant = await screen.findByTestId("share-independent-named-root");
-    expect(within(namedGrant).getByRole("button", { name: "End access" })).toBeTruthy();
+    expect(
+      within(namedGrant).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+    ).toBeTruthy();
     expect(screen.queryByTestId("share-independent-pending-root")).toBeNull();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
@@ -2542,20 +2735,19 @@ codex mcp login dohc-share`);
     );
 
     const group = await linkGroup(user, "share-1");
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
     const namedGrant = await screen.findByTestId("share-independent-named-root");
-    await user.click(within(namedGrant).getByRole("button", { name: "End access" }));
+    await choosePersonOption(user, namedGrant, "Remove access");
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
-        name: "End access",
+        name: "Remove access",
       }),
     );
 
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
-      expect(within(group).queryByRole("button", { name: "Add link" })).toBeNull();
+      expect(within(group).queryByRole("button", { name: "Link options" })).toBeNull();
     });
-    expect(within(group).queryByRole("button", { name: "Comments" })).toBeNull();
     expect(screen.queryByTestId("share-independent-named-root")).toBeNull();
 
     const inventoryError = await screen.findByText("independent inventory unavailable");
@@ -2565,11 +2757,11 @@ codex mcp login dohc-share`);
 
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
-      expect(within(group).getByRole("button", { name: "Add link" })).toBeTruthy();
-      expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
+      expect(within(group).getByRole("button", { name: "Link options" })).toBeTruthy();
     });
+    expect(await linkOptions(user, group)).toEqual(["Comments", "Add another link"]);
     expect(screen.queryByText("independent inventory unavailable")).toBeNull();
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
     expect(await screen.findByTestId("share-independent-named-root")).toBeTruthy();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
@@ -2593,16 +2785,18 @@ codex mcp login dohc-share`);
     expect(await screen.findByTestId("share-link-group-share-first")).toBeTruthy();
     await openMoreLinks(user);
     expect(screen.getByTestId("share-link-group-share-second")).toBeTruthy();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
     await openSeparateLink(user);
-    expect(document.activeElement?.getAttribute("role")).toBe("radio");
-    expect(document.activeElement?.getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByTestId("share-link-create-access"));
     const create = screen.getByTestId("share-link-create");
-    expect(create.textContent).toBe("Create separate link");
-    expect(screen.getByText("Starts a new share with its own comments.")).toBeTruthy();
-    expect(screen.queryByText(PATHS_WARNING)).toBeNull();
-    const createAccess = screen.getByRole("radiogroup", { name: "Link access" });
-    expect(within(createAccess).queryByRole("radio", { name: "Edit" })).toBeNull();
-    await user.click(within(createAccess).getByRole("radio", { name: "Comment" }));
+    expect(screen.getByRole("region", { name: "Separate link" }).textContent).toBe(
+      "Separate linkIts own commentsCan viewCreate link",
+    );
+    expect(await newLinkLevels(user)).toEqual([
+      "Can viewAnyone with the link can read this without an account.",
+      "Can commentAnyone with the link can read this and comment.",
+    ]);
+    await chooseNewLinkAccess(user, "Can comment");
     await user.click(create);
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
@@ -2669,15 +2863,13 @@ codex mcp login dohc-share`);
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(1);
     });
 
-    const create = screen.getByTestId("share-link-create");
+    const create = await screen.findByTestId("share-link-create");
     expect(create.textContent).toBe("Create link");
-    expect(screen.queryByText("Starts a new share with its own comments.")).toBeNull();
-    expect(screen.getByText(VERSION_WARNING)).toBeTruthy();
-    const createAccess = screen.getByRole("radiogroup", { name: "Link access" });
-    expect(
-      within(createAccess).getByRole("radio", { name: "View" }).getAttribute("aria-checked"),
-    ).toBe("true");
-    await user.click(within(createAccess).getByRole("radio", { name: "Comment" }));
+    expect(screen.getByTestId("share-link-create-section").textContent).toBe(
+      "No linkCan viewCreate link",
+    );
+    await chooseNewLinkAccess(user, "Can comment");
+    expect(screen.getByTestId("share-link-create-access").textContent).toBe("Can comment");
     await user.click(create);
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
@@ -2760,13 +2952,14 @@ codex mcp login dohc-share`);
       Object.values(bridgeMock).reduce((count, mocked) => count + mocked.mock.calls.length, 0);
 
     await openSeparateLink(user);
-    const linkAccess = screen.getByRole("radiogroup", { name: "Link access" });
+    const draft = screen.getByTestId("share-link-create-access");
+    expect(document.activeElement).toBe(draft);
     const callsBefore = bridgeCalls();
-    within(linkAccess).getByRole("radio", { name: "View" }).focus();
-    await user.keyboard("{ArrowRight}");
-    expect(
-      within(linkAccess).getByRole("radio", { name: "Comment" }).getAttribute("aria-checked"),
-    ).toBe("true");
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{Enter}");
+    expect(draft.textContent).toBe("Can comment");
+    expect(document.activeElement).toBe(draft);
     expect(bridgeCalls()).toBe(callsBefore);
 
     const trigger = within(screen.getByTestId("share-link-row-view-link")).getByRole("button", {
@@ -2829,8 +3022,8 @@ codex mcp login dohc-share`);
     );
     await screen.findByTestId("share-link-row-retune-link");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_A);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_A);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -2839,7 +3032,7 @@ codex mcp login dohc-share`);
     await chooseLinkAccess(user, row, "Can comment");
     let confirmation = screen.getByTestId("share-link-confirmation");
     await user.click(within(confirmation).getByRole("button", { name: "Turn on comments" }));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
     expect(screen.queryByText(LINK_URL_A)).toBeNull();
     expect(bridgeMock.retuneRelayShareLink).toHaveBeenNthCalledWith(1, {
       workspaceId: "ws-1",
@@ -2859,7 +3052,7 @@ codex mcp login dohc-share`);
     await vi.waitFor(() => {
       expect(bridgeMock.retuneRelayShareLink).toHaveBeenCalledTimes(2);
     });
-    expect(screen.getByTestId("share-link-url").textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
     expect(bridgeMock.retuneRelayShareLink).toHaveBeenNthCalledWith(2, {
       workspaceId: "ws-1",
       shareId: "share-retune",
@@ -2902,7 +3095,7 @@ codex mcp login dohc-share`);
     await reset();
     expect(await screen.findByTestId("share-link-unsure")).toBeTruthy();
     await reset();
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
     expect(screen.queryByTestId("share-link-unsure")).toBeNull();
   });
 
@@ -3000,7 +3193,7 @@ codex mcp login dohc-share`);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
-    expect(screen.getByTestId("share-link-url").textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
     await addLinkWith(user, screen.getByTestId("share-link-group-share-kept-swap"), "Can view");
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
@@ -3031,7 +3224,7 @@ codex mcp login dohc-share`);
     );
 
     const row = await screen.findByTestId("share-link-row-kept-reset");
-    expect(within(row).getByTestId("share-link-url").textContent).toBe(LINK_URL_A);
+    expect((await findLinkUrl(user, row)).textContent).toBe(LINK_URL_A);
     await chooseLinkOption(user, row, "Reset link");
     await user.click(
       within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
@@ -3052,7 +3245,7 @@ codex mcp login dohc-share`);
     // The list's error already offers Try again, so the row does not repeat it.
     expect(within(unsureRow).queryByRole("button", { name: "Try again" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
   });
 
   it("retires the displayed URL before refreshing after a lost widening response", async () => {
@@ -3086,8 +3279,8 @@ codex mcp login dohc-share`);
 
     let row = await screen.findByTestId("share-link-row-stale-retune");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_A);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_A);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -3205,33 +3398,37 @@ codex mcp login dohc-share`);
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
     expect(bridgeMock.retuneRelayShareLink).not.toHaveBeenCalled();
 
-    const addButton = within(group).getByRole("button", { name: "Add link" });
-    addButton.focus();
-    expect(document.activeElement).toBe(addButton);
+    const options = within(row).getByRole("button", { name: "Link options" });
+    options.focus();
     await user.keyboard("{Enter}");
-    const addMenu = screen.getByRole("menu", { hidden: true });
-    expect(addMenu.getAttribute("aria-label")).toBe("Access for the new link");
+    const optionsMenu = screen.getByRole("menu", { hidden: true });
+    expect(optionsMenu.getAttribute("aria-label")).toBe("Link options");
+    await user.keyboard("a");
     expect(document.activeElement).toBe(
-      within(addMenu).getByRole("menuitem", { name: "Can view", hidden: true }),
+      within(optionsMenu).getByRole("menuitem", { name: "Add another link", hidden: true }),
     );
     await user.keyboard("{Enter}");
-    expect(
-      within(group).getByRole("button", { name: "Adding link…" }).hasAttribute("disabled"),
-    ).toBe(true);
+    // The link being added takes focus at its level, the next thing to choose.
+    const another = screen.getByRole("region", { name: "Another link" });
+    expect(another.textContent).toBe("Another linkSame commentsCan viewAdd link");
+    expect(document.activeElement).toBe(screen.getByTestId("share-link-add-access-share-keyboard"));
+    await user.keyboard("{Tab}");
+    const submit = screen.getByTestId<HTMLButtonElement>("share-link-add-submit-share-keyboard");
+    expect(document.activeElement).toBe(submit);
+    await user.keyboard("{Enter}");
+    expect(submit.textContent).toBe("Adding link…");
+    expect(submit.disabled).toBe(true);
     expect(within(row).getByRole("button", { name: "Can view" }).hasAttribute("disabled")).toBe(
       true,
     );
-    await user.click(within(row).getByRole("button", { name: "Link options" }));
-    for (const name of ["Reset link", "End link"]) {
-      expect(
-        screen.getByRole("menuitem", { name, hidden: true }).getAttribute("aria-disabled"),
-      ).toBe("true");
+    await user.click(options);
+    for (const name of ["Add another link", "New separate link", "Reset link", "End link"]) {
+      const item = screen.getByRole("menuitem", { name, hidden: true });
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      expect(item.textContent).toBe(`${name}Finish the change under way first.`);
     }
     await user.click(screen.getByRole("menuitem", { name: "End link", hidden: true }));
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Create separate link" }).hasAttribute("disabled"),
-    ).toBe(true);
 
     await act(async () => {
       add.resolve({ shareId: "share-keyboard", grantId: "added", url: LINK_URL });
@@ -3286,7 +3483,7 @@ codex mcp login dohc-share`);
     await act(async () => {
       addB.resolve({ shareId: "share-ws-b", grantId: "added-b", url: LINK_URL_B });
     });
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL_B);
   });
 
   it("keeps a newer retune busy when a stale widening arrives", async () => {
@@ -3352,7 +3549,7 @@ codex mcp login dohc-share`);
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
   });
 
-  it("keeps the named result beside a minted link, and lists the person invited", async () => {
+  it("keeps the invited line beside a minted link, and lists the person invited", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -3364,12 +3561,12 @@ codex mcp login dohc-share`);
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
-    expect((await screen.findByTestId("share-code")).textContent).toBe(SHARE_CODE);
+    expect(await screen.findByText(INVITED)).toBeTruthy();
 
-    await user.click(screen.getByTestId("share-link-create"));
-    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(await screen.findByTestId("share-link-create"));
+    expect((await findLinkUrl(user)).textContent).toBe(LINK_URL);
 
-    expect(screen.getByTestId("share-code").textContent).toBe(SHARE_CODE);
+    expect(screen.getByText(INVITED)).toBeTruthy();
     expect(
       within(screen.getByTestId("share-invited-grant-1")).getByText("friend@dohc.test"),
     ).toBeTruthy();
@@ -3404,9 +3601,8 @@ codex mcp login dohc-share`);
       />,
     );
     const group = await screen.findByTestId("share-link-group-share-a");
-    const comments = within(group).getByRole("button", { name: "Comments" });
 
-    await user.click(comments);
+    await toggleComments(user, group);
     const opening = within(group).getByText("Loading comments…").closest("[role=status]");
     expect(opening?.classList.contains("dohc-reveal-if-slow")).toBe(true);
     await act(async () => {
@@ -3414,8 +3610,8 @@ codex mcp login dohc-share`);
     });
     await within(group).findByText("No comments yet.");
 
-    await user.click(comments);
-    await user.click(comments);
+    await toggleComments(user, group);
+    await toggleComments(user, group);
     const words = within(group).getByText("Loading comments…");
     expect(words.tagName, "a reread draws placeholder lines where comments were shown").toBe("P");
     expect(words.getAttribute("role"), "a reread says nothing to a screen reader").toBe("status");
@@ -3445,12 +3641,13 @@ codex mcp login dohc-share`);
     await openMoreLinks(user);
     const groupB = screen.getByTestId("share-link-group-share-b");
     const damaged = screen.getByTestId("share-link-group-share-damaged");
-    expect(within(groupA).getByRole("button", { name: "Comments" }).textContent).toBe("Comments");
-    expect(within(groupB).getByRole("button", { name: "Comments" }).textContent).toBe("Comments");
-    expect(within(damaged).queryByRole("button", { name: "Comments" })).toBeNull();
+    expect(await linkOptions(user, groupA)).toContain("Comments");
+    expect(await linkOptions(user, groupB)).toContain("Comments");
+    expect(await linkOptions(user, damaged)).toEqual(["End link"]);
+    expect(screen.queryByTestId(/^share-comments-/u)).toBeNull();
     expect(bridgeMock.listRelayShareDiscussion).not.toHaveBeenCalled();
 
-    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, groupA);
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       shareId: "share-a",
@@ -3484,7 +3681,7 @@ codex mcp login dohc-share`);
     await openOwnerComments(user, "share-mixed");
 
     const dependentRow = await screen.findByTestId("share-dependent-damaged-dependent");
-    await user.click(within(dependentRow).getByRole("button", { name: "Make independent" }));
+    await choosePersonOption(user, dependentRow, "Make independent");
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
         name: "Make independent",
@@ -3823,8 +4020,8 @@ codex mcp login dohc-share`);
     const group = await openOwnerComments(user, "share-1");
     expect(await within(group).findByText("Original")).toBeTruthy();
 
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
+    await toggleComments(user, group);
 
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
@@ -4500,7 +4697,7 @@ codex mcp login dohc-share`);
     });
     const groupB = await screen.findByTestId("share-link-group-share-shared");
 
-    await user.click(within(groupB).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, groupB);
     const seedB = await within(groupB).findByTestId("share-comment-message-b");
     expect(within(seedB).getByText("Scope B state")).toBeTruthy();
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
@@ -4979,7 +5176,7 @@ codex mcp login dohc-share`);
     expect(within(group).queryByText("dohc could not complete that change.")).toBeNull();
   });
 
-  it("promotes under the displayed parent and keeps direct End access reachable", async () => {
+  it("promotes under the displayed parent and keeps Remove access reachable", async () => {
     const parentWithDependent = readableLink("parent-link", {
       shareId: "share-1",
       generation: 7,
@@ -5012,8 +5209,14 @@ codex mcp login dohc-share`);
     );
     await openOwnerComments(user, "share-1");
     const dependentRow = await screen.findByTestId("share-dependent-dependent-1");
-    expect(dependentRow.textContent).toContain("Can comment · Joined through a link");
-    await user.click(within(dependentRow).getByRole("button", { name: "Make independent" }));
+    expect(dependentRow.textContent).toContain("Joined through a linkCan comment");
+    // Their level follows the link, so it is words, and the row's one control is its menu.
+    expect(
+      within(dependentRow)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual(["Options for friend@example.test"]);
+    await choosePersonOption(user, dependentRow, "Make independent");
     let confirmation = screen.getByTestId("owner-comments-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
       "Make friend@example.test's access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.",
@@ -5028,12 +5231,12 @@ codex mcp login dohc-share`);
     });
 
     const independentRow = await screen.findByTestId("share-independent-dependent-1");
-    await user.click(within(independentRow).getByRole("button", { name: "End access" }));
+    await choosePersonOption(user, independentRow, "Remove access");
     confirmation = screen.getByTestId("owner-comments-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "End dependent-1@example.test's access? They lose access right away. Copies they already made stay with them.",
+      "Remove dependent-1@example.test's access? They lose access right away. Copies they already made stay with them.",
     );
-    await user.click(within(confirmation).getByRole("button", { name: "End access" }));
+    await user.click(within(confirmation).getByRole("button", { name: "Remove access" }));
     expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       shareId: "share-1",
@@ -5084,10 +5287,10 @@ codex mcp login dohc-share`);
     );
     await openOwnerComments(user, "share-1");
     expect(await screen.findByTestId("share-independent-stale-independent")).toBeTruthy();
-    await user.click(
-      within(await screen.findByTestId("share-dependent-dependent-1")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-dependent-dependent-1"),
+      "Make independent",
     );
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
@@ -5110,10 +5313,10 @@ codex mcp login dohc-share`);
       ),
     ).toBeTruthy();
 
-    await user.click(
-      within(screen.getByTestId("share-dependent-dependent-1")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      screen.getByTestId("share-dependent-dependent-1"),
+      "Make independent",
     );
     expect(
       within(screen.getByTestId("share-people-share-1")).getByText(
@@ -5162,7 +5365,9 @@ codex mcp login dohc-share`);
     await openOwnerComments(user, "share-1");
     const independent = await screen.findByTestId("share-independent-independent-1");
     expect(screen.queryByText("private inventory failure")).toBeNull();
-    expect(within(independent).getByRole("button", { name: "End access" })).toBeTruthy();
+    expect(
+      within(independent).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+    ).toBeTruthy();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
 
@@ -5196,10 +5401,10 @@ codex mcp login dohc-share`);
       />,
     );
     await openOwnerComments(user, "share-1");
-    await user.click(
-      within(await screen.findByTestId("share-dependent-dependent-1")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-dependent-dependent-1"),
+      "Make independent",
     );
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
@@ -5215,7 +5420,9 @@ codex mcp login dohc-share`);
     await user.click(within(error.parentElement!).getByRole("button", { name: "Try again" }));
     expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
     const independent = await screen.findByTestId("share-independent-dependent-1");
-    expect(within(independent).getByRole("button", { name: "End access" })).toBeTruthy();
+    expect(
+      within(independent).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+    ).toBeTruthy();
     expect(screen.queryByTestId("share-dependent-dependent-1")).toBeNull();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
@@ -5259,7 +5466,7 @@ codex mcp login dohc-share`);
       stale.reject(new Error("stale inventory failure"));
     });
     expect(screen.queryByText("stale inventory failure")).toBeNull();
-    expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
+    expect(within(group).getByRole("textbox", { name: "Add a comment" })).toBeTruthy();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
 
@@ -5298,10 +5505,10 @@ codex mcp login dohc-share`);
       />,
     );
     await openOwnerComments(user, "share-1");
-    await user.click(
-      within(await screen.findByTestId("share-dependent-dependent-1")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-dependent-dependent-1"),
+      "Make independent",
     );
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
@@ -5385,8 +5592,8 @@ codex mcp login dohc-share`);
       />,
     );
     const group = await openOwnerComments(user, "share-1");
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
+    await toggleComments(user, group);
     await act(async () => {
       secondRead.resolve(discussionPage([namedComment("current", "Current page")]));
     });
@@ -5682,11 +5889,11 @@ codex mcp login dohc-share`);
     ).toEqual(["a-ancient", "a-older", "a-newest", "a-external"]);
 
     const a4 = await activityCall("share-a", 4);
-    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, groupA);
     expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
       pollId: a4.payload.pollId,
     });
-    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, groupA);
     expect(await within(groupA).findByText("A reopened")).toBeTruthy();
     const a5 = await activityCall("share-a", 5);
 
@@ -5844,7 +6051,7 @@ codex mcp login dohc-share`);
     });
     expect(within(group).getByText("Kept through retry")).toBeTruthy();
 
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
     expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
       pollId: retryPayload.pollId,
     });
@@ -5992,10 +6199,10 @@ codex mcp login dohc-share`);
       />,
     );
     await openOwnerComments(user, "share-a");
-    await user.click(
-      within(await screen.findByTestId("share-dependent-dependent-a")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-dependent-dependent-a"),
+      "Make independent",
     );
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
@@ -6026,10 +6233,10 @@ codex mcp login dohc-share`);
     expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(callsBeforePromotionSettles);
 
     const independent = await screen.findByTestId("share-independent-independent-b");
-    await user.click(within(independent).getByRole("button", { name: "End access" }));
+    await choosePersonOption(user, independent, "Remove access");
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
-        name: "End access",
+        name: "Remove access",
       }),
     );
     const callsBeforeUnmount = bridgeMock.listRelayShareLinks.mock.calls.length;
@@ -6061,33 +6268,247 @@ codex mcp login dohc-share`);
       />,
     );
     const group = await screen.findByTestId("share-link-group-share-keyboard");
-    const comments = within(group).getByRole("button", { name: "Comments" });
-    comments.focus();
-    await user.keyboard("{Enter}");
-    expect(await within(group).findByRole("textbox", { name: "Add a comment" })).toBeTruthy();
-    for (const name of ["Can view", "Link options", "Add link", "Pause link comments", "Post"]) {
-      expect(within(group).getByRole("button", { name })).toBeTruthy();
-    }
     const options = within(group).getByRole("button", { name: "Link options" });
     options.focus();
     await user.keyboard("{Enter}");
     expect(document.activeElement).toBe(
-      screen.getByRole("menuitem", { name: "Reset link", hidden: true }),
+      screen.getByRole("menuitem", { name: "Comments", hidden: true }),
     );
-    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{Enter}");
+    expect(await within(group).findByRole("textbox", { name: "Add a comment" })).toBeTruthy();
+    expect(document.activeElement).toBe(options);
+    // At rest a link shows its level, Copy link when there is a link to copy, the menu and the disclosure.
+    for (const name of [
+      "Can view",
+      "Link options",
+      "Link details",
+      "Pause link comments",
+      "Post",
+    ]) {
+      expect(within(group).getByRole("button", { name })).toBeTruthy();
+    }
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(
+      screen.getByRole("menuitem", { name: "Hide comments", hidden: true }),
+    );
+    await user.keyboard("{End}");
     expect(document.activeElement).toBe(
       screen.getByRole("menuitem", { name: "End link", hidden: true }),
+    );
+    await user.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(
+      screen.getByRole("menuitem", { name: "Reset link", hidden: true }),
     );
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
     expect(document.activeElement).toBe(options);
-    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
   });
 });
 
 describe("people and links on one surface", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
+
+  it("reports an invitation the clipboard refused, the way a copy button does", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    bridgeMock.getShareCopyDetails.mockResolvedValue({
+      status: "active",
+      shareCode: "dohc-share:share-ana:http://r.test",
+    });
+    writeText.mockRejectedValueOnce(new Error("Document is not focused."));
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
+
+    await copyInvitation(user, "ana");
+    await waitFor(() =>
+      expect(report).toHaveBeenCalledExactlyOnceWith({
+        message: "dohc could not copy the invitation. Document is not focused.",
+        cause: expect.anything(),
+        retry: expect.any(Function),
+      }),
+    );
+    expect(screen.getByTestId("share-invited-ana").textContent).toContain("Could not copy");
+    expect(JSON.stringify(report.mock.calls[0]![0])).not.toContain("dohc-share:share-ana");
+  });
+
+  it("removes a person's access from their menu, and hands Undo to the shell", async () => {
+    const both = sharingAccess([
+      invitedRow("ana", "ana@dohc.test"),
+      invitedRow("ben", "ben@dohc.test"),
+    ]);
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(both)
+      .mockResolvedValue(sharingAccess([invitedRow("ben", "ben@dohc.test")]));
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={PLAN}
+        onClose={() => {}}
+        shareRemovals={shareRemovals}
+      />,
+    );
+
+    await choosePersonOption(user, await screen.findByTestId("share-invited-ana"), "Remove access");
+    expect(bridgeMock.revokeRelayShare).toHaveBeenCalledExactlyOnceWith({ shareId: "share-ana" });
+    await waitFor(() => expect(screen.queryByTestId("share-invited-ana")).toBeNull());
+    // Undo is the way back, so nothing asks first.
+    expect(screen.queryByTestId("owner-comments-confirmation")).toBeNull();
+    expect(screen.getByTestId("share-invited-ben")).toBeTruthy();
+    expect(shareRemovals.removed).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      shareId: "share-ana",
+      undo: UNDO,
+      message: "Ended the share of docs/plan.md with ana@dohc.test.",
+      restoredMessage: "Restored the share of docs/plan.md with ana@dohc.test.",
+      restored: expect.any(Function),
+    });
+    expect(shareRemovals.failed).not.toHaveBeenCalled();
+
+    bridgeMock.listSharingAccess.mockResolvedValue(both);
+    await act(async () => shareRemovals.removed.mock.calls[0]![0].restored());
+    expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
+  });
+
+  it("hands a refused removal to the shell with Try again, and keeps the person listed", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    bridgeMock.revokeRelayShare.mockRejectedValueOnce(new Error("relay down"));
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={PLAN}
+        onClose={() => {}}
+        shareRemovals={shareRemovals}
+      />,
+    );
+
+    const ana = await screen.findByTestId("share-invited-ana");
+    await choosePersonOption(user, ana, "Remove access");
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledTimes(1));
+    expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "ws-1",
+      message: "dohc could not end the share of docs/plan.md with ana@dohc.test.",
+    });
+    expect(screen.queryByText("relay down")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId<HTMLButtonElement>("share-person-access-ana").disabled).toBe(false),
+    );
+
+    await act(async () => shareRemovals.failed.mock.calls[0]![0].retry());
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.revokeRelayShare).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("share-invited-ana")).toBeNull();
+  });
+
+  it("removes a person invited a moment ago, before any list has them", async () => {
+    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={PLAN}
+        onClose={() => {}}
+        shareRemovals={shareRemovals}
+      />,
+    );
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+    const invited = await screen.findByTestId("share-invited-grant-1");
+
+    await choosePersonOption(user, invited, "Remove access");
+    expect(bridgeMock.revokeRelayShare).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1" });
+    await waitFor(() => expect(screen.queryByTestId("share-invited-grant-1")).toBeNull());
+    expect(screen.queryByTestId("share-people")).toBeNull();
+  });
+
+  it("changes the access of a person who no longer depends on a link, from their row", async () => {
+    const link = readableLink("link-1", { shareId: "share-1" });
+    const person = independentGrant("named-1", { recipientEmail: "friend@example.test" });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [link], independentGrants: [person] })
+      .mockResolvedValue({ links: [link], independentGrants: [{ ...person, access: "edit" }] });
+    const change = controllable<unknown>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValue(change.promise);
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const row = await screen.findByTestId("share-independent-named-1");
+    expect(row.textContent).toBe("Ffriend@example.testCan comment");
+    const access = within(row).getByTestId<HTMLButtonElement>("share-person-access-named-1");
+    await user.click(access);
+    expect(
+      screen.getAllByRole("menuitemradio", { hidden: true }).map((level) => level.textContent),
+    ).toEqual([
+      expect.stringMatching(/^Can view/),
+      "Can comment",
+      expect.stringMatching(/^Can edit/),
+    ]);
+    expect(
+      screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
+    ).toEqual(["Remove access"]);
+    await user.click(screen.getByTestId("share-person-access-named-1-edit"));
+
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      grantId: "named-1",
+      access: "edit",
+    });
+    expect(access.disabled).toBe(true);
+    expect(access.textContent).toBe("Can comment");
+    const reads = bridgeMock.listRelayShareLinks.mock.calls.length;
+    await act(async () => {
+      change.resolve({
+        grantId: "named-1",
+        access: "edit",
+        generation: 3,
+        status: "active",
+        revokedAtMs: null,
+        parentGrantId: null,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("share-person-access-named-1").textContent).toBe("Can edit"),
+    );
+    await waitFor(() =>
+      expect(bridgeMock.listRelayShareLinks.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(screen.getByTestId<HTMLButtonElement>("share-person-access-named-1").disabled).toBe(
+      false,
+    );
+  });
+
+  it("keeps the level of a person on a link's share and says why when the change fails", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+      independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
+    });
+    bridgeMock.retuneRelayShareGrant.mockRejectedValue(
+      new Error("dohc could not reach the server."),
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-person-access-named-1"));
+    await user.click(await screen.findByTestId("share-person-access-named-1-view"));
+    expect((await screen.findByTestId("share-person-error-named-1")).textContent).toContain(
+      "dohc could not reach the server.",
+    );
+    const access = screen.getByTestId<HTMLButtonElement>("share-person-access-named-1");
+    expect(access.textContent).toBe("Can comment");
+    expect(access.disabled).toBe(false);
+  });
 
   it("copies a listed person's invitation from their row", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
@@ -6108,7 +6529,9 @@ describe("people and links on one surface", () => {
     const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
-    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    const ana = await screen.findByTestId("share-invited-ana");
+    expect(within(ana).getAllByRole("button")).toHaveLength(1);
+    await copyInvitation(user, "ana");
     await waitFor(() =>
       expect(writeText).toHaveBeenLastCalledWith("dohc-share:share-ana:http://r.test"),
     );
@@ -6116,8 +6539,13 @@ describe("people and links on one surface", () => {
       shareId: "share-ana",
       grantId: "ana",
     });
+    // The menu has closed, so the row says the copy was made, then says how they came again.
+    await waitFor(() => expect(ana.textContent).toContain("Invitation copied"));
+    expect(ana.textContent).not.toContain("Invited by email");
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("share-person-access-ana"));
 
-    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await copyInvitation(user, "ben");
     await waitFor(() =>
       expect(writeText).toHaveBeenLastCalledWith("https://share.test/invite#ben"),
     );
@@ -6336,8 +6764,8 @@ describe("people and links on one surface", () => {
     const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
-    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
-    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await copyInvitation(user, "ana");
+    await copyInvitation(user, "ben");
     await waitFor(() =>
       expect(writeText).toHaveBeenLastCalledWith("dohc-share:share-ben:http://r.test"),
     );
@@ -6363,8 +6791,8 @@ describe("people and links on one surface", () => {
     const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
-    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
-    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await copyInvitation(user, "ana");
+    await copyInvitation(user, "ben");
     await act(async () => {
       slow.resolve({ status: "ended" });
     });
@@ -6381,12 +6809,12 @@ describe("people and links on one surface", () => {
     const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
-    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    await copyInvitation(user, "ana");
     await waitFor(() => expect(screen.queryByTestId("share-invited-ana")).toBeNull());
     expect(writeText).not.toHaveBeenCalled();
   });
 
-  it("lists the people invited to exactly this selection, and opens one in Sharing", async () => {
+  it("lists the people invited to exactly this selection, each with one menu", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("link-1", { shareId: "share-linked" })],
     });
@@ -6411,17 +6839,8 @@ describe("people and links on one surface", () => {
           invitedRow("on-link-share", "linked@dohc.test", { shareId: "share-linked" }),
         ]),
       );
-    const onClose = vi.fn();
-    const onOpenSharing = vi.fn();
     const user = userEvent.setup();
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={PLAN}
-        onClose={onClose}
-        onOpenSharing={onOpenSharing}
-      />,
-    );
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
     const people = await screen.findByTestId("share-people");
     await within(people).findByTestId("share-invited-ben");
@@ -6451,15 +6870,23 @@ describe("people and links on one surface", () => {
     });
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
 
-    await user.click(within(people).getByTestId("share-invited-options-ben"));
-    await user.click(
-      await screen.findByRole("menuitem", { name: "Open in Sharing", hidden: true }),
-    );
-    expect(onClose).toHaveBeenCalledOnce();
-    expect(onOpenSharing).toHaveBeenCalledExactlyOnceWith({
-      lane: "granted",
-      shareId: "share-ben",
-    });
+    expect(screen.getByRole("heading", { name: "People with access" })).toBeTruthy();
+    // The level is each row's one control. Its menu holds the levels, then the row's other actions.
+    expect(
+      within(people)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("data-testid")),
+    ).toEqual(["share-person-access-ana", "share-person-access-ben"]);
+    await user.click(within(people).getByTestId("share-person-access-ben"));
+    expect(
+      screen
+        .getAllByRole("menuitemradio", { hidden: true })
+        .map((level) => level.getAttribute("data-testid")),
+    ).toEqual(["share-person-access-ben-view", "share-person-access-ben-edit"]);
+    expect(
+      screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
+    ).toEqual(["Copy invitation", "Remove access"]);
+    expect(screen.getAllByRole("separator", { hidden: true })).toHaveLength(1);
   });
 
   it("says in place that the invited people could not load, and reads again on Try again", async () => {
@@ -6533,8 +6960,7 @@ describe("people and links on one surface", () => {
     expect(more.textContent).toBe("2 more links");
     expect(more.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getAllByTestId(/^share-link-group-/u)).toHaveLength(1);
-    // A separate link is made beside the other separate links.
-    expect(screen.queryByRole("button", { name: "Create separate link" })).toBeNull();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
 
     await user.click(more);
     expect(more.getAttribute("aria-expanded")).toBe("true");
@@ -6547,20 +6973,40 @@ describe("people and links on one surface", () => {
       "share-link-group-share-newer",
       "share-link-group-share-ended",
     ]);
-    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
 
     await user.click(more);
     expect(screen.getAllByTestId(/^share-link-group-/u)).toHaveLength(1);
+
+    // A separate link is made beside the other separate links, so asking for one opens them.
+    await openSeparateLink(user);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      document
+        .getElementById("share-links-more-list")
+        ?.contains(screen.getByRole("region", { name: "Separate link" })),
+    ).toBe(true);
   });
 
-  it("offers a separate link under the one share when there are no more links", async () => {
+  it("offers a separate link under the one share when there are no more links, and takes Cancel", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("only", { shareId: "share-only" })],
     });
+    const user = userEvent.setup();
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
     expect(await screen.findByTestId("share-link-group-share-only")).toBeTruthy();
     expect(screen.queryByTestId("share-links-more")).toBeNull();
-    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
+
+    await openSeparateLink(user);
+    const separate = screen.getByRole("region", { name: "Separate link" });
+    expect(
+      separate.compareDocumentPosition(screen.getByTestId("share-link-group-share-only")),
+    ).toBe(Node.DOCUMENT_POSITION_PRECEDING);
+    await user.click(within(separate).getByRole("button", { name: "Cancel separate link" }));
+    expect(screen.queryByRole("region", { name: "Separate link" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Link options" }));
+    expect(bridgeMock.createRelayShareLink).not.toHaveBeenCalled();
   });
 
   it("keeps a new separate link in view beside the links it joins", async () => {
@@ -6584,9 +7030,9 @@ describe("people and links on one surface", () => {
 
     await openMoreLinks(user);
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     const group = await screen.findByTestId("share-link-group-share-made");
-    expect(within(group).getByTestId("share-link-url").textContent).toBe(LINK_URL_B);
+    expect((await findLinkUrl(user, group)).textContent).toBe(LINK_URL_B);
     const more = screen.getByTestId("share-links-more");
     expect(more.textContent).toBe("2 more links");
     expect(more.getAttribute("aria-expanded")).toBe("true");
@@ -6638,7 +7084,7 @@ describe("people and links on one surface", () => {
     expect(screen.getAllByTestId(/^share-link-group-/u)).toHaveLength(1);
   });
 
-  it("opens more links to say that a link could not be added", async () => {
+  it("says beside the link being added that it could not be added", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [
         readableLink("first", { shareId: "share-first", createdAtMs: CREATED_MS }),
@@ -6654,10 +7100,25 @@ describe("people and links on one surface", () => {
       await screen.findByTestId("share-link-group-share-first"),
       "Can comment",
     );
-    expect((await screen.findByTestId("share-link-error")).textContent).toBe(
+    const another = screen.getByRole("region", { name: "Another link" });
+    expect((await within(another).findByTestId("share-link-error")).textContent).toBe(
       "The sync relay is unavailable.",
     );
-    expect(screen.getByTestId("share-links-more").getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("share-links-more").getAttribute("aria-expanded")).toBe("false");
+    // The link is still there to try again, at the level chosen.
+    expect(screen.getByTestId("share-link-add-access-share-first").textContent).toBe("Can comment");
+    const submit = screen.getByTestId<HTMLButtonElement>("share-link-add-submit-share-first");
+    expect(submit.textContent).toBe("Add link");
+    expect(submit.disabled).toBe(false);
+
+    await user.click(within(another).getByRole("button", { name: "Cancel another link" }));
+    expect(screen.queryByRole("region", { name: "Another link" })).toBeNull();
+    expect(screen.queryByTestId("share-link-error")).toBeNull();
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("share-link-group-share-first")).getByRole("button", {
+        name: "Link options",
+      }),
+    );
   });
 
   it("says a link could not be added without opening a list the person never opened", async () => {
@@ -6755,11 +7216,11 @@ describe("people and links on one surface", () => {
       expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledTimes(1),
     );
     await openMoreLinks(user);
-    expect(
-      within(screen.getByTestId("share-link-group-share-a"))
-        .getByRole("button", { name: "Comments" })
-        .getAttribute("aria-expanded"),
-    ).toBe("false");
+    expect(screen.queryByTestId("share-comments-share-a")).toBeNull();
+    expect(await linkOptions(user, screen.getByTestId("share-link-group-share-a"))).toEqual([
+      "Comments",
+      "Add another link",
+    ]);
   });
 
   it("keeps a question about a person open when their share's comments close", async () => {
@@ -6775,13 +7236,13 @@ describe("people and links on one surface", () => {
     render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
 
     const group = await openOwnerComments(user, "share-1");
-    await user.click(
-      within(await screen.findByTestId("share-dependent-joined")).getByRole("button", {
-        name: "Make independent",
-      }),
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-dependent-joined"),
+      "Make independent",
     );
     expect(screen.getByTestId("owner-comments-confirmation")).toBeTruthy();
-    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await toggleComments(user, group);
     expect(
       within(screen.getByTestId("share-people-share-1")).getByTestId("owner-comments-confirmation"),
     ).toBeTruthy();
@@ -6850,7 +7311,7 @@ describe("people and links on one surface", () => {
 
     await screen.findByTestId("share-link-group-share-only");
     await openSeparateLink(user);
-    await user.click(screen.getByTestId("share-link-create"));
+    await user.click(await screen.findByTestId("share-link-create"));
     expect(await screen.findByTestId("share-link-group-share-made")).toBeTruthy();
     expect(screen.getByTestId("share-links-more").textContent).toBe("1 more link");
     expect(screen.getByTestId("share-links-more").getAttribute("aria-expanded")).toBe("true");
@@ -6905,10 +7366,11 @@ describe("advertised public Edit release", () => {
           onClose={() => {}}
         />,
       );
-      const choices = screen.getByRole("radiogroup", { name: "Link access" });
-      await user.click(await within(choices).findByRole("radio", { name: "Edit" }));
-      expect(screen.getByText("People who can edit can see the full History.")).toBeTruthy();
-      await user.click(screen.getByTestId("share-link-create"));
+      expect(await newLinkLevels(user)).toContain(
+        "Can editAnyone with the link can edit this and see the full History.",
+      );
+      await chooseNewLinkAccess(user, "Can edit");
+      await user.click(await screen.findByTestId("share-link-create"));
       expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         paths,
@@ -6922,7 +7384,7 @@ describe("advertised public Edit release", () => {
       independentGrants: [],
       supportedLinkAccess: ["view", "comment", "edit"],
     });
-    userEvent.setup();
+    const user = userEvent.setup();
     render(
       <RelayShareDialog
         workspaceId="ws-1"
@@ -6930,11 +7392,10 @@ describe("advertised public Edit release", () => {
         onClose={() => {}}
       />,
     );
-    expect(
-      within(screen.getByRole("radiogroup", { name: "Link access" })).queryByRole("radio", {
-        name: "Edit",
-      }),
-    ).toBeNull();
+    expect(await newLinkLevels(user)).toEqual([
+      "Can viewAnyone with the link can read this without an account.",
+      "Can commentAnyone with the link can read this and comment.",
+    ]);
   });
 });
 

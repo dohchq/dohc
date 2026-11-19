@@ -48,9 +48,7 @@ it.each([["Trip"], ["first.md", "second.md"]])(
   "discloses full History beside the edit choice for %j",
   async (...paths) => {
     const user = userEvent.setup();
-    render(
-      <EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths }} onDone={() => {}} />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths }} />);
     const line = "They can see the full History.";
     await user.click(screen.getByTestId("share-access"));
     expect((await screen.findByTestId("share-access-edit")).textContent).toContain(line);
@@ -62,13 +60,7 @@ describe("automation steps a share would stop", () => {
   it("says so in one sentence before an Edit share, and makes the share on the second Invite", async () => {
     const user = userEvent.setup();
     bridgeMock.automationShareImpact.mockResolvedValue({ stops: [spend] });
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["Trip"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await chooseAccess(user, "edit");
     await user.click(screen.getByTestId("share-create"));
@@ -107,13 +99,7 @@ describe("automation steps a share would stop", () => {
           answer = resolve;
         }),
     );
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["Trip"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await chooseAccess(user, "edit");
     await user.click(screen.getByTestId("share-create"));
@@ -135,13 +121,7 @@ describe("automation steps a share would stop", () => {
 
   it("asks nothing for a View share, and shares when the check itself fails, saying so", async () => {
     const user = userEvent.setup();
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["Trip"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.automationShareImpact).not.toHaveBeenCalled();
@@ -151,13 +131,7 @@ describe("automation steps a share would stop", () => {
     bridgeMock.automationShareImpact.mockRejectedValue(
       new Error("dohc is still opening this workspace's automations."),
     );
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["Trip"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
     await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
     await chooseAccess(user, "edit");
     await user.click(screen.getByTestId("share-create"));
@@ -194,17 +168,14 @@ describe("automation steps a share would stop", () => {
 });
 
 describe("EmailShareForm", () => {
-  it("creates a path share and shows the copyable code", async () => {
+  it("invites, then clears the field for the next address and says what to do next", async () => {
     const user = userEvent.setup();
     render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onDone={() => {}}
-      />,
+      <EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/plan.md"] }} />,
     );
 
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    const field = screen.getByTestId<HTMLInputElement>("share-email");
+    await user.type(field, "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
 
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
@@ -213,17 +184,54 @@ describe("EmailShareForm", () => {
       access: "view",
       paths: ["docs/plan.md"],
     });
-    const code = await screen.findByTestId("share-code");
-    expect(code.textContent).toBe(SHARE_CODE);
-    expect(screen.queryByTestId("share-browser-invitation-copy")).toBeNull();
-    // Shares end from the Sharing view.
-    expect(screen.getByText("You can end this share anytime from Sharing.")).toBeTruthy();
+    const status = await screen.findByText(/^Invited/);
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.textContent).toBe(
+      "Invited friend@dohc.test. Copy the invitation and send it to them.",
+    );
+    expect(field.value).toBe("");
+    expect(document.activeElement).toBe(field);
+    expect(screen.getByTestId("share-create").textContent).toBe("Invite");
 
-    await user.click(screen.getByTestId("share-code-copy"));
+    const copy = screen.getByRole("button", { name: "Copy invitation" });
+    expect(copy).toBe(screen.getByTestId("share-invitation-copy"));
+    await user.click(copy);
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(SHARE_CODE));
+    expect(await screen.findByRole("button", { name: "Invitation copied" })).toBe(copy);
   });
 
-  it("copies the exact server invitation and retains the desktop code", async () => {
+  it("invites a second person at the access chosen for the first", async () => {
+    const user = userEvent.setup();
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs"] }} />);
+    await chooseAccess(user, "edit");
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+    await screen.findByText(/^Invited/);
+
+    bridgeMock.createRelayShare.mockResolvedValue({
+      shareId: "share-2",
+      grantId: "grant-2",
+      shareCode: "dohc-share:share-2:http://relay.test",
+      recipientEmail: "ana@dohc.test",
+    });
+    await user.keyboard("ana@dohc.test{Enter}");
+    await waitFor(() =>
+      expect(screen.getByText(/^Invited/).textContent).toBe(
+        "Invited ana@dohc.test. Copy the invitation and send it to them.",
+      ),
+    );
+    expect(bridgeMock.createRelayShare).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      recipientEmail: "ana@dohc.test",
+      access: "edit",
+      paths: ["docs"],
+    });
+    await user.click(screen.getByTestId("share-invitation-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("dohc-share:share-2:http://relay.test"),
+    );
+  });
+
+  it("copies the browser invitation when the server gives one", async () => {
     const invitation = "https://share.example.test/s/edit/exact-grant";
     bridgeMock.createRelayShare.mockResolvedValue({
       shareId: "share-1",
@@ -233,13 +241,7 @@ describe("EmailShareForm", () => {
       browserInvitationUrl: invitation,
     });
     const user = userEvent.setup();
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs"] }} />);
     await user.click(screen.getByTestId("share-access"));
     expect((await screen.findByTestId("share-access-edit")).textContent).toContain(
       "shared Markdown files live when available",
@@ -247,18 +249,8 @@ describe("EmailShareForm", () => {
     await user.click(screen.getByTestId("share-access-edit"));
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
-    expect(
-      (await screen.findByTestId("share-browser-invitation")).getAttribute("data-grant-id"),
-    ).toBe("exact-grant");
-    const copyInvitation = screen.getByTestId("share-browser-invitation-copy");
-    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(copyInvitation);
-    await user.click(copyInvitation);
+    await user.click(await screen.findByTestId("share-invitation-copy"));
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
-    expect(await screen.findByRole("button", { name: "Browser invitation copied" })).toBe(
-      copyInvitation,
-    );
-    expect(screen.getByTestId("share-code").textContent).toBe(SHARE_CODE);
-    expect(screen.getByText(/sign in with the invited account/)).toBeTruthy();
   });
 
   it("ignores a creation response after the workspace changes", async () => {
@@ -271,20 +263,12 @@ describe("EmailShareForm", () => {
     );
     const user = userEvent.setup();
     const view = render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs"] }}
-        onDone={() => {}}
-      />,
+      <EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs"] }} />,
     );
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     view.rerender(
-      <EmailShareForm
-        workspaceId="ws-2"
-        target={{ kind: "paths", paths: ["docs"] }}
-        onDone={() => {}}
-      />,
+      <EmailShareForm workspaceId="ws-2" target={{ kind: "paths", paths: ["docs"] }} />,
     );
     await act(async () =>
       complete({
@@ -295,19 +279,16 @@ describe("EmailShareForm", () => {
         browserInvitationUrl: "https://share.example.test/s/edit/old-grant",
       }),
     );
-    expect(screen.queryByTestId("share-browser-invitation")).toBeNull();
-    expect(screen.queryByTestId("share-code")).toBeNull();
+    expect(screen.queryByText(/^Invited/)).toBeNull();
+    expect(screen.queryByTestId("share-invitation-copy")).toBeNull();
+    expect(screen.getByTestId<HTMLInputElement>("share-email").value).toBe("friend@dohc.test");
     expect(screen.getByTestId("share-create").hasAttribute("disabled")).toBe(false);
   });
 
   it("offers View and Edit for email without promising a discussion", async () => {
     const user = userEvent.setup();
     render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onDone={() => {}}
-      />,
+      <EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/plan.md"] }} />,
     );
 
     expect(screen.getByTestId("share-access").textContent).toBe("Can view");
@@ -346,13 +327,7 @@ describe("EmailShareForm", () => {
       ),
     );
     const user = userEvent.setup();
-    render(
-      <EmailShareForm
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: [".env"] }}
-        onDone={() => {}}
-      />,
-    );
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: [".env"] }} />);
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect((await screen.findByRole("alert")).textContent).toBe("Secret files can't be shared.");

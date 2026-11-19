@@ -1,27 +1,29 @@
-import { CloudOff, CloudUpload, LogIn, Share2, X, type LucideIcon } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ShareAccess } from "../ipc/bridgeContract";
+import { CloudOff, CloudUpload, LogIn, X, type LucideIcon } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
-import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
-import { accessOptions, EmailShareForm } from "./EmailShareForm";
+import { EmailShareForm } from "./EmailShareForm";
 import { ipcErrorMessage } from "./ipcError";
 import { notSentWords } from "./notSentWords";
-import { SHARE_ACCESS_WORDS, ShareAccessMenu, SharePersonRow } from "./shareAccess";
 import { INVITATION_SECRET } from "./shareCopySecrets";
+import {
+  isShareAccess,
+  PersonAccessRow,
+  type ChangedAccess,
+  type SharedPerson,
+} from "./sharePerson";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { FieldError, IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
-import { CopyButton } from "./ui/CopyButton";
-import { MoreMenu } from "./ui/MoreMenu";
-import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
-import { useRequestSequence } from "./useRequestSequence";
+import { useCopy } from "./ui/CopyButton";
+import { NameLine } from "./ui/NameLine";
+import { splitPath } from "./ui/PathLine";
+import { rowMatchesTarget, targetLabel, useRelayShareLinkPane } from "./useRelayShareLinkPane";
 import {
   accessReasonForLane,
   serverName,
   type AccessContext,
   type AccessReason,
 } from "./workbench/accessReason";
-import type { SharingFocus } from "./workbench/SharingView";
 import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "./workspace/workspaceSession";
 
@@ -33,16 +35,7 @@ export type RelayShareTarget =
 // toasts, so a long link pane grows it downward and its body scrolls.
 const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
-type InvitedPerson = {
-  shareId: string;
-  grantId: string;
-  name: string;
-  email: string | null;
-  access: ShareAccess | null;
-  generation: number | null;
-};
-
-type ChangedAccess = { access: ShareAccess; generation: number };
+type InvitedPerson = SharedPerson & { generation: number | null };
 
 const listedSince = (person: InvitedPerson, changed: ChangedAccess) =>
   person.generation !== null && person.generation >= changed.generation;
@@ -50,9 +43,6 @@ const listedSince = (person: InvitedPerson, changed: ChangedAccess) =>
 function shownAccess(person: InvitedPerson, changed: ChangedAccess | undefined) {
   return changed && !listedSince(person, changed) ? changed.access : person.access;
 }
-
-const isShareAccess = (access: string | null): access is ShareAccess =>
-  access !== null && access in SHARE_ACCESS_WORDS;
 
 type InvitationClick = {
   resolve: (text: string | null) => void;
@@ -104,20 +94,6 @@ function useInvitation(
         resolve(null);
       }
     });
-}
-
-function CopyInvitation(props: { person: InvitedPerson; reload: () => Promise<unknown> }) {
-  const invitation = useInvitation(props.person, props.reload);
-  return (
-    <CopyButton
-      iconOnly
-      label="Copy invitation"
-      copiedLabel="Invitation copied"
-      testId={`share-copy-invitation-${props.person.grantId}`}
-      sensitive={INVITATION_SECRET}
-      getText={invitation}
-    />
-  );
 }
 
 // The people this selection was shared with by email, from the listing the
@@ -214,8 +190,6 @@ export function RelayShareDialog(props: {
   // What About's Access reads, so Share names the same cause.
   accessContext: AccessContext;
   server: string | null;
-  // Opens a share in the Sharing view, where it ends. The dialog closes first.
-  onOpenSharing?: (target: SharingFocus) => void;
   // New notes the server has no file for until their open editor is left.
   notSentWhileOpen?: readonly string[];
 }) {
@@ -244,6 +218,11 @@ export function RelayShareDialog(props: {
     byGrant: Readonly<Record<string, ChangedAccess>>;
   }>({ scope: linkPane.scope, byGrant: {} });
   const accessNow = changedAccess.scope === linkPane.scope ? changedAccess.byGrant : {};
+  const [removedHere, setRemovedHere] = useState<{ scope: string; grantIds: readonly string[] }>({
+    scope: linkPane.scope,
+    grantIds: [],
+  });
+  const removedNow = removedHere.scope === linkPane.scope ? removedHere.grantIds : [];
   const invited = useInvitedPeople({
     workspaceId: props.workspaceId,
     target: props.target,
@@ -271,14 +250,11 @@ export function RelayShareDialog(props: {
       (person) => !listed.some((known) => known.grantId === person.grantId),
     ),
     // A share with links lists its people through its links.
-  ].filter((person) => !linkPane.peopleShareIds.has(person.shareId));
+  ].filter(
+    (person) =>
+      !linkPane.peopleShareIds.has(person.shareId) && !removedNow.includes(person.grantId),
+  );
   const invitedFailed = !held && invited.failed;
-  const { onOpenSharing } = props;
-
-  const subject =
-    props.target.kind === "version"
-      ? `version “${props.target.versionName ?? props.target.versionId}”`
-      : (props.target.label ?? props.target.paths[0] ?? "this selection");
 
   // While the body scrolls, the title sits in a band with a rule. The band
   // keeps the dialog's 20px inset, so only the rule comes in.
@@ -302,25 +278,12 @@ export function RelayShareDialog(props: {
       className={`dohc-elevated flex w-105 flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-3 p-5"} ${DIALOG_HEIGHT_CLASS}`}
     >
       <div
-        className={`flex flex-col gap-3 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}
+        className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}
       >
-        <div className="flex items-center gap-2">
-          <Share2 size={14} aria-hidden className="text-subtle" />
-          <h2 className="m-0 flex-1 text-base font-semibold text-ink">Share</h2>
-          <IconButton aria-label="Close" onClick={linkPane.close}>
-            <X size={13} aria-hidden />
-          </IconButton>
-        </div>
-
-        <p className="m-0 text-xs leading-relaxed text-muted">
-          {props.target.kind === "version" ? (
-            <>Share {subject}.</>
-          ) : (
-            <>
-              Share <code className="font-mono text-[11px] text-ink">{subject}</code>.
-            </>
-          )}
-        </p>
+        <ShareTitle target={props.target} />
+        <IconButton aria-label="Close" title="Close" onClick={linkPane.close}>
+          <X size={13} aria-hidden />
+        </IconButton>
       </div>
 
       {/* A control's halo draws inset here, where the scroller would clip it. */}
@@ -342,25 +305,23 @@ export function RelayShareDialog(props: {
             inert={held || undefined}
             className={held ? "flex flex-col gap-6 opacity-50" : "flex flex-col gap-6"}
           >
-            <div className="flex flex-col gap-3">
-              <EmailShareForm
-                key={linkPane.scope}
-                workspaceId={props.workspaceId}
-                target={props.target}
-                onDone={linkPane.close}
-                onCreated={(person) => {
-                  const scope = linkPane.scope;
-                  setInvitedHere((current) => ({
-                    scope,
-                    people: [
-                      ...(current.scope === scope ? current.people : []),
-                      { ...person, email: person.name, generation: 1 },
-                    ],
-                  }));
-                  setInvitedRevision((revision) => revision + 1);
-                }}
-              />
-            </div>
+            <EmailShareForm
+              key={linkPane.scope}
+              workspaceId={props.workspaceId}
+              target={props.target}
+              removedGrantIds={removedNow}
+              onCreated={(person) => {
+                const scope = linkPane.scope;
+                setInvitedHere((current) => ({
+                  scope,
+                  people: [
+                    ...(current.scope === scope ? current.people : []),
+                    { ...person, email: person.name, generation: 1 },
+                  ],
+                }));
+                setInvitedRevision((revision) => revision + 1);
+              }}
+            />
 
             {invitedPeople.length > 0 || invitedFailed || linkPane.people !== null ? (
               <section
@@ -369,44 +330,55 @@ export function RelayShareDialog(props: {
                 aria-labelledby="share-people-heading"
               >
                 <SectionLabel as="h3" id="share-people-heading" className="m-0">
-                  People
+                  People with access
                 </SectionLabel>
                 {invitedFailed ? (
                   <RetryRow testId="share-people-failed" onRetry={() => void loadInvited()}>
                     dohc could not load the people you invited by email.
                   </RetryRow>
                 ) : null}
-                {invitedPeople.map((person) => (
-                  <InvitedPersonRow
-                    key={person.grantId}
-                    workspaceId={props.workspaceId}
-                    target={props.target}
-                    person={{
-                      ...person,
-                      access: shownAccess(person, accessNow[person.grantId]),
-                    }}
-                    reload={loadInvited}
-                    onAccessChanged={(changed) => {
-                      const scope = linkPane.scope;
-                      setChangedAccess((current) => ({
-                        scope,
-                        byGrant: {
-                          ...(current.scope === scope ? current.byGrant : {}),
-                          [person.grantId]: changed,
-                        },
+                {invitedPeople.map((person) => {
+                  const scope = linkPane.scope;
+                  const removed = (gone: boolean) => {
+                    setRemovedHere((current) => {
+                      const others = (current.scope === scope ? current.grantIds : []).filter(
+                        (grantId) => grantId !== person.grantId,
+                      );
+                      return { scope, grantIds: gone ? [...others, person.grantId] : others };
+                    });
+                    if (gone)
+                      setInvitedHere((current) => ({
+                        ...current,
+                        people: current.people.filter((here) => here.grantId !== person.grantId),
                       }));
-                      setInvitedRevision((revision) => revision + 1);
-                    }}
-                    {...(onOpenSharing
-                      ? {
-                          onOpenSharing: () => {
-                            linkPane.close();
-                            onOpenSharing({ lane: "granted", shareId: person.shareId });
+                    setInvitedRevision((revision) => revision + 1);
+                  };
+                  return (
+                    <InvitedPersonRow
+                      key={person.grantId}
+                      workspaceId={props.workspaceId}
+                      target={props.target}
+                      person={{
+                        ...person,
+                        access: shownAccess(person, accessNow[person.grantId]),
+                      }}
+                      reload={loadInvited}
+                      shareRemovals={props.shareRemovals}
+                      onAccessChanged={(changed) => {
+                        setChangedAccess((current) => ({
+                          scope,
+                          byGrant: {
+                            ...(current.scope === scope ? current.byGrant : {}),
+                            [person.grantId]: changed,
                           },
-                        }
-                      : {})}
-                  />
-                ))}
+                        }));
+                        setInvitedRevision((revision) => revision + 1);
+                      }}
+                      onRemoved={() => removed(true)}
+                      onRestored={() => removed(false)}
+                    />
+                  );
+                })}
                 {linkPane.people}
               </section>
             ) : null}
@@ -419,103 +391,120 @@ export function RelayShareDialog(props: {
   );
 }
 
+function ShareTitle(props: { target: RelayShareTarget }) {
+  const { target } = props;
+  const className = "m-0 flex min-w-0 flex-1 gap-1 text-base font-semibold text-ink";
+  if (target.kind === "version") {
+    const words = `Share version "${target.versionName ?? target.versionId}"`;
+    return (
+      <h2 className={className} title={words}>
+        <span className="truncate">{words}</span>
+      </h2>
+    );
+  }
+  const [first, ...rest] = target.paths;
+  const name =
+    target.label ?? (rest.length > 0 ? `${target.paths.length} items` : splitPath(first).name);
+  return (
+    <h2 className={className}>
+      {"Share "}
+      <NameLine name={name || first} title={target.paths.join(", ")} />
+    </h2>
+  );
+}
+
 function InvitedPersonRow(props: {
   workspaceId: string;
   target: RelayShareTarget;
   person: InvitedPerson;
   reload: () => Promise<unknown>;
+  shareRemovals: ShareRemovalNotices | undefined;
   onAccessChanged: (changed: ChangedAccess) => void;
-  onOpenSharing?: () => void;
+  onRemoved: () => void;
+  onRestored: () => void;
 }) {
-  const { person, target, workspaceId } = props;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [asked, setAsked] = useState<ShareAccess | null>(null);
-  const errorId = useId();
-  const requests = useRequestSequence([workspaceId]);
-  const automations = useAutomationShareCheck(workspaceId, target);
-  const options = useMemo(() => {
-    const offered = accessOptions(target).map(({ value, description }) => ({
-      value,
-      description,
-      testId: `share-person-access-${person.grantId}-${value}`,
-    }));
-    return person.access === "comment"
-      ? [offered[0]!, { value: "comment" as const }, ...offered.slice(1)]
-      : offered;
-  }, [person.access, person.grantId, target.kind]);
-  const shareOf = (access: ShareAccess) => ({
-    recipientEmail: person.email,
-    access,
-    shareId: person.shareId,
+  const { person, workspaceId, shareRemovals } = props;
+  const invitation = useInvitation(person, props.reload);
+  const copied = useCopy({
+    getText: invitation,
+    words: { copied: "Invitation copied" },
+    sensitive: INVITATION_SECRET,
   });
-  const note = asked ? automations.noteFor(shareOf(asked)) : null;
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removeErrorId = useId();
+  const subject = `the share of ${targetLabel(props.target)} with ${person.name}`;
 
-  async function change(access: ShareAccess) {
-    if (busy || access === person.access) return;
-    const token = requests.next();
-    const current = () => requests.isCurrent(token);
-    setError(null);
-    setAsked(access);
-    setBusy(true);
+  async function remove() {
+    setRemoving(true);
+    setRemoveError(null);
     try {
-      const share = shareOf(access);
-      if (
-        person.email !== null &&
-        automations.asks(share) &&
-        !(await automations.mayShare(share, current))
-      )
-        return;
-      const changed = await bridge().retuneRelayShareGrant({
+      const result = await bridge().revokeRelayShare({ shareId: person.shareId });
+      shareRemovals?.removed({
         workspaceId,
         shareId: person.shareId,
-        grantId: person.grantId,
-        access,
+        undo: result.undo,
+        message: result.undo
+          ? `Ended ${subject}.`
+          : `${subject[0]!.toUpperCase()}${subject.slice(1)} has already ended.`,
+        restoredMessage: `Restored ${subject}.`,
+        restored: props.onRestored,
       });
-      if (!current()) return;
-      props.onAccessChanged({ access: changed.access, generation: changed.generation });
-      setAsked(null);
-      automations.forget();
+      props.onRemoved();
     } catch (cause) {
-      if (current())
-        setError(ipcErrorMessage(cause, `dohc could not change ${person.name}'s access.`));
+      const message = `dohc could not end ${subject}.`;
+      if (shareRemovals)
+        shareRemovals.failed({ workspaceId, message, cause, retry: () => void remove() });
+      else setRemoveError(ipcErrorMessage(cause, message));
     } finally {
-      if (current()) setBusy(false);
+      setRemoving(false);
     }
   }
 
   return (
-    <div data-testid={`share-invited-${person.grantId}`} className="flex flex-col gap-1">
-      <SharePersonRow name={person.name} detail="Invited by email">
-        {person.access ? (
-          <ShareAccessMenu
-            label={`Access for ${person.name}`}
-            access={person.access}
-            options={options}
-            disabled={busy}
-            testId={`share-person-access-${person.grantId}`}
-            width={288}
-            align="end"
-            onPick={(access) => void change(access)}
-          />
-        ) : null}
-        <CopyInvitation person={person} reload={props.reload} />
-        {props.onOpenSharing ? (
-          <MoreMenu
-            label="Share options"
-            topLayer
-            testId={`share-invited-options-${person.grantId}`}
-            items={[{ label: "Open in Sharing", onSelect: props.onOpenSharing }]}
-          />
-        ) : null}
-      </SharePersonRow>
-      {note?.warning ? <AutomationShareNote note={note} /> : null}
-      {error ? (
-        <FieldError id={errorId} testId={`share-person-error-${person.grantId}`}>
-          {error}
+    <PersonAccessRow
+      testId={`share-invited-${person.grantId}`}
+      workspaceId={workspaceId}
+      target={props.target}
+      person={person}
+      detail={
+        <>
+          {copied.feedback === null ? (
+            "Invited by email"
+          ) : (
+            <span className={copied.feedback === "failed" ? "text-danger" : undefined}>
+              {copied.words[copied.feedback]}
+            </span>
+          )}
+          <span role="status" aria-live="polite" className="sr-only">
+            {copied.announcement}
+          </span>
+        </>
+      }
+      busy={removing}
+      actions={[
+        {
+          id: "copy-invitation",
+          label: "Copy invitation",
+          testId: `share-copy-invitation-${person.grantId}`,
+          onSelect: copied.copy,
+        },
+        {
+          id: "remove",
+          label: "Remove access",
+          danger: true,
+          testId: `share-remove-${person.grantId}`,
+          onSelect: () => void remove(),
+        },
+      ]}
+      onAccessChanged={props.onAccessChanged}
+    >
+      {removeError ? (
+        <FieldError id={removeErrorId} testId={`share-remove-error-${person.grantId}`}>
+          {removeError}
         </FieldError>
       ) : null}
-    </div>
+    </PersonAccessRow>
   );
 }
 

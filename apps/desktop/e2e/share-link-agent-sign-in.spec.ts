@@ -168,23 +168,23 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
 
     let dialog = await openLinkPane(page, OTHER_PATH);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const otherUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
     const otherAddress = `${otherUrl.origin}/mcp/s/${otherUrl.hash.slice(1)}`;
     await closeDialog(dialog);
 
     dialog = await openLinkPane(page, PATH);
-    await dialog
-      .getByRole("radiogroup", { name: "Link access" })
-      .getByRole("radio", { name: "Comment", exact: true })
-      .click();
+    await dialog.getByTestId("share-link-create-access").click();
+    await dialog.getByRole("menuitemradio", { name: "Can comment", exact: true }).click();
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
     expect(linkUrl.origin).toBe(sharedDatasetViewerOrigin);
     const secret = linkUrl.hash.slice(1);
     const address = await holdSystemClipboard(test.info(), async (remainingMs) => {
-      const copy = dialog.getByTestId("share-link-agent-copy");
-      await copy.click({ timeout: remainingMs() });
-      await expect(copy).toHaveText("Copied", { timeout: remainingMs() });
+      await dialog.getByRole("button", { name: "Link options" }).click({ timeout: remainingMs() });
+      await dialog.getByTestId("share-link-agent-copy").click({ timeout: remainingMs() });
+      await expect(dialog).toContainText("Copied for an agent", { timeout: remainingMs() });
       return desktop!.app.evaluate(({ clipboard }) => clipboard.readText());
     });
     expect(address).toBe(`${sharedDatasetViewerOrigin}/mcp/s/${secret}`);

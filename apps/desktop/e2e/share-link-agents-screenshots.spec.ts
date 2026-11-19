@@ -172,17 +172,19 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
 
     let dialog = await openLinkPane(page);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
     expect(linkUrl.origin).toBe(sharedDatasetViewerOrigin);
     const secret = linkUrl.hash.slice(1);
     const address = `${linkUrl.origin}/mcp/s/${secret}`;
+    await dialog.getByRole("button", { name: "Link options" }).click();
     const agentCopy = dialog.getByTestId("share-link-agent-copy");
     await expect(agentCopy).toHaveText("Copy for an agent");
     await expect(dialog).not.toContainText(address);
     await shoot(page, dialog, "share-link-a-copy-for-agent");
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await agentCopy.click({ timeout: remainingMs() });
-      await expect(agentCopy).toHaveText("Copied", { timeout: remainingMs() });
+      await expect(dialog).toContainText("Copied for an agent", { timeout: remainingMs() });
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(address);
     });
 
@@ -207,6 +209,7 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
 
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
     dialog = await openLinkPane(page);
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const agents = dialog.getByRole("region", { name: "Agents" });
     await expect(agents.getByRole("listitem")).toHaveCount(2);
     await expect(agents).toContainText("Claude Code");
