@@ -1,4 +1,6 @@
 import * as T from "three";
+import { transformedGeometry } from "./figure-geometry";
+import { figureCanvas } from "./figure-canvas";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
@@ -34,8 +36,10 @@ export function batchAssemblies(assemblies: T.Group[]) {
         receive: mesh.receiveShadow,
         geometries: [],
       };
-      const geometry = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
-      geometry.applyMatrix4(new T.Matrix4().multiplyMatrices(inverse, mesh.matrixWorld));
+      const geometry = transformedGeometry(
+        mesh.geometry,
+        new T.Matrix4().multiplyMatrices(inverse, mesh.matrixWorld),
+      );
       batch.geometries.push(geometry);
       batches.set(key, batch);
       originals.add(mesh.geometry);
@@ -68,8 +72,7 @@ export function workshop() {
   const cast = metal(0x424e50, 0.44, 0.66);
   const brass = metal(0xbd9458, 0.31);
   // Cut faces carry drafting hatch, the way a sectioned part is drawn in a manual.
-  const hatch = document.createElement("canvas");
-  hatch.width = hatch.height = 128;
+  const hatch = figureCanvas(128, 128);
   const hatchContext = hatch.getContext("2d")!;
   hatchContext.fillStyle = "#c25a43";
   hatchContext.fillRect(0, 0, 128, 128);
@@ -527,8 +530,8 @@ export function createDifferential(): DriveModel {
   return {
     root,
     update: (time) => {
-      carrier.rotation.y = time * 0.2;
-      shaft.rotation.y = (-time * 0.2 * 41) / 11;
+      carrier.rotation.y = (time * Math.PI * 2) / 12;
+      shaft.rotation.y = (-carrier.rotation.y * 41) / 11;
     },
     dispose: w.dispose,
   };

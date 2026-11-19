@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { transformedGeometry } from "./figure-geometry";
+import { figureCanvas } from "./figure-canvas";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
@@ -6,14 +8,15 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 export function createInlineSixEngine() {
   const engine = new THREE.Group();
   const textures: THREE.Texture[] = [];
-  const grainCanvas = new OffscreenCanvas(256, 256);
+  const grainCanvas = figureCanvas(256, 256);
   const grainContext = grainCanvas.getContext("2d")!;
   const pixels = grainContext.createImageData(256, 256);
   let seed = 6419;
   for (let i = 0; i < pixels.data.length; i += 4) {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     const value = 100 + (seed >>> 25);
-    pixels.data.set([value, value, value, 255], i);
+    pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
+    pixels.data[i + 3] = 255;
   }
   grainContext.putImageData(pixels, 0, 0);
   const grain = new THREE.CanvasTexture(grainCanvas);
@@ -79,7 +82,7 @@ export function createInlineSixEngine() {
     roughness: 0.7,
   });
 
-  const brushedCanvas = new OffscreenCanvas(128, 128);
+  const brushedCanvas = figureCanvas(128, 128);
   const brushedContext = brushedCanvas.getContext("2d")!;
   const brushedPixels = brushedContext.createImageData(128, 128);
   for (let y = 0; y < 128; y++) {
@@ -87,7 +90,9 @@ export function createInlineSixEngine() {
     const line = 197 + (seed >>> 29);
     for (let x = 0; x < 128; x++) {
       const value = line + Math.round(2 * Math.sin(x * 0.07 + y * 0.13));
-      brushedPixels.data.set([value, value, value, 255], (y * 128 + x) * 4);
+      const i = (y * 128 + x) * 4;
+      brushedPixels.data[i] = brushedPixels.data[i + 1] = brushedPixels.data[i + 2] = value;
+      brushedPixels.data[i + 3] = 255;
     }
   }
   brushedContext.putImageData(brushedPixels, 0, 0);
@@ -141,12 +146,15 @@ export function createInlineSixEngine() {
     radius = 0.045,
   ) {
     return part(
-      new RoundedBoxGeometry(size[0], size[1], size[2], 1, radius),
+      Math.min(...size) < 0.055
+        ? new THREE.BoxGeometry(size[0], size[1], size[2])
+        : new RoundedBoxGeometry(size[0], size[1], size[2], 1, radius),
       material,
       parent,
       position,
     );
   }
+  const cylinders = new Map<number, THREE.CylinderGeometry>();
   function cylinder(
     radius: number,
     length: number,
@@ -156,12 +164,13 @@ export function createInlineSixEngine() {
     axis: "x" | "y" | "z" = "z",
     segments = radius < 0.1 ? 12 : 32,
   ) {
-    const mesh = part(
-      new THREE.CylinderGeometry(radius, radius, length, segments),
-      material,
-      parent,
-      position,
-    );
+    let geometry = cylinders.get(segments);
+    if (!geometry) {
+      geometry = new THREE.CylinderGeometry(1, 1, 1, segments);
+      cylinders.set(segments, geometry);
+    }
+    const mesh = part(geometry, material, parent, position);
+    mesh.scale.set(radius, length, radius);
     if (axis === "z") mesh.rotation.x = Math.PI / 2;
     if (axis === "x") mesh.rotation.z = Math.PI / 2;
     return mesh;
@@ -175,7 +184,7 @@ export function createInlineSixEngine() {
     axis: "x" | "y" | "z" = "z",
   ) {
     const mesh = part(
-      new THREE.TorusGeometry(radius, thickness, 6, radius < 0.11 ? 16 : 40),
+      new THREE.TorusGeometry(radius, thickness, 5, radius < 0.11 ? 12 : radius < 0.3 ? 24 : 36),
       material,
       parent,
       position,
@@ -195,7 +204,13 @@ export function createInlineSixEngine() {
       points.map((p) => new THREE.Vector3(...(p as [number, number, number]))),
     );
     return part(
-      new THREE.TubeGeometry(curve, segments, radius, radius < 0.04 ? 6 : 12, false),
+      new THREE.TubeGeometry(
+        curve,
+        Math.max(8, Math.round(segments * 0.7)),
+        radius,
+        radius < 0.04 ? 5 : 10,
+        false,
+      ),
       material,
       parent,
     );
@@ -340,7 +355,7 @@ export function createInlineSixEngine() {
   cylinder(0.18, 0.07, [0, 0.405, -2.14], polishedAlloy, intakeCover, "y");
   cylinder(0.155, 0.027, [0, 0.45, -2.14], graphite, intakeCover, "y", 24);
   box([0.28, 0.047, 0.057], [0, 0.475, -2.14], chrome, intakeCover, 0.016);
-  const badgeCanvas = new OffscreenCanvas(256, 64);
+  const badgeCanvas = figureCanvas(256, 64);
   const badgeContext = badgeCanvas.getContext("2d")!;
   badgeContext.fillStyle = "#3b2424";
   badgeContext.fillRect(0, 0, 256, 64);
@@ -412,7 +427,7 @@ export function createInlineSixEngine() {
     box([0.44, 0.13, 0.53], [1.77, 0.86, z], metal);
     cylinder(0.22, 0.33, [1.77, 1.065, z], polishedAlloy, engine, "y");
     const dome = part(
-      new THREE.SphereGeometry(0.22, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.SphereGeometry(0.22, 24, 10, 0, Math.PI * 2, 0, Math.PI / 2),
       polishedAlloy,
       engine,
       [1.77, 1.23, z],
@@ -982,10 +997,7 @@ export function createInlineSixEngine() {
   engine.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
     const material = object.material as THREE.Material;
-    const geometry = object.geometry.index
-      ? object.geometry.toNonIndexed()
-      : object.geometry.clone();
-    geometry.applyMatrix4(object.matrixWorld);
+    const geometry = transformedGeometry(object.geometry, object.matrixWorld);
     const batch = batches.get(material) ?? [];
     batch.push(geometry);
     batches.set(material, batch);

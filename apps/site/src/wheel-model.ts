@@ -1,4 +1,5 @@
 import * as T from "three";
+import { figureCanvas } from "./figure-canvas";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { batchAssemblies, workshop, type DriveModel } from "./drive-models";
 
@@ -7,14 +8,12 @@ const spokes = 5;
 
 /** A five-spoke road wheel with one lug nut missing, standing upright with
  * its face toward +z. It turns on its axle once every `period` seconds. */
-export function createWheel(period = 14): DriveModel & { setEdge: (strength: number) => void } {
+export function createWheel(period = 8): DriveModel & { setEdge: (strength: number) => void } {
   const w = workshop();
   const { root, metal, silver, bright, steel, dark, cast, mesh, cylinder, ring, bolt } = w;
   const rubber = metal(0x1b1c1c, 0.81, 0);
   const sidewall = metal(0xffffff, 0.74, 0);
-  const mold = document.createElement("canvas");
-  mold.width = 1024;
-  mold.height = 64;
+  const mold = figureCanvas(1024, 64);
   const ink = mold.getContext("2d")!;
   ink.fillStyle = "#272828";
   ink.fillRect(0, 0, mold.width, mold.height);
