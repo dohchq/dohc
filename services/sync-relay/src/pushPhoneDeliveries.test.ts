@@ -1,4 +1,5 @@
 import { createECDH } from "node:crypto";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { accountDeletionIdentity } from "@dohc/workspace-auth/accountDeletion";
 import { afterEach, expect, it, vi } from "vitest";
 import { phoneCanShow } from "./chatMessageInterest";
@@ -79,10 +80,11 @@ async function fixture(options: { browsers?: boolean } = {}) {
         folderPath: "team",
       }),
       chatChannelCreate("direct", { kind: "dm", name: "Alice" }),
-      chatChannelCreate("assistant", { kind: "agent", name: "Claude" }),
+      // Only the reserved agent wire id makes a chat an agent's.
+      chatChannelCreate(AGENT_CHANNEL_WIRE_ID, { kind: "agent", name: "Claude" }),
       chatThreadCreate("team-thread", "team"),
       chatThreadCreate("dm-thread", "direct"),
-      chatThreadCreate("agent-thread", "assistant"),
+      chatThreadCreate("agent-thread", AGENT_CHANNEL_WIRE_ID),
     ],
     "owner",
   );
@@ -343,11 +345,91 @@ it("gives one alert when the run Notice arrives before its message", async () =>
   expect(claimPushDelivery(f.storage, Date.now())).toMatchObject({ noticeId: "agent-run:1" });
 });
 
-it("drops a run Notice's alert when the message it waited for isn't the owner's agent's", async () => {
+it("alerts for a message on its own when the run Notice that waited for it isn't its agent's", async () => {
   const f = await fixture();
   f.notice("answer", "team-thread");
   f.say("alice", "answer", "team-thread", "@Kim not your agent");
-  expect(f.rows()).toEqual([expect.objectContaining({ message_id: "answer", state: "dropped" })]);
+  expect(f.rows()).toEqual([
+    expect.objectContaining({
+      message_id: "answer",
+      reason: "mention",
+      state: "pending",
+      notice_id: null,
+    }),
+  ]);
+});
+
+it.each([
+  ["live", 60_000],
+  ["expired", 0],
+] as const)(
+  "when a %s run Notice's message arrives, keeps the alert for the newest message",
+  async (wait, leftMs) => {
+    const f = await fixture();
+    f.notice("answer", "team-thread");
+    f.storage.db
+      .prepare("UPDATE sync_relay_push_deliveries SET expires_at_ms = ? WHERE relay_seq IS NULL")
+      .run(Date.now() + leftMs);
+    f.say("alice", "mention", "team-thread", "@Kim one");
+    f.agent("answer", "team-thread");
+    if (wait === "live")
+      // The reply is fresh from its own arrival, not from when the Notice came.
+      expect(f.rows()).toEqual([
+        expect.objectContaining({
+          message_id: "answer",
+          state: "pending",
+          expires_at_ms: f.arrivedAt("answer") + PUSH_DELIVERY_EXPIRY_MS,
+        }),
+        expect.objectContaining({ message_id: "mention", state: "dropped" }),
+      ]);
+    // An expired wait can't replace the mention, and nothing alerts for it.
+    else
+      expect(f.rows()).toEqual([
+        expect.objectContaining({ message_id: "mention", state: "pending" }),
+      ]);
+  },
+);
+
+it("alerts for a message on its own after the sender swept its run Notice's expired wait", async () => {
+  const f = await fixture();
+  f.notice("answer", "team-thread");
+  f.storage.db
+    .prepare("UPDATE sync_relay_push_deliveries SET expires_at_ms = ? WHERE relay_seq IS NULL")
+    .run(Date.now() - 1);
+  // The sender marks the expired wait dropped; nothing is sendable yet.
+  expect(claimPushDelivery(f.storage, Date.now())).toBeNull();
+  f.say("alice", "answer", "team-thread", "@Kim the reply");
+  expect(f.rows()).toEqual([
+    expect.objectContaining({
+      message_id: "answer",
+      reason: "mention",
+      state: "pending",
+      notice_id: null,
+    }),
+  ]);
+});
+
+it("doesn't let a late run Notice for an older message replace a newer alert", async () => {
+  const f = await fixture();
+  f.agent("older", "team-thread");
+  f.say("alice", "newer", "team-thread", "@Kim two");
+  f.notice("older", "team-thread");
+  expect(f.rows().map((row) => [row.message_id, row.state])).toEqual([
+    ["newer", "pending"],
+    ["older", "dropped"],
+  ]);
+});
+
+it("forgets a deleted account as a sender in the rate counts", async () => {
+  const f = await fixture();
+  f.say("alice", "message", "team-thread", "@Kim I do");
+  expect(claimPushDelivery(f.storage, Date.now())).not.toBeNull();
+  const senders = () =>
+    f.storage.db.prepare("SELECT sender_key FROM sync_relay_push_sender_rate").all();
+  expect(senders()).toEqual([{ sender_key: "user:alice" }]);
+  initializeAccountDeletion(f.storage, DELETION_KEY);
+  fenceAccount(f.storage, DELETION_KEY, "alice", "alice@dohc.test");
+  expect(senders()).toEqual([]);
 });
 
 it("keeps only a thread's newest pending phone alert", async () => {
