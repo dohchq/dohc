@@ -97,7 +97,6 @@ const APNS_NAMES = [
   "DOHC_RELAY_APNS_TEAM_ID",
 ];
 
-/** The phone's topic, its APNs environments, and the `.p8` key that sends to them, read once: all or none. */
 export function readApnsConfig(
   env: Record<string, string | undefined>,
   readKeyFile: (path: string) => string = (path) => readFileSync(path, "utf8"),

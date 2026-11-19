@@ -12,7 +12,6 @@ const TOKEN_REUSE_MS = 40 * 60_000;
 
 export type ApnsClient = ReturnType<typeof createApnsClient>;
 
-/** One HTTP/2 connection per environment to Apple's fixed hosts. `origins` exists for tests. */
 export function createApnsClient(
   config: ApnsConfig,
   options: { now?: () => number; origins?: Partial<Record<ApnsEnvironment, string>> } = {},
@@ -53,7 +52,6 @@ export function createApnsClient(
           opened.unref();
           resolve(opened);
         });
-        // Errors can name the host, never a device token: tokens travel only in stream paths.
         opened.on("error", (error) => {
           forget();
           reject(error);
@@ -71,7 +69,6 @@ export function createApnsClient(
     const { opened, ready } = entry;
     return new Promise<ClientHttp2Session>((resolve, reject) => {
       const abort = () => {
-        // A connection that never finished opening is not kept for the next attempt.
         if (opened.connecting) opened.destroy();
         reject(signal.reason);
       };
@@ -87,7 +84,6 @@ export function createApnsClient(
       const authorization = `bearer ${providerToken()}`;
       const connection = await session(environment, signal);
       signal.throwIfAborted();
-      // `send` writes the stream before it returns.
       return {
         send(
           deviceToken: string,
@@ -122,7 +118,6 @@ export function createApnsClient(
             });
             stream.on("error", reject);
             stream.once("close", () => {
-              // A reset after the headers leaves the status unconfirmed, so a 410 then ends nothing.
               if (!status || stream.rstCode !== constants.NGHTTP2_NO_ERROR)
                 return reject(Error("APNs response interrupted"));
               let timestampMs: number | null = null;
@@ -138,11 +133,9 @@ export function createApnsClient(
         },
       };
     },
-    /** Forgets the provider token, after Apple refused it. */
     forgetToken() {
       token = undefined;
     },
-    /** Every attempt has finished first, so the connections are destroyed, not drained. */
     async close() {
       closed = true;
       await Promise.all(

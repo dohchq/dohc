@@ -171,7 +171,6 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
       body = automationFailureBodyForPermission(body, canEdit, isOwner);
     }
     insertNotice(storage, { ...input, body, noticeId, placement });
-    // Only your own agent's run, naming its reply, may alert your phone.
     const { thread, message } = input.target;
     if (
       self &&
@@ -913,7 +912,6 @@ function phoneNotices(
   });
 }
 
-/** Whether the recipient still has the Notice, neither dismissed, removed, nor expired. */
 export function noticeIsListed(
   storage: StorageContext,
   recipientUserId: string,

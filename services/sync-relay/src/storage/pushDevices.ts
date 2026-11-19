@@ -24,7 +24,6 @@ export interface BindPushDeviceInput {
   token: string;
   environment: ApnsEnvironment;
   topic: string;
-  // The account's display name, which a mention of them uses.
   accountName?: string;
   nowMs: number;
 }
@@ -106,7 +105,6 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       existing.environment === input.environment &&
       existing.topic === input.topic
     ) {
-      // The registration time decides whether Apple's later "unregistered" still applies.
       db.prepare(`UPDATE ${PUSH_SUBSCRIPTIONS} SET expires_at_ms = ?, updated_at_ms = max(updated_at_ms, ?)
           WHERE kind = 'apns' AND session_id = ?`).run(
         input.sessionExpiresAtMs,
@@ -157,7 +155,6 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
   });
 }
 
-/** The phone binding under `generation`, while its sign-in has neither expired nor begun signing out. */
 export function readLivePushDevice(
   storage: StorageContext,
   generation: number,
@@ -171,7 +168,6 @@ export function readLivePushDevice(
   return row ? rowFrom(row) : null;
 }
 
-/** Ends a phone binding Apple called unregistered, unless it was registered again after Apple's time. */
 export function removeUnregisteredPushDevice(
   storage: StorageContext,
   generation: number,

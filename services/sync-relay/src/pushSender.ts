@@ -37,7 +37,6 @@ import {
 const SEND_TIMEOUT_MS = 10_000;
 export const PUSH_DELIVERY_TTL_SECONDS = 60;
 export const PUSH_STREAMS = 4;
-// After Apple refuses the provider key, phone alerts wait this long: also as soon as Apple takes a new token.
 export const APNS_PAUSE_MS = 20 * 60_000;
 const blocked = new BlockList();
 for (const [address, prefix] of [
@@ -261,7 +260,6 @@ export type ResolvePushAlertLink = (
 ) => string | null;
 export const noPushAlertLink: ResolvePushAlertLink = () => null;
 
-/** Who sent it and where: "Ana mentioned you in Trip". A sender's chosen name never reads as an account. */
 function alertLabel(
   { message, access }: { message: PushMessage; access: { place: string } },
   reason: ChatMessageReason,
@@ -295,7 +293,6 @@ function alertLabel(
 export function createPushSender(options: {
   storage: StorageContext;
   config: PushConfig | undefined;
-  // Phone alerts. The sender closes it.
   apns?: ApnsClient | undefined;
   sessionIsValid(
     session: { userId: string; sessionId: string },
@@ -307,7 +304,6 @@ export function createPushSender(options: {
   transport?: PushTransport;
   now?: () => number;
   onError?: () => void;
-  // Apple refused the provider key, team, or topic; phone alerts pause.
   onApnsRefused?: () => void;
 }) {
   const { storage, config, apns } = options;
@@ -339,7 +335,6 @@ export function createPushSender(options: {
     return access ? { subscription, message, access } : null;
   };
 
-  // Every check a phone alert needs, synchronous, so the last one runs right before the stream write.
   const currentNative = (delivery: PushDelivery, client: ApnsClient) => {
     const nowMs = now();
     const binding = readLivePushDevice(storage, delivery.generation, nowMs);
@@ -356,13 +351,11 @@ export function createPushSender(options: {
     )
       return null;
     const { noticeId } = lease;
-    // An agent's answer alerts only while it is the recipient's own agent's, and its run Notice is still listed.
-    if (
+    const agentAlertWithdrawn =
       (delivery.reason === "agent" || noticeId !== null) &&
       (!isOwnAgentMessage(message, delivery.userId) ||
-        (noticeId !== null && !noticeIsListed(storage, delivery.userId, noticeId, nowMs)))
-    )
-      return null;
+        (noticeId !== null && !noticeIsListed(storage, delivery.userId, noticeId, nowMs)));
+    if (agentAlertWithdrawn) return null;
     const access = pushMessageAccess(storage, message, delivery.userId);
     return access ? { binding, message, access, noticeId } : null;
   };
@@ -379,12 +372,10 @@ export function createPushSender(options: {
       ? await options.lookupAccountName(before.message.authorUserId, signal)
       : null;
     signal.throwIfAborted();
-    // The session is the last await. Nothing waits between the check below and the stream write.
     const valid = await options.sessionIsValid(before.binding, signal);
     signal.throwIfAborted();
     const fresh = valid ? storage.readTx(() => currentNative(delivery, client)) : null;
     const nowMs = now();
-    // Apple keeps an undelivered alert no longer than a browser's push service would.
     const expiration = Math.floor(
       Math.min(nowMs + PUSH_DELIVERY_TTL_SECONDS * 1000, delivery.expiresAtMs) / 1000,
     );
@@ -395,7 +386,6 @@ export function createPushSender(options: {
     )
       return drop(delivery);
     const { binding, message, noticeId } = fresh;
-    // Stable for the thread, so a newer alert replaces an older one on the phone.
     const threadKey = createHash("sha256")
       .update(JSON.stringify([binding.generation, message.workspaceId, message.threadId]))
       .digest("base64url")
@@ -410,7 +400,6 @@ export function createPushSender(options: {
         "apns-collapse-id": threadKey,
       },
       apnsPayload({
-        // A chosen name or chat name can hold a URL too.
         title: alertLabel(fresh, delivery.reason, accountName, true),
         body: apnsText(message.body),
         threadKey,
@@ -426,13 +415,11 @@ export function createPushSender(options: {
       signal,
     );
     if (response.status === 403) {
-      // The key, team, or topic, not this phone: hold every phone alert, spending no attempt.
       if (now() >= pausedUntilMs) options.onApnsRefused?.();
       pausedUntilMs = now() + APNS_PAUSE_MS;
       client.forgetToken();
       return pausePushDelivery(storage, delivery, pausedUntilMs);
     }
-    // Only a 410 that says when the token stopped working ends a binding; any other is a failed attempt.
     const { status, timestampMs } = response;
     const gone = status === 410 && timestampMs !== null;
     if (gone) removeUnregisteredPushDevice(storage, binding.generation, timestampMs);
@@ -518,7 +505,7 @@ export function createPushSender(options: {
             : "dropped";
       finishPushDelivery(storage, delivery, outcome, now());
     } catch (error) {
-      // Provider errors can contain endpoint secrets or device tokens. Report only a fixed message upstream.
+      // Provider errors can contain endpoint secrets. Report only a fixed message upstream.
       options.onError?.();
       finishPushDelivery(
         storage,
@@ -531,7 +518,6 @@ export function createPushSender(options: {
     }
     return true;
   };
-  // Phone deliveries wait while Apple refuses the key, and stay queued until expiry with no APNs client.
   const nativeFromMs = () => (apns ? pausedUntilMs : Number.MAX_SAFE_INTEGER);
   const claim = () => claimPushDelivery(storage, now(), { native: now() >= nativeFromMs() });
   const track = (delivery: PushDelivery): Promise<unknown> => {
@@ -558,7 +544,6 @@ export function createPushSender(options: {
     timer = setTimeout(pump, Math.max(0, atMs - now()));
     timer.unref();
   };
-  // Starts attempts up to PUSH_STREAMS, at most one per recipient; each finished attempt pumps again.
   function pump(): void {
     if (timer) clearTimeout(timer);
     timer = undefined;
