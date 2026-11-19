@@ -814,10 +814,11 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
       # Gradle installs the SDK platform, build tools, and NDK that React Native's version catalog names; the runner's
-      # SDK licenses are already accepted. expo-sqlite ships a prebuilt Android library, so it has no Kotlin to compile here.
-      - name: Compile the native modules' Kotlin
+      # SDK licenses are already accepted. Every project's Java and Kotlin compiles: the app, its own modules, and each
+      # autolinked library, so a new native dependency compiles here before it merges. The JS bundle isn't built.
+      - name: Compile the app and its native modules
         working-directory: apps/mobile/android
-        run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
+        run: ./gradlew compileDebugSources --no-daemon --console=plain --stacktrace
 
   # Headless browsers against a dohc server of its own on the runner. One leg has people edit one
   # shared note together; the other runs the share page's end-to-end tests. Neither is part of a
