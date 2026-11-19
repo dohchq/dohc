@@ -34,17 +34,12 @@ export function createShareInvitationEmailer(options: {
   timeoutMs?: number;
 }): (invitation: ShareInvitation) => Promise<ShareInvitationEmailAnswer> {
   const { sendEmail, timeoutMs = SHARE_INVITATION_EMAIL_TIMEOUT_MS } = options;
-  const verifiedEmail = async (userId: string): Promise<string | null> => {
-    try {
-      return (await options.lookupVerifiedUserEmail?.(userId)) ?? null;
-    } catch {
-      return null;
-    }
-  };
   return async (invitation) => {
     if (!sendEmail) return { invitationEmail: "unavailable" };
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
+      const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
+      if (!inviterEmail) return { invitationEmail: "unavailable" };
       const admission = admitShareInvitationEmail(options.storage, {
         inviterUserId: invitation.inviterUserId,
         nowMs: options.nowMs(),
@@ -65,7 +60,7 @@ export function createShareInvitationEmailer(options: {
         sendEmail(
           shareInvitationMessage({
             recipientEmail: invitation.recipientEmail,
-            inviterEmail: await verifiedEmail(invitation.inviterUserId),
+            inviterEmail,
             subjectName: invitation.subjectName,
             access: invitation.access,
             browserInvitationUrl: invitation.browserInvitationUrl,

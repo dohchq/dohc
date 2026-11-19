@@ -158,21 +158,29 @@ it("leaves the browser link and the code out when the relay can give neither", a
   );
 });
 
-it.each([
-  { name: "is not verified", lookupVerifiedUserEmail: () => null },
-  {
-    name: "cannot be read",
-    lookupVerifiedUserEmail: () => {
-      throw new Error("database is down");
-    },
-  },
-])("says Someone when the inviter's email $name", async ({ lookupVerifiedUserEmail }) => {
-  const { sent, invite } = await fixture({ lookupVerifiedUserEmail });
+it("sends nothing and counts nothing for an inviter whose own address is not verified", async () => {
+  const { storage, sent, invite } = await fixture({ lookupVerifiedUserEmail: () => null });
 
   const reply = await invite({ recipientEmail: "friend@dohc.test" });
 
-  expect(reply).toMatchObject({ invitationEmail: "sent" });
-  expect(sent[0]!.subject).toBe('Someone shared "Trip plan" with you');
+  expect(reply).toMatchObject({ ok: true, invitationEmail: "unavailable" });
+  expect(sent).toHaveLength(0);
+  expect(attempts(storage, "owner")).toBe(0);
+});
+
+it("answers failed, sends nothing and keeps the invite when the inviter's address cannot be read", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { storage, sent, invite } = await fixture({
+    lookupVerifiedUserEmail: () => {
+      throw new Error("database is down");
+    },
+  });
+
+  const reply = await invite({ recipientEmail: "friend@dohc.test" });
+
+  expect(reply).toMatchObject({ ok: true, invitationEmail: "failed" });
+  expect(sent).toHaveLength(0);
+  expect(attempts(storage, "owner")).toBe(0);
 });
 
 it("answers unavailable and keeps the invite when the relay has no mail server", async () => {

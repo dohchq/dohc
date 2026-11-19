@@ -40,19 +40,19 @@ export function shareCodeForRelay(
 
 export function shareInvitationMessage(input: {
   recipientEmail: string;
-  inviterEmail: string | null;
+  inviterEmail: string;
   subjectName: string | null;
   access: string;
   browserInvitationUrl: string | null;
   shareCode: string | null;
 }): EmailMessage {
   const recipient = oneLine(input.recipientEmail, ADDRESS_MAX_CHARS);
-  const inviter = oneLine(input.inviterEmail ?? "", ADDRESS_MAX_CHARS);
+  const inviter = oneLine(input.inviterEmail, ADDRESS_MAX_CHARS);
   const name = oneLine(input.subjectName ?? "", NAME_MAX_CHARS).replace(
     /["\u201c\u201d\u201e\u201f\u00ab\u00bb]/gu,
     "'",
   );
-  const shared = `${inviter || "Someone"} shared ${name ? `"${name}"` : "a file"} with you`;
+  const shared = `${inviter} shared ${name ? `"${name}"` : "a file"} with you`;
   const role = ROLE_SENTENCES.get(input.access);
   const paragraphs = [
     `${shared} on dohc.${role ? ` ${role}` : ""}`,
@@ -61,7 +61,7 @@ export function shareInvitationMessage(input: {
       : []),
     `Open it in dohc:\n1. Sign in to dohc as ${recipient}.\n2. Choose Sharing, then Shared with me.`,
     ...(input.shareCode ? [`Or choose Open a share and paste this code:\n${input.shareCode}`] : []),
-    `You got this email because ${inviter || "someone"} invited ${recipient}. If you do not know them, you can ignore it.`,
+    `You got this email because ${inviter} invited ${recipient}. If you do not know them, you can ignore it.`,
   ];
   return { to: recipient, subject: shared, text: `${paragraphs.join("\n\n")}\n` };
 }

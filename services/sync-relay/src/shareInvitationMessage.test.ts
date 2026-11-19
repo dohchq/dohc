@@ -69,11 +69,12 @@ it("names the role only for View, Comment, and Edit", () => {
     expect(first(access)).toBe('owner@dohc.test shared "Trip plan" with you on dohc.');
 });
 
-it("says Someone when the inviter's email cannot be read, and a file when the share has no name", () => {
-  const message = shareInvitationMessage({ ...invitation, inviterEmail: null, subjectName: null });
-  expect(message.subject).toBe("Someone shared a file with you");
-  expect(message.text).toContain("Someone shared a file with you on dohc. You can edit it.");
-  expect(message.text).toContain("You got this email because someone invited friend@example.test.");
+it("says a file when the share has no name", () => {
+  const message = shareInvitationMessage({ ...invitation, subjectName: null });
+  expect(message.subject).toBe("owner@dohc.test shared a file with you");
+  expect(message.text).toContain(
+    "owner@dohc.test shared a file with you on dohc. You can edit it.",
+  );
 });
 
 it("keeps a hostile name on one line, capped, and inside the quotation marks", () => {
