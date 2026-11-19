@@ -9,6 +9,7 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   sharedDatasetViewerOrigin,
+  openAppFromFolderLink,
   startSharedDatasetBrowser,
 } from "./helpers/sharedDatasetBrowser";
 import {
@@ -202,7 +203,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     const guest = await shared.browser.newPage();
     guest.on("pageerror", (error) => shared!.failures.push(error.message));
     await guest.goto(linkUrl);
-    await guest.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(guest);
     await expect(guest).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
     const form = guest.frameLocator("iframe");
     await form.getByLabel("Name", { exact: false }).fill("Shared browser participant");
@@ -288,7 +289,7 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     if (publishedDashboard.kind !== "published") throw Error("Expected dashboard publication.");
     const reader = await shared.browser.newPage();
     await reader.goto(linkUrl);
-    await reader.getByRole("button", { name: "Open app", exact: true }).click();
+    await openAppFromFolderLink(reader);
     const dashboardFrame = reader.frameLocator("iframe");
     await expect(dashboardFrame.locator("pre")).toContainText("Shared browser participant");
     const createOperation = dataset.operations.find((operation) => operation.kind === "create")!;
