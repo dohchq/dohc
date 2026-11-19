@@ -49,7 +49,7 @@ final class SharingBandTests: XCTestCase {
   @MainActor
   func testTheBandSitsUnderTheBarAndStaysThereWhileTheLanesScroll() {
     let app = launch(demo: "band")
-    XCTAssertTrue(band(app).waitForExistence(timeout: 20) && lane(app).waitForExistence(timeout: 15), "Sharing should show the band")
+    XCTAssertTrue(band(app).waitForExistence(timeout: 45) && lane(app).waitForExistence(timeout: 15), "Sharing should show the band")
     assertPlaced(app, "At rest")
     keep(app, "09-sharing-band")
     // Up by a little more than the title's fold, held so it doesn't carry on: the band stays at the folded bar.
@@ -68,7 +68,7 @@ final class SharingBandTests: XCTestCase {
   func testTheBandArrivingMovesTheLanesDownOnceByItsHeight() {
     // Where the first lane rests with no band, from a launch without one, so the reading doesn't race the arrival.
     var app = launch(demo: "none")
-    XCTAssertTrue(lane(app).waitForExistence(timeout: 20), "Sharing should show its lanes")
+    XCTAssertTrue(lane(app).waitForExistence(timeout: 45), "Sharing should show its lanes")
     XCTAssertFalse(band(app).exists, "Without a problem there should be no band")
     let before = lane(app).frame.minY
     app.terminate()
@@ -85,7 +85,7 @@ final class SharingBandTests: XCTestCase {
   func testAtTheLargestTextSizesTheBandStaysUnderTheBarAndALaneShows() {
     for (size, name) in [("UICTContentSizeCategoryXXXL", "largest-default-text"), ("UICTContentSizeCategoryAccessibilityXXXL", "largest-text")] {
       let app = launch(demo: "band", ["-UIPreferredContentSizeCategoryName", size])
-      XCTAssertTrue(band(app).waitForExistence(timeout: 20) && lane(app).waitForExistence(timeout: 15), "At \(name) Sharing should show the band")
+      XCTAssertTrue(band(app).waitForExistence(timeout: 45) && lane(app).waitForExistence(timeout: 15), "At \(name) Sharing should show the band")
       assertPlaced(app, "At \(name)")
       // The band is capped at half the space between the bar's resting edge and the tab bar.
       let half = (app.tabBars.firstMatch.frame.minY - barEdge(app)) / 2

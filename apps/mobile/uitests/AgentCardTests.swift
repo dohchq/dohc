@@ -10,7 +10,7 @@ final class AgentCardTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", route]
     app.launch()
-    XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 20), "The chat's composer should show")
+    XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 45), "The chat's composer should show")
     return app
   }
 

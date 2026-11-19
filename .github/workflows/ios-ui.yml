@@ -181,20 +181,6 @@ jobs:
           [[ $udid =~ ^[0-9A-F-]{36}$ ]] || { echo "::error::simctl create returned $udid."; exit 1; }
           echo "IOS_UDID=$udid" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$udid" -b
-          # One discarded test warms the fresh simulator, so the light pass doesn't pay its first launch. It counts for nothing.
-          # perl's alarm bounds the whole run, runner startup included, at 7 minutes; Xcode's allowance bounds only the test.
-          started=$SECONDS status=0
-          perl -e 'alarm shift; exec @ARGV' 420 xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$udid" -derivedDataPath "$DD" \
-            -only-testing:dohcUITests/ConversationDecisionTests/testAResolvedPollOffersNoAnswer \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
-            > "$OUT/logs/warm-up.log" 2>&1 || status=$?
-          echo "Warm-up: xcodebuild exited $status in $((SECONDS - started)) s" | tee -a "$OUT/summary.txt"
-          # A warm-up the alarm ended may leave its runner behind, so stop what it started and boot the simulator afresh.
-          if (( status == 142 )); then
-            pkill -f -- "-destination id=$udid" || true
-            xcrun simctl shutdown "$udid"
-            xcrun simctl bootstatus "$udid" -b
-          fi
           runs=0 failed=0
           for appearance in light dark; do
             xcrun simctl ui "$udid" appearance "$appearance"

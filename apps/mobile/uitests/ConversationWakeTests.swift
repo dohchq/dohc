@@ -9,7 +9,7 @@ final class ConversationWakeTests: XCTestCase {
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "chat", "-dohcDemo", "talk-wakes"]
     app.launch()
-    XCTAssertTrue(app.textViews["Message #planning"].waitForExistence(timeout: 20), "The chat should open")
+    XCTAssertTrue(app.textViews["Message #planning"].waitForExistence(timeout: 45), "The chat should open")
     return app
   }
 

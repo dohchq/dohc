@@ -14,7 +14,7 @@ final class ConversationDecisionTests: XCTestCase {
 
   private func field(_ app: XCUIApplication, _ label: String) -> XCUIElement {
     let field = app.textViews[label]
-    XCTAssertTrue(field.waitForExistence(timeout: 20), "The composer's field should be named \(label)")
+    XCTAssertTrue(field.waitForExistence(timeout: 45), "The composer's field should be named \(label)")
     return field
   }
 

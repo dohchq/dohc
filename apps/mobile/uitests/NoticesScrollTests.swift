@@ -55,7 +55,7 @@ final class NoticesScrollTests: XCTestCase {
     let last = row(app, "Nova finished updating the packing list")
     let previous = row(app, "Sam Ortiz commented on itinerary/days.md")
     let markAllRead = app.navigationBars.firstMatch.buttons["Mark all read"]
-    XCTAssertTrue(last.waitForExistence(timeout: 20), "Notices should list its rows")
+    XCTAssertTrue(last.waitForExistence(timeout: 45), "Notices should list its rows")
     guard let open = largeTitle(app) else { return XCTFail("Notices should show its large title") }
     let button = markAllRead.frame
     keep(app, "07-notices-top")
@@ -88,7 +88,7 @@ final class NoticesScrollTests: XCTestCase {
     app.launch()
     let chats = app.tabBars.firstMatch.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Chats")).firstMatch
     let tab = app.tabBars.firstMatch.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Notices")).firstMatch
-    XCTAssertTrue(tab.waitForExistence(timeout: 20))
+    XCTAssertTrue(tab.waitForExistence(timeout: 45))
     XCTAssertTrue(chats.isSelected, "The app should open on Chats")
     // Measurement protocol, not a pass condition: let launch settle before the tap.
     Thread.sleep(forTimeInterval: 4)

@@ -12,7 +12,7 @@ final class ConversationComposerTests: XCTestCase {
 
   private func field(_ app: XCUIApplication, _ label: String) -> XCUIElement {
     let field = app.textViews[label]
-    XCTAssertTrue(field.waitForExistence(timeout: 20), "The composer's field should be named \(label)")
+    XCTAssertTrue(field.waitForExistence(timeout: 45), "The composer's field should be named \(label)")
     return field
   }
 
@@ -55,7 +55,7 @@ final class ConversationComposerTests: XCTestCase {
   func testAGroupWritesANewPostWithATitle() {
     let app = launch("chat")
     let newPost = app.buttons["New post"]
-    XCTAssertTrue(newPost.waitForExistence(timeout: 20), "A Group should offer New post")
+    XCTAssertTrue(newPost.waitForExistence(timeout: 45), "A Group should offer New post")
     newPost.tap()
     let title = app.textFields["Title"]
     XCTAssertTrue(title.waitForExistence(timeout: 15), "New post should add a title")

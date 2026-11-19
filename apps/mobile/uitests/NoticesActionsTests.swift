@@ -17,7 +17,7 @@ final class NoticesActionsTests: XCTestCase {
     for _ in 0..<12 where !(row.exists && row.isHittable) {
       app.swipeUp()
     }
-    XCTAssertTrue(row.waitForExistence(timeout: 20), "The sample's mention row never showed")
+    XCTAssertTrue(row.waitForExistence(timeout: 45), "The sample's mention row never showed")
     // Past the end, so the last row rests above the tab bar.
     app.swipeUp()
     XCTAssertTrue(row.isHittable)

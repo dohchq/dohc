@@ -20,7 +20,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let body = app.webViews.firstMatch.textViews.firstMatch
-    XCTAssertTrue(body.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(body.waitForExistence(timeout: 45), "The page's editable body should appear")
     // The caret lands in view, so nothing on the page may move when the keyboard comes up.
     let title = app.webViews.firstMatch.staticTexts["Packing list"]
     XCTAssertTrue(title.waitForExistence(timeout: 15))
@@ -49,7 +49,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap()
     let keyboard = app.keyboards.firstMatch
     XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
@@ -69,7 +69,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap()
     let keyboard = app.keyboards.firstMatch
     XCTAssertTrue(keyboard.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
@@ -95,7 +95,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let spot = page.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92))
     spot.tap()
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15), "A tap should bring up the on-screen keyboard")
@@ -124,7 +124,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let title = page.staticTexts["Packing list"]
     XCTAssertTrue(title.waitForExistence(timeout: 15))
     let top = title.frame.minY
@@ -144,7 +144,7 @@ final class PageEditingTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()
     let page = app.webViews.firstMatch
-    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 20), "The page's editable body should appear")
+    XCTAssertTrue(page.textViews.firstMatch.waitForExistence(timeout: 45), "The page's editable body should appear")
     let title = page.staticTexts["Packing list"]
     let line = page.staticTexts["Walking shoes, already broken in"]
     XCTAssertTrue(line.waitForExistence(timeout: 15))

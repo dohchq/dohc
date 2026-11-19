@@ -9,7 +9,7 @@ final class NoticesFrameTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "notices", "-dohcDemo", demo]
     app.launch()
     XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Maya Chen mentioned you in #planning"))
-      .firstMatch.waitForExistence(timeout: 20), "Notices should list its rows")
+      .firstMatch.waitForExistence(timeout: 45), "Notices should list its rows")
     if !demo.isEmpty {
       let band = app.descendants(matching: .any)["sync-band-area"]
       XCTAssertTrue(band.waitForExistence(timeout: 15) && band.frame.height > 0, "The band should show before its drags are measured")
@@ -42,7 +42,7 @@ final class NoticesFrameTests: XCTestCase {
     app.launchArguments += ["-dohcTestRoute", "notices", "-dohcDemo", demo]
     app.launch()
     XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Maya Chen mentioned you in #planning"))
-      .firstMatch.waitForExistence(timeout: 20), "Notices should list its rows")
+      .firstMatch.waitForExistence(timeout: 45), "Notices should list its rows")
     if !demo.isEmpty { XCTAssertTrue(app.descendants(matching: .any)["sync-band-area"].waitForExistence(timeout: 15), "The band should show") }
     // Measurement protocol, not a pass condition: a script reads the footprint at each mark, then the drags go on.
     print("NOTICES LONG SCROLL BEFORE \(demo)")

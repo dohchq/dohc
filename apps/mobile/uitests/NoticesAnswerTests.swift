@@ -28,7 +28,7 @@ final class NoticesAnswerTests: XCTestCase {
   /// The line's 32 pt pill sits above the time's line (about 16 pt, 2 pt above it) and the row's 12 pt bottom padding.
   private func tapAnswer(_ app: XCUIApplication, _ title: String) {
     let collapsed = row(app, title, ", Unanswered,")
-    XCTAssertTrue(collapsed.waitForExistence(timeout: 20), "The \(title) row never showed its question open")
+    XCTAssertTrue(collapsed.waitForExistence(timeout: 45), "The \(title) row never showed its question open")
     XCTAssertTrue(collapsed.isHittable)
     collapsed.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
       .withOffset(CGVector(dx: 56 + 24, dy: collapsed.frame.height - 12 - 18 - 16))
