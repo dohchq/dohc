@@ -457,7 +457,11 @@ export function createAgentConnectionRoutes(input: {
       expiresAtMs: pending.expiresAtMs,
       workspaceId: pending.workspaceId,
       levels: PERSONAL_REACH_LEVELS,
-      workspaces: roster.workspaces,
+      // Joined workspaces too: Allow replaces an existing agent's reach with
+      // what this page lists. One whose membership ended can't be chosen.
+      workspaces: roster.workspaces.flatMap(({ workspaceId, name, role }) =>
+        role === "ended" ? [] : [{ workspaceId, name }],
+      ),
       agents: roster.agents.map((agent) => ({
         agentId: agent.agentId,
         name: agent.name,

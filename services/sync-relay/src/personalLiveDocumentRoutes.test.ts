@@ -128,6 +128,47 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
   expect(await body(await held, 200)).toEqual(ready);
 });
 
+/** member-1 joins the fixture's workspace at Edit. */
+function joinAtEdit(f: Awaited<ReturnType<typeof fixture>>): void {
+  expect(
+    f.storage.inviteWorkspaceMember({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      workspaceName: "Plans",
+      email: "sam@example.test",
+      recipientUserId: "member-1",
+      newMemberId: () => "member-entry",
+      newGrantId: () => "member-grant",
+      newShareId: () => "members-share",
+      nowMs: 5,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    f.storage.setWorkspaceMemberLevel({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      level: "edit",
+      workspaceName: undefined,
+      newShareId: () => "unused-share",
+      nowMs: 6,
+    }),
+  ).toEqual({ ok: true });
+}
+
+// Proves: live documents stay owned only (22A). A member's agent at Edit in
+// a workspace its person joined at Edit opens nothing and writes nothing.
+it("refuses a member's agent at Edit in a workspace its person joined, without writing", async () => {
+  const f = await fixture();
+  joinAtEdit(f);
+  f.ready();
+  await expectCode(
+    await f.agent("member-helper", "edit", "member-1").open(),
+    403,
+    "personal_agent_out_of_reach",
+  );
+  expect(f.read()).toBeNull();
+});
+
 // Proves: an agent's open of a page a member opened first is the agent's
 // demand. The page stays hosted once the member is removed and after the
 // member's window ends.

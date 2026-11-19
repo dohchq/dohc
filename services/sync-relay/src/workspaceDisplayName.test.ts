@@ -35,7 +35,7 @@ it("names a workspace only for its owner", async () => {
   const { storage, h } = await fixture();
   expect((await h(rename("owner", "workspace", { name: "  Trip planning " }))).status).toBe(200);
   expect(storage.listPersonalAgents("owner").workspaces).toEqual([
-    { workspaceId: "workspace", name: "Trip planning" },
+    { workspaceId: "workspace", name: "Trip planning", role: "owner" },
   ]);
 
   const refused = await h(rename("other", "workspace", { name: "Taken" }));
@@ -43,10 +43,10 @@ it("names a workspace only for its owner", async () => {
   expect(refused.status).toBe(404);
   expect(await refused.text()).toBe(await missing.text());
   expect(storage.listPersonalAgents("owner").workspaces).toEqual([
-    { workspaceId: "workspace", name: "Trip planning" },
+    { workspaceId: "workspace", name: "Trip planning", role: "owner" },
   ]);
   expect(storage.listPersonalAgents("other").workspaces).toEqual([
-    { workspaceId: "other-workspace", name: null },
+    { workspaceId: "other-workspace", name: null, role: "owner" },
   ]);
 });
 
@@ -63,7 +63,7 @@ it("takes only the account's bearer", async () => {
   ).toBe(404);
   expect((await h(rename(null, "workspace", { name: "Nobody" }))).status).toBe(404);
   expect(storage.listPersonalAgents("owner").workspaces).toEqual([
-    { workspaceId: "workspace", name: null },
+    { workspaceId: "workspace", name: null, role: "owner" },
   ]);
   expect((await h(rename("owner", "workspace", { name: "Owner" }))).status).toBe(200);
 });
@@ -84,13 +84,13 @@ it("refuses names a folder couldn't have", async () => {
   }
   expect((await h(request("owner", "/sync/workspaces/workspace/name"))).status).toBe(405);
   expect(storage.listPersonalAgents("owner").workspaces).toEqual([
-    { workspaceId: "workspace", name: null },
+    { workspaceId: "workspace", name: null, role: "owner" },
   ]);
 
   // The limit counts characters, as the column's check does.
   const emoji = "😀".repeat(255);
   expect((await h(rename("owner", "workspace", { name: emoji }))).status).toBe(200);
   expect(storage.listPersonalAgents("owner").workspaces).toEqual([
-    { workspaceId: "workspace", name: emoji },
+    { workspaceId: "workspace", name: emoji, role: "owner" },
   ]);
 });

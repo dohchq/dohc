@@ -2789,7 +2789,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     credential: personalAgentChatStorage.PersonalCredential,
     workspaceId: string,
     nowMs: number,
-  ): personalAgentStorage.PersonalReach | null {
+  ): personalAgentChatStorage.PersonalReachRead {
     return personalAgentChatStorage.readPersonalReach(this, credential, workspaceId, nowMs);
   }
 

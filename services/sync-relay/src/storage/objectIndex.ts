@@ -218,7 +218,7 @@ const channelType = (value: unknown): ChannelType =>
 export function listChannelCreates(
   storage: StorageContext,
   workspaceId: string,
-): { channelWireId: string; name: string; type: ChannelType }[] {
+): { channelWireId: string; name: string; type: ChannelType; purpose: string | null }[] {
   const rows = storage.db
     .prepare(
       `SELECT payload_json FROM sync_relay_log INDEXED BY idx_sync_relay_log_channel_creates
@@ -226,7 +226,7 @@ export function listChannelCreates(
      ORDER BY relay_seq`,
     )
     .iterate(workspaceId);
-  const channels = new Map<string, { name: string; type: ChannelType }>();
+  const channels = new Map<string, { name: string; type: ChannelType; purpose: string | null }>();
   for (const row of rows) {
     let record: Record<string, unknown> | null;
     try {
@@ -238,6 +238,7 @@ export function listChannelCreates(
     channels.set(record.wireId, {
       name: typeof record.name === "string" ? record.name : "",
       type: channelType(record.type),
+      purpose: typeof record.purpose === "string" && record.purpose ? record.purpose : null,
     });
   }
   return [...channels].map(([channelWireId, channel]) => ({ channelWireId, ...channel }));
