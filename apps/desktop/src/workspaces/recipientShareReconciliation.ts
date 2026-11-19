@@ -1,5 +1,6 @@
 import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
-import { recordedShareSelector } from "./shareViewRecords";
+import { recordedShareSelector, sharePinAtStatedLevel } from "./shareViewRecords";
+import type { ShareViewSelector } from "./shareViewInfo";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { joinedChannelMatchesCredentials } from "./chatRelayIdentity";
 import type {
@@ -20,6 +21,7 @@ export interface ReceivedShareListing {
   // Share ids the relay lists as active and undamaged for this account.
   received: ReadonlySet<string>;
   removed: readonly ConfirmedShareRemoval[];
+  statedFileSelectors: ReadonlyMap<string, ShareViewSelector>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -38,6 +40,7 @@ export function readReceivedShareListing(listing: unknown): ReceivedShareListing
   const removedRows = listing.removed;
   if (!Array.isArray(receivedRows) || !Array.isArray(removedRows)) return null;
   const received = new Set<string>();
+  const statedFileSelectors = new Map<string, ShareViewSelector>();
   for (const row of receivedRows) {
     if (
       isRecord(row) &&
@@ -46,6 +49,11 @@ export function readReceivedShareListing(listing: unknown): ReceivedShareListing
       row.shareId.length > 0
     ) {
       received.add(row.shareId);
+      const selector =
+        isRecord(row.selector) && row.selector.kind === undefined
+          ? recordedShareSelector({ ...row.selector, access: row.access })
+          : null;
+      if (selector) statedFileSelectors.set(row.shareId, selector);
     }
   }
   const removed: ConfirmedShareRemoval[] = [];
@@ -61,7 +69,7 @@ export function readReceivedShareListing(listing: unknown): ReceivedShareListing
       removed.push({ shareId: row.shareId, removedAtMs: row.removedAtMs });
     }
   }
-  return { received, removed };
+  return { received, removed, statedFileSelectors };
 }
 
 function shareViewMatches(view: ShareViewIdentity, credentials: CloudCredentials): boolean {
@@ -127,8 +135,8 @@ export function reconcileRecipientShares(
   confirmedActive: ReadonlySet<string>,
 ): RegistryEntry | null {
   const listedRemovals = new Set(listing.removed.map((row) => row.shareId));
-  const active = (shareId: string) =>
-    listing.received.has(shareId) && confirmedActive.has(shareId) && !listedRemovals.has(shareId);
+  const listed = (shareId: string) => listing.received.has(shareId) && !listedRemovals.has(shareId);
+  const active = (shareId: string) => listed(shareId) && confirmedActive.has(shareId);
   // Share ids this listing speaks for: records pinned to its relay and
   // account. Records pinned elsewhere keep their state, ended or not.
   const spokenFor = new Set<string>();
@@ -152,9 +160,17 @@ export function reconcileRecipientShares(
       return mount;
     }
     spokenFor.add(mount.shareId);
-    if (mount.ended !== true || !active(mount.shareId)) return mount;
+    const resumed = mount.ended === true && active(mount.shareId) ? withoutEnded(mount) : mount;
+    const grantedSelector =
+      resumed.ended !== true && listed(mount.shareId)
+        ? sharePinAtStatedLevel(
+            mount.grantedSelector,
+            listing.statedFileSelectors.get(mount.shareId),
+          )
+        : null;
+    if (resumed === mount && grantedSelector === null) return mount;
     mountsChanged = true;
-    return withoutEnded(mount);
+    return grantedSelector ? { ...resumed, grantedSelector } : resumed;
   });
 
   let channelsChanged = false;

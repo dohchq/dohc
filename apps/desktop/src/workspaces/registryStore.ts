@@ -228,8 +228,9 @@ export interface ShareViewIdentity {
   // rather than asking the relay for a replacement — that ask is the one a
   // relay able to damage a record would answer with a wider scope.
   //
-  // The `access` level rides with it: the level is part of the grant,
-  // pinned once and enforced on every pull, not re-asked per refresh.
+  // The `access` level rides with it and is enforced on every pull. It is the
+  // one part that follows a later statement from the relay, when that
+  // statement names the same paths and version (`sharePinAtStatedLevel`).
   grantedSelector: ShareViewSelector;
   ended?: boolean;
   // Ops this share's pulls skipped, and why. Durable on purpose: the cursor
