@@ -5333,11 +5333,28 @@ pub fn fold_resolution_into_ydoc_in_tx(
     chosen_text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let key =
-        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+    fold_authored_resolution_in_tx(
+        tx,
+        &DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
-        })?;
-    let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
+        })?,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+    )
+    .map(drop)
+}
+
+pub(crate) fn fold_authored_resolution_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    chosen_text: &str,
+    author: LineageFoldAuthor<'_>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    let complete = match ydoc_lineage_completeness_in_tx(tx, key)? {
         YdocLineageCompleteness::Complete(complete) => complete,
         YdocLineageCompleteness::DeferredUpdates => {
             return Err(SyncError::InvalidInput {
@@ -5351,7 +5368,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         }
     };
     let complete = CompleteYdocLineage {
-        key,
+        key: key.clone(),
         state: complete,
     };
     // Read before the supersede drops a reserved settle attempt's authors.
@@ -5365,7 +5382,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         &complete,
         path,
         chosen_text,
-        LineageFoldAuthor::default(),
+        author,
         now_ms,
         LineageFoldCause::LocalMutation { unsettled_authors },
     ) {
@@ -5375,9 +5392,12 @@ pub fn fold_resolution_into_ydoc_in_tx(
             marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
         }) && empty_seed_never_replicated_in_tx(tx, &complete.key)? =>
         {
-            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms)
+            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms).map(|()| None)
         }
-        folded => folded.map(|_| ()),
+        folded => folded.map(|fold| match fold {
+            LineageFold::Folded { facts, .. } => facts.map(|facts| *facts),
+            LineageFold::NoContent => None,
+        }),
     }
 }
 

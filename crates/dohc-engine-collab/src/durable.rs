@@ -253,6 +253,7 @@ pub enum SuccessorInstallOutcome {
     Installed {
         predecessor_claim_id: String,
         successor_claim_id: String,
+        record_facts: Option<Box<dohc_engine_domain::CollectionRecordApplyFacts>>,
     },
     Replayed {
         successor_claim_id: String,
@@ -1824,7 +1825,15 @@ pub struct SuccessorReplacement<'a> {
     /// asset references, not bytes, so validating the canonical artifact needs
     /// the exact text whose embedded files supply those bytes.
     pub scene_result: Option<&'a str>,
+    pub author: SuccessorAuthor<'a>,
     pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SuccessorAuthor<'a> {
+    pub origin_id: Option<&'a str>,
+    pub attribution: Option<&'a ChangeAttribution>,
+    pub source: Option<(&'a str, i64)>,
 }
 
 pub fn replace_lineage_with_successor(
@@ -1864,6 +1873,7 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         path,
         successor,
         scene_result,
+        author,
         now_ms,
     } = replacement;
     let successor_doc = validate_successor_base(successor, scene_result)?;
@@ -2032,22 +2042,55 @@ pub fn replace_reviewed_lineage_with_successor_in_tx(
         ],
     )
     .map_err(map_sql)?;
-    if successor.content_kind == ContentKind::Richdoc {
-        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+    let record_facts = if successor.content_kind == ContentKind::Richdoc {
+        index_successor_frontmatter(tx, key, &successor_doc.frontmatter_json(), author, now_ms)
+            .map_err(|error| CollabError::Corrupt {
+                reason: format!("collection successor index update failed: {error}"),
+            })?
+            .map(Box::new)
+    } else {
+        None
+    };
+    Ok(SuccessorInstallOutcome::Installed {
+        predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
+        successor_claim_id: successor.lineage_claim_id.clone(),
+        record_facts,
+    })
+}
+
+fn index_successor_frontmatter(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    after: &serde_json::Value,
+    author: SuccessorAuthor<'_>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, dohc_engine_domain::DomainError>
+{
+    let Some(before) =
+        dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
             tx,
             &key.workspace_id,
             &key.version_id,
             &key.object_id,
-            &successor_doc.frontmatter_json(),
-        )
-        .map_err(|error| CollabError::Corrupt {
-            reason: format!("collection successor index update failed: {error}"),
-        })?;
-    }
-    Ok(SuccessorInstallOutcome::Installed {
-        predecessor_claim_id: expected_predecessor_claim_id.to_owned(),
-        successor_claim_id: successor.lineage_claim_id.clone(),
-    })
+        )?
+    else {
+        return Ok(None);
+    };
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &before,
+        after,
+        &before,
+        after,
+        None,
+        author.origin_id,
+        author.attribution,
+        author.source,
+        now_ms,
+    )
 }
 
 /// Archive an exact active lineage without installing a text successor.

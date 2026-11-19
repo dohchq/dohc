@@ -479,6 +479,7 @@ fn resolve_named(b: &mut EngineStore, resolution: ResolveConflictKind, name: &st
             },
             |tx, result, prepared| {
                 crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map(drop)
                     .map_err(map_error)
             },
         )
@@ -1043,6 +1044,61 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
                 );
                 assert_eq!(head_text(&b, RECORD), Some(chosen));
             }
+        }
+    }
+}
+
+fn status_history(b: &EngineStore) -> Vec<(Option<String>, Option<String>)> {
+    b.read_with(|conn| {
+        conn.prepare(
+            "SELECT previous_value_json,next_value_json FROM collection_field_history \
+             WHERE workspace_id='ws' AND field_name='Status' ORDER BY history_id",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+    })
+    .expect("Status history")
+}
+
+#[test]
+fn choosing_a_side_that_changes_a_field_records_its_history() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let merged = {
+        let doc = richdoc(&flown);
+        doc.richdoc_append_paragraph(NOTES);
+        projected(&doc)
+    };
+    for claimed in [false, true] {
+        for resolution in [
+            ResolveConflictKind::ApplyIncoming,
+            ResolveConflictKind::ApplyMerged {
+                text: merged.clone(),
+            },
+        ] {
+            let label = format!("claimed={claimed} {resolution:?}");
+            let (_a_scratch, mut a) = device("device-a");
+            let created = a_creates_apollo(&mut a, &planned);
+            let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+            let doc = richdoc(&planned);
+            if claimed {
+                device_c_base(&mut b, &doc);
+                b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
+            } else {
+                b_opens(&mut b, &doc, &planned, &[NOTES]);
+            }
+            let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+            hydrate(&mut b, &[&flown, &merged]);
+            assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+            let before = status_history(&b);
+
+            resolve(&mut b, resolution);
+            assert_eq!(indexed_status(&b), Some(json!("Flown")), "{label}");
+            let after = status_history(&b);
+            assert_eq!(
+                after[before.len()..],
+                [(Some("\"Planned\"".to_owned()), Some("\"Flown\"".to_owned()))],
+                "{label}"
+            );
         }
     }
 }
