@@ -172,7 +172,6 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
       body = automationFailureBodyForPermission(body, canEdit, isOwner);
     }
     insertNotice(storage, { ...input, body, noticeId, placement });
-    // Only your own agent's run, naming its reply, may alert your phone.
     const { thread, message } = input.target;
     if (
       self &&
@@ -912,6 +911,20 @@ function phoneNotices(
         (notice.target?.path !== undefined || notice.target?.thread !== undefined));
     return named && safeTarget(notice) ? [notice] : [];
   });
+}
+
+export function noticeIsListed(
+  storage: StorageContext,
+  recipientUserId: string,
+  noticeId: string,
+  nowMs: number,
+): boolean {
+  return Boolean(
+    storage.db
+      .prepare(`SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?
+        AND dismissed_at_ms IS NULL AND removed_at_ms IS NULL AND expires_at_ms > ?`)
+      .get(recipientUserId, noticeId, nowMs),
+  );
 }
 
 /** The recipient's change head; zero for a list that never changed. */
