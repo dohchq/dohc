@@ -50,6 +50,7 @@ import {
   GetRelayReceivedSharePayload,
   GetRelayReceivedShareResult,
   LeaveRelaySharePayload,
+  LeaveRelayShareResult,
   RevokeRelaySharePayload,
   RevokeRelayShareResult,
   UndoRelaySharePayload,
@@ -419,6 +420,7 @@ export const relayShareOperations = {
     scope: "device",
     guard: "trusted-sender",
     payload: LeaveRelaySharePayload,
+    result: LeaveRelayShareResult,
   },
   undoRelayShare: {
     capabilityId: "share.revoke.undo",

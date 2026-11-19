@@ -1379,7 +1379,7 @@ const ownerInputs = {
   listRelayShares: undefined,
   getRelayReceivedShare: { shareId: "share" },
   revokeRelayShare: { shareId: "share" },
-  leaveRelayShare: { shareId: "share" },
+  leaveRelayShare: { shareId: "share", ended: false },
   undoRelayShare: { workspaceId, shareId: "share", undoId: "undo-1" },
   pollRelayShareDiscussionActivity: pollInput,
   cancelRelayShareDiscussionActivity: { pollId: pollInput.pollId },

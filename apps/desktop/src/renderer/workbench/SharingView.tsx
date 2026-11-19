@@ -456,7 +456,7 @@ export type SharingActions = {
   unmount: (mount: ShareMount) => void;
   startLeave: (shareId: string) => void;
   leave: (shareId: string, mount: ShareMount | undefined) => void;
-  clear: (shareId: string) => void;
+  clear: (shareId: string, mount: ShareMount | undefined) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
   dismissSkips: (mount: ShareMount) => void;
@@ -705,7 +705,7 @@ function ReceivedRow(props: {
     ? [
         {
           label: "Remove from workspace",
-          onSelect: () => actions.unmount(mount),
+          onSelect: () => (row && removed ? actions.clear(shareId, mount) : actions.unmount(mount)),
           disabled: props.busy,
         },
         ...(skipped && !props.skipsShown
@@ -726,7 +726,7 @@ function ReceivedRow(props: {
         ? [
             {
               label: "Remove from list",
-              onSelect: () => actions.clear(shareId),
+              onSelect: () => actions.clear(shareId, undefined),
               disabled: props.busy,
             },
           ]
@@ -1326,21 +1326,23 @@ export function SharingView(props: {
     }
   }
 
-  async function leave(shareId: string, mounted: ShareMount | undefined) {
+  async function leave(shareId: string, mounted: ShareMount | undefined, ended: boolean) {
     const token = epoch.current();
     setBusyShareId(shareId);
     try {
-      if (mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
-      await bridge().leaveRelayShare({ shareId });
+      const { left } = await bridge().leaveRelayShare({ shareId, ended });
+      if (left && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
       if (epoch.isCurrent(token)) {
-        setConfirmShareId(null);
+        setConfirmShareId((confirming) => (confirming === shareId ? null : confirming));
         void loadReceived({ refreshed: refresh() });
       }
     } catch (cause) {
       props.reportError(
-        "dohc could not take this share off your list.",
+        ended
+          ? "dohc could not take this share off your list."
+          : "dohc could not leave this share.",
         cause,
-        () => void leave(shareId, undefined),
+        () => void leave(shareId, mounted, ended),
       );
     } finally {
       if (epoch.isCurrent(token)) setBusyShareId(null);
@@ -1411,8 +1413,8 @@ export function SharingView(props: {
     mount: (shareId) => void mount(shareId),
     unmount: (target) => void unmount(target),
     startLeave: setConfirmShareId,
-    leave: (shareId, mounted) => void leave(shareId, mounted),
-    clear: (shareId) => void leave(shareId, undefined),
+    leave: (shareId, mounted) => void leave(shareId, mounted, false),
+    clear: (shareId, mounted) => void leave(shareId, mounted, true),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
     showSkips: (shareId) => setSkip(shareId, "shown"),

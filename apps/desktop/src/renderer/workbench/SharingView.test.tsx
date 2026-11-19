@@ -22,7 +22,8 @@ const bridgeMock = {
     >(),
   getRelayReceivedShare: vi.fn<(input: { shareId: string }) => Promise<unknown>>(),
   mountShare: vi.fn<(input: { workspaceId: string; shareCode: string }) => Promise<unknown>>(),
-  leaveRelayShare: vi.fn<(input: { shareId: string }) => Promise<void>>(),
+  leaveRelayShare:
+    vi.fn<(input: { shareId: string; ended: boolean }) => Promise<{ left: boolean }>>(),
   getShareCopyDetails:
     vi.fn<(input: { shareId: string; grantId: string }) => Promise<ShareCopyResult>>(),
   dismissShareSkips:
@@ -491,7 +492,7 @@ describe("the actions Settings offers on a share", () => {
 
   it("leaves a share after a confirm, and reads the list again", async () => {
     answerWith({ received: answer("received", { rows: [received()] }) });
-    bridgeMock.leaveRelayShare.mockResolvedValue(undefined);
+    bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
     render(<View />);
     const row = await screen.findByTestId("sharing-received-row");
     await userEvent.click(
@@ -506,12 +507,15 @@ describe("the actions Settings offers on a share", () => {
     await userEvent.click(within(confirm).getByTestId("sharing-leave"));
 
     await waitFor(() => expect(screen.queryByTestId("sharing-received-row")).toBeNull());
-    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledExactlyOnceWith({ shareId: "in-1" });
+    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledExactlyOnceWith({
+      shareId: "in-1",
+      ended: false,
+    });
     expect(callbacks.onUnmount).not.toHaveBeenCalled();
     expect(callbacks.reportError).not.toHaveBeenCalled();
   });
 
-  it("takes the share's folder out of the workspace before it leaves", async () => {
+  it("leaves first, then takes the share's folder out of the workspace", async () => {
     answerWith({ received: answer("received", { rows: [received()] }) });
     const order: string[] = [];
     callbacks.onUnmount.mockImplementation(async () => {
@@ -519,6 +523,7 @@ describe("the actions Settings offers on a share", () => {
     });
     bridgeMock.leaveRelayShare.mockImplementation(async () => {
       order.push("leave");
+      return { left: true };
     });
     const mount: ShareMount = {
       shareId: "in-1",
@@ -536,7 +541,7 @@ describe("the actions Settings offers on a share", () => {
     );
     await userEvent.click(within(row).getByTestId("sharing-leave"));
 
-    await waitFor(() => expect(order).toEqual(["unmount", "leave"]));
+    await waitFor(() => expect(order).toEqual(["leave", "unmount"]));
     expect(callbacks.onUnmount).toHaveBeenCalledWith("shared-with-me/funnel");
   });
 
@@ -547,7 +552,7 @@ describe("the actions Settings offers on a share", () => {
       }),
     });
     bridgeMock.leaveRelayShare.mockRejectedValueOnce(new Error("offline"));
-    bridgeMock.leaveRelayShare.mockResolvedValue(undefined);
+    bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
     render(<View />);
     const row = await screen.findByTestId("sharing-received-row");
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Removed");
@@ -563,6 +568,63 @@ describe("the actions Settings offers on a share", () => {
     await act(async () => callbacks.reportError.mock.calls[0]![2]());
     await waitFor(() => expect(screen.queryByTestId("sharing-received-row")).toBeNull());
     expect(bridgeMock.leaveRelayShare).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.leaveRelayShare).toHaveBeenLastCalledWith({ shareId: "in-1", ended: true });
+  });
+
+  it("takes an ended share's folder and its row away in one step", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [received({ status: "removed", selector: null, access: null })],
+      }),
+    });
+    bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
+    const mount: ShareMount = {
+      shareId: "in-1",
+      label: "funnel",
+      granterEmail: "sam@example.com",
+      access: "view",
+      ended: true,
+    };
+    render(<View mounts={[mount]} />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
+    );
+
+    await waitFor(() =>
+      expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel"),
+    );
+    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledExactlyOnceWith({
+      shareId: "in-1",
+      ended: true,
+    });
+  });
+
+  it("leaves access the owner restored alone when a stale row is cleared", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [received({ status: "removed", selector: null, access: null })],
+      }),
+    });
+    bridgeMock.leaveRelayShare.mockResolvedValue({ left: false });
+    const mount: ShareMount = {
+      shareId: "in-1",
+      label: "funnel",
+      granterEmail: "sam@example.com",
+      access: "view",
+    };
+    render(<View mounts={[mount]} />);
+    const row = await screen.findByTestId("sharing-received-row");
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-received-row").dataset.status).toBe("active"),
+    );
+    expect(callbacks.onUnmount).not.toHaveBeenCalled();
+    expect(callbacks.reportError).not.toHaveBeenCalled();
   });
 
   it("ends a share dohc cannot read, so its reverse path stays", async () => {

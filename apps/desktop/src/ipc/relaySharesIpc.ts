@@ -36,6 +36,7 @@ import {
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessageResult,
   ListRelayShareDiscussionResult,
+  LeaveRelayShareResult,
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionResult,
   PollRelayShareDiscussionActivityResult,
@@ -48,6 +49,7 @@ import {
   RelayShareDiscussionPauseResponse,
   RelayShareGrantPromotionResponse,
   RelayShareGrantRevokeResponse,
+  RelayShareLeaveResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
   RelayShareLinkEndResponse,
@@ -1415,10 +1417,16 @@ export function createRelaySharesIpcHandlers<
   };
 
   const leaveRelayShare: Handlers["leaveRelayShare"] = async (input) => {
-    await relayShareJson<unknown>(`/sync/shares/${encodeURIComponent(input.shareId)}/leave`, {
-      method: "POST",
-    });
+    const relayResult = await relayShareJson<unknown>(
+      `/sync/shares/${encodeURIComponent(input.shareId)}/leave`,
+      { method: "POST", body: JSON.stringify({ ended: input.ended }) },
+    );
     sharesChanged(null);
+    const parsed = RelayShareLeaveResponse.safeParse(relayResult);
+    if (!parsed.success) {
+      throw new Error(relayShareErrorCopy(500, null));
+    }
+    return LeaveRelayShareResult.parse({ left: parsed.data.left });
   };
 
   // Restores what a removal ended, from the receipt the removal returned.

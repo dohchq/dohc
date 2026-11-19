@@ -61,8 +61,14 @@ async function fixture() {
   });
   let now = 3000;
   const handle = testHandler(storage, { nowMs: () => now });
-  const leave = (userId: string | null, shareId = "s") =>
-    handle(request(userId, `/sync/shares/${shareId}/leave`, { method: "POST" }));
+  const leave = (userId: string | null, shareId = "s", body: unknown = { ended: false }) =>
+    handle(
+      request(userId, `/sync/shares/${shareId}/leave`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
   const received = async (userId: string) =>
     (await (await handle(request(userId, "/sync/shares?received=true"))).json()) as {
       received: { shareId: string }[];
@@ -97,7 +103,9 @@ it("clears a share the owner ended, and shows it again when the owner ends it ag
   expect((await received("reader")).removed.map((row) => row.shareId)).toEqual(["s"]);
 
   at(3500);
-  expect((await leave("reader")).status).toBe(200);
+  const cleared = await leave("reader", "s", { ended: true });
+  expect(cleared.status).toBe(200);
+  expect(await cleared.json()).toEqual({ ok: true, left: true });
   expect((await received("reader")).removed).toEqual([]);
 
   storage.undoShareRemoval({
@@ -116,6 +124,49 @@ it("clears a share the owner ended, and shows it again when the owner ends it ag
     }).ok,
   ).toBe(true);
   expect((await received("reader")).removed.map((row) => row.shareId)).toEqual(["s"]);
+});
+
+it("keeps access the owner restored when only an ended share was to be cleared", async () => {
+  const { storage, leave, received } = await fixture();
+
+  const response = await leave("reader", "s", { ended: true });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ ok: true, left: false });
+  expect(storage.getShareGrant("reader")).toMatchObject({ status: "active", generation: 1 });
+  expect((await received("reader")).received.map((row) => row.shareId)).toContain("s");
+});
+
+it("clears an ended chat share, and refuses to leave one that is active", async () => {
+  const { storage, leave, received } = await fixture();
+  storage.createShare({
+    share: {
+      ...storage.getShare("s")!,
+      shareId: "chat",
+      selectorJson: JSON.stringify({ kind: "chat", channelWireId: "channel_wire_team" }),
+    },
+    grant: {
+      ...GRANT,
+      grantId: "chatter",
+      shareId: "chat",
+      principalUserId: "reader",
+      access: "read-only",
+    },
+  });
+
+  expect((await leave("reader", "chat")).status).toBe(404);
+  expect(storage.getShareGrant("chatter")).toMatchObject({ status: "active", generation: 1 });
+
+  expect(
+    storage.removeShareAccess({
+      shareId: "chat",
+      grantId: "chatter",
+      actorUserId: "owner",
+      nowMs: 3000,
+    }).ok,
+  ).toBe(true);
+  expect((await leave("reader", "chat", { ended: true })).status).toBe(200);
+  expect((await received("reader")).removed.map((row) => row.shareId)).not.toContain("chat");
 });
 
 it("touches nobody else's access", async () => {
@@ -138,6 +189,9 @@ it("refuses a share that is not of files, and anything but POST", async () => {
   const { storage, handle, leave } = await fixture();
 
   expect((await leave("reader", "members")).status).toBe(404);
+  expect((await leave("reader", "members", { ended: true })).status).toBe(404);
+  for (const body of [{}, { ended: "yes" }, { ended: false, shareId: "s" }])
+    expect((await leave("reader", "s", body)).status, JSON.stringify(body)).toBe(400);
   expect(storage.getShareGrant("member")).toMatchObject({ status: "active", generation: 1 });
   expect((await handle(request("reader", "/sync/shares/s/leave"))).status).toBe(405);
   expect(storage.getShareGrant("reader")?.status).toBe("active");

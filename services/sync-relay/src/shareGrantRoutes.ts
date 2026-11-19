@@ -247,18 +247,30 @@ export function createShareGrantRoutes(
   ): Promise<Response> {
     if (route.route === "share-leave") {
       if (request.method !== "POST") throw relayError("method_not_allowed");
-      const leavesEdit = storage
-        .listActiveShareGrantsForRecipient(route.shareId, actor.userId)
-        .some((grant) => grant.access === "edit");
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "ended") || typeof input.ended !== "boolean") {
+        throw badRequest("ended must be true or false, and the only field");
+      }
+      const onlyEnded = input.ended;
+      const leavesEdit =
+        !onlyEnded &&
+        storage
+          .listActiveShareGrantsForRecipient(route.shareId, actor.userId)
+          .some((grant) => grant.access === "edit");
       const result = await endAccess(route.shareId, leavesEdit, () =>
-        storage.leaveShare({ shareId: route.shareId, userId: actor.userId, nowMs: nowMs() }),
+        storage.leaveShare({
+          shareId: route.shareId,
+          userId: actor.userId,
+          nowMs: nowMs(),
+          onlyEnded,
+        }),
       );
       if (!result.ok) throw notFound();
       if (result.workspaceId !== null) {
         discussionActivity.wake(route.shareId);
         discussionActivity.wakeLog(result.workspaceId);
       }
-      return jsonResponse({ ok: true });
+      return jsonResponse({ ok: true, left: result.left });
     }
 
     if (route.route === "share-undo") {

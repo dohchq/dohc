@@ -294,12 +294,12 @@ export function undoShareRemoval(
 
 export function leaveShare(
   storage: StorageContext,
-  input: { shareId: string; userId: string; nowMs: number },
-): { ok: false } | { ok: true; workspaceId: string | null } {
+  input: { shareId: string; userId: string; nowMs: number; onlyEnded: boolean },
+): { ok: false } | { ok: true; left: boolean; workspaceId: string | null } {
   return storage.tx(() => {
     const share = storage.getShare(input.shareId);
     const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
-    if (share && (!selector || "kind" in selector)) return { ok: false };
+    if (share && !selector) return { ok: false };
     const held = share
       ? (storage.db
           .prepare(
@@ -309,6 +309,8 @@ export function leaveShare(
           )
           .all(input.shareId, input.userId) as { grant_id: string }[])
       : [];
+    if (held.length > 0 && input.onlyEnded) return { ok: true, left: false, workspaceId: null };
+    if (held.length > 0 && "kind" in selector!) return { ok: false };
     for (const { grant_id } of held) {
       revokeShareGrantInTransaction(storage, {
         shareId: input.shareId,
@@ -325,7 +327,7 @@ export function leaveShare(
          ON CONFLICT (share_id, recipient_user_id) DO UPDATE SET left_at_ms = excluded.left_at_ms`,
       )
       .run(input.shareId, input.userId, Math.max(Math.trunc(input.nowMs), removed.removedAtMs));
-    return { ok: true, workspaceId: held.length > 0 ? share!.workspaceId : null };
+    return { ok: true, left: true, workspaceId: held.length > 0 ? share!.workspaceId : null };
   });
 }
 
