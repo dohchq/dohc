@@ -18,7 +18,11 @@ type Read<T> = Result<T, Unsure>;
 
 /// The block's inline content as the editor reads `text`, when this reader
 /// follows that reading and the projector writes it back as `text`.
-pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece>> {
+pub(super) fn read_inline(
+    text: &str,
+    paragraph: bool,
+    budget: &mut usize,
+) -> Option<Vec<InlinePiece>> {
     if !text
         .bytes()
         .any(|byte| matches!(byte, b'*' | b'_' | b'`' | b'~' | b'[' | b'!'))
@@ -29,9 +33,14 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
     }
     let units: Vec<u16> = text.encode_utf16().collect();
     let mut pieces = Vec::new();
-    lex(&units, &[], false, &mut pieces).ok()?;
+    let mut work = units.len().saturating_mul(SCAN_WORK_PER_UNIT);
+    lex(&units, &[], false, &mut work, &mut pieces).ok()?;
     let pieces = merged(pieces);
-    let nodes: Vec<MarkdownNode> = pieces
+    let nodes_used = nodes(&pieces);
+    if nodes_used > *budget {
+        return None;
+    }
+    let read: Vec<MarkdownNode> = pieces
         .iter()
         .map(|piece| match piece {
             InlinePiece::Text(run) => MarkdownNode::Text(vec![run.clone()]),
@@ -42,8 +51,34 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
             },
         })
         .collect();
-    let written = render_inline(&nodes, false, paragraph, false).ok()?;
-    (written == text).then_some(pieces)
+    let written = render_inline(&read, false, paragraph, false).ok()?;
+    if written != text {
+        return None;
+    }
+    *budget -= nodes_used;
+    Some(pieces)
+}
+
+/// The projection nodes a document may spend on inline reading. The densest
+/// real note, scaled to the largest note the engine folds, needs about a third.
+pub(super) const INLINE_NODE_BUDGET: usize = crate::limits::MAX_PROJECTION_NODES / 2;
+
+const SCAN_WORK_PER_UNIT: usize = 32;
+
+fn nodes(pieces: &[InlinePiece]) -> usize {
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            InlinePiece::Text(run) => {
+                2 + run
+                    .marks
+                    .iter()
+                    .map(|mark| 1 + mark.attrs.as_object().map_or(0, |attrs| attrs.len()))
+                    .sum::<usize>()
+            }
+            InlinePiece::Image(attrs) => 2 + attrs.len(),
+        })
+        .sum()
 }
 
 fn unsure_text(text: &str) -> bool {
@@ -140,7 +175,11 @@ fn masked(src: &[u16]) -> Read<Vec<u16>> {
         let end = if src[at] == u16::from(b'[') {
             masked_link(src, at)?
         } else if src[at] == u16::from(b'`') && (at == 0 || src[at - 1] != u16::from(b'`')) {
-            masked_code(src, at)
+            let end = masked_code(src, at);
+            if end.is_some_and(|end| label_crosses(src, at, end)) {
+                return Err(Unsure);
+            }
+            end
         } else {
             None
         };
@@ -202,11 +241,27 @@ fn masked_code(src: &[u16], at: usize) -> Option<usize> {
     (index > content && run_of(src, index, u16::from(b'`')) == run).then_some(index + run)
 }
 
+// marked masks a reference link before code spans, so a label that opens
+// inside a code span and closes after it can end the span early.
+fn label_crosses(src: &[u16], at: usize, end: usize) -> bool {
+    let close = u16::from(b']');
+    src[at..end]
+        .iter()
+        .rposition(|unit| *unit == u16::from(b'['))
+        .is_some_and(|open| !src[at + open..end].contains(&close) && src[end..].contains(&close))
+}
+
 fn run_of(src: &[u16], at: usize, unit: u16) -> usize {
     src[at..].iter().take_while(|held| **held == unit).count()
 }
 
-fn lex(src: &[u16], marks: &[MarkdownMark], in_link: bool, out: &mut Vec<InlinePiece>) -> Read<()> {
+fn lex(
+    src: &[u16],
+    marks: &[MarkdownMark],
+    in_link: bool,
+    work: &mut usize,
+    out: &mut Vec<InlinePiece>,
+) -> Read<()> {
     let mask = masked(src)?;
     let mut at = 0;
     let mut previous: Option<u16> = None;
@@ -221,18 +276,18 @@ fn lex(src: &[u16], marks: &[MarkdownMark], in_link: bool, out: &mut Vec<InlineP
         if matches!(first, Some(b'['))
             || (first == Some(b'!') && rest.get(1) == Some(&u16::from(b'[')))
         {
-            at += link(rest, marks, in_link, out)?;
+            at += link(rest, marks, in_link, work, out)?;
             continue;
         }
         if matches!(first, Some(b'*' | b'_')) {
-            if let Some((length, strong)) = em_strong(rest, &mask[at..], previous)? {
+            if let Some((length, strong)) = em_strong(rest, &mask[at..], previous, work)? {
                 let (open, mark) = if strong {
                     (2, MarkKind::Bold)
                 } else {
                     (1, MarkKind::Italic)
                 };
                 let inner = &rest[open..length - open];
-                lex(inner, &add_mark(marks, plain(mark))?, in_link, out)?;
+                lex(inner, &add_mark(marks, plain(mark))?, in_link, work, out)?;
                 at += length;
                 continue;
             }
@@ -244,13 +299,14 @@ fn lex(src: &[u16], marks: &[MarkdownMark], in_link: bool, out: &mut Vec<InlineP
             }
         }
         if first == Some(b'~') {
-            if let Some(length) = del(rest, &mask[at..], previous)? {
+            if let Some(length) = del(rest, &mask[at..], previous, work)? {
                 let open = run_of(rest, 0, u16::from(b'~'));
                 let inner = &rest[open..length - open];
                 lex(
                     inner,
                     &add_mark(marks, plain(MarkKind::Strike))?,
                     in_link,
+                    work,
                     out,
                 )?;
                 at += length;
@@ -346,7 +402,12 @@ fn inline_text(src: &[u16]) -> usize {
     at
 }
 
-fn em_strong(src: &[u16], mask: &[u16], previous: Option<u16>) -> Read<Option<(usize, bool)>> {
+fn em_strong(
+    src: &[u16],
+    mask: &[u16],
+    previous: Option<u16>,
+    work: &mut usize,
+) -> Read<Option<(usize, bool)>> {
     let delimiter = src[0];
     let star = delimiter == u16::from(b'*');
     let run = run_of(src, 0, delimiter);
@@ -383,6 +444,7 @@ fn em_strong(src: &[u16], mask: &[u16], previous: Option<u16>) -> Read<Option<(u
     let mut delayed = 0isize;
     let mut from = 0;
     while let Some(found) = right_delimiter(scan, from, delimiter, star)? {
+        spend(work, found.end - from)?;
         from = found.end;
         let Some(group) = found.group else { continue };
         let length = found.run as isize;
@@ -402,7 +464,13 @@ fn em_strong(src: &[u16], mask: &[u16], previous: Option<u16>) -> Read<Option<(u
         let total = run + found.index + 1 + closing;
         return Ok(Some((total, run.min(closing) % 2 == 0)));
     }
+    spend(work, scan.len() - from)?;
     Ok(None)
+}
+
+fn spend(work: &mut usize, units: usize) -> Read<()> {
+    *work = work.checked_sub(units).ok_or(Unsure)?;
+    Ok(())
 }
 
 struct Delimiter {
@@ -514,7 +582,7 @@ fn skip_pair(t: &[u16], delimiter: u16, other: u16) -> Option<usize> {
     (t.get(last) == Some(&other) && t.get(last + 1) == Some(&other)).then_some(last)
 }
 
-fn del(src: &[u16], mask: &[u16], previous: Option<u16>) -> Read<Option<usize>> {
+fn del(src: &[u16], mask: &[u16], previous: Option<u16>, work: &mut usize) -> Read<Option<usize>> {
     let tilde = u16::from(b'~');
     let run = run_of(src, 0, tilde);
     if run > 2 {
@@ -616,8 +684,10 @@ fn del(src: &[u16], mask: &[u16], previous: Option<u16>) -> Read<Option<usize>> 
             at = end;
             continue;
         }
+        spend(work, at)?;
         return Ok(Some(run + at + 1 + run));
     }
+    spend(work, t.len())?;
     Ok(None)
 }
 
@@ -660,6 +730,7 @@ fn link(
     src: &[u16],
     marks: &[MarkdownMark],
     in_link: bool,
+    work: &mut usize,
     out: &mut Vec<InlinePiece>,
 ) -> Read<usize> {
     let image = src[0] == u16::from(b'!');
@@ -728,7 +799,7 @@ fn link(
                 "title": title,
             }),
         };
-        lex(label, &add_mark(marks, mark)?, true, out)?;
+        lex(label, &add_mark(marks, mark)?, true, work, out)?;
     }
     Ok(at + 1)
 }
@@ -1022,5 +1093,31 @@ Run `make` and see [`npm install`](https://docs.example/install).
                 ] },
             ]))
         );
+    }
+
+    #[test]
+    fn a_reference_label_that_crosses_a_code_span_keeps_the_raw_reading() {
+        let read = |text: &str| read_inline(text, true, &mut { INLINE_NODE_BUDGET });
+        assert!(read("**a `x**[`]**").is_none());
+        assert!(read("**a `x[0]`** and [b](https://b.example)").is_some());
+    }
+
+    #[test]
+    fn a_note_dense_with_links_keeps_within_the_projection_limit() {
+        let markdown = format!("{}end\n", "[x](u) ".repeat(34_000));
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
+            .expect("folds");
+        assert!(doc.project_richdoc().is_ok());
+    }
+
+    #[test]
+    fn unclosed_delimiters_stop_the_reading_early() {
+        for unit in ["*", "_", "~"] {
+            let text = format!("{}end", format!("{unit}word ").repeat(20_000));
+            assert!(read_inline(&text, true, &mut { INLINE_NODE_BUDGET }).is_none());
+        }
+        let text = format!("{}end", "**word** ".repeat(20_000));
+        assert!(read_inline(&text, true, &mut { INLINE_NODE_BUDGET }).is_some());
     }
 }

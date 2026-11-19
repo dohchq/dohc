@@ -1688,11 +1688,12 @@ impl Ydoc {
                     if len > start + end {
                         frag.remove_range(txn, start, len - start - end);
                     }
+                    let mut budget = inline_reading::INLINE_NODE_BUDGET;
                     for block in blocks[start as usize..blocks.len() - end as usize]
                         .iter()
                         .rev()
                     {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block);
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block, &mut budget);
                     }
                 };
                 if WIRE_SEED {
@@ -4852,9 +4853,10 @@ fn insert_md_paragraph<F: XmlFragment>(
     parent: &F,
     index: u32,
     text: &str,
+    budget: &mut usize,
 ) {
     let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
-    if let Some(pieces) = inline_reading::read_inline(text, true) {
+    if let Some(pieces) = inline_reading::read_inline(text, true, budget) {
         inline_reading::insert_pieces(txn, &el, &pieces);
         return;
     }
@@ -4910,11 +4912,12 @@ fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     item: &MdListItem<'_>,
+    budget: &mut usize,
 ) {
     for block in item.blocks().iter().rev() {
-        insert_md_block::<_, WIRE_DEFAULTS>(txn, parent, 0, block);
+        insert_md_block::<_, WIRE_DEFAULTS>(txn, parent, 0, block, budget);
     }
-    insert_md_paragraph(txn, parent, 0, &item.paragraph);
+    insert_md_paragraph(txn, parent, 0, &item.paragraph, budget);
 }
 
 fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
@@ -4922,13 +4925,14 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     parent: &F,
     index: u32,
     block: &MdBlock<'_>,
+    budget: &mut usize,
 ) {
     match block {
-        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
+        MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text, budget),
         MdBlock::Heading { level, text } => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("heading"));
             el.insert_attribute(txn, "level", *level);
-            match inline_reading::read_inline(text, false) {
+            match inline_reading::read_inline(text, false, budget) {
                 Some(pieces) => inline_reading::insert_pieces(txn, &el, &pieces),
                 None => {
                     el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
@@ -4938,7 +4942,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
         MdBlock::Quote(children) => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
             for child in children.iter().rev() {
-                insert_md_block::<_, WIRE_DEFAULTS>(txn, &el, 0, child);
+                insert_md_block::<_, WIRE_DEFAULTS>(txn, &el, 0, child, budget);
             }
         }
         MdBlock::BulletList(items) => {
@@ -4947,13 +4951,13 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
                 MdBulletItems::Plain(items) => {
                     for text in items.iter().rev() {
                         let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                        insert_md_paragraph(txn, &li, 0, text);
+                        insert_md_paragraph(txn, &li, 0, text, budget);
                     }
                 }
                 MdBulletItems::Blocks(items) => {
                     for item in items.iter().rev() {
                         let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                        insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                        insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, budget);
                     }
                 }
             }
@@ -4963,7 +4967,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
             el.insert_attribute(txn, "start", *start);
             for item in items.iter().rev() {
                 let li = el.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, budget);
             }
         }
         MdBlock::TaskList(items) => {
@@ -4971,7 +4975,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
             for (checked, item) in items.iter().rev() {
                 let li = el.insert(txn, 0, XmlElementPrelim::empty("taskItem"));
                 li.insert_attribute(txn, "checked", *checked);
-                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item, budget);
             }
         }
         MdBlock::CodeBlock { language, content } => {
@@ -5188,10 +5192,11 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
+    let mut budget = inline_reading::INLINE_NODE_BUDGET;
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
+        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block, &mut budget);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }
