@@ -426,7 +426,7 @@ async fn await_ready_with_deadline(
             // caller gets a bounded, observable failure now, and the worker is
             // still eventually reclaimed, rather than a synchronous hang OR a
             // silently forgotten thread that keeps running.
-            let _ = stop_tx.send(ThreadMessage::Stop);
+            let _ = stop_tx.try_send(ThreadMessage::Stop);
             if let Some(worker) = worker.take() {
                 let _ = std::thread::Builder::new()
                     .name("dohc-native-watcher-startup-reaper".to_owned())
@@ -1085,8 +1085,9 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let started = Instant::now();
         let result = NativeWatcher::start_thread(
-            Duration::from_millis(20),
-            move |_rx, _tx, _state, _ready| {
+            Duration::from_millis(500),
+            move |_rx, tx, _state, _ready| {
+                while tx.try_send(ThreadMessage::Event).is_ok() {}
                 let _ = release_rx.recv_timeout(Duration::from_secs(5));
             },
         )
