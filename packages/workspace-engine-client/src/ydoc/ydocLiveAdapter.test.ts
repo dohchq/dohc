@@ -127,6 +127,40 @@ describe("server automation draft declarations", () => {
   );
 });
 
+describe("a settle delay named by an update", () => {
+  it("arms that update's settle with its own delay", async () => {
+    const engine = seedPlaintextEngine("seed");
+    const scheduler = settleScheduler();
+    const provider = await openEngineYdocProviderSession({
+      transport: engine,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: scheduler.schedule,
+      settleDebounceMs: 800,
+    });
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (text) => text.insert(0, "a")),
+    );
+    await provider.applyLocalUpdate(
+      plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(0, "b")),
+      { settleDelayMs: 2_000 },
+    );
+    expect(scheduler.delays).toEqual([800, 2_000]);
+    expect(scheduler.armed).toHaveLength(1);
+    // A remote change between the paused note's updates keeps its delay.
+    engine.applyRemoteUpdate(
+      engine.activeSessionIds()[0]!,
+      plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) => text.insert(0, "remote ")),
+    );
+    expect(scheduler.delays).toEqual([800, 2_000, 2_000]);
+    expect(scheduler.armed).toHaveLength(1);
+    await provider.evict();
+  });
+});
+
 describe("closing a settled revision", () => {
   it.each(["untouched", "edited"])(
     "settles an absent lineage on close only after an edit (%s)",
@@ -5182,6 +5216,24 @@ describe("YdocLiveAdapter", () => {
       await drain();
     }
     expect(delays).toEqual([4000, 4000, 8000, 10_000, 10_000]);
+
+    await provider.close({ settle: false });
+  });
+
+  it("retries no sooner than the delay the latest edit named", async () => {
+    const { provider, delays, scheduler } = await openAgainstABlockedSettle(
+      "typed against a locked file",
+      { settleDebounceMs: 800 },
+    );
+    await provider.applyLocalUpdate(
+      plaintextUpdate(provider.initialUpdate, (body) => {
+        body.insert(0, "typed while paused");
+      }),
+      { settleDelayMs: 2_000 },
+    );
+    scheduler.fire();
+    await drain();
+    expect(delays).toEqual([800, 2_000, 2_000]);
 
     await provider.close({ settle: false });
   });

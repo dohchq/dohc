@@ -532,6 +532,9 @@ export type WorkspaceEngineYDocProviderSession = Omit<
       actorOriginId?: string;
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
+      // How long after this update the document is saved to its file, in
+      // place of the usual pause.
+      settleDelayMs?: number;
     },
   ): void;
   // A local update decided when its turn on this session's chain comes:

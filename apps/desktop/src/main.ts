@@ -359,6 +359,7 @@ import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { holdsDeliveries } from "./workspaces/ownerLivePause";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor, isReservedPath } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
@@ -7190,6 +7191,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
   onLiveEditsPaused: (workspaceId, path) =>
     desktopEngine.noteOwnerLiveEditsPaused(workspaceId, path),
+  livePaused: (workspaceId, objectId) =>
+    holdsDeliveries(desktopEngine.ownerLivePauses(workspaceId), objectId),
   onOwnerOpened: (workspaceId, path) => desktopEngine.ownerOpenedLiveDocument(workspaceId, path),
   onOwnerEdit: (workspaceId) => desktopEngine.ownerEditLanded(workspaceId),
   sessionFor: (sender) => rendererWorkspaceSessions.current(sender as WebContents),

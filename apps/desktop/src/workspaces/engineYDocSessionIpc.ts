@@ -80,6 +80,20 @@ import {
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 
+// Main records each editor update as one engine row. While the server has
+// paused a note's live editing, each row becomes one delivery at Resume, and
+// the relay takes about one a second. An update per keystroke left thousands
+// waiting. The editor gathers up to a second of typing per update for such a
+// note instead, and sends what it gathered at once when the note closes or
+// the app quits. Every other note sends each update at once, so a crash
+// loses no more of it than before.
+const PAUSED_TYPING_BATCH_MS = 1_000;
+// Saving a note to its file holds the engine, and typing that arrives
+// meanwhile is recorded only when the save ends. Updates a second apart would
+// let the usual 0.8 s pause start that save mid-typing, so a paused note waits
+// for a gathered second plus that pause.
+const PAUSED_SAVE_DELAY_MS = 2_000;
+
 /** The session holds no claim yet, and every binding names one. */
 class OwnerClaimNotLearned extends Error {
   constructor(readonly resync: () => Promise<void>) {
@@ -154,6 +168,8 @@ interface EngineYDocSessionIpcOptions {
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
+  /** The server has paused live editing of this note until its owner resumes it. */
+  livePaused?: (workspaceId: string, objectId: string) => boolean;
   /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
   // An owner's edit of a shared note is in its queue for the server.
@@ -508,6 +524,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #resolveDocumentPath: EngineYDocSessionIpcOptions["resolveDocumentPath"];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
+  readonly #livePaused: EngineYDocSessionIpcOptions["livePaused"];
   readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
   readonly #onOwnerEdit: EngineYDocSessionIpcOptions["onOwnerEdit"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
@@ -535,6 +552,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#onLiveEditsPaused = options.onLiveEditsPaused;
+    this.#livePaused = options.livePaused;
     this.#onOwnerOpened = options.onOwnerOpened;
     this.#onOwnerEdit = options.onOwnerEdit;
     this.#localPersonId = options.localPersonId;
@@ -1130,11 +1148,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           },
           this.#localPersonId,
         );
+        const sharedView = this.#isSharedView(owned.workspace);
+        const objectId = owned.provider.objectId;
+        const paused =
+          !sharedView &&
+          objectId !== undefined &&
+          this.#livePaused?.(owned.workspace.workspaceId, objectId) === true;
         try {
           owned.provider.applyLocalUpdate(
             input.update,
             () => noteLocalEdit(owned.saveSeq, input.seq),
-            this.#isSharedView(owned.workspace)
+            sharedView
               ? {
                   idempotencyKey: input.requestId,
                   attribution: { actorKind: "human", onBehalfOf: person },
@@ -1143,6 +1167,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   idempotencyKey: input.requestId,
                   actorOriginId: person,
                   attribution: { actorKind: "human", onBehalfOf: person, depth: 0 },
+                  ...(paused ? { settleDelayMs: PAUSED_SAVE_DELAY_MS } : {}),
                 },
           );
         } catch (error) {
@@ -1151,7 +1176,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           }
           throw error;
         }
-        return { accepted: true };
+        return paused
+          ? { accepted: true, batchDelayMs: PAUSED_TYPING_BATCH_MS }
+          : { accepted: true };
       },
     );
     if (applied.kind === "refused") {

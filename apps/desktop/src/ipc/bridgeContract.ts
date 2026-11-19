@@ -8947,7 +8947,11 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
 export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
-  z.object({ accepted: z.literal(true) }),
+  z.object({
+    accepted: z.literal(true),
+    // How long the editor may gather later typing into its next update.
+    batchDelayMs: z.number().int().nonnegative().max(10_000).optional(),
+  }),
   z.object({
     accepted: z.literal(false),
     reason: z.enum([
