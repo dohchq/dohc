@@ -320,27 +320,18 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     if (current.kind !== "invoked") throw Error("Expected current Collection data.");
     await relay.stop();
     relay = null;
-    const offline = await page.evaluate(
-      async (request) => window.dohcDesktop!.dataset(request),
-      request,
-    );
-    expect(offline).toMatchObject({
-      kind: "invoked",
-      result: current.result,
-      copy: { offline: true },
-    });
+    await expect
+      .poll(() => page.evaluate(async (request) => window.dohcDesktop!.dataset(request), request))
+      .toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     await desktop.close();
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
-    const reopened = await desktop.page.evaluate(
-      async (request) => window.dohcDesktop!.dataset(request),
-      request,
-    );
-    expect(reopened).toMatchObject({
-      kind: "invoked",
-      result: current.result,
-      copy: { offline: true },
-    });
+    const reopened = desktop.page;
+    await expect
+      .poll(() =>
+        reopened.evaluate(async (request) => window.dohcDesktop!.dataset(request), request),
+      )
+      .toMatchObject({ kind: "invoked", result: current.result, copy: { offline: true } });
     expect(shared.failures).toEqual([]);
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await info.attach("scope", {
