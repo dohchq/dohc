@@ -123,14 +123,18 @@ pub struct Entry {
 }
 
 /// The names in the folder at `path`, read from one handle opened there.
+/// The first batch is read here, so a path that opens but can't be listed,
+/// such as a file, fails like `read_dir` rather than on its first entry.
 pub fn list(path: &Path) -> io::Result<Listing> {
-    Ok(Listing {
+    let mut listing = Listing {
         folder: open_folder(path)?,
         buffer: vec![0; 8 * 1024],
         next: None,
         restart: true,
         done: false,
-    })
+    };
+    listing.fetch()?;
+    Ok(listing)
 }
 
 pub struct Listing {
@@ -160,32 +164,45 @@ impl Iterator for Listing {
             if self.done {
                 return None;
             }
-            let class = if self.restart {
-                FileIdBothDirectoryRestartInfo
-            } else {
-                FileIdBothDirectoryInfo
-            };
-            self.restart = false;
-            let bytes = u32::try_from(self.buffer.len() * 8).unwrap_or(u32::MAX);
-            // SAFETY: The handle is open and the buffer holds `bytes` writable,
-            // 8-byte aligned bytes for this synchronous call.
-            #[allow(unsafe_code)]
-            let listed = unsafe {
-                GetFileInformationByHandleEx(
-                    self.folder.as_raw_handle(),
-                    class,
-                    self.buffer.as_mut_ptr().cast(),
-                    bytes,
-                )
-            };
-            if listed == 0 {
+            if let Err(error) = self.fetch() {
                 self.done = true;
-                let error = io::Error::last_os_error();
-                return (error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32))
-                    .then_some(Err(error));
+                return Some(Err(error));
             }
+        }
+    }
+}
+
+impl Listing {
+    /// Reads the next batch of records into the buffer.
+    fn fetch(&mut self) -> io::Result<()> {
+        let class = if self.restart {
+            FileIdBothDirectoryRestartInfo
+        } else {
+            FileIdBothDirectoryInfo
+        };
+        self.restart = false;
+        let bytes = u32::try_from(self.buffer.len() * 8).unwrap_or(u32::MAX);
+        // SAFETY: The handle is open and the buffer holds `bytes` writable,
+        // 8-byte aligned bytes for this synchronous call.
+        #[allow(unsafe_code)]
+        let listed = unsafe {
+            GetFileInformationByHandleEx(
+                self.folder.as_raw_handle(),
+                class,
+                self.buffer.as_mut_ptr().cast(),
+                bytes,
+            )
+        };
+        if listed == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+                return Err(error);
+            }
+            self.done = true;
+        } else {
             self.next = Some(0);
         }
+        Ok(())
     }
 }
 
@@ -299,6 +316,14 @@ mod tests {
             assert_eq!(entry.modified, metadata.modified().ok(), "{:?}", entry.name);
         }
         assert_eq!(entries[0].size, 4);
+    }
+
+    #[test]
+    fn listing_a_file_fails_before_any_entry() {
+        let scratch = ScratchDir::new_named("in-place-list-file").unwrap();
+        let file = root(scratch.path()).unwrap().join("file.md");
+        std::fs::write(&file, "not a folder").unwrap();
+        assert!(list(&file).is_err());
     }
 
     #[test]
