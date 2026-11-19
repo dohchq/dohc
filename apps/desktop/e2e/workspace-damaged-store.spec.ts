@@ -58,12 +58,14 @@ test("@damaged-store a damaged data store is named and Rebuild brings the worksp
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
     await page.getByTestId("notice-center-toggle").click();
-    const notices = page.getByRole("dialog", { name: "Notices", exact: true });
-    await expect(notices.getByText("This workspace's data store is damaged.")).toBeVisible({
+    const refused = page
+      .getByRole("dialog", { name: "Notices", exact: true })
+      .getByTestId("notice-engine-store-refused");
+    await expect(refused).toContainText("This workspace's data store is damaged.", {
       timeout: 60_000,
     });
     await page.screenshot({ path: test.info().outputPath("damaged-store-notice.png") });
-    await notices.getByRole("button", { name: "Rebuild", exact: true }).click();
+    await refused.getByRole("button", { name: "Rebuild", exact: true }).click();
 
     const rebuild = page.getByTestId("engine-rebuild-dialog");
     await expect(rebuild).toContainText("This workspace's data store is damaged.");
@@ -79,7 +81,7 @@ test("@damaged-store a damaged data store is named and Rebuild brings the worksp
     await expect(
       page
         .getByRole("dialog", { name: "Notices", exact: true })
-        .getByText("This workspace's data store is damaged."),
+        .getByTestId("notice-engine-store-refused"),
     ).toHaveCount(0);
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
