@@ -215,6 +215,12 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
+    const windowSize = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }));
+    const tooShortForTheAgents = { width: windowSize.width, height: 420 };
+    await page.setViewportSize(tooShortForTheAgents);
     await expect(dialog).toHaveAttribute("data-scrolls", "");
     await agents.scrollIntoViewIfNeeded();
     const body = dialog.getByTestId("share-dialog-body");
@@ -229,6 +235,7 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     );
     await expectFitsWindow(page, dialog);
     await page.evaluate(() => document.documentElement.style.removeProperty("--dohc-toast-room"));
+    await page.setViewportSize(windowSize);
     await shoot(page, dialog, "share-link-b-agents-two");
 
     await agents.getByRole("button", { name: "Disconnect Claude Code" }).click();

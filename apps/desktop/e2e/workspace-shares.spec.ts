@@ -215,7 +215,14 @@ test("grant side: share a file by email from the explorer, copy the code, and en
 
     const invited = dialog.getByTestId("share-invited");
     await expect(invited).toContainText(`Invited ${RECIPIENT_EMAIL}.`);
-    const shareId = (await invited.getAttribute("data-share-id"))!;
+    const shareCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      const copy = dialog.getByTestId("share-invitation-copy");
+      await copy.click({ timeout: remainingMs() });
+      await expect(copy).toHaveText("Invitation copied", { timeout: remainingMs() });
+      return desktop!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
+    expect(shareCode.startsWith("dohc-share:")).toBe(true);
+    const shareId = shareCode.split(":")[1]!;
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
     const recipientFetch = await relayJson(
