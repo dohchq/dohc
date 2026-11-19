@@ -1248,8 +1248,21 @@ describe("chatDispatchService", () => {
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toEqual({
       liveRunId: expect.any(String),
       liveTriggerMessageId: expect.any(String),
+      liveAgent: { agentId: "default", name: "Nova" },
       pendingCount: 0,
       paused: false,
+    });
+    // A conversation two devices started reads the run in its other thread.
+    expect(
+      await fixture.service.dispatchStateForThread(
+        WORKSPACE_ID,
+        "thread-other-device",
+        [],
+        [trigger.threadId],
+      ),
+    ).toMatchObject({
+      liveRunId: expect.any(String),
+      liveAgent: { agentId: "default", name: "Nova" },
     });
 
     const followUp = await fixture.chat.sendMessage({
@@ -1272,6 +1285,14 @@ describe("chatDispatchService", () => {
       pendingCount: 1,
       waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
     });
+    expect(
+      await fixture.service.dispatchStateForThread(
+        WORKSPACE_ID,
+        "thread-other-device",
+        [],
+        [trigger.threadId],
+      ),
+    ).toMatchObject({ pendingCount: 1 });
     expect(
       await fixture.service.dispatchStateForThread(WORKSPACE_ID, null, [trigger.threadId]),
     ).toEqual({
