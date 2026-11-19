@@ -53,9 +53,11 @@ function reportAddAfterLeaving(
   shareCode: string,
   cause: unknown,
 ) {
+  const shareId = parseShareCode(shareCode)?.shareId;
   report?.({
     message: ipcErrorMessage(cause, "dohc could not add the share."),
     cause,
+    ...(shareId === undefined ? {} : { identity: `share-add:${shareId}` }),
     retry: () =>
       void bridge()
         .mountShare({ workspaceId: into.workspaceId, shareCode })

@@ -178,7 +178,10 @@ describe("OpenSharedView", () => {
         <OpenSharedView
           onWorkspaceReady={() => {}}
           onBack={() => {}}
-          resolvedShare={{ shareId: "share-1", shareCode: "ordinary-received-share-code" }}
+          resolvedShare={{
+            shareId: "share-1",
+            shareCode: "dohc-share:share-1:http://localhost:1788",
+          }}
           mountInto={{ workspaceId: "ws-host", onMounted }}
         />
       </ShellErrorReporter.Provider>,
@@ -194,6 +197,7 @@ describe("OpenSharedView", () => {
     expect(report).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ message: "dohc could not reach the server." }),
     );
+    expect(report.mock.calls[0]![0].identity).toBe("share-add:share-1");
 
     bridgeMock.mountShare.mockResolvedValue({
       workspace: { ...SHARED_VIEW, shareView: undefined, shareMounts: [] },
@@ -203,7 +207,7 @@ describe("OpenSharedView", () => {
 
     expect(bridgeMock.mountShare).toHaveBeenLastCalledWith({
       workspaceId: "ws-host",
-      shareCode: "ordinary-received-share-code",
+      shareCode: "dohc-share:share-1:http://localhost:1788",
     });
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
       label: "granter",

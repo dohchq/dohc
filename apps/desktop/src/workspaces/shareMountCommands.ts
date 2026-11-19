@@ -287,8 +287,11 @@ export function createShareMountCommands<WorkspaceSummary>(
                 })
               : null;
           if (row === null) {
+            const listedInSharing =
+              typeof added.label === "string" && added.label.length > 0 && added.label.length <= 64;
             throw new Error(
-              "This share is already in this workspace, but dohc could not read its record. Remove it from Sharing, then add it again.",
+              "This share is already in this workspace, but dohc could not read its record." +
+                (listedInSharing ? " Remove it from Sharing, then add it again." : ""),
             );
           }
           return {

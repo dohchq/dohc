@@ -588,6 +588,19 @@ describe("share mount commands", () => {
     await expect(
       commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("could not read its record. Remove it from Sharing");
+
+    await h.dependencies.updateMounts(WORKSPACE.workspaceId, (mounts) =>
+      mounts.map((mount) => ({ ...mount, label: "" })),
+    );
+    const unlisted = await commands
+      .mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })
+      .then(
+        () => null,
+        (error: Error) => error.message,
+      );
+    expect(unlisted).toBe(
+      "This share is already in this workspace, but dohc could not read its record.",
+    );
   });
 
   it("fails closed before relay access for invalid or cross-relay share codes", async () => {
