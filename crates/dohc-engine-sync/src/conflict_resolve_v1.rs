@@ -2951,13 +2951,21 @@ fn local_reviews_of_same_heads(
         .map_err(SyncError::corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    let side = |state: &ConflictFileState| -> Result<Option<HeadV1>, SyncError> {
-        payload
-            .paths
-            .iter()
-            .position(|path| *path == state.path)
-            .map(|path_ref| head_from_conflict_side(state, path_ref, None))
-            .transpose()
+    let same = |state: &ConflictFileState, head: &HeadV1| {
+        state.path == payload.paths[head.path_ref()]
+            && match head.present() {
+                None => !state.is_present(),
+                Some(head) => match head.content_kind {
+                    HeadContentKindV1::Text => state.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.object_id == head.object_id
+                            && snapshot.blob_sha256 == head.blob_sha256
+                    }),
+                    HeadContentKindV1::Binary => {
+                        state.binary_object_id.as_deref() == Some(head.object_id.as_str())
+                            && state.binary_sha256.as_deref() == Some(head.blob_sha256.as_str())
+                    }
+                },
+            }
     };
     let mut reviews = Vec::new();
     for conflict_id in ids {
@@ -2967,15 +2975,9 @@ fn local_reviews_of_same_heads(
         else {
             continue;
         };
-        let (Some(current), Some(incoming)) = (side(&row.current)?, side(&row.incoming)?) else {
-            continue;
-        };
-        let same = |left: &HeadV1, right: &HeadV1| {
-            left.path_ref() == right.path_ref() && same_object_and_projected_content(left, right)
-        };
-        if same(&current, &payload.current) && same(&incoming, &payload.incoming) {
+        if same(&row.current, &payload.current) && same(&row.incoming, &payload.incoming) {
             reviews.push((conflict_id, false));
-        } else if same(&current, &payload.incoming) && same(&incoming, &payload.current) {
+        } else if same(&row.current, &payload.incoming) && same(&row.incoming, &payload.current) {
             reviews.push((conflict_id, true));
         }
     }
@@ -5068,6 +5070,58 @@ mod tests {
             "{outcome:?}"
         );
         assert!(outcome.refusals.is_empty(), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_decision_finds_this_computers_own_review_of_the_same_heads() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let payload = &built.validated.payload;
+        let dohc_engine_storage::TxnOutcome::Committed(reviews) = store
+            .write_with(&NoFaults, |tx| {
+                let bytes = b"picture bytes".to_vec();
+                let sha = put_binary_blob(tx, &bytes)?;
+                let open = |conflict_id: &str, current, incoming| TextConflict {
+                    conflict_id: conflict_id.to_owned(),
+                    workspace_id: "ws".to_owned(),
+                    path: "doc.md".to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "main".to_owned(),
+                    created_at_ms: 15,
+                    updated_at_ms: 15,
+                    status: ConflictStatus::Open,
+                    chosen_from: ConflictChoice::Current,
+                    resolution: None,
+                    metadata: ConflictMetadata::origin("sync"),
+                    base: ConflictFileState::text("doc.md", None),
+                    current,
+                    incoming,
+                };
+                let binary = ConflictFileState::binary_head(
+                    "doc.md",
+                    sha,
+                    i64::try_from(bytes.len()).unwrap(),
+                    "object-picture",
+                    "picture-moment",
+                    15,
+                );
+                insert_text_conflict_if_absent(tx, &open("binary-review", binary.clone(), binary))
+                    .map_err(map_local_domain_error)?;
+                let mut own_current = conflict_state_from_head(tx, payload, &payload.incoming)?;
+                let mut own_incoming = conflict_state_from_head(tx, payload, &payload.current)?;
+                for side in [&mut own_current, &mut own_incoming] {
+                    if let Some(snapshot) = side.snapshot.as_mut() {
+                        snapshot.latest_moment_id = format!("{}-here", snapshot.latest_moment_id);
+                    }
+                }
+                insert_text_conflict_if_absent(tx, &open("own-review", own_current, own_incoming))
+                    .map_err(map_local_domain_error)?;
+                local_reviews_of_same_heads(tx, payload)
+            })
+            .unwrap()
+        else {
+            panic!("the lookup did not commit");
+        };
+        assert_eq!(reviews, vec![("own-review".to_owned(), true)]);
     }
 
     fn text_keep_head(store: &mut EngineStore) -> TextSnapshot {
