@@ -257,6 +257,22 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
     answerNoWorkspaces() {
       noWorkspaces = true;
     },
+    /** Ben invites Ada to his workspace, which she then knows as "Garden". */
+    joinGarden() {
+      expect(
+        storage.inviteWorkspaceMember({
+          workspaceId: GARDEN,
+          actorUserId: BEN.userId,
+          workspaceName: "Garden",
+          email: ADA.email,
+          recipientUserId: ADA.userId,
+          newMemberId: () => "member-ada",
+          newGrantId: () => "grant-ada",
+          newShareId: () => "share-garden",
+          nowMs: NOW,
+        }),
+      ).toMatchObject({ ok: true });
+    },
     restart() {
       app = application();
     },
@@ -297,6 +313,37 @@ it("starts the address's workspace at Edit and every other at None, and offers N
   expect(html).not.toContain(GARDEN);
   // With no agent signed in yet, there is no one to choose.
   expect(html).not.toContain("Who it is");
+});
+
+it("offers None, View and Comment in a workspace its person joined, marked Member, and refuses Edit there", async () => {
+  const s = await stack();
+  s.joinGarden();
+  const { as, page, html } = await s.open(new CookieJar(), GARDEN);
+  expect(page.status).toBe(200);
+  expect(reachOf(html)).toEqual({
+    [TRIP]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
+    [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
+    [GARDEN]: { offered: ["none", "view", "comment"], selected: "comment" },
+  });
+  expect(html).toContain('<bdi class="k" id="w-2">Garden</bdi><span class="sub">Member</span>');
+  expect(html).not.toContain('<span class="sub">Owner</span>');
+  expect(html).toContain('<p class="cap">Reads and posts with at most your access here.</p>');
+
+  const edit = await s.choose(as, html, {
+    as: "new",
+    name: "Garden helper",
+    [`w:${GARDEN}`]: "edit",
+    decision: "allow",
+  });
+  expect(edit.status).toBe(400);
+  expect(await edit.text()).toContain("dohc could not read this choice.");
+  const allowed = await s.choose(as, html, {
+    as: "new",
+    name: "Garden helper",
+    [`w:${GARDEN}`]: "comment",
+    decision: "allow",
+  });
+  expect(allowed.status).toBe(303);
 });
 
 it("asks a browser that signed in before the password last changed to sign in again before it allows", async () => {

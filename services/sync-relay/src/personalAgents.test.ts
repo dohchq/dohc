@@ -543,8 +543,8 @@ describe("personal agent sign-in", () => {
       workspaceId: WS_A,
       levels: ["view", "comment", "edit"],
       workspaces: [
-        { workspaceId: WS_A, name: null },
-        { workspaceId: WS_B, name: null },
+        { workspaceId: WS_A, name: null, role: "owner" },
+        { workspaceId: WS_B, name: null, role: "owner" },
       ],
       agents: [],
     });
@@ -2201,7 +2201,7 @@ describe("a personal agent in a workspace its person joined", () => {
     const asked = await beginRequest(f, clientId, COMMUNITY);
     expect(await ok(await consent(f, asked, session))).toMatchObject({
       workspaceId: COMMUNITY,
-      workspaces: [expect.objectContaining({ workspaceId: COMMUNITY, name: "Community" })],
+      workspaces: [{ workspaceId: COMMUNITY, name: "Community", role: "member" }],
     });
     await expectRefused(await consent(f, asked));
     const agent = await signIn(f, { clientId, workspaceId: COMMUNITY, session, reach });

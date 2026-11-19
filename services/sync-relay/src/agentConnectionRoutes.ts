@@ -461,9 +461,10 @@ export function createAgentConnectionRoutes(input: {
       workspaceId: pending.workspaceId,
       levels: PERSONAL_REACH_LEVELS,
       // Joined workspaces too: Allow replaces an existing agent's reach with
-      // what this page lists. One whose membership ended can't be chosen.
+      // what this page lists. One whose membership ended can't be chosen. The
+      // role lets the page offer Edit only in a workspace the account owns.
       workspaces: roster.workspaces.flatMap(({ workspaceId, name, role }) =>
-        role === "ended" ? [] : [{ workspaceId, name }],
+        role === "ended" ? [] : [{ workspaceId, name, role }],
       ),
       agents: roster.agents.map((agent) => ({
         agentId: agent.agentId,

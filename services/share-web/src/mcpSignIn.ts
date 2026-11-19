@@ -500,6 +500,17 @@ const LEVEL_MEANINGS: Readonly<Record<PersonalLevel, string>> = {
 };
 const isLevel = (value: unknown): value is PersonalLevel =>
   (LEVELS as readonly unknown[]).includes(value);
+// In a workspace its person joined, an agent reads and posts at most: the
+// relay writes only in workspaces the person owns.
+const JOINED_NOTE = "Reads and posts with at most your access here.";
+type WorkspaceRole = "owner" | "admin" | "member";
+const ROLE_MARKS: Readonly<Record<WorkspaceRole, string | null>> = {
+  owner: null,
+  admin: "Admin",
+  member: "Member",
+};
+const isRole = (value: unknown): value is WorkspaceRole =>
+  value === "owner" || value === "admin" || value === "member";
 
 interface PersonalConsent {
   reportedClientName: string | null;
@@ -508,7 +519,7 @@ interface PersonalConsent {
   /** The workspace in the agent's address. */
   workspaceId: string;
   levels: PersonalLevel[];
-  workspaces: Array<{ workspaceId: string; name: string | null }>;
+  workspaces: Array<{ workspaceId: string; name: string | null; role: WorkspaceRole }>;
   agents: Array<{
     agentId: string;
     name: string;
@@ -540,10 +551,11 @@ function parsePersonalConsent(value: Record<string, unknown> | null): PersonalCo
     if (
       !workspace ||
       typeof workspace.workspaceId !== "string" ||
-      (workspace.name !== null && name === null)
+      (workspace.name !== null && name === null) ||
+      !isRole(workspace.role)
     )
       return null;
-    workspaces.push({ workspaceId: workspace.workspaceId, name });
+    workspaces.push({ workspaceId: workspace.workspaceId, name, role: workspace.role });
   }
   const agents: PersonalConsent["agents"] = [];
   for (const entry of value.agents) {
@@ -582,6 +594,15 @@ function parsePersonalConsent(value: Record<string, unknown> | null): PersonalCo
   };
 }
 
+/** The levels a workspace's row offers: no Edit in one the person joined. */
+function offeredIn(consent: PersonalConsent, workspaceId: string): PersonalLevel[] {
+  const workspace = consent.workspaces.find((entry) => entry.workspaceId === workspaceId);
+  if (!workspace) return [];
+  return workspace.role === "owner"
+    ? consent.levels
+    : consent.levels.filter((level) => level !== "edit");
+}
+
 type ConsentRead =
   | { ok: true; consent: PersonalConsent }
   | { ok: false; status: number; code: string | null };
@@ -616,12 +637,11 @@ function startingChoice(
       name: agent.name,
       reach: new Map([...agent.reach].filter(([workspaceId]) => listed.has(workspaceId))),
     };
-  const highest = consent.levels[consent.levels.length - 1];
+  const offered = offeredIn(consent, consent.workspaceId);
+  const highest = offered[offered.length - 1];
   return {
     name: consent.reportedClientName ?? "",
-    reach: new Map(
-      highest && listed.has(consent.workspaceId) ? [[consent.workspaceId, highest]] : [],
-    ),
+    reach: new Map(highest ? [[consent.workspaceId, highest]] : []),
   };
 }
 
@@ -729,10 +749,12 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
       .map((workspace, index) => {
         const id = `w-${String(index)}`;
         const level = view.reach.get(workspace.workspaceId);
-        const current = level !== undefined && consent.levels.includes(level) ? level : "none";
+        const levels = offeredIn(consent, workspace.workspaceId);
+        const current = level !== undefined && levels.includes(level) ? level : "none";
+        const mark = ROLE_MARKS[workspace.role];
         const radios = [
           { value: "none", label: "None" },
-          ...consent.levels.map((offered) => ({ value: offered, label: LEVEL_LABELS[offered] })),
+          ...levels.map((offered) => ({ value: offered, label: LEVEL_LABELS[offered] })),
         ]
           .map(({ value, label }) => {
             const checked = value === current;
@@ -744,6 +766,7 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
           .join("");
         return (
           `<div class="row"><bdi class="k" id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
+          (mark ? `<span class="sub">${mark}</span>` : "") +
           `<span class="seg" role="radiogroup" aria-labelledby="${id}">${radios}</span></div>`
         );
       })
@@ -752,7 +775,10 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
   const meanings =
     consent.levels.length === 0
       ? ""
-      : `<p class="cap">${consent.levels.map((level) => LEVEL_MEANINGS[level]).join(" ")}</p>`;
+      : `<p class="cap">${consent.levels.map((level) => LEVEL_MEANINGS[level]).join(" ")}</p>` +
+        (consent.workspaces.some((workspace) => workspace.role !== "owner")
+          ? `<p class="cap">${JOINED_NOTE}</p>`
+          : "");
   const allow =
     '<button type="submit" name="decision" value="allow" class="btn primary">Allow</button>';
   return (
@@ -1575,11 +1601,12 @@ export function createMcpSignIn(options: {
     let listChanged = false;
     for (const [key, value] of form) {
       if (!key.startsWith("w:") || value === "none") continue;
+      const workspaceId = key.slice("w:".length);
       if (!isLevel(value) || !consent.levels.includes(value))
         return errorPage(origin, `dohc could not read this choice. ${START_AGAIN}`);
-      const workspaceId = key.slice("w:".length);
-      if (listed.has(workspaceId)) reach.set(workspaceId, value);
-      else listChanged = true;
+      if (!listed.has(workspaceId)) listChanged = true;
+      else if (offeredIn(consent, workspaceId).includes(value)) reach.set(workspaceId, value);
+      else return errorPage(origin, `dohc could not read this choice. ${START_AGAIN}`);
     }
     const typedName = agent ? agent.name : (form.get("name") ?? "");
     const named = agent ? null : nameChoice(typedName);
