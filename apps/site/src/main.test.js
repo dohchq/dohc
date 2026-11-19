@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import html from "../index.html?raw";
 
 const state = vi.hoisted(() => ({ fail: true }));
+vi.mock("./hero-engine", () => ({ engineLoadFinished: new Promise(() => {}) }));
 vi.mock("./ProductDemo", async () => {
   const { createElement } = await import("react");
   return {
@@ -32,7 +33,16 @@ it("restores an operable loader after a React render error and retries with a fr
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
   try {
     await import("./main.tsx");
-    appear([{ isIntersecting: true }]);
+    const status = host.querySelector("[data-demo-status]");
+    status.textContent = "";
+    void appear([
+      { isIntersecting: true, intersectionRatio: 0.1, boundingClientRect: { top: 700 } },
+    ]);
+    expect(status.textContent).toBe("");
+    await appear([
+      { isIntersecting: true, intersectionRatio: 0.6, boundingClientRect: { top: 140 } },
+    ]);
+    expect(status.textContent).toContain("Loading");
     const retry = host.querySelector("[data-demo-retry]");
     await vi.waitFor(() => expect(retry.hidden).toBe(false), { timeout: 10_000 });
     expect(host.querySelector("[data-demo-status]").textContent).toContain("could not load");

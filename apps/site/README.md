@@ -54,3 +54,14 @@ graphite, almost monochrome). Fonts are bundled from Fontsource packages,
 with no external font requests. `styles.css` embeds `Inter`,
 `Source Serif 4`, and the handwriting face `Homemade Apple`. The demo
 loads `Inter` and `IBM Plex Mono` in `src/main.tsx` when it mounts.
+
+### Rebuild the studio reflections
+
+The three figures use a reflection map baked from the CC0 Poly Haven studio in `assets/`.
+If the lighting or three.js cube layout changes, start the local Vite server and open
+`/assets/bake-reflections.html`. Download the EXR to `apps/site`. From that directory,
+run the command below. It copies the floating-point color channels without clipping the highlights.
+
+```sh
+ffmpeg -y -i figure-reflections.exr -vf "mergeplanes=0x000102:gbrpf32le" -frames:v 1 public/figure-reflections.hdr
+```
