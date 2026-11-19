@@ -77,7 +77,7 @@ fn other_computers_write_to(root: &Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn other_computers_write_to(root: &Path) -> bool {
-    const SHARED_FILESYSTEMS: [u32; 11] = [
+    const SHARED_FILESYSTEMS: [u32; 12] = [
         0x6969,
         0x517b,
         0xff53_4d42,
@@ -86,6 +86,7 @@ fn other_computers_write_to(root: &Path) -> bool {
         0x6573_5546,
         0x00c3_6400,
         0x5346_414f,
+        0x6b41_4653,
         0x786f_4256,
         0x7c7c_6673,
         0x0bd0_0bd0,
