@@ -241,6 +241,18 @@ export function RelayShareDialog(props: {
     revision: invitedRevision,
   });
   const loadInvited = invited.load;
+  const listedNow = invited.people;
+  useEffect(() => {
+    setChangedAccess((current) => {
+      const kept = Object.entries(current.byGrant).filter(
+        ([grantId]) =>
+          !listedNow.some((person) => person.grantId === grantId && person.access !== null),
+      );
+      return kept.length === Object.keys(current.byGrant).length
+        ? current
+        : { ...current, byGrant: Object.fromEntries(kept) };
+    });
+  }, [listedNow]);
   const listed = held ? [] : invited.people;
   const invitedPeople = [
     ...listed,
@@ -446,8 +458,10 @@ function InvitedPersonRow(props: {
         grantId: person.grantId,
         access,
       });
+      if (!current()) return;
       props.onAccessChanged(changed.access);
-      if (current()) setAsked(null);
+      setAsked(null);
+      automations.forget();
     } catch (cause) {
       if (current())
         setError(ipcErrorMessage(cause, `dohc could not change ${person.name}'s access.`));

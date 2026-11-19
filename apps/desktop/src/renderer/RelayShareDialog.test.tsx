@@ -6124,9 +6124,9 @@ describe("people and links on one surface", () => {
   });
 
   it("changes a person's access from their row, in place", async () => {
-    bridgeMock.listSharingAccess.mockResolvedValue(
-      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
-    );
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([invitedRow("ana", "ana@dohc.test")]))
+      .mockResolvedValue(sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit" })]));
     const change = controllable<unknown>();
     bridgeMock.retuneRelayShareGrant.mockReturnValue(change.promise);
     const user = userEvent.setup();
@@ -6164,6 +6164,31 @@ describe("people and links on one surface", () => {
     expect(screen.getAllByTestId(/^share-invited-(?!options)/u)).toHaveLength(1);
   });
 
+  it("shows the level a later reading of the list reports, over the one it set", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([invitedRow("ana", "ana@dohc.test")]))
+      .mockResolvedValue(
+        sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "comment" })]),
+      );
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("share-person-access-ana").textContent).toBe("Can comment"),
+    );
+  });
+
   it("keeps the level and says why when the change fails", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
       sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit" })]),
@@ -6186,9 +6211,12 @@ describe("people and links on one surface", () => {
   });
 
   it("warns before Edit stops an automation, and changes on the second choice", async () => {
-    bridgeMock.listSharingAccess.mockResolvedValue(
-      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
-    );
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([invitedRow("ana", "ana@dohc.test")]))
+      .mockResolvedValueOnce(
+        sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit" })]),
+      )
+      .mockResolvedValue(sharingAccess([invitedRow("ana", "ana@dohc.test")]));
     bridgeMock.automationShareImpact.mockResolvedValue({
       stops: [
         {
@@ -6226,6 +6254,19 @@ describe("people and links on one surface", () => {
     );
     expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce();
     expect(screen.queryByTestId("share-automation-warning")).toBeNull();
+
+    await user.click(screen.getByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-view"));
+    await waitFor(() => expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect((screen.getByTestId("share-person-access-ana") as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    await user.click(screen.getByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    expect(await screen.findByTestId("share-automation-warning")).toBeTruthy();
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2);
   });
 
   it("copies only the invitation asked for last, when an earlier one answers late", async () => {

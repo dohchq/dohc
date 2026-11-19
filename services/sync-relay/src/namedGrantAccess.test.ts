@@ -144,6 +144,14 @@ it("keeps a grant that came from a link at or below the link's access", async ()
     generation: before.generation + 1,
     parentGrantId: "link",
   });
+
+  expect((await retune("owner", "dependent", { workspaceId: "w", access: "comment" })).status).toBe(
+    200,
+  );
+  expect(storage.getShareGrant("dependent")).toMatchObject({
+    access: "comment",
+    generation: before.generation + 2,
+  });
 });
 
 it("refuses everyone but the owner, and every request that is not a change", async () => {
@@ -190,6 +198,25 @@ it("refuses a revoked grant and a share that is not of files", async () => {
     (await retune("owner", "member", { workspaceId: "w", access: "edit" }, "members")).status,
   ).toBe(404);
   expect(storage.getShareGrant("member")).toMatchObject({ access: "view", generation: 1 });
+
+  storage.createShare({
+    share: {
+      ...storage.getShare("s")!,
+      shareId: "chat",
+      selectorJson: JSON.stringify({ kind: "chat", channelWireId: "channel_wire_team" }),
+    },
+    grant: {
+      ...NAMED,
+      shareId: "chat",
+      grantId: "chatter",
+      principalUserId: "reader",
+      access: "read-only",
+    },
+  });
+  expect(
+    (await retune("owner", "chatter", { workspaceId: "w", access: "edit" }, "chat")).status,
+  ).toBe(404);
+  expect(storage.getShareGrant("chatter")).toMatchObject({ access: "read-only", generation: 1 });
 
   expect(
     storage.removeShareAccess({ shareId: "s", grantId: "named", actorUserId: "owner", nowMs: 3000 })
