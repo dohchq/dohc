@@ -54,11 +54,7 @@ const schema = {
     WHERE op_kind = 'chat.message.append' AND json_valid(payload_json)`,
 } as const;
 
-// Phone alerts. A phone's delivery has no installation; its generation names
-// the binding. It waits for its message (`relay_seq` null) when an agent's run
-// Notice arrives before the reply. The key holds no source, so a message and
-// its Notice give one delivery. `sender_key` caps one sender's phone alerts to
-// one recipient. Arrivals keep the server's first-append time of recent messages.
+// Phone rows: no installation, `relay_seq` null while a run Notice waits, one key per message.
 const nativeSchema = {
   ...schema,
   [TABLE]: `CREATE TABLE sync_relay_push_deliveries (
@@ -168,19 +164,20 @@ function senderKey(storage: StorageContext, message: PushMessage): string {
   return `link:${String(grant ?? message.linkPrincipalId)}`;
 }
 
-// A phone keeps only a thread's newest pending alert. A superseded one keeps its key until
-// cleanup, so a replay can't revive it. One still waiting for its message stays.
+// A phone keeps only the alert for a thread's newest live pending message. A superseded one keeps
+// its key until cleanup, so a replay can't revive it. One still waiting for its message stays.
 function supersede(
   storage: StorageContext,
   row: { generation: number; workspaceId: string; threadId: string },
-  deliveryId: string,
   nowMs: number,
 ): void {
+  const thread = [row.generation, row.workspaceId, row.threadId] as const;
   storage.db
     .prepare(`UPDATE ${TABLE} SET state = 'dropped' WHERE generation = ? AND workspace_id = ?
-      AND thread_id = ? AND state = 'pending' AND relay_seq IS NOT NULL AND delivery_id <> ?
-      AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
-    .run(row.generation, row.workspaceId, row.threadId, deliveryId, nowMs);
+      AND thread_id = ? AND state = 'pending' AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+      AND relay_seq < (SELECT max(relay_seq) FROM ${TABLE} WHERE generation = ? AND workspace_id = ?
+        AND thread_id = ? AND state = 'pending' AND expires_at_ms > ?)`)
+    .run(...thread, nowMs, ...thread, nowMs);
 }
 
 interface DeliveryRow {
@@ -238,8 +235,7 @@ function insertDelivery(storage: StorageContext, row: DeliveryRow, nowMs: number
         AND message_id = ? AND generation = ? AND notice_id IS NULL`).run(row.noticeId, ...key);
     return;
   }
-  if (row.installationId === null && row.relaySeq !== null)
-    supersede(storage, row, deliveryId, nowMs);
+  if (row.installationId === null && row.relaySeq !== null) supersede(storage, row, nowMs);
 }
 
 /** Runs inside the message append transaction. No network work may enter here. */
@@ -262,27 +258,27 @@ export function recordPushDeliveries(
       .prepare(`INSERT OR IGNORE INTO sync_relay_push_arrivals
         (workspace_id, thread_id, message_id, relay_seq, arrived_at_ms) VALUES (?, ?, ?, ?, ?)`)
       .run(workspaceId, threadId, messageId, relaySeq, nowMs);
-    // A run Notice that came first waited for this reply; it alerts only if the reply is its agent's.
+    // A run Notice that came first waited for this reply; it alerts only while live and only if the
+    // reply is its agent's. Otherwise it gives way, so the reply's own alert can still queue.
     for (const row of storage.db
-      .prepare(`SELECT delivery_id, account_user_id, generation FROM ${TABLE} WHERE workspace_id = ?
-        AND thread_id = ? AND message_id = ? AND relay_seq IS NULL AND state = 'pending'`)
+      .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms FROM ${TABLE}
+        WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL AND state = 'pending'`)
       .all(workspaceId, threadId, messageId)) {
       const userId = String(row.account_user_id);
       const deliveryId = String(row.delivery_id);
-      const eligible =
-        isOwnAgentMessage(message, userId) &&
-        pushMessageAccess(storage, message, userId) !== null &&
-        phoneCanShow(storage, userId, workspaceId, threadId);
+      if (
+        Number(row.expires_at_ms) <= nowMs ||
+        !isOwnAgentMessage(message, userId) ||
+        !pushMessageAccess(storage, message, userId) ||
+        !phoneCanShow(storage, userId, workspaceId, threadId)
+      ) {
+        storage.db.prepare(`DELETE FROM ${TABLE} WHERE delivery_id = ?`).run(deliveryId);
+        continue;
+      }
       storage.db
-        .prepare(`UPDATE ${TABLE} SET relay_seq = ?, state = ? WHERE delivery_id = ?`)
-        .run(relaySeq, eligible ? "pending" : "dropped", deliveryId);
-      if (eligible)
-        supersede(
-          storage,
-          { generation: Number(row.generation), workspaceId, threadId },
-          deliveryId,
-          nowMs,
-        );
+        .prepare(`UPDATE ${TABLE} SET relay_seq = ?, expires_at_ms = ? WHERE delivery_id = ?`)
+        .run(relaySeq, nowMs + PUSH_DELIVERY_EXPIRY_MS, deliveryId);
+      supersede(storage, { generation: Number(row.generation), workspaceId, threadId }, nowMs);
     }
   }
   // Browsers of the owner and of share grantees; phones of the owner alone.
@@ -348,12 +344,7 @@ export function recordPushDeliveries(
   }
 }
 
-/**
- * Runs inside the Notice post transaction, for the recipient's own
- * agent-run Notice naming its reply. The reply must be the recipient's
- * agent's, first appended no longer ago than a delivery lives. A reply
- * not yet appended leaves a delivery that waits for it until expiry.
- */
+/** In the Notice transaction: the owner's agent's fresh reply alerts, or one not yet appended is awaited. */
 export function recordNoticePushDeliveries(
   storage: StorageContext,
   input: {
@@ -428,11 +419,7 @@ export interface PushDelivery {
   leaseToken: string;
 }
 
-/**
- * Leases the next due delivery: at most one per recipient at a time, the
- * recipient who waited longest first, within the recipient's rate and, for
- * a phone, the sender's. `native: false` holds phone deliveries back.
- */
+/** Leases one due delivery per recipient, longest-waiting first; `native: false` holds phones back. */
 export function claimPushDelivery(
   storage: StorageContext,
   nowMs: number,
@@ -528,11 +515,7 @@ export function finishPushDelivery(
   );
 }
 
-/**
- * Includes leases, a busy recipient, and rate limits, so an unavailable row
- * cannot cause a busy loop. Phone deliveries are due no sooner than
- * `nativeFromMs`. A delivery still waiting for its message is due only to expire.
- */
+/** Counts leases, busy recipients and rate limits so nothing busy-loops; phones wait for `nativeFromMs`. */
 export function nextPushDeliveryAt(
   storage: StorageContext,
   nowMs: number,
