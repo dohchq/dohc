@@ -95,6 +95,7 @@ const accessNoticeIdentity = (grantId: string) => `share-access:${grantId}`;
 // shown on request, or hidden up to the generation a Dismiss covered.
 type SkipState = "shown" | number;
 export type SkipView = ReadonlyMap<string, SkipState>;
+export type RemovedEndedCopies = ReadonlyMap<string, number>;
 
 const LANE = {
   granted: {
@@ -337,11 +338,13 @@ function retunable(row: LeveledRow): row is LeveledRow & { access: ShareAccess }
 const listedSince = (row: AccessShareRow, changed: ChangedAccess) =>
   row.generation !== null && row.generation >= changed.generation;
 
-function levelNow(row: LeveledRow, change: AccessChange | undefined): Level {
-  if (change?.asked) return change.asked;
+function confirmedLevel(row: LeveledRow, change: AccessChange | undefined): Level {
   const answered = change?.answered;
   return answered && !listedSince(row, answered) ? answered.access : row.access;
 }
+
+const levelNow = (row: LeveledRow, change: AccessChange | undefined): Level =>
+  change?.asked ?? confirmedLevel(row, change);
 
 const changingAccess = (change: AccessChange | undefined) => !!change?.asked;
 const writeUnderWay = (change: AccessChange | undefined, shareBusy: boolean) =>
@@ -521,9 +524,10 @@ function receivedEntry(
   row: AccessShareRow | null,
   mount: ShareMount | undefined,
   listed: boolean,
+  endedCopyRemoved: boolean,
 ): ReceivedEntry {
   const shareId = row?.shareId ?? mount!.shareId;
-  const endedCopy = mount?.ended === true;
+  const endedCopy = mount?.ended === true || endedCopyRemoved;
   const removed = endedCopy || (row ? row.status === "removed" : listed);
   const damaged = row ? row.status === "damaged" : mount?.damaged === true;
   const active = row?.status === "active" && !endedCopy;
@@ -579,8 +583,16 @@ const knownAnswer = (view: AccessView): AccessAnswer | null =>
 
 type SenderGroup = { sender: ReceivedEntry["sender"]; entries: ReceivedEntry[] };
 
-function listReceived(view: AccessView, mounts: readonly ShareMount[]) {
+function listReceived(
+  view: AccessView,
+  mounts: readonly ShareMount[],
+  removedEndedCopies: RemovedEndedCopies,
+) {
   const known = knownAnswer(view);
+  const listedBeforeRemoval = (shareId: string) => {
+    const removedAtMs = removedEndedCopies.get(shareId);
+    return removedAtMs !== undefined && (known?.checkedAtMs ?? 0) <= removedAtMs;
+  };
   const rows =
     view.status === "ready"
       ? view.answer.rows.filter((row): row is AccessShareRow => row.kind === "share")
@@ -595,6 +607,7 @@ function listReceived(view: AccessView, mounts: readonly ShareMount[]) {
             row,
             mounts.find((mount) => mount.shareId === row.shareId),
             true,
+            listedBeforeRemoval(row.shareId),
           ),
         )
       : []),
@@ -602,7 +615,7 @@ function listReceived(view: AccessView, mounts: readonly ShareMount[]) {
       ? []
       : mounts
           .filter((mount) => !rows.some((row) => row.shareId === mount.shareId))
-          .map((mount) => receivedEntry(null, mount, whole))),
+          .map((mount) => receivedEntry(null, mount, whole, false))),
   ];
   const repeated = repeatedNames(entries.map((entry) => entry.subject.name));
   const bySender = new Map<string, SenderGroup>();
@@ -762,8 +775,9 @@ export type SharingActions = {
   reviewConflicts: () => void;
 };
 
+type PersonCopyId = "copy" | "copy-code";
 type PersonCopy = {
-  id: string;
+  id: PersonCopyId;
   label: string;
   secret: CopySecret;
   getText: () => Promise<string | null>;
@@ -778,24 +792,28 @@ function PersonMenu(props: {
 }) {
   const report = useContext(ShellErrorReporter);
   const [open, setOpen] = useState(false);
-  const [feedback, setFeedback] = useState<{ id: string; words: CopyFeedback } | null>(null);
+  const [feedback, setFeedback] = useState<{ id: PersonCopyId; words: CopyFeedback } | null>(null);
   const latest = useRef({ copies: props.copies, report });
   latest.current = { copies: props.copies, report };
-  const pickedId = useRef<string | null>(null);
+  const copyingId = useRef<PersonCopyId | null>(null);
   const answered = useRef(false);
   const usingKeyboard = useRef(false);
   const status = useRef<HTMLSpanElement>(null);
-  const action = useRef<ReturnType<typeof createCopy<void>> | null>(null);
+  const action = useRef<ReturnType<typeof createCopy<PersonCopyId>> | null>(null);
   useLayoutEffect(() => {
-    const picked = () => latest.current.copies.find((copy) => copy.id === pickedId.current);
-    const made = createCopy({
-      getText: () => picked()?.getText() ?? null,
+    const copyOf = (id: PersonCopyId | null) =>
+      latest.current.copies.find((copy) => copy.id === id);
+    const made = createCopy<PersonCopyId>({
+      getText: (id) => {
+        copyingId.current = id;
+        return copyOf(id)?.getText() ?? null;
+      },
       report: () => latest.current.report,
-      secret: () => picked()?.secret,
+      secret: () => copyOf(copyingId.current)?.secret,
       show: (next) => {
-        if (next && pickedId.current !== null) {
+        if (next && copyingId.current !== null) {
           answered.current = true;
-          setFeedback({ id: pickedId.current, words: next });
+          setFeedback({ id: copyingId.current, words: next });
           return;
         }
         if (!answered.current) return;
@@ -837,10 +855,7 @@ function PersonMenu(props: {
           ...copies.map((copy) => ({
             id: copy.id,
             label: feedback?.id === copy.id ? COPY_WORDS[feedback.words] : copy.label,
-            onSelect: () => {
-              pickedId.current = copy.id;
-              void action.current?.copy();
-            },
+            onSelect: () => void action.current?.copy(copy.id),
           })),
           ...(removal
             ? [
@@ -905,28 +920,25 @@ function PersonRow(props: {
         : grant.via === "dependent"
           ? "Joined through a link"
           : "";
-  const browserLink = invitable({ ...grant, access });
+  const browserLink = invitable({ ...grant, access: confirmedLevel(grant, props.change) });
   const invitation = props.invitations && browserLink;
-  const copies: PersonCopy[] = copyable(grant)
-    ? [
-        {
-          id: "copy",
-          label: grant.via === "named" ? "Copy invitation" : "Copy code",
-          secret: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
-          getText: () => actions.copy(grant, invitation ? "invitation" : "code"),
-        },
-        ...(browserLink
-          ? [
-              {
-                id: "copy-code",
-                label: "Copy share code",
-                secret: SHARE_CODE_SECRET,
-                getText: () => actions.copy(grant, "code"),
-              },
-            ]
-          : []),
-      ]
-    : [];
+  const copyInvitation: PersonCopy = {
+    id: "copy",
+    label: grant.via === "named" ? "Copy invitation" : "Copy code",
+    secret: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
+    getText: () => actions.copy(grant, invitation ? "invitation" : "code"),
+  };
+  const copyCode: PersonCopy = {
+    id: "copy-code",
+    label: "Copy share code",
+    secret: SHARE_CODE_SECRET,
+    getText: () => actions.copy(grant, "code"),
+  };
+  const copies = !copyable(grant)
+    ? []
+    : browserLink
+      ? [copyInvitation, copyCode]
+      : [copyInvitation];
   return (
     <li data-testid="sharing-person" data-grant-id={grant.grantId} className="flex flex-col gap-1">
       <div className="flex min-h-8 items-center gap-2">
@@ -1348,7 +1360,7 @@ function receivedActions(
           onSelect: () =>
             row?.status === "removed" ? actions.clear(shareId, mount) : actions.unmount(mount),
         }
-      : row && entry.removed
+      : row?.status === "removed"
         ? { label: "Remove from list", onSelect: () => actions.clear(shareId, undefined) }
         : null;
     return { primary, menu: showSkips };
@@ -1760,6 +1772,7 @@ export function SharingPanel(props: {
   notSentWhileOpen: readonly string[];
   mounts: readonly ShareMount[];
   skipView: SkipView;
+  removedEndedCopies: RemovedEndedCopies;
   invitations: boolean;
   accessChanges: AccessChanges;
   confirmKey: string | null;
@@ -1796,8 +1809,8 @@ export function SharingPanel(props: {
     );
   }, [grantedView, props.waiting]);
   const received = useMemo(
-    () => listReceived(props.received, props.mounts),
-    [props.mounts, props.received],
+    () => listReceived(props.received, props.mounts, props.removedEndedCopies),
+    [props.mounts, props.received, props.removedEndedCopies],
   );
 
   const focusView = focus ? (focus.lane === "granted" ? props.granted : props.received) : null;
@@ -2078,7 +2091,12 @@ export function SharingView(props: {
   onUnmount: (path: string) => Promise<void>;
   shareRemovals: ShareRemovalNotices;
   sharesRevision: number;
-  reportError: (fallback: string, error: unknown, retry: () => void, identity?: string) => void;
+  reportError: (
+    fallback: string,
+    error: unknown,
+    retry: () => void | false,
+    identity?: string,
+  ) => void;
   // What to focus once its lane answers, as Settings search asked.
   focus: SharingFocus | null;
   onFocused: () => void;
@@ -2112,6 +2130,7 @@ export function SharingView(props: {
     setBusyShareIds(next);
   };
   const [skipView, setSkipView] = useState<SkipView>(new Map());
+  const [removedEndedCopies, setRemovedEndedCopies] = useState<RemovedEndedCopies>(new Map());
   const [accessChanges, setAccessChanges] = useState<AccessChanges>({});
   const [changesFor, setChangesFor] = useState(workspaceId);
   if (changesFor !== workspaceId) {
@@ -2129,6 +2148,8 @@ export function SharingView(props: {
   };
   const writing = (grant: AccessShareRow) =>
     writeUnderWay(changesNow.current[grant.grantId], busyNow.current.has(grant.shareId));
+  const unlessWriting = (grant: AccessShareRow, write: () => void) => (): void | false =>
+    writing(grant) ? false : write();
   // Bumped when the view closes, so a late answer leaves the view's own state alone.
   const epoch = useRequestSequence([workspaceId]);
   const openLookups = useRequestSequence([workspaceId]);
@@ -2283,7 +2304,7 @@ export function SharingView(props: {
         workspaceId,
         message: `dohc could not remove ${subject}.`,
         cause,
-        retry: () => void removePerson(grant, title),
+        retry: unlessWriting(grant, () => void removePerson(grant, title)),
       });
     } finally {
       if (epoch.isCurrent(token)) setBusy(grant.shareId, false);
@@ -2318,7 +2339,7 @@ export function SharingView(props: {
       props.reportError(
         `dohc could not change ${recipientOf(grant)}'s access to ${title}.`,
         cause,
-        () => void retune(grant, access, title),
+        unlessWriting(grant, () => void retune(grant, access, title)),
         identity,
       );
     }
@@ -2334,6 +2355,12 @@ export function SharingView(props: {
     return found.share;
   }
 
+  function receivedFailed(token: number, fallback: string, cause: unknown, retry: () => void) {
+    const gone = cause instanceof NoLongerShared;
+    props.reportError(gone ? cause.message : fallback, cause, retry);
+    if (gone && epoch.isCurrent(token)) void loadReceived({ refreshed: refresh() });
+  }
+
   async function mount(shareId: string) {
     const token = epoch.current();
     setBusy(shareId, true);
@@ -2342,7 +2369,8 @@ export function SharingView(props: {
       await bridge().mountShare({ workspaceId, shareCode: share.shareCode });
       props.onMountsChanged();
     } catch (cause) {
-      props.reportError(
+      receivedFailed(
+        token,
         "dohc could not add this share to the workspace.",
         cause,
         () => void mount(shareId),
@@ -2368,11 +2396,8 @@ export function SharingView(props: {
       }
       open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true });
     } catch (cause) {
-      if (!openLookups.isCurrent(lookup)) return;
-      if (cause instanceof NoLongerShared) {
-        props.reportError(cause.message, cause, retry);
-        void loadReceived({ refreshed: refresh() });
-      } else props.reportError("dohc could not open this share.", cause, retry);
+      if (openLookups.isCurrent(lookup))
+        receivedFailed(token, "dohc could not open this share.", cause, retry);
     } finally {
       if (epoch.isCurrent(token)) setBusy(shareId, false);
     }
@@ -2381,8 +2406,11 @@ export function SharingView(props: {
   async function unmount(target: ShareMount) {
     const token = epoch.current();
     setBusy(target.shareId, true);
+    if (target.ended)
+      setRemovedEndedCopies((removed) => new Map(removed).set(target.shareId, Date.now()));
     try {
       await props.onUnmount(`shared-with-me/${target.label}`);
+      if (target.ended && epoch.isCurrent(token)) void loadReceived({ refreshed: refresh() });
     } finally {
       if (epoch.isCurrent(token)) setBusy(target.shareId, false);
     }
@@ -2498,6 +2526,7 @@ export function SharingView(props: {
       notSentWhileOpen={props.notSentWhileOpen ?? []}
       mounts={props.mounts}
       skipView={skipView}
+      removedEndedCopies={removedEndedCopies}
       invitations={invitations}
       accessChanges={accessChanges}
       confirmKey={confirmKey}

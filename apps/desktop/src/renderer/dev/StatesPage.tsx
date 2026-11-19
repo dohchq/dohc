@@ -2434,6 +2434,7 @@ function SharingSpecimen(props: {
         waiting={SHARING_WAITING}
         mounts={props.mounts ?? SHARING_MOUNTS}
         skipView={props.skipView ?? new Map()}
+        removedEndedCopies={new Map()}
         notSentWhileOpen={[]}
         invitations
         accessChanges={{}}
