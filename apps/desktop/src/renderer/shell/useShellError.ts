@@ -1185,8 +1185,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, paths?: readonly string[]) => {
-      push({ message, retry: null, tone: "warning", ...(paths ? { paths } : {}) });
+    (message: string, paths?: readonly string[], identity?: string) => {
+      push({
+        message,
+        retry: null,
+        tone: "warning",
+        ...(paths ? { paths } : {}),
+        ...(identity ? { identity } : {}),
+      });
     },
     [push],
   );

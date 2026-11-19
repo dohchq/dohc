@@ -564,6 +564,18 @@ export const SaveOwnerLiveRecoveryCopyResult = z
   })
   .strict();
 export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
+// Packages Save recovery copy kept on this computer with no readable copy in
+// the workspace. `path` is the note, or null when the package can't be read.
+export const ListOwnerLiveRecoveryPackagesResult = z
+  .object({
+    packages: z.array(
+      z.object({ path: SAFE_RELATIVE_PATH.nullable(), packagePath: SAFE_RELATIVE_PATH }).strict(),
+    ),
+  })
+  .strict();
+export type ListOwnerLiveRecoveryPackagesResult = z.infer<
+  typeof ListOwnerLiveRecoveryPackagesResult
+>;
 
 export const OwnerLiveDocument = z
   .object({

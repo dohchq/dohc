@@ -121,6 +121,10 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+import {
+  LiveRecoveryPackageNotices,
+  type LiveRecoveryPackage,
+} from "./shell/LiveRecoveryPackageNotices";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
@@ -3748,6 +3752,20 @@ export function DesktopWorkspaceShell(props: {
   // for a workspace this window left paints nothing. One save per file runs
   // at a time, and asking again while it runs waits for it.
   const recoverySaves = useRef(new Map<string, Promise<void>>());
+  const showRecoveryPackage = useCallback(
+    (kept: LiveRecoveryPackage) =>
+      showWarningNotice(
+        `${kept.path === null ? "Kept edits" : `Kept edits for ${kept.path}`} have no readable copy. They are saved on this computer, in the file below.`,
+        [kept.packagePath],
+        `live-recovery-package:${kept.packagePath}`,
+      ),
+    [showWarningNotice],
+  );
+  const failRecoveryPackages = useCallback(
+    (error: unknown, retry: () => void) =>
+      reportShellError("dohc could not check for saved recovery packages.", error, retry),
+    [reportShellError],
+  );
   useEffect(() => {
     saveLiveRecoveryCopyRef.current = (id, path, incident) => {
       const key = `${id}\n${path}\n${incident ?? ""}`,
@@ -8040,6 +8058,13 @@ export function DesktopWorkspaceShell(props: {
         setShareTarget({ kind: "version", versionId: version.id, versionName: version.name });
   const shell = (
     <WorkspaceSessionProvider workspaceId={workspaceId}>
+      {workspaceIsReady && !shareView ? (
+        <LiveRecoveryPackageNotices
+          workspaceId={workspaceId}
+          show={showRecoveryPackage}
+          fail={failRecoveryPackages}
+        />
+      ) : null}
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
           <CustomizeContext.Provider value={customizeContext}>

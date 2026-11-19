@@ -131,6 +131,9 @@ function harness() {
     storedOn: "this-computer",
     keptEdits: "kept",
   }));
+  const listOwnerLiveRecoveryPackages = vi.fn<Dependencies["listOwnerLiveRecoveryPackages"]>(
+    async () => ({ packages: [] }),
+  );
   const retryOwnerLiveRelease = vi.fn<Dependencies["retryOwnerLiveRelease"]>(async () => undefined);
   const resumeOwnerLivePause = vi.fn<NonNullable<Dependencies["resumeOwnerLivePause"]>>(
     async () => null,
@@ -195,6 +198,7 @@ function harness() {
     resumeOwnerLivePause,
     ownerLivePauses,
     saveOwnerLiveRecoveryCopy,
+    listOwnerLiveRecoveryPackages,
     sharesChanged,
     sendRendererActivity,
     reconcileReceivedShares,
@@ -1132,6 +1136,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.resumeOwnerLiveDocument.channel,
       relayShareOperations.retryOwnerLiveQuarantine.channel,
       relayShareOperations.saveOwnerLiveRecoveryCopy.channel,
+      relayShareOperations.listOwnerLiveRecoveryPackages.channel,
       relayShareOperations.createRelayShare.channel,
       relayShareOperations.listRelayShares.channel,
       relayShareOperations.getRelayReceivedShare.channel,
@@ -1157,7 +1162,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.promoteRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(32);
+    expect(h.handlers.size).toBe(33);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -1432,6 +1437,7 @@ const ownerInputs = {
   },
   revokeRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant" },
   saveOwnerLiveRecoveryCopy: { workspaceId, path: "notes/a.md" },
+  listOwnerLiveRecoveryPackages: { workspaceId },
 } satisfies Record<keyof typeof relayShareOperations, unknown>;
 const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
   name,
