@@ -38,8 +38,9 @@ export function createShareInvitationEmailer(options: {
     if (!sendEmail) return { invitationEmail: "unavailable" };
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const startedAt = performance.now();
+    let answered = false;
     const assertInTime = () => {
-      if (performance.now() - startedAt >= timeoutMs) throw new Error("timed out");
+      if (answered || performance.now() - startedAt >= timeoutMs) throw new Error("timed out");
     };
     const email = async (): Promise<ShareInvitationEmailAnswer> => {
       const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
@@ -80,7 +81,10 @@ export function createShareInvitationEmailer(options: {
       return await Promise.race([
         emailing,
         new Promise<never>((_, reject) => {
-          deadline = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+          deadline = setTimeout(() => {
+            answered = true;
+            reject(new Error("timed out"));
+          }, timeoutMs);
         }),
       ]);
     } catch {
