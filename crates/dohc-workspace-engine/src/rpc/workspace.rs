@@ -1985,17 +1985,17 @@ mod tests {
                 "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
             )
             .expect("a table to damage");
-            let root_page: u64 = conn
+            let root_page: i64 = conn
                 .query_row(
                     "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
                     [],
                     |row| row.get(0),
                 )
                 .expect("root page");
-            let page_size: u64 = conn
+            let page_size: i64 = conn
                 .pragma_query_value(None, "page_size", |row| row.get(0))
                 .expect("page size");
-            (root_page, page_size)
+            (root_page.unsigned_abs(), page_size.unsigned_abs())
         };
         {
             use std::io::{Seek, SeekFrom, Write};

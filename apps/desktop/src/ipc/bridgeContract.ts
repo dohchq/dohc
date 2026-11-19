@@ -1581,6 +1581,7 @@ export const databaseImportOperations = {
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
+  "state-corrupt",
   "migration-failed",
   "migrated-by-newer-build",
 ] as const satisfies readonly EngineStoreRefusal[];
@@ -1973,6 +1974,8 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "This workspace's data store is not in the format this version of dohc uses.";
     case "foreign-database":
       return "dohc cannot read this workspace's data store.";
+    case "state-corrupt":
+      return "This workspace's data store is damaged.";
     case "migration-failed":
       return "dohc could not update this workspace's data store to this version.";
     case "migrated-by-newer-build":
@@ -1980,14 +1983,15 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
   }
 }
 
-// What the refusal needs. A store from another format, or a file that is not
-// a dohc database, is rebuilt from the workspace files. A store this build
+// What the refusal needs. A store from another format, a file that is not a
+// dohc database, or a damaged one, is rebuilt from the workspace files. A store this build
 // could not migrate, or one a newer build migrated, is intact and waits for a
 // build that can open it.
 export function engineStoreRefusalRecovery(cause: EngineStoreRefusal): "rebuild" | "update" {
   switch (cause) {
     case "unsupported-fingerprint":
     case "foreign-database":
+    case "state-corrupt":
       return "rebuild";
     case "migration-failed":
     case "migrated-by-newer-build":

@@ -321,6 +321,7 @@ export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
+  "state-corrupt",
   "migration-failed",
   "migrated-by-newer-build",
 ] as const;
