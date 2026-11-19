@@ -3904,6 +3904,88 @@ it("verifies a capture whose source is the settlement moment of a stopped note t
     f.close();
   }
 });
+it("resumes from the owner's save after a Stop when the host's last save lands after it", async () => {
+  const f = fixture();
+  try {
+    const r = await retiringFeed(f, true, false);
+    r.applyEdit();
+    await r.upload(r.editBytes);
+    const { audit, moment } = await retiringSettlement(f, r);
+    expect(await r.push([r.ydocRow(r.editBytes)], 0)).toMatchObject({ status: 200 });
+    const doc = new Y.Doc({ gc: false });
+    Y.applyUpdate(doc, f.capture.fullState);
+    Y.applyUpdate(doc, r.editBytes);
+    const vector = Y.encodeStateVector(doc);
+    doc.getMap("frontmatter").set("title", "Owner");
+    const ownerUpdate = Y.encodeStateAsUpdate(doc, vector),
+      state = Buffer.from(Y.encodeStateAsUpdate(doc));
+    doc.destroy();
+    const markdown = markdownOf(f, state);
+    for (const bytes of [ownerUpdate, markdown]) await r.upload(bytes);
+    const stored = () =>
+      f.raw
+        .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE path='docs/a.md'")
+        .get()!.blob_sha256;
+    f.raw
+      .prepare(
+        "INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES ('workspace','main','docs/a.md',?,'text',1)",
+      )
+      .run(hash(markdownOf(f, f.capture.baselineBytes)));
+    const momentId = `moment-ydoc-${hash(state)}`;
+    f.storage.appendLogBatch({
+      workspaceId: "workspace",
+      originId: "owner-device",
+      ops: [
+        r.ydocRow(ownerUpdate),
+        [
+          "moment.append",
+          {
+            momentId,
+            objectId: "object",
+            versionId: "main",
+            path: "docs/a.md",
+            operation: "write",
+            payloadBeforePath: "docs/a.md",
+            payloadAfterPath: "docs/a.md",
+            payloadBeforeContentKind: "text",
+            payloadAfterContentKind: "text",
+            payloadBeforeBlobSha256: stored(),
+            payloadAfterBlobSha256: hash(markdown),
+            payloadAfterByteLength: markdown.length,
+            recordedAtMs: 20,
+          },
+        ] as Row,
+      ].map(([opKind, payload], originSeq) => ({
+        originSeq,
+        opKind,
+        payloadJson: JSON.stringify(payload),
+        recordedAtMs: 20,
+      })),
+      workReferences: { userId: "owner", references: [] },
+    });
+    expect(stored()).toBe(hash(markdown));
+    expect(await r.push([audit(), moment()], 1)).toMatchObject({
+      status: 200,
+      body: { inserted: 2 },
+    });
+    expect(r.coordinate(2)).toEqual(departed("moment.append"));
+    expect(stored()).toBe(hash(markdown));
+    Object.assign(f.capture, { fullState: state });
+    Object.assign(f.capture.source, {
+      committedCursor: Number(
+        f.raw.prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log").get()!.seq,
+      ),
+      sourceMomentId: momentId,
+      sourceDigest: hash(markdown),
+      sourceByteLength: markdown.length,
+      fullStateDigest: hash(state),
+      fullStateByteLength: state.length,
+    });
+    expect(await verify(f)).toEqual({ verified: true });
+  } finally {
+    f.close();
+  }
+});
 const unsettled = "neither ordinary history nor a proved settlement",
   unproved = "Native activation source settlement is not proved.";
 it.each([
