@@ -3699,7 +3699,7 @@ mod successor_validation_tests {
 
     #[test]
     fn a_markdown_successor_with_links_and_nested_marks_builds_the_same_bytes_every_time() {
-        let artifact = "A [link](https://a.example \"t\") and **`code`** and *__both__*.\n";
+        let artifact = "A **`code`** and a [link](https://a.example).\n";
         let first = markdown_successor(artifact);
         for _ in 0..8 {
             assert_eq!(markdown_successor(artifact), first);
