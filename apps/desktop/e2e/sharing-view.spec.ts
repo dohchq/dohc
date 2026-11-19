@@ -64,9 +64,16 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     const dialog = page.getByTestId("share-dialog");
     await dialog.getByTestId("share-email").fill(RECIPIENT_EMAIL);
     await dialog.getByTestId("share-create").click();
-    const shareCode = (await dialog.getByTestId("share-code").textContent()) ?? "";
+    await expect(dialog.getByTestId("share-invited")).toContainText(`Invited ${RECIPIENT_EMAIL}.`);
+    const shareCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      const copy = dialog.getByTestId("share-invitation-copy");
+      await copy.click({ timeout: remainingMs() });
+      await expect(copy).toHaveText("Invitation copied", { timeout: remainingMs() });
+      return desktop!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
+    expect(shareCode.startsWith("dohc-share:")).toBe(true);
     const shareId = shareCode.split(":")[1]!;
-    await dialog.getByTestId("share-done").click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("cloud")).click();

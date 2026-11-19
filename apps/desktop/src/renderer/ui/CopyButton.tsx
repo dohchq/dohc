@@ -72,17 +72,18 @@ function failureWords(
 // as when the failure's toast replaced the toast it sat in, Try again copies
 // the text that failed. A secret keeps no such text: its notice says where to
 // copy it again instead, with no Try again.
-function retryAfter(
-  control: { copy: (() => Promise<void>) | null },
+function retryAfter<Choice>(
+  control: { copy: ((choice: Choice) => Promise<void>) | null },
   report: ReportShellFailure,
   secret: CopySecret | undefined,
   error: unknown,
   text: string | null,
   failure: string | undefined,
+  choice: Choice,
 ): () => void {
   return () => {
     if (control.copy) {
-      void control.copy();
+      void control.copy(choice);
       return;
     }
     if (text === null) {
@@ -93,7 +94,7 @@ function retryAfter(
       report({
         message: failureWords(secret, next, true, failure),
         cause: next,
-        retry: retryAfter(control, report, secret, next, text, failure),
+        retry: retryAfter(control, report, secret, next, text, failure, choice),
       }),
     );
   };
@@ -103,16 +104,18 @@ function retryAfter(
 // has shown for COPY_FEEDBACK_MS. `dispose` when the control goes away.
 // `secret` marks text such as a share link or a code: no copy of it is kept
 // to retry with, and the control lets go of its text source when it goes.
-export function createCopy(options: {
-  getText: () => string | null | Promise<string | null>;
+// A control that offers more than one text names the one to copy as `choice`,
+// and Try again copies that choice again.
+export function createCopy<Choice = void>(options: {
+  getText: (choice: Choice) => string | null | Promise<string | null>;
   report: () => ReportShellFailure | null;
   show: (feedback: CopyFeedback | null) => void;
   secret?: (() => CopySecret | undefined) | undefined;
   failure?: string | undefined;
-}): { copy: () => Promise<void>; dispose: () => void } {
+}): { copy: (choice: Choice) => Promise<void>; dispose: () => void } {
   const { report: reporter, show, secret: secretOf, failure } = options;
   let read: typeof options.getText | null = options.getText;
-  const control: { copy: (() => Promise<void>) | null } = { copy: null };
+  const control: { copy: ((choice: Choice) => Promise<void>) | null } = { copy: null };
   let attempts = 0;
   let live = true;
   let reset: ReturnType<typeof setTimeout> | null = null;
@@ -126,7 +129,7 @@ export function createCopy(options: {
     }, COPY_FEEDBACK_MS);
   }
 
-  function fail(error: unknown, text: string | null) {
+  function fail(error: unknown, text: string | null, choice: Choice) {
     if (live) answer("failed");
     const report = reporter();
     if (!report) return;
@@ -138,21 +141,21 @@ export function createCopy(options: {
     report({
       message: failureWords(secret, error, false, failure),
       cause: error,
-      retry: retryAfter(control, report, secret, error, secret ? null : text, failure),
+      retry: retryAfter(control, report, secret, error, secret ? null : text, failure, choice),
     });
   }
 
-  async function copy() {
+  async function copy(choice: Choice) {
     const source = read;
     if (!source) return;
     const attempt = ++attempts;
     const current = () => live && attempt === attempts;
     let text: string | null;
     try {
-      const pending = source();
+      const pending = source(choice);
       text = pending instanceof Promise ? await pending : pending;
     } catch (error) {
-      if (current()) fail(error, null);
+      if (current()) fail(error, null, choice);
       return;
     }
     if (text === null || !current()) return;
@@ -161,7 +164,7 @@ export function createCopy(options: {
     } catch (error) {
       // A newer click answers for this one. A write the control outlived
       // still fails, and the shell is the one left to say so.
-      if (attempt === attempts) fail(error, text);
+      if (attempt === attempts) fail(error, text, choice);
       return;
     }
     if (current()) answer("copied");
@@ -176,6 +179,75 @@ export function createCopy(options: {
       control.copy = null;
       if (reset !== null) clearTimeout(reset);
     },
+  };
+}
+
+/**
+ * One control's copy for an owner that shows the answer itself, such as a
+ * menu row that answers in its own row. `feedback` holds the answer for
+ * COPY_FEEDBACK_MS, and `announcement` is the same answer for a status
+ * region the owner keeps mounted.
+ */
+export function useCopy<Choice = void>(options: {
+  getText: (choice: Choice) => string | null | Promise<string | null>;
+  words?: Partial<Record<CopyFeedback, string>> | undefined;
+  sensitive?: CopySecret | undefined;
+  failure?: string | undefined;
+}): {
+  copy: (choice: Choice) => void;
+  feedback: CopyFeedback | null;
+  announcement: string;
+  words: Record<CopyFeedback, string>;
+} {
+  const report = useContext(ShellErrorReporter);
+  const words: Record<CopyFeedback, string> = { ...COPY_WORDS, ...options.words };
+  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const getText = useRef<typeof options.getText | null>(options.getText);
+  getText.current = options.getText;
+  const reportTo = useRef(report);
+  reportTo.current = report;
+  const spoken = useRef(words);
+  spoken.current = words;
+  const secret = useRef(options.sensitive);
+  secret.current = options.sensitive;
+  const action = useRef<ReturnType<typeof createCopy<Choice>> | null>(null);
+  const mountedGetText = options.getText;
+  const failure = options.failure;
+  // In the commit that puts the control on screen, so a click that comes
+  // before React's passive effects run still counts.
+  useLayoutEffect(() => {
+    // Set again here: StrictMode runs the cleanup below and this effect
+    // again without a render between them.
+    getText.current = mountedGetText;
+    let announce: ReturnType<typeof setTimeout> | null = null;
+    const copy = createCopy<Choice>({
+      getText: (choice) => getText.current?.(choice) ?? null,
+      report: () => reportTo.current,
+      secret: () => secret.current,
+      failure,
+      show: (next) => {
+        setFeedback(next);
+        // Cleared now and set in a later task, so a second answer inside
+        // the feedback window is announced again.
+        setAnnouncement("");
+        if (announce !== null) clearTimeout(announce);
+        announce = next ? setTimeout(() => setAnnouncement(spoken.current[next]), 0) : null;
+      },
+    });
+    action.current = copy;
+    return () => {
+      copy.dispose();
+      // The text source goes with the control.
+      getText.current = null;
+      if (announce !== null) clearTimeout(announce);
+    };
+  }, []);
+  return {
+    copy: (choice) => void action.current?.copy(choice),
+    feedback,
+    announcement,
+    words,
   };
 }
 
@@ -207,54 +279,13 @@ export function CopyButton(props: {
   disabled?: boolean;
   ref?: Ref<HTMLButtonElement> | undefined;
 }) {
-  const report = useContext(ShellErrorReporter);
   const label = props.label ?? "Copy";
-  const words: Record<CopyFeedback, string> = {
-    ...COPY_WORDS,
-    ...(props.copiedLabel ? { copied: props.copiedLabel } : {}),
-  };
-  const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
-  const [announcement, setAnnouncement] = useState("");
-  const getText = useRef<typeof props.getText | null>(props.getText);
-  getText.current = props.getText;
-  const reportTo = useRef(report);
-  reportTo.current = report;
-  const spoken = useRef(words);
-  spoken.current = words;
-  const secret = useRef(props.sensitive);
-  secret.current = props.sensitive;
-  const action = useRef<ReturnType<typeof createCopy> | null>(null);
-  const mountedGetText = props.getText;
-  const failure = props.failure;
-  // In the commit that puts the button on screen, so a click that comes
-  // before React's passive effects run still counts.
-  useLayoutEffect(() => {
-    // Set again here: StrictMode runs the cleanup below and this effect
-    // again without a render between them.
-    getText.current = mountedGetText;
-    let announce: ReturnType<typeof setTimeout> | null = null;
-    const copy = createCopy({
-      getText: () => getText.current?.() ?? null,
-      report: () => reportTo.current,
-      secret: () => secret.current,
-      failure,
-      show: (next) => {
-        setFeedback(next);
-        // Cleared now and set in a later task, so a second answer inside
-        // the feedback window is announced again.
-        setAnnouncement("");
-        if (announce !== null) clearTimeout(announce);
-        announce = next ? setTimeout(() => setAnnouncement(spoken.current[next]), 0) : null;
-      },
-    });
-    action.current = copy;
-    return () => {
-      copy.dispose();
-      // The text source goes with the button.
-      getText.current = null;
-      if (announce !== null) clearTimeout(announce);
-    };
-  }, []);
+  const { copy, feedback, announcement, words } = useCopy({
+    getText: props.getText,
+    words: props.copiedLabel ? { copied: props.copiedLabel } : undefined,
+    sensitive: props.sensitive,
+    failure: props.failure,
+  });
 
   const shown = feedback ? words[feedback] : label;
   const Icon = feedback ? ICON[feedback] : (props.icon ?? Copy);
@@ -266,7 +297,7 @@ export function CopyButton(props: {
           data-testid={props.testId}
           disabled={props.disabled}
           aria-label={props.pinName ? label : undefined}
-          onClick={() => void action.current?.copy()}
+          onClick={() => copy()}
           className="inline-flex shrink-0 items-center gap-1.5"
         >
           <Icon size={13} aria-hidden />
@@ -287,7 +318,7 @@ export function CopyButton(props: {
         disabled={props.disabled}
         aria-label={props.pinName ? label : props.iconOnly ? shown : undefined}
         title={props.iconOnly ? shown : undefined}
-        onClick={() => void action.current?.copy()}
+        onClick={() => copy()}
         className={
           props.iconOnly
             ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`

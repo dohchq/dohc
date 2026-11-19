@@ -172,17 +172,19 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
 
     let dialog = await openLinkPane(page);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
     expect(linkUrl.origin).toBe(sharedDatasetViewerOrigin);
     const secret = linkUrl.hash.slice(1);
     const address = `${linkUrl.origin}/mcp/s/${secret}`;
+    await dialog.getByRole("button", { name: "Link options" }).click();
     const agentCopy = dialog.getByTestId("share-link-agent-copy");
     await expect(agentCopy).toHaveText("Copy for an agent");
     await expect(dialog).not.toContainText(address);
     await shoot(page, dialog, "share-link-a-copy-for-agent");
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await agentCopy.click({ timeout: remainingMs() });
-      await expect(agentCopy).toHaveText("Copied", { timeout: remainingMs() });
+      await expect(dialog).toContainText("Copied for an agent", { timeout: remainingMs() });
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(address);
     });
 
@@ -207,11 +209,18 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
 
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
     dialog = await openLinkPane(page);
+    await dialog.getByRole("button", { name: "Link details", exact: true }).click();
     const agents = dialog.getByRole("region", { name: "Agents" });
     await expect(agents.getByRole("listitem")).toHaveCount(2);
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
+    const windowSize = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }));
+    const tooShortForTheAgents = { width: windowSize.width, height: 420 };
+    await page.setViewportSize(tooShortForTheAgents);
     await expect(dialog).toHaveAttribute("data-scrolls", "");
     await agents.scrollIntoViewIfNeeded();
     const body = dialog.getByTestId("share-dialog-body");
@@ -226,6 +235,7 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     );
     await expectFitsWindow(page, dialog);
     await page.evaluate(() => document.documentElement.style.removeProperty("--dohc-toast-room"));
+    await page.setViewportSize(windowSize);
     await shoot(page, dialog, "share-link-b-agents-two");
 
     await agents.getByRole("button", { name: "Disconnect Claude Code" }).click();

@@ -9989,14 +9989,6 @@ export function DesktopWorkspaceShell(props: {
                                 accessContext={accessContext}
                                 server={cloudStatus?.workspaceServerUrl ?? null}
                                 notSentWhileOpen={syncStatus?.notSentWhileOpen ?? []}
-                                onOpenSharing={(target) => {
-                                  setSharingFocus(target);
-                                  mutateWb((state) => ({
-                                    ...state,
-                                    activeView: SHARING_VIEW_ID,
-                                    sidebarVisible: true,
-                                  }));
-                                }}
                               />
                             </Suspense>
                           </Overlay>
