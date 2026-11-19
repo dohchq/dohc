@@ -2007,6 +2007,30 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   await capture.stop();
 });
 
+it("says a keyed write the busy engine refused every time was not recorded, and never replays it", async () => {
+  const { capture, session, state } = await keyedFaultCapture("dohc-ydoc-keyed-busy-");
+  const busy = () =>
+    new DaemonRefusalError(
+      { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+      undefined,
+    );
+  state.applyRefusals.push(busy(), busy());
+  await expect(
+    session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+      idempotencyKey: "claim/1/0",
+    }),
+  ).rejects.toThrow("did not record this write to note.md, and nothing of it was kept");
+  expect((await session.settleNow())?.content).toBe("");
+
+  await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "KEYED"), undefined, {
+    idempotencyKey: "claim/1/1",
+  });
+  expect((await session.settleNow())?.content).toBe("KEYED");
+  expect(state.journalKeys).toEqual(["claim/1/1"]);
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
 it("a workspace close fails while the daemon is still down, and reopens nothing", async () => {
   const reported: string[] = [];
   const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(

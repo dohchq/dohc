@@ -3485,6 +3485,7 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           replayArmed = !settleForgiven;
+          const sentBefore = record.sent;
           try {
             record.sent = true;
             const replay =
@@ -3497,6 +3498,8 @@ export function createWorkspaceEngineCapture(
             onReplayArmed?.();
             await journaled;
           } catch (error) {
+            if (!sentBefore && hasRefusalInCauseChain(error, isEngineStoreBusyRefusal))
+              record.sent = false;
             if (!recordUpdateFailure(record, error)) throw error;
             if (record.unanswered === null) {
               const editorVisible = refuseRecord(record, error);
@@ -3679,6 +3682,10 @@ export function createWorkspaceEngineCapture(
       let sent = false;
       const unanswered = (error: unknown): Error =>
         sent || record.sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
+      const givenUp = (error: unknown): Error => {
+        if (!sent && !record.sent) removePendingRecord(record);
+        return unanswered(error);
+      };
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
@@ -3689,8 +3696,7 @@ export function createWorkspaceEngineCapture(
         } catch (error) {
           if (record.acknowledged) return;
           if (record.refusal !== null) throw record.refusal.error;
-          if (!sent && !record.sent) removePendingRecord(record);
-          throw unanswered(error);
+          throw givenUp(error);
         }
         if (record.acknowledged) return;
         if (record.refusal !== null) throw record.refusal.error;
@@ -3705,6 +3711,7 @@ export function createWorkspaceEngineCapture(
         // The first generation's doc is the canonical doc, and it takes the
         // update before the journal answers. Keep the state to return to.
         const restoreOnFailure = generation.doc === doc;
+        const sentBefore = record.sent;
         try {
           sent = true;
           record.sent = true;
@@ -3718,6 +3725,10 @@ export function createWorkspaceEngineCapture(
           }
           return;
         } catch (error) {
+          if (!sentBefore && hasRefusalInCauseChain(error, isEngineStoreBusyRefusal)) {
+            sent = false;
+            record.sent = false;
+          }
           if (restoreOnFailure && canonicalDoc === doc) {
             const restored = new Y.Doc();
             Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
@@ -3749,7 +3760,7 @@ export function createWorkspaceEngineCapture(
             if (record.acknowledged) return;
             const refusal = (record as PendingRecord).refusal;
             if (refusal !== null) throw refusal.error;
-            throw keyedWriteUncertain(error);
+            throw givenUp(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
@@ -3762,7 +3773,7 @@ export function createWorkspaceEngineCapture(
               "The document lineage changed before the write was acknowledged.",
             );
           }
-          if (attempt > 0) throw keyedWriteUncertain(error);
+          if (attempt > 0) throw givenUp(error);
         }
       }
     };
