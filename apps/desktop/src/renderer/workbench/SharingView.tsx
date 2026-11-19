@@ -785,7 +785,7 @@ function PersonMenu(props: {
   const answered = useRef(false);
   const usingKeyboard = useRef(false);
   const status = useRef<HTMLSpanElement>(null);
-  const action = useRef<ReturnType<typeof createCopy> | null>(null);
+  const action = useRef<ReturnType<typeof createCopy<void>> | null>(null);
   useLayoutEffect(() => {
     const picked = () => latest.current.copies.find((copy) => copy.id === pickedId.current);
     const made = createCopy({
