@@ -577,6 +577,19 @@ describe("share mount commands", () => {
     expect(calls).toBe(1);
   });
 
+  it("refuses to add again a share whose stored record it cannot read, and says where to remove it", async () => {
+    const h = harness();
+    const commands = createShareMountCommands(h.dependencies);
+    await commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent });
+    await h.dependencies.updateMounts(WORKSPACE.workspaceId, (mounts) =>
+      mounts.map((mount) => ({ ...mount, grantedSelector: { paths: "not-a-list" } as never })),
+    );
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+    ).rejects.toThrow("could not read its record. Remove it from Sharing");
+  });
+
   it("fails closed before relay access for invalid or cross-relay share codes", async () => {
     const invalid = harness();
     await expect(

@@ -192,8 +192,25 @@ describe("OpenSharedView", () => {
 
     expect(onMounted).not.toHaveBeenCalled();
     expect(report).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ message: "dohc could not reach the server.", retry: null }),
+      expect.objectContaining({ message: "dohc could not reach the server." }),
     );
+
+    bridgeMock.mountShare.mockResolvedValue({
+      workspace: { ...SHARED_VIEW, shareView: undefined, shareMounts: [] },
+      mount: { shareId: "share-1", label: "granter", status: "updated", changedPaths: 1 },
+    });
+    await act(async () => report.mock.calls[0]![0].retry());
+
+    expect(bridgeMock.mountShare).toHaveBeenLastCalledWith({
+      workspaceId: "ws-host",
+      shareCode: "ordinary-received-share-code",
+    });
+    expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      label: "granter",
+      access: null,
+      alreadyAdded: false,
+      left: true,
+    });
   });
 
   it("keeps Back available while opening separately and ignores the late result after leaving", async () => {

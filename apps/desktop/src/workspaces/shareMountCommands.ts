@@ -19,6 +19,7 @@ import {
   usableShareMountRecord,
   withoutShareMountRecords,
 } from "./shareMounts";
+import { readableShareLevel } from "./shareViewMarker";
 import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
@@ -275,14 +276,16 @@ export function createShareMountCommands<WorkspaceSummary>(
         const existing = dependencies.readMounts(workspace.workspaceId);
         const [added] = shareMountRecordsForId(existing, parsed.shareId);
         if (added !== undefined) {
-          const row = usableShareMountRecord(existing, added)
-            ? shareMountResultRow({
-                shareId: added.shareId,
-                label: added.label,
-                status: added.ended === true ? "ended" : "unchanged",
-                changedPaths: 0,
-              })
-            : null;
+          const row =
+            usableShareMountRecord(existing, added) &&
+            readableShareLevel(added.grantedSelector) !== null
+              ? shareMountResultRow({
+                  shareId: added.shareId,
+                  label: added.label,
+                  status: added.ended === true ? "ended" : "unchanged",
+                  changedPaths: 0,
+                })
+              : null;
           if (row === null) {
             throw new Error(
               "This share is already in this workspace, but dohc could not read its record. Remove it from Sharing, then add it again.",

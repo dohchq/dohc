@@ -11,11 +11,11 @@ import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-rea
 import { useContext, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
-import type { RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
+import type { MountShareResult, RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
-import { ShellErrorReporter } from "./shell/useShellError";
+import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 import { IconButton, PrimaryButton, SectionLabel } from "./ui/controls";
 import { FolderChip } from "./ui/Step";
 
@@ -26,14 +26,45 @@ import { FolderChip } from "./ui/Step";
 // folder next to the default workspace root, named after the share, so
 // nobody has to pick a folder to see the files.
 
-// A share added to this workspace. `access` is the pinned level, null when
-// the pin could not be read. `left`: the dialog closed while dohc was adding.
 export type MountedShare = {
   label: string;
   access: ShareAccess | null;
   alreadyAdded: boolean;
   left: boolean;
 };
+
+type MountInto = { workspaceId: string; onMounted: (mounted: MountedShare) => void };
+
+function mountedShare(result: MountShareResult, left: boolean): MountedShare {
+  const pinned = result.workspace.shareMounts?.find(
+    (mount) => mount.shareId === result.mount.shareId,
+  );
+  return {
+    label: result.mount.label,
+    access: pinned?.access ?? null,
+    alreadyAdded: result.alreadyAdded === true,
+    left,
+  };
+}
+
+function reportAddAfterLeaving(
+  report: ReportShellFailure | null,
+  into: MountInto,
+  shareCode: string,
+  cause: unknown,
+) {
+  report?.({
+    message: ipcErrorMessage(cause, "dohc could not add the share."),
+    cause,
+    retry: () =>
+      void bridge()
+        .mountShare({ workspaceId: into.workspaceId, shareCode })
+        .then(
+          (result) => into.onMounted(mountedShare(result, true)),
+          (again: unknown) => reportAddAfterLeaving(report, into, shareCode, again),
+        ),
+  });
+}
 
 type Gate = { kind: "checking" } | { kind: "signed-out" } | { kind: "signed-in"; email: string };
 
@@ -97,10 +128,7 @@ export function OpenSharedView(
     // Present when opened from inside a workspace: enables the default
     // "Add to this workspace" mode (a shared-with-me/ mount). Absent on
     // first-run, where there is no workspace to mount into yet.
-    mountInto?: {
-      workspaceId: string;
-      onMounted: (mounted: MountedShare) => void;
-    };
+    mountInto?: MountInto;
   } & ConnectionNoticeHost,
 ) {
   const [gate, setGate] = useState<Gate>(
@@ -254,15 +282,7 @@ export function OpenSharedView(
         const left = actionRequests.isCutOff(actionRequest);
         if (!left && !actionRequests.isCurrent(actionRequest)) return;
         if (!left) props.onOpened?.();
-        const pinned = result.workspace.shareMounts?.find(
-          (mount) => mount.shareId === result.mount.shareId,
-        );
-        adding.onMounted({
-          label: result.mount.label,
-          access: pinned?.access ?? null,
-          alreadyAdded: result.alreadyAdded === true,
-          left,
-        });
+        adding.onMounted(mountedShare(result, left));
       } else {
         const result = await bridge().openSharedView({
           shareCode,
@@ -274,11 +294,7 @@ export function OpenSharedView(
       }
     } catch (cause) {
       if (adding && actionRequests.isCutOff(actionRequest)) {
-        reportShellError?.({
-          message: ipcErrorMessage(cause, "dohc could not add the share."),
-          cause,
-          retry: null,
-        });
+        reportAddAfterLeaving(reportShellError, adding, shareCode, cause);
         return;
       }
       if (!actionRequests.isCurrent(actionRequest)) return;
