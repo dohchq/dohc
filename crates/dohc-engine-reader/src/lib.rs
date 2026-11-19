@@ -92,6 +92,12 @@ impl PreparationRequest {
             }
         }
     }
+    fn checked_bytes(&self) -> usize {
+        match self {
+            Self::Projection(request) => request.source.len() + request.checkpoint.len(),
+            Self::Witness(request) => request.source.len(),
+        }
+    }
     fn supersedes(&self, prior: &Self) -> bool {
         match (self, prior) {
             (Self::Projection(a), Self::Projection(b)) => {
@@ -187,16 +193,28 @@ struct Shared {
 #[derive(Clone, Copy)]
 struct Deadlines {
     startup: Duration,
-    request: Duration,
+    request_floor: Duration,
+    request_cap: Duration,
     queue: Duration,
     idle: Duration,
+}
+const REQUEST_TIME_PER_CHECKED_BYTE: Duration = Duration::from_micros(40);
+impl Deadlines {
+    fn request(&self, checked_bytes: usize) -> Duration {
+        let scaled = REQUEST_TIME_PER_CHECKED_BYTE
+            .saturating_mul(checked_bytes.try_into().unwrap_or(u32::MAX));
+        self.request_floor
+            .saturating_add(scaled)
+            .min(self.request_cap)
+    }
 }
 impl Default for Deadlines {
     fn default() -> Self {
         Self {
             startup: Duration::from_secs(5),
-            request: Duration::from_secs(10),
-            queue: Duration::from_secs(10),
+            request_floor: Duration::from_secs(10),
+            request_cap: Duration::from_secs(60),
+            queue: Duration::from_secs(60),
             // A cold start made the first sync after 30 s idle take about 2 s on a
             // Windows desktop. An idle reader holds about 66 MiB.
             idle: Duration::from_secs(10 * 60),
@@ -370,6 +388,7 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
         };
         let started = Instant::now();
         let mut phase = "startup";
+        let deadline = d.request(p.request.checked_bytes());
         let result = (|| {
             if worker.is_none() {
                 let deadline = Instant::now() + d.startup;
@@ -395,12 +414,15 @@ fn drive(shared: Arc<Shared>, config: Config, d: Deadlines) {
             phase = "send";
             w.send(p.request)?;
             phase = "response";
-            wait_event(w, &shared, Instant::now() + d.request)?.ok_or(Failure::Crashed)
+            wait_event(w, &shared, Instant::now() + deadline)?.ok_or(Failure::Crashed)
         })();
         // A crash before the request reached the process is not the note's
         // crash, and must not use up its proof's crash limit.
         let result = result.map_err(|failure| match failure {
             Failure::Crashed if phase != "response" => Failure::NotStarted,
+            Failure::TimedOut if phase == "response" && deadline == d.request_cap => {
+                Failure::TooLarge
+            }
             failure => failure,
         });
         if let Err(failure) = &result {

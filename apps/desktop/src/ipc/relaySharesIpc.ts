@@ -18,6 +18,7 @@ import {
   type OwnerLiveQuarantine,
   saveOnlyLiveDocuments,
   SaveOwnerLiveRecoveryCopyResult,
+  ListOwnerLiveRecoveryPackagesResult,
   type StopOwnerLiveDocumentResult,
   type ResumeOwnerLiveDocumentResult,
   CreateRelayShareResult,
@@ -1047,6 +1048,9 @@ export function createRelaySharesIpcHandlers<
       path: string,
       incident?: string,
     ): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    listOwnerLiveRecoveryPackages(
+      workspace: Workspace,
+    ): Promise<ListOwnerLiveRecoveryPackagesResult>;
     // A grant changed on the relay. Null when the change names no workspace.
     sharesChanged(workspaceId: string | null): void;
     sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
@@ -2071,6 +2075,15 @@ export function createRelaySharesIpcHandlers<
       );
       operation.assertCurrent();
       return saved;
+    },
+    listOwnerLiveRecoveryPackages: async (_input, { operation }) => {
+      operation.assertCurrent();
+      assertOriginalWorkspace(operation.workspace);
+      const listed = ListOwnerLiveRecoveryPackagesResult.parse(
+        await dependencies.listOwnerLiveRecoveryPackages(operation.workspace),
+      );
+      operation.assertCurrent();
+      return listed;
     },
     createRelayShare,
     listRelayShares,

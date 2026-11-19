@@ -282,10 +282,18 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   );
 }
 
+export class YdocUpdateNotRecordedError extends Error {
+  constructor() {
+    super("engine-store-busy: the engine recorded none of this edit, and it was dropped");
+    this.name = "YdocUpdateNotRecordedError";
+  }
+}
+
 // Retryability does not prove non-admission: cancellation or an internal
 // failure can answer after the spawned record task commits. Only input and
 // permission refusals prove that this original did not land.
 export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
+  if (error instanceof YdocUpdateNotRecordedError) return true;
   const wire =
     error instanceof DaemonRefusalError
       ? { code: error.wireCode, retry: error.retry }
@@ -321,6 +329,7 @@ export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
+  "state-corrupt",
   "migration-failed",
   "migrated-by-newer-build",
 ] as const;

@@ -1151,7 +1151,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.noticeHead(this, recipientUserId);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+  markNotices(input: noticeStorage.MarkNoticesInput): { dismissed: string[]; repeated: string[] } {
     return noticeStorage.markNotices(this, input);
   }
 

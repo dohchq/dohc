@@ -78,7 +78,7 @@ fn an_actor_opens_a_damaged_store_then_stops_and_its_next_open_is_refused() {
         let handle = actor.handle();
         // The check runs on its own thread and ends the actor without a command from anyone.
         let waited = Instant::now();
-        while handle.lifecycle() != LifecycleState::Closed {
+        while handle.lifecycle() != LifecycleState::Damaged {
             assert!(
                 waited.elapsed() < Duration::from_secs(30),
                 "the actor stops once its store's page check finds damage"

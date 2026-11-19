@@ -781,7 +781,7 @@ import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 
 import {
   readWorkspaceText,
-  resolveWorkspaceFile,
+  resolveWorkspaceDocument,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
@@ -3053,6 +3053,10 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
   },
+  lostDrawings: (workspaceId) =>
+    [...(typingRecoveryFailures.get(workspaceId)?.values() ?? [])].flatMap((failure) =>
+      failure.reason === "drawing-unavailable" && failure.path ? [failure.path] : [],
+    ),
   logError: (message, error) => console.error(message, error),
 });
 
@@ -7322,15 +7326,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       },
     });
   },
-  resolveDocumentPath: async (workspace, path) => {
-    try {
-      return (await resolveWorkspaceFile(workspace.rootPath, path, "write")).resolvedPath;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOENT" || code === "ENOTDIR") return null;
-      throw error;
-    }
-  },
+  resolveDocumentPath: (workspace, path, access) =>
+    resolveWorkspaceDocument(workspace.rootPath, path, access),
   onError: (message, error) => {
     if (error === undefined) console.error(message);
     else console.error(message, error);
@@ -9399,6 +9396,11 @@ function registerIpcHandlers(): void {
       desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
     saveOwnerLiveRecoveryCopy: (workspace, path, incident) =>
       desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
+    listOwnerLiveRecoveryPackages: async (workspace) => ({
+      packages: await (
+        await import("./workspaces/ownerLiveRecoveryCopy")
+      ).listKeptRecoveryPackages(workspace),
+    }),
     sharesChanged: (workspaceId) => {
       receivedShareAcquisition.invalidate();
       invalidateHistoryLabels(workspaceId);

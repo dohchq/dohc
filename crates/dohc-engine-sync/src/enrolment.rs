@@ -52,7 +52,7 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
         let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-        export_covered_heads_in_tx(tx, workspace_id, leases)?;
+        export_covered_heads_in_tx(tx, workspace_id)?;
         backfill_moments_and_conflict_bundles(tx, workspace_id)?;
         declined
     } else {
@@ -69,7 +69,7 @@ pub(crate) fn finish_live_history_enrolment_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
-    export_covered_heads_in_tx(tx, workspace_id, leases)?;
+    export_covered_heads_in_tx(tx, workspace_id)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     Ok(declined)
 }
@@ -359,9 +359,9 @@ fn covered_heads_in_tx(
         .map_err(SyncError::corrupt)
 }
 
-/// The paths whose first file record the sweeps would send now, but skip
-/// because an open editing session holds the document. Leaving the document
-/// ends its session, and the next pass sends the record.
+/// The new notes whose first file record waits because an open editing
+/// session holds their unclaimed lineage. The session's next record, or
+/// leaving the note, claims it, and the next pass sends the record.
 pub fn first_exports_held_open_in(
     conn: &rusqlite::Connection,
     workspace_id: &str,
@@ -405,11 +405,6 @@ fn first_exports_held_open_in_tx(
             paths.push(path);
         }
     }
-    for (_, version_id, object_id, _, _, _, _, _, path) in covered_heads_in_tx(tx, workspace_id)? {
-        if held(version_id, object_id) {
-            paths.push(path);
-        }
-    }
     paths.sort();
     paths.dedup();
     Ok(paths)
@@ -421,7 +416,6 @@ fn first_exports_held_open_in_tx(
 pub(crate) fn export_covered_heads_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
-    leases: &dyn LeaseProbe,
 ) -> Result<(), SyncError> {
     for (
         moment_id,
@@ -440,9 +434,6 @@ pub(crate) fn export_covered_heads_in_tx(
             version_id,
             object_id,
         };
-        if leases.is_live(&key) {
-            continue;
-        }
         // Keep attempts and asset waits in this transaction so rollback
         // cannot suppress a retry.
         tx.execute(
@@ -2669,7 +2660,7 @@ mod tests {
                     .map_err(SyncError::persist)?;
                     tx.execute(invalidate, []).map_err(SyncError::persist)?;
                     originate_live_ydoc_base_in_tx(tx, &key, 101)?;
-                    export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+                    export_covered_heads_in_tx(tx, "ws")
                 })
                 .expect("backfill unproved artifact");
             assert!(

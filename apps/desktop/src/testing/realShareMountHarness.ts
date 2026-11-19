@@ -171,6 +171,7 @@ export function createRealShareMountHarness(input: {
     retryOwnerLiveQuarantine: unexpected,
     retryOwnerLiveRelease: unexpected,
     saveOwnerLiveRecoveryCopy: unexpected,
+    listOwnerLiveRecoveryPackages: unexpected,
     sendRendererActivity: () => {},
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,

@@ -164,7 +164,11 @@ interface EngineYDocSessionIpcOptions {
   // A shared note's current text when no editor holds it, edits still on
   // their way to the server included. Null for a note that is not shared.
   ownerDraftState?: (workspace: EngineYDocWorkspace, path: string) => Promise<Uint8Array | null>;
-  resolveDocumentPath: (workspace: EngineYDocWorkspace, path: string) => Promise<string | null>;
+  resolveDocumentPath: (
+    workspace: EngineYDocWorkspace,
+    path: string,
+    access: "read" | "write",
+  ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
@@ -624,7 +628,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const generation = rendererSession.generation;
     let canonicalPath: string | null;
     try {
-      canonicalPath = await this.#resolveDocumentPath(workspace, validatedPath.normalized);
+      canonicalPath = await this.#resolveDocumentPath(workspace, validatedPath.normalized, "write");
     } catch (error) {
       this.#onError(
         `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
@@ -725,7 +729,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
     let currentPath: string | null;
     try {
-      currentPath = await this.#resolveDocumentPath(workspace, requestedPath);
+      currentPath = await this.#resolveDocumentPath(workspace, requestedPath, "write");
     } catch (error) {
       this.#onError(`[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`, error);
       return unavailableOpen({ documentUnavailable: true });
@@ -1206,7 +1210,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
-      const path = await this.#markdownDocumentPath(authority.workspace, input.path);
+      const path = await this.#markdownDocumentPath(authority.workspace, input.path, "read");
       authority.assertCurrent();
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
@@ -1235,7 +1239,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (this.#isSharedView(workspace)) {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
-      const path = await this.#markdownDocumentPath(workspace, input.path);
+      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
       const key = `${workspace.workspaceId}\u0000${path}`;
       const turn = (this.#documentEdits.get(key) ?? Promise.resolve())
         .catch(() => undefined)
@@ -1290,11 +1294,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  async #markdownDocumentPath(workspace: EngineYDocWorkspace, requested: string): Promise<string> {
+  async #markdownDocumentPath(
+    workspace: EngineYDocWorkspace,
+    requested: string,
+    access: "read" | "write",
+  ): Promise<string> {
     if (liveDocumentKindForPath(requested) !== "richdoc") {
       throw new Error(`${requested} is not a Markdown document.`);
     }
-    const path = await this.#resolveDocumentPath(workspace, requested);
+    const path = await this.#resolveDocumentPath(workspace, requested, access);
     if (path === null) throw new Error(`No document at ${requested}.`);
     if (liveDocumentKindForPath(path) !== "richdoc") {
       throw new Error(`${requested} is not a Markdown document.`);
