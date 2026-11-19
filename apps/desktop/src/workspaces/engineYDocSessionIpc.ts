@@ -110,7 +110,7 @@ export interface EngineYDocIpcSender {
 }
 
 // A shared view's named live provider settles on its host and has no
-// settleNow or lineageAtOpen; a local capture's provider has both.
+// settleNow; a local capture's provider does.
 export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
@@ -1268,7 +1268,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  /** Opens and closes a note no editor holds, with no window, as an editor's first open would; writes no file. */
   async startLiveInBackground(input: {
     workspaceId: string;
     path: string;
@@ -1291,7 +1290,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           path,
           ownsDocument,
           async () => {
-            // A closed workspace is not started again for a background open.
             const capture = this.#captureFor(workspace);
             if (!capture) throw new Error("The workspace engine is not running.");
             const provider = await capture.openYDocSession({

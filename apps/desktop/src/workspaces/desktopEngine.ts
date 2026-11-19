@@ -235,8 +235,6 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // to replace a file.
   noteNoAtomicPlacement(workspaceId: string): void;
   noteWriteDeferred(workspaceId: string, path: string): void;
-  // Hears the paths capture recorded, unless an announcement did not list them all. Pauses while
-  // the engine restarts.
   backgroundLiveStart?: Pick<BackgroundLiveStart, "note" | "pause" | "resume">;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   // The server accepted or refused a document's edits, so the notes waiting for it changed.
@@ -1825,7 +1823,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             gate
           )
             await waitForEnginePublicationGate(gate, signal);
-          // Not awaited: a start in flight may be waiting for the engine this barrier holds back.
           void dependencies.backgroundLiveStart?.pause();
           stopOwnerHost();
           await stopOwnerDelivery();

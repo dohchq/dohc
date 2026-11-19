@@ -3768,7 +3768,6 @@ const activity = {
     notifyRenderer();
   },
   stopEngines: async (): Promise<void> => {
-    // Sign-out and an account change stop the engines. Credentials are cleared first, so no note starts again.
     await backgroundLiveStart.drop();
     await Promise.all(
       workspaceAuthorities
@@ -7456,7 +7455,6 @@ const showOnPhone = createShowOnPhone({
   },
   onError: (message, error) => console.warn(message, error),
 });
-// A note written as a file starts live editing here, so the owner's phone can edit it.
 const backgroundLiveStart = createBackgroundLiveStart({
   eligible: (workspaceId) => {
     const credentials = cachedCredentials;
@@ -7504,7 +7502,6 @@ const backgroundLiveStart = createBackgroundLiveStart({
   },
   start: async (workspaceId, path) => {
     const result = await engineYDocSessionIpc.startLiveInBackground({ workspaceId, path });
-    // The close recorded a new live history for sync, but no edit wakes a push. A pass pushes first.
     if (result === "seeded") activity.queueCloudPull(workspaceId);
   },
   onError: (message, error) => console.warn(message, error),
