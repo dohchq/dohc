@@ -188,6 +188,9 @@ export async function settleOwnerLivePauses(input: {
       if (!held && listed && pause.copy) {
         const roomCopy = await relayCopy(input.relay, pause, input.signal);
         const copyPath = await freeName(pause.path, input.writes);
+        // No copy of this note is held, so typing kept for an earlier attempt has none to join.
+        for (const [id, t] of input.tried)
+          if (t.objectId === pause.objectId) input.tried.delete(id);
         const tried = { objectId: pause.objectId, state: null as Uint8Array | null };
         input.tried.set(pause.pauseId, tried);
         let paused = roomCopy;

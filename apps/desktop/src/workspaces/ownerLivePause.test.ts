@@ -278,6 +278,21 @@ describe("settleOwnerLivePauses", () => {
     expect(f.relay.copyWritten).toHaveBeenCalledOnce();
   });
 
+  it("keeps typing from an attempt the engine never paused out of a later pause's copy", async () => {
+    const f = fixture();
+    f.client.ownerYDocPause.mockRejectedValueOnce(new Error("engine busy"));
+    f.leaveLiveEditing.mockImplementationOnce(async (_path, run, late) => {
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, roomCopy);
+      editor.getText("t").insert(3, ", typed then");
+      late(Y.encodeStateAsUpdate(editor));
+      return run([]);
+    });
+    expect(await f.settle()).toEqual([]);
+    await f.settle([{ ...pause, pauseId: "pause-2" }]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana's words and the owner's");
+  });
+
   it("writes the owner's typing during the pause into the copy when the pause then ended elsewhere", async () => {
     const f = fixture();
     typeDuringPause(f);

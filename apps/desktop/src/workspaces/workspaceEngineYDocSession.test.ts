@@ -2300,3 +2300,44 @@ it("hands typing that reached it during the pause to late, with what it builds o
     editor.destroy();
   }
 });
+
+it("hands typing during the pause to late when live editing ended but the answer failed", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    const late: Uint8Array[] = [];
+    const lost = new Error("The answer was lost.");
+    await expect(
+      session.leaveLiveEditing!(
+        async () => {
+          typeIntoBody(editor, " Typed during the pause.");
+          throw lost;
+        },
+        (edits) => late.push(edits),
+      ),
+    ).rejects.toBe(lost);
+    expect(replacements).toHaveBeenCalledOnce();
+    expect(late).toHaveLength(1);
+    expect(documentMarkdown(late[0]!)).toContain("Typed during the pause.");
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});

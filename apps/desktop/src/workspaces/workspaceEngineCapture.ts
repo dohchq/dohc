@@ -4105,13 +4105,17 @@ export function createWorkspaceEngineCapture(
             return leave(Y.encodeStateAsUpdate(canonicalDoc, Y.encodeStateVector(recordedDoc)));
           }
           leaving = generation;
-          let left;
-          try {
-            left = await generation.leaveLiveEditing(leave);
-          } catch (error) {
-            if (generation.ownerBound) leaving = null;
-            throw error;
-          }
+          const outcome = await generation.leaveLiveEditing(leave).then(
+            (left) => ({ left }),
+            (error: unknown) => {
+              if (generation.ownerBound) {
+                leaving = null;
+                throw error;
+              }
+              // Live editing can end before an answer that fails.
+              return { error };
+            },
+          );
           if (late && canonicalDoc !== null) {
             // The replacement retires this document, so its state is read first.
             const base = Y.encodeStateAsUpdate(canonicalDoc);
@@ -4121,7 +4125,8 @@ export function createWorkspaceEngineCapture(
                 Y.mergeUpdates([base, ...[...queuedOriginals].map((original) => original.update)]),
               );
           }
-          return left;
+          if ("error" in outcome) throw outcome.error;
+          return outcome.left;
         });
       },
       contentKind,
