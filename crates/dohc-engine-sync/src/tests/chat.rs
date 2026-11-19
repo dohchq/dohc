@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_domain::chats::{DEFAULT_AGENT_ID, GENERAL_CHANNEL_WIRE_ID, agent_channel_wire_id};
 
 fn reaction_winner(engine: &EngineStore) -> (String, i64, String, i64) {
     engine
@@ -5317,5 +5318,100 @@ fn the_owner_private_kinds_match_the_relay_registry() {
     assert_eq!(relay, engine);
     for kind in crate::router::OWNER_PRIVATE_KINDS {
         assert!(crate::router::routes_to_chat(kind), "{kind}");
+    }
+}
+
+fn journaled_channel_creates(engine: &EngineStore) -> Vec<ReplicationEnvelope> {
+    engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT origin_id, origin_seq, payload_json, recorded_at_ms \
+                 FROM replication_log \
+                 WHERE workspace_id = 'ws' AND op_kind = 'chat.channel.create' \
+                 ORDER BY origin_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let payload_json: String = row.get(2)?;
+                Ok(ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
+                    workspace_id: "ws".to_owned(),
+                    origin_id: row.get(0)?,
+                    origin_seq: row.get(1)?,
+                    op_kind: "chat.channel.create".to_owned(),
+                    payload: serde_json::from_str(&payload_json).expect("create payload"),
+                    recorded_at_ms: row.get(3)?,
+                    relay_seq: None,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .expect("journaled channel creates")
+}
+
+fn channel_for_wire(engine: &EngineStore, wire_id: &str) -> String {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_channel_wire_ids \
+                 WHERE workspace_id = 'ws' AND wire_id = ?1",
+                [wire_id],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("a channel for the wire id")
+}
+
+/// Each of a person's computers makes General and its agents' chats before
+/// they first sync. A link names a chat by its channel id, so every computer
+/// must give each of these chats the same one.
+#[test]
+fn general_and_agent_chats_made_before_sync_share_one_channel_id() {
+    let (_a_scratch, _a_path, mut a) = open_store();
+    let (_b_scratch, _b_path, mut b) = open_store();
+    for (engine, at) in [(&mut a, 10), (&mut b, 20)] {
+        let mut chats = LinkedChatStore::new(engine);
+        chats
+            .ensure_general_channel("ws", &format!("general-{at}"), at, &NoFaults)
+            .expect("General");
+        chats
+            .ensure_agent_channel(
+                "ws",
+                &format!("agent-{at}"),
+                DEFAULT_AGENT_ID,
+                "My agent",
+                at,
+                &NoFaults,
+            )
+            .expect("the default agent's chat");
+        chats
+            .ensure_agent_channel(
+                "ws",
+                &format!("research-{at}"),
+                "research",
+                "Research",
+                at,
+                &NoFaults,
+            )
+            .expect("research's chat");
+    }
+    let (from_a, from_b) = (journaled_channel_creates(&a), journaled_channel_creates(&b));
+    assert_eq!((from_a.len(), from_b.len()), (3, 3));
+    for op in &from_b {
+        apply_chat_envelope(&mut a, op, &NoFaults).expect("B's create on A");
+    }
+    for op in &from_a {
+        apply_chat_envelope(&mut b, op, &NoFaults).expect("A's create on B");
+    }
+    for wire in [
+        GENERAL_CHANNEL_WIRE_ID.to_owned(),
+        agent_channel_wire_id(DEFAULT_AGENT_ID),
+        agent_channel_wire_id("research"),
+    ] {
+        assert_eq!(
+            channel_for_wire(&a, &wire),
+            channel_for_wire(&b, &wire),
+            "{wire} has a different channel id on each computer"
+        );
     }
 }
