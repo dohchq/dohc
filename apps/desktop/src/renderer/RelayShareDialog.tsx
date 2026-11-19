@@ -38,6 +38,8 @@ const isShareAccess = (access: string | null): access is ShareAccess =>
 
 type InvitationAnswer = { value: ShareCopyResult | undefined; error: unknown };
 
+let newestInvitationCopy = 0;
+
 function useInvitation(
   person: Pick<InvitedPerson, "shareId" | "grantId">,
   reload: () => Promise<unknown>,
@@ -58,9 +60,11 @@ function useInvitation(
   const { retry } = query;
   return () =>
     new Promise<string | null>((resolve, reject) => {
+      const copy = ++newestInvitationCopy;
       waiting.current?.({ value: undefined, error: null });
       waiting.current = ({ value, error }) => {
-        if (error !== null) reject(error);
+        if (copy !== newestInvitationCopy) resolve(null);
+        else if (error !== null) reject(error);
         else if (!value) resolve(null);
         else if (value.status === "ended") {
           void reload();
