@@ -80,6 +80,11 @@ test("@server-restart-many measures how long an open note takes to be editable a
     console.log(
       `RESTART with ${String(OTHER_NOTES + 1)} linked notes: the open note was editable ${String(editableAfterMs)} ms after the relay returned; the new relay made ${String(registered())} register requests; slow passes logged ${String(slow)}`,
     );
+    // Why the page was told to try again while the relay came back, as the relay's own log has it.
+    for (const line of server.relay().diagnostics().stderr.split("
+"))
+      if (line.includes("live open told to try again") || line.includes("Live host pass was slow"))
+        console.log(`RESTART relay: ${line.slice(0, 400)}`);
     await expect(editor).toContainText("after");
   } finally {
     await server.close();
