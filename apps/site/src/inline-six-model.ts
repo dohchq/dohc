@@ -28,7 +28,7 @@ export function createInlineSixEngine() {
     bumpScale: 0.013,
   });
   const cast = new THREE.MeshStandardMaterial({
-    color: 0x252a28,
+    color: 0x2c3935,
     metalness: 0.18,
     roughness: 0.46,
     bumpMap: grain,
@@ -62,14 +62,16 @@ export function createInlineSixEngine() {
     metalness: 0,
   });
   const copper = new THREE.MeshStandardMaterial({
-    color: 0x8d542d,
+    color: 0xc29553,
     metalness: 0.85,
     roughness: 0.35,
   });
   const red = new THREE.MeshStandardMaterial({
-    color: 0x982a25,
-    metalness: 0.35,
-    roughness: 0.4,
+    color: 0x8c191c,
+    metalness: 0.42,
+    roughness: 0.32,
+    bumpMap: grain,
+    bumpScale: 0.005,
   });
   const seal = new THREE.MeshStandardMaterial({
     color: 0x252a30,
@@ -77,15 +79,15 @@ export function createInlineSixEngine() {
     roughness: 0.7,
   });
 
-  const brushedCanvas = new OffscreenCanvas(256, 256);
+  const brushedCanvas = new OffscreenCanvas(128, 128);
   const brushedContext = brushedCanvas.getContext("2d")!;
-  const brushedPixels = brushedContext.createImageData(256, 256);
-  for (let y = 0; y < 256; y++) {
+  const brushedPixels = brushedContext.createImageData(128, 128);
+  for (let y = 0; y < 128; y++) {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     const line = 197 + (seed >>> 29);
-    for (let x = 0; x < 256; x++) {
+    for (let x = 0; x < 128; x++) {
       const value = line + Math.round(2 * Math.sin(x * 0.07 + y * 0.13));
-      brushedPixels.data.set([value, value, value, 255], (y * 256 + x) * 4);
+      brushedPixels.data.set([value, value, value, 255], (y * 128 + x) * 4);
     }
   }
   brushedContext.putImageData(brushedPixels, 0, 0);
@@ -139,7 +141,7 @@ export function createInlineSixEngine() {
     radius = 0.045,
   ) {
     return part(
-      new RoundedBoxGeometry(size[0], size[1], size[2], 2, radius),
+      new RoundedBoxGeometry(size[0], size[1], size[2], 1, radius),
       material,
       parent,
       position,
@@ -152,7 +154,7 @@ export function createInlineSixEngine() {
     material: THREE.Material,
     parent: THREE.Object3D = engine,
     axis: "x" | "y" | "z" = "z",
-    segments = 32,
+    segments = radius < 0.1 ? 12 : 32,
   ) {
     const mesh = part(
       new THREE.CylinderGeometry(radius, radius, length, segments),
@@ -173,7 +175,7 @@ export function createInlineSixEngine() {
     axis: "x" | "y" | "z" = "z",
   ) {
     const mesh = part(
-      new THREE.TorusGeometry(radius, thickness, 8, 48),
+      new THREE.TorusGeometry(radius, thickness, 6, radius < 0.11 ? 16 : 40),
       material,
       parent,
       position,
@@ -192,7 +194,11 @@ export function createInlineSixEngine() {
     const curve = new THREE.CatmullRomCurve3(
       points.map((p) => new THREE.Vector3(...(p as [number, number, number]))),
     );
-    return part(new THREE.TubeGeometry(curve, segments, radius, 10, false), material, parent);
+    return part(
+      new THREE.TubeGeometry(curve, segments, radius, radius < 0.04 ? 6 : 12, false),
+      material,
+      parent,
+    );
   }
   function fastener(
     position: number[],
@@ -201,7 +207,7 @@ export function createInlineSixEngine() {
     radius = 0.055,
     direction = 1,
   ) {
-    cylinder(radius * 1.4, 0.025, position, steel, parent, axis, 24);
+    cylinder(radius * 1.4, 0.025, position, steel, parent, axis, 12);
     const face = [...position];
     face[{ x: 0, y: 1, z: 2 }[axis]] += direction * 0.025;
     cylinder(radius, 0.045, face, chrome, parent, axis, 6);
@@ -267,101 +273,97 @@ export function createInlineSixEngine() {
     box([0.73, 0.15, 5.4], [side * 0.51, 0.945, 0], castAlloy, engine, 0.045);
     box([0.75, 0.024, 5.44], [side * 0.51, 1.025, 0], seal, engine, 0.015);
   }
-  // Sealed cam housings sit on machined gasket rails above the DOHC head.
-  function camCover(x: number, y: number, length: number, z: number) {
-    const shell = new THREE.Shape();
-    shell.moveTo(-0.35, 0);
-    shell.lineTo(-0.35, 0.12);
-    shell.bezierCurveTo(-0.35, 0.44, 0.35, 0.44, 0.35, 0.12);
-    shell.lineTo(0.35, 0);
-    shell.lineTo(0.305, 0);
-    shell.lineTo(0.305, 0.12);
-    shell.bezierCurveTo(0.305, 0.375, -0.305, 0.375, -0.305, 0.12);
-    shell.lineTo(-0.305, 0);
-    shell.closePath();
+  function camCover(x: number, z: number, length: number) {
     const cover = new THREE.Group();
-    cover.position.set(x, y, z);
+    cover.position.set(x, 1.02, z);
     engine.add(cover);
-    const shellGeometry = new THREE.ExtrudeGeometry(shell, {
-      depth: length,
-      bevelEnabled: true,
-      bevelSize: 0.012,
-      bevelThickness: 0.012,
-      bevelSegments: 3,
-      curveSegments: 32,
+    const crown = new THREE.Shape();
+    crown.moveTo(-0.34, 0);
+    crown.lineTo(-0.34, 0.19);
+    crown.bezierCurveTo(-0.34, 0.3, -0.25, 0.35, -0.16, 0.35);
+    crown.lineTo(0.16, 0.35);
+    crown.bezierCurveTo(0.25, 0.35, 0.34, 0.3, 0.34, 0.19);
+    crown.lineTo(0.34, 0);
+    crown.closePath();
+    const casting = new THREE.ExtrudeGeometry(crown, {
+      depth: length - 0.06,
+      bevelThickness: 0.03,
+      bevelSize: 0.018,
+      bevelSegments: 2,
+      curveSegments: 8,
     });
-    // Smooth the domed walls while keeping the machined rim and end bevels crisp.
-    const shellPositions = shellGeometry.getAttribute("position");
-    const shellNormals = shellGeometry.getAttribute("normal");
-    const wallNormal = new THREE.Vector3();
-    for (let i = 0; i < shellPositions.count; i++) {
-      const x = shellPositions.getX(i),
-        y = shellPositions.getY(i);
-      if (y <= 0.12 || Math.abs(shellNormals.getZ(i)) > 0.01) continue;
-      wallNormal.set(x / (0.35 * 0.35), (y - 0.12) / (0.24 * 0.24), 0).normalize();
-      const facing = Math.sign(
-        wallNormal.x * shellNormals.getX(i) + wallNormal.y * shellNormals.getY(i),
-      );
-      shellNormals.setXYZ(i, wallNormal.x * facing, wallNormal.y * facing, 0);
-    }
-    part(shellGeometry, polishedAlloy, cover, [0, 0, -length / 2]);
-    const endProfile = new THREE.Shape();
-    endProfile.moveTo(-0.35, 0);
-    endProfile.lineTo(-0.35, 0.12);
-    endProfile.bezierCurveTo(-0.35, 0.44, 0.35, 0.44, 0.35, 0.12);
-    endProfile.lineTo(0.35, 0);
-    endProfile.closePath();
-    for (const end of [-1, 1]) {
-      part(
-        new THREE.ExtrudeGeometry(endProfile, {
-          depth: 0.035,
-          bevelEnabled: true,
-          bevelSize: 0.012,
-          bevelThickness: 0.012,
-          bevelSegments: 3,
-          curveSegments: 24,
-        }),
-        polishedAlloy,
-        cover,
-        [0, 0, (end * length) / 2 - 0.0175],
-      );
-    }
+    part(casting, red, cover, [0, 0, -length / 2 + 0.03]);
     for (const side of [-1, 1]) {
-      box([0.075, 0.035, length + 0.07], [side * 0.34, 0, 0], metal, cover, 0.012);
-      box([0.055, 0.018, length], [side * 0.34, -0.026, 0], seal, cover, 0.005);
-      for (let zBolt = -length / 2 + 0.16; zBolt < length / 2; zBolt += 0.84)
-        fastener([side * 0.34, 0.036, zBolt], cover, "y", 0.028);
+      box([0.075, 0.035, length], [side * 0.34, 0.005, 0], metal, cover, 0.012);
+      for (let zBolt = -length / 2 + 0.14; zBolt < length / 2; zBolt += 0.84)
+        fastener([side * 0.34, 0.045, zBolt], cover, "y", 0.032);
+      for (const dx of [0.165, 0.24])
+        box(
+          [0.032, 0.032, length - 0.18],
+          [side * dx, dx === 0.165 ? 0.368 : 0.352, 0],
+          polishedAlloy,
+          cover,
+          0.012,
+        );
     }
-    for (const dx of [-0.125, 0.125])
-      box([0.018, 0.018, length - 0.12], [dx, 0.343, 0], metal, cover, 0.006);
     return cover;
   }
-  const intakeCover = camCover(0.51, 1.02, 5.38, 0);
-  camCover(-0.51, 1.02, 5.38, 0);
-  cylinder(0.17, 0.07, [0, 0.42, -1.95], chrome, intakeCover, "y");
-  box([0.23, 0.045, 0.06], [0, 0.48, -1.95], steel, intakeCover, 0.012);
-  box([0.23, 0.012, 0.72], [0, 0.362, 0.1], red, intakeCover, 0.025);
-  const badgeCanvas = new OffscreenCanvas(512, 128);
+  const intakeCover = camCover(0.51, 0, 5.38);
+  camCover(-0.51, 2.51, 0.36);
+  camCover(-0.51, -2.51, 0.36);
+  box([0.61, 0.055, 4.7], [-0.51, 1.045, 0], graphite);
+  for (const x of [-0.84, -0.18]) box([0.044, 0.065, 4.74], [x, 1.08, 0], polishedAlloy);
+  cylinder(0.099, 4.9, [-0.51, 1.23, 0], steel);
+  const lobe = new THREE.Shape();
+  lobe.moveTo(-0.15, 0);
+  lobe.bezierCurveTo(-0.15, 0.105, -0.078, 0.25, 0, 0.25);
+  lobe.bezierCurveTo(0.078, 0.25, 0.15, 0.105, 0.15, 0);
+  lobe.absarc(0, 0, 0.15, 0, -Math.PI, true);
+  for (const [i, z] of stations.entries()) {
+    const geometry = new THREE.ExtrudeGeometry(lobe, {
+      depth: 0.18,
+      bevelEnabled: true,
+      bevelThickness: 0.012,
+      bevelSize: 0.01,
+      bevelSegments: 1,
+      curveSegments: 12,
+    });
+    part(geometry, polishedAlloy, engine, [-0.51, 1.23, z - 0.09]).rotation.z =
+      ([0, 4, 2, 5, 1, 3][i] * Math.PI) / 3;
+    cylinder(0.175, 0.075, [-0.51, 1.09, z], metal, engine, "y");
+  }
+  for (const z of [-1.68, 0, 1.68]) {
+    box([0.58, 0.105, 0.18], [-0.51, 1.17, z], castAlloy);
+    cylinder(0.15, 0.18, [-0.51, 1.23, z], castAlloy);
+    for (const x of [-0.74, -0.28]) fastener([x, 1.23, z], engine, "y", 0.043);
+  }
+  cylinder(0.18, 0.07, [0, 0.405, -2.14], polishedAlloy, intakeCover, "y");
+  cylinder(0.155, 0.027, [0, 0.45, -2.14], graphite, intakeCover, "y", 24);
+  box([0.28, 0.047, 0.057], [0, 0.475, -2.14], chrome, intakeCover, 0.016);
+  const badgeCanvas = new OffscreenCanvas(256, 64);
   const badgeContext = badgeCanvas.getContext("2d")!;
-  badgeContext.fillStyle = "#f2eee7";
-  badgeContext.font = "500 84px Arial";
+  badgeContext.fillStyle = "#3b2424";
+  badgeContext.fillRect(0, 0, 256, 64);
+  badgeContext.strokeStyle = "#c8ac89";
+  badgeContext.lineWidth = 3;
+  badgeContext.strokeRect(3, 3, 250, 58);
+  badgeContext.fillStyle = "#eee0c5";
+  badgeContext.font = "bold 50px Georgia";
   badgeContext.textAlign = "center";
-  badgeContext.fillText("dohc", 256, 94);
+  badgeContext.fillText("dohc", 128, 48);
   const badgeTexture = new THREE.CanvasTexture(badgeCanvas);
   badgeTexture.colorSpace = THREE.SRGBColorSpace;
   textures.push(badgeTexture);
   const badgeMaterial = new THREE.MeshStandardMaterial({
     map: badgeTexture,
-    transparent: true,
-    depthWrite: false,
-    metalness: 0.45,
-    roughness: 0.3,
+    metalness: 0.48,
+    roughness: 0.32,
   });
   const badge = part(
-    new THREE.PlaneGeometry(0.61, 0.155),
+    new THREE.PlaneGeometry(1.06, 0.265),
     badgeMaterial,
     intakeCover,
-    [0, 0.371, 0.1],
+    [0, 0.374, 0.12],
   );
   badge.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
 
@@ -422,22 +424,25 @@ export function createInlineSixEngine() {
     cylinder(0.17, 0.04, [1.58, 0.63, z + 0.4], chrome, engine, "y");
     fastener([1.58, 0.67, z + 0.4], engine, "y", 0.035);
     const profile = [
+      [0.202, 0],
+      [0.207, 0.14],
+      [0.224, 0.25],
+      [0.266, 0.34],
+      [0.324, 0.395],
+      [0.335, 0.41],
+      [0.33, 0.424],
+      [0.31, 0.424],
+      [0.244, 0.36],
+      [0.199, 0.26],
+      [0.178, 0.14],
       [0.175, 0],
-      [0.18, 0.16],
-      [0.205, 0.29],
-      [0.285, 0.38],
-      [0.3, 0.39],
-      [0.307, 0.37],
-      [0.228, 0.27],
-      [0.204, 0.13],
-      [0.2, 0],
     ];
     const bell = part(
       new THREE.LatheGeometry(
         profile.map(([r, h]) => new THREE.Vector2(r, h)),
         48,
       ),
-      chrome,
+      copper,
       engine,
       [2.05, 0.7, z],
     );
@@ -491,7 +496,7 @@ export function createInlineSixEngine() {
         [-1.36, 0.66, z],
         [-1.65 - (i % 3) * 0.11, 0.25, z],
         [-1.71 - (i % 3) * 0.06, -0.65, z * 0.8],
-        [-1.64, -1.2, endZ + ((i % 3) - 1) * 0.16],
+        [-1.64 + (i % 3 === 1 ? -0.09 : 0.045), -1.24, endZ + ((i % 3) - 1) * 0.089],
       ],
       0.125,
       exhaustSteel,
@@ -500,8 +505,8 @@ export function createInlineSixEngine() {
     );
     const uv = header.geometry.getAttribute("uv");
     const colors = new Float32Array(uv.count * 3);
-    const hot = new THREE.Color(0x756759);
-    const straw = new THREE.Color(0xb3a18a);
+    const hot = new THREE.Color(0x686888);
+    const straw = new THREE.Color(0xc29561);
     const cool = new THREE.Color(0xb6bdc0);
     const color = new THREE.Color();
     for (let j = 0; j < uv.count; j++) {
@@ -514,53 +519,89 @@ export function createInlineSixEngine() {
     ring(0.133, 0.016, [-1.22, 0.66, z], steel, engine, "x");
   });
   for (const z of [-1.24, 1.24]) {
-    cylinder(0.235, 0.45, [-1.64, -1.37, z], steel, engine, "y");
-    ring(0.242, 0.022, [-1.64, -1.57, z], chrome, engine, "y");
-    cylinder(0.205, 0.01, [-1.64, -1.6, z], black, engine, "y");
+    part(new THREE.CylinderGeometry(0.239, 0.18, 0.34, 36), steel, engine, [-1.64, -1.39, z]);
+    ring(0.184, 0.017, [-1.64, -1.57, z], chrome, engine, "y");
+    cylinder(0.157, 0.01, [-1.64, -1.607, z], black, engine, "y");
   }
 
-  // A sealed timing chest connects the crankcase to both cam housings.
   plate(
     [
       [-0.74, -1.04],
       [0.74, -1.04],
-      [0.73, 0.94],
-      [0.54, 1.07],
-      [-0.54, 1.07],
-      [-0.73, 0.94],
+      [0.73, 0.53],
+      [0.55, 0.78],
+      [-0.55, 0.78],
+      [-0.73, 0.53],
     ],
     0.16,
     [0, 0, 2.69],
     castAlloy,
   );
   for (const x of [-0.66, 0.66])
-    for (const y of [-0.85, -0.3, 0.3, 0.85]) fastener([x, y, 2.89], engine, "z", 0.044);
-  const timingOutline = new THREE.Shape();
-  timingOutline.moveTo(-0.74, 0.18);
-  timingOutline.lineTo(-0.86, 1.12);
-  timingOutline.bezierCurveTo(-0.89, 1.5, -0.2, 1.54, -0.15, 1.22);
-  timingOutline.lineTo(0.15, 1.22);
-  timingOutline.bezierCurveTo(0.2, 1.54, 0.89, 1.5, 0.86, 1.12);
-  timingOutline.lineTo(0.74, 0.18);
-  timingOutline.closePath();
-  part(
-    new THREE.ExtrudeGeometry(timingOutline, {
-      depth: 0.16,
-      bevelEnabled: true,
-      bevelSize: 0.035,
-      bevelThickness: 0.035,
-      bevelSegments: 3,
-      curveSegments: 24,
-    }),
-    castAlloy,
-    engine,
-    [0, 0, 2.69],
-  );
-  for (const side of [-1, 1]) {
-    cylinder(0.21, 0.032, [side * 0.51, 1.14, 2.895], metal);
-    ring(0.185, 0.009, [side * 0.51, 1.14, 2.916], steel);
-    for (const dy of [-0.12, 0.12]) fastener([side * 0.51, 1.14 + dy, 2.924], engine, "z", 0.03);
-    for (const y of [0.56, 0.94]) fastener([side * 0.77, y, 2.895], engine, "z", 0.035);
+    for (const y of [-0.85, -0.3, 0.3]) fastener([x, y, 2.89], engine, "z", 0.044);
+  const camCenters = [
+    [0.51, 1.18],
+    [-0.51, 1.18],
+    [0, 0.56],
+  ];
+  const pitchRadius = 0.24;
+  const chainPath = new THREE.Shape();
+  for (const [i, [x, y]] of camCenters.entries()) {
+    const before = camCenters[(i + 2) % 3];
+    const after = camCenters[(i + 1) % 3];
+    const start = Math.atan2(y - before[1], x - before[0]) - Math.PI / 2;
+    const end = Math.atan2(after[1] - y, after[0] - x) - Math.PI / 2;
+    chainPath.absarc(x, y, pitchRadius, start, end, false);
+    const sprocket = new THREE.Shape();
+    const teeth = 16;
+    for (let tooth = 0; tooth < teeth; tooth++)
+      for (const [fraction, r] of [
+        [0, 0.22],
+        [0.22, 0.246],
+        [0.52, 0.246],
+        [0.76, 0.22],
+      ]) {
+        const angle = ((tooth + fraction) * Math.PI * 2) / teeth;
+        const sx = Math.cos(angle) * r,
+          sy = Math.sin(angle) * r;
+        if (!tooth && !fraction) sprocket.moveTo(sx, sy);
+        else sprocket.lineTo(sx, sy);
+      }
+    sprocket.closePath();
+    for (let j = 0; j < 4; j++) {
+      const a = (j * Math.PI) / 2 + i;
+      const hole = new THREE.Path();
+      hole.absarc(Math.cos(a) * 0.137, Math.sin(a) * 0.137, 0.052, 0, Math.PI * 2, true);
+      sprocket.holes.push(hole);
+    }
+    cylinder(0.165, 0.18, [x, y, 2.745], castAlloy);
+    cylinder(0.115, 0.135, [x, y, 2.84], graphite);
+    part(
+      new THREE.ExtrudeGeometry(sprocket, { depth: 0.068, bevelEnabled: false, curveSegments: 6 }),
+      metal,
+      engine,
+      [x, y, 2.88],
+    );
+    cylinder(0.088, 0.035, [x, y, 2.96], copper);
+    fastener([x, y, 2.985], engine, "z", 0.057);
+  }
+  chainPath.closePath();
+  const count = 2 * Math.round(chainPath.getLength() / ((2 * Math.PI * pitchRadius) / 16) / 2);
+  const pins = chainPath.getSpacedPoints(count);
+  for (let i = 0; i < count; i++) {
+    const pin = pins[i],
+      next = pins[i + 1];
+    cylinder(0.026, 0.097, [pin.x, pin.y, 2.917], steel, engine, "z", 10);
+    const z = i % 2 ? 2.951 : 2.966;
+    const link = box(
+      [pin.distanceTo(next) + 0.032, 0.049, 0.015],
+      [(pin.x + next.x) / 2, (pin.y + next.y) / 2, z],
+      graphite,
+      engine,
+      0.007,
+    );
+    link.rotation.z = Math.atan2(next.y - pin.y, next.x - pin.x);
+    cylinder(0.015, 0.017, [pin.x, pin.y, 2.977], chrome, engine, "z", 8);
   }
   function pulley(x: number, y: number, radius: number) {
     cylinder(radius, 0.16, [x, y, 3.06], graphite);
@@ -930,9 +971,9 @@ export function createInlineSixEngine() {
     cylinder(0.15, 0.06, [-1.045, 0.66, z], steel, engine, "x");
   });
   for (const z of [-1.24, 1.24]) {
-    ring(0.237, 0.017, [-1.64, -1.43, z], metal, engine, "y");
-    box([0.6, 0.06, 0.46], [-1.64, -1.57, z], steel, engine, 0.1);
-    for (const dx of [-0.25, 0.25]) fastener([-1.64 + dx, -1.62, z], engine, "y", 0.034, -1);
+    ring(0.235, 0.014, [-1.64, -1.24, z], metal, engine, "y");
+    box([0.54, 0.045, 0.365], [-1.64, -1.568, z], steel, engine, 0.1);
+    for (const dx of [-0.224, 0.224]) fastener([-1.64 + dx, -1.601, z], engine, "y", 0.034, -1);
   }
   // The entire exterior is static. Merge by material to keep the detailed model cheap to draw.
   engine.updateMatrixWorld(true);

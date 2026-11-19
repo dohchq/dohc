@@ -50,7 +50,7 @@ async function initialize(canvas: OffscreenCanvas, pixelRatio: number, studioUrl
   studio.setDark(dark);
   const { center } = studio;
   const distance = (studio.radius / Math.sin(halfFov)) * 0.83;
-  camera.position.copy(center).addScaledVector(new THREE.Vector3(10, 6.5, 7).normalize(), distance);
+  camera.position.copy(center).addScaledVector(new THREE.Vector3(-8, 8, 10).normalize(), distance);
   camera.lookAt(center);
   await renderer.compileAsync(scene, camera);
   let width = 0,

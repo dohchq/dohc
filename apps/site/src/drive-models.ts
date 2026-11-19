@@ -65,16 +65,16 @@ export function workshop() {
   const bright = metal(0xe6ebef, 0.2);
   const steel = metal(0x717b84, 0.3);
   const dark = metal(0x242a30, 0.48, 0.75);
-  const cast = metal(0x7b848c, 0.52, 0.82);
-  const brass = metal(0x9b8052, 0.32);
+  const cast = metal(0x424e50, 0.44, 0.66);
+  const brass = metal(0xbd9458, 0.31);
   // Cut faces carry drafting hatch, the way a sectioned part is drawn in a manual.
   const hatch = document.createElement("canvas");
   hatch.width = hatch.height = 128;
   const hatchContext = hatch.getContext("2d")!;
-  hatchContext.fillStyle = "#d3d7da";
+  hatchContext.fillStyle = "#c25a43";
   hatchContext.fillRect(0, 0, 128, 128);
-  hatchContext.strokeStyle = "#6a7279";
-  hatchContext.lineWidth = 3;
+  hatchContext.strokeStyle = "#76372d";
+  hatchContext.lineWidth = 1.5;
   for (let offset = -128; offset <= 128; offset += 16) {
     hatchContext.beginPath();
     hatchContext.moveTo(offset, 128);
@@ -116,7 +116,7 @@ export function workshop() {
     radius = 0.035,
   ) =>
     mesh(
-      new RoundedBoxGeometry(size[0], size[1], size[2], 2, Math.min(radius, Math.min(...size) / 3)),
+      new RoundedBoxGeometry(size[0], size[1], size[2], 1, Math.min(radius, Math.min(...size) / 3)),
       material,
       parent,
       pos,
@@ -128,7 +128,8 @@ export function workshop() {
     material = silver,
     parent: T.Object3D = root,
     top = radius,
-  ) => mesh(new T.CylinderGeometry(top, radius, height, 64), material, parent, pos);
+    segments = radius < 0.08 ? 12 : 40,
+  ) => mesh(new T.CylinderGeometry(top, radius, height, segments), material, parent, pos);
   const ring = (
     radius: number,
     tube: number,
@@ -136,12 +137,17 @@ export function workshop() {
     material = silver,
     parent: T.Object3D = root,
   ) => {
-    const part = mesh(new T.TorusGeometry(radius, tube, 12, 96), material, parent, pos);
+    const part = mesh(
+      new T.TorusGeometry(radius, tube, 6, radius < 0.1 ? 16 : radius < 0.4 ? 40 : 72),
+      material,
+      parent,
+      pos,
+    );
     part.rotation.x = Math.PI / 2;
     return part;
   };
   const bolt = (pos: number[], size = 0.045, parent: T.Object3D = root) => {
-    const head = cylinder(size, size * 0.65, pos, bright, parent);
+    const head = cylinder(size, size * 0.65, pos, bright, parent, size, 6);
     const socket = mesh(new T.CylinderGeometry(size * 0.47, size * 0.47, 0.006, 6), dark, head, [
       0,
       size * 0.34,
@@ -197,16 +203,26 @@ function bevelTeeth({ teeth, inner, outer, height, cone, twist = 0 }: GearSpec) 
     new T.Vector2(Math.cos(angle) * radius, Math.sin(angle) * radius);
   const shapes = Array.from({ length: teeth }, (_, i) => {
     const a = i * pitch;
-    return new T.Shape([
-      at(inner, a - half),
-      at(outer, a - half + twist),
-      at(outer, a + half + twist),
-      at(inner, a + half),
-    ]);
+    const mid = (inner + outer) / 2;
+    const start = at(inner, a - half);
+    const tooth = new T.Shape();
+    tooth.moveTo(start.x, start.y);
+    const edge = (r: number, angle: number, rEnd: number, endAngle: number) => {
+      const control = at(r, angle);
+      const end = at(rEnd, endAngle);
+      tooth.quadraticCurveTo(control.x, control.y, end.x, end.y);
+    };
+    edge(mid, a - half + twist * 0.15, outer, a - half + twist);
+    const tip = at(outer, a + half + twist);
+    tooth.lineTo(tip.x, tip.y);
+    edge(mid, a + half + twist * 0.15, inner, a + half);
+    tooth.closePath();
+    return tooth;
   });
   const chamfer = Math.min(height * 0.22, half * inner * 0.45);
   const geometry = new T.ExtrudeGeometry(shapes, {
     depth: height,
+    curveSegments: 3,
     bevelEnabled: true,
     bevelThickness: chamfer,
     bevelSize: chamfer,
@@ -245,7 +261,6 @@ export function createDifferential(): DriveModel {
   axisX.rotation.z = -Math.PI / 2;
   root.add(axisX);
 
-  // Cast housing turned around the axle, with the quarter facing the viewer cut away.
   const profile = new T.SplineCurve(
     [
       [0.5, -1.28],
@@ -259,7 +274,7 @@ export function createDifferential(): DriveModel {
       [0.62, 1.06],
       [0.5, 1.28],
     ].map(([r, h]) => new T.Vector2(r, h)),
-  ).getPoints(48);
+  ).getPoints(24);
   const wall = 0.13;
   const inside = profile.map((point, i) => {
     const before = profile[Math.max(0, i - 1)],
@@ -269,19 +284,34 @@ export function createDifferential(): DriveModel {
   });
   const housing = new T.Group();
   axisX.add(housing);
-  const sweep = Math.PI * 1.5;
+  const sweep = Math.PI * 1.29;
   // Each run is one smooth stretch of a counter-clockwise profile; runs meet at hard edges.
   const turned = (runs: T.Vector2[][]) => {
-    for (const run of runs) mesh(new T.LatheGeometry(run, 120, 0, sweep), cast, housing);
+    for (const run of runs) mesh(new T.LatheGeometry(run, 64, 0, sweep), cast, housing);
     const outline = new T.Shape(runs.flatMap((run) => run.slice(0, -1)));
     for (const angle of [0, sweep]) {
       const face = mesh(new T.ShapeGeometry(outline, 24), section, housing);
-      face.rotation.y = angle === 0 ? -Math.PI / 2 : Math.PI;
+      face.rotation.y = angle - Math.PI / 2;
       face.castShadow = false;
     }
   };
   const last = profile.length - 1;
   turned([profile, [profile[last], inside[last]], [...inside].reverse(), [inside[0], profile[0]]]);
+  for (let i = 0; i < 8; i++) {
+    const angle = ((i + 0.5) * sweep) / 8;
+    const rib = new T.LatheGeometry(profile, 4, angle - 0.055, 0.11);
+    const vertices = rib.getAttribute("position");
+    for (let j = 0; j < vertices.count; j++) {
+      const along = (j % profile.length) / (profile.length - 1);
+      const across = Math.floor(j / profile.length) / 4;
+      const point = profile[j % profile.length];
+      const lift = 0.11 * Math.sin(along * Math.PI) * Math.sin(across * Math.PI) - 0.005;
+      const scale = 1 + lift / point.x;
+      vertices.setXYZ(j, vertices.getX(j) * scale, point.y, vertices.getZ(j) * scale);
+    }
+    rib.computeVertexNormals();
+    mesh(rib, cast, housing);
+  }
   // The two housing halves bolt together at a flange just behind the crown wheel.
   const flange = [
     [1.44, 0.08],
@@ -308,8 +338,24 @@ export function createDifferential(): DriveModel {
         Math.sin(a) * 0.345,
       ]);
     }
-    cylinder(0.34, 0.16, [0, sign * 2.13, 0], silver, axisX);
-    cylinder(0.22, 0.04, [0, sign * 2.24, 0], dark, axisX);
+    const flange = new T.Shape();
+    flange.absarc(0, 0, 0.38, 0, Math.PI * 2, false);
+    for (let j = 0; j < 4; j++) {
+      const angle = (j * Math.PI) / 2 + Math.PI / 4;
+      const bore = new T.Path();
+      bore.absarc(Math.cos(angle) * 0.276, Math.sin(angle) * 0.276, 0.055, 0, Math.PI * 2, true);
+      flange.holes.push(bore);
+    }
+    const coupling = new T.ExtrudeGeometry(flange, {
+      depth: 0.09,
+      bevelEnabled: true,
+      bevelSize: 0.012,
+      bevelThickness: 0.012,
+      bevelSegments: 1,
+      curveSegments: 12,
+    });
+    mesh(coupling.rotateX(-Math.PI / 2), silver, axisX, [0, sign * 2.13 - 0.045, 0]);
+    cylinder(0.22, 0.068, [0, sign * 2.205, 0], steel, axisX);
     for (let i = 0; i < 16; i++) {
       const a = (i * Math.PI) / 8;
       const spline = box(
@@ -351,22 +397,43 @@ export function createDifferential(): DriveModel {
   const carrier = new T.Group();
   axisX.add(carrier);
   // A 41:11 crown and pinion: a 3.73 final drive.
-  gear(carrier, [0, -0.34, 0], {
-    teeth: 41,
-    inner: 0.86,
-    outer: 1.2,
-    height: 0.1,
-    cone: 0.12,
-    twist: 0.1,
-    bore: 0.47,
-    thickness: 0.1,
-  });
+  gear(
+    carrier,
+    [0, -0.34, 0],
+    {
+      teeth: 41,
+      inner: 0.86,
+      outer: 1.2,
+      height: 0.1,
+      cone: 0.12,
+      twist: 0.15,
+      bore: 0.47,
+      thickness: 0.1,
+    },
+    brass,
+  );
   for (const y of [-0.43, 0.44]) {
-    cylinder(0.66, 0.1, [0, y, 0], steel, carrier);
+    const web = new T.Shape();
+    web.absarc(0, 0, 0.69, 0, Math.PI * 2, false);
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+      const opening = new T.Path();
+      opening.absarc(Math.cos(a) * 0.445, Math.sin(a) * 0.445, 0.146, 0, Math.PI * 2, true);
+      web.holes.push(opening);
+    }
+    const plate = new T.ExtrudeGeometry(web, {
+      depth: 0.08,
+      bevelEnabled: true,
+      bevelSize: 0.012,
+      bevelThickness: 0.012,
+      bevelSegments: 1,
+      curveSegments: 12,
+    });
+    mesh(plate.rotateX(-Math.PI / 2), steel, carrier, [0, y - 0.04, 0]);
     cylinder(0.25, 0.14, [0, y, 0], bright, carrier);
     for (let i = 0; i < 8; i++) {
       const a = (i * Math.PI) / 4;
-      bolt([Math.cos(a) * 0.55, y + 0.063, Math.sin(a) * 0.55], 0.047, carrier);
+      bolt([Math.cos(a) * 0.62, y + 0.055, Math.sin(a) * 0.62], 0.047, carrier);
     }
   }
   for (let i = 0; i < 4; i++) {
@@ -407,7 +474,23 @@ export function createDifferential(): DriveModel {
   input.rotation.x = Math.PI / 2;
   input.position.set(-0.1, -0.12, 0);
   root.add(input);
-  cylinder(0.36, 0.5, [0, 1.55, 0], cast, input);
+  const nose = [
+    [0.58, 1.05],
+    [0.53, 1.22],
+    [0.39, 1.48],
+    [0.36, 1.7],
+    [0.39, 1.73],
+    [0.39, 1.8],
+    [0.24, 1.8],
+  ];
+  mesh(
+    new T.LatheGeometry(
+      nose.map(([r, y]) => new T.Vector2(r, y)),
+      48,
+    ),
+    cast,
+    input,
+  );
   ring(0.35, 0.04, [0, 1.8, 0], silver, input);
   const shaft = new T.Group();
   input.add(shaft);
@@ -425,6 +508,10 @@ export function createDifferential(): DriveModel {
   for (const x of [-0.19, 0.19]) box([0.12, 0.38, 0.18], [x, 2.28, 0], silver, shaft);
   const universal = cylinder(0.08, 0.54, [0, 2.4, 0], steel, shaft);
   universal.rotation.z = Math.PI / 2;
+  for (const x of [-0.235, 0.235]) {
+    const cup = cylinder(0.113, 0.075, [x, 2.4, 0], brass, shaft);
+    cup.rotation.z = Math.PI / 2;
+  }
   const crossJoint = cylinder(0.08, 0.45, [0, 2.4, 0], bright, shaft);
   crossJoint.rotation.x = Math.PI / 2;
   for (const z of [-0.18, 0.18]) box([0.17, 0.38, 0.11], [0, 2.54, z], silver, shaft);

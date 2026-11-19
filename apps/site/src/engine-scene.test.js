@@ -83,8 +83,8 @@ it("keeps the initial pose until the first frame is rendered, then rotates witho
   message("ready");
   tick(5000);
   expect(views()).toHaveLength(1);
-  expect(views()[0].view.theta).toBe(Math.atan2(10, 7));
-  expect(views()[0].view.phi).toBe(Math.atan2(Math.hypot(10, 7), 6.5));
+  expect(views()[0].view.theta).toBe(Math.atan2(-8, 10));
+  expect(views()[0].view.phi).toBe(Math.atan2(Math.hypot(-8, 10), 8));
   expect(frames.size).toBe(0);
   expect(host.classList.contains("engine-loaded")).toBe(false);
   tick(15000);
@@ -103,7 +103,7 @@ it("shows the same stationary pose for reduced motion without running a continuo
   tick(5000);
   message("rendered");
   tick(5020);
-  expect(views().every(({ view }) => view.theta === Math.atan2(10, 7))).toBe(true);
+  expect(views().every(({ view }) => view.theta === Math.atan2(-8, 10))).toBe(true);
   expect(frames.size).toBe(0);
 });
 

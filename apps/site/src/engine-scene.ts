@@ -9,8 +9,8 @@ export function mountEngine(host: HTMLElement) {
   const send = (message: EngineWorkerRequest) => worker.postMessage(message);
   const lifetime = new AbortController();
   const { signal } = lifetime;
-  let theta = Math.atan2(10, 7);
-  let phi = Math.atan2(Math.hypot(10, 7), 6.5);
+  let theta = Math.atan2(-8, 10);
+  let phi = Math.atan2(Math.hypot(-8, 10), 8);
   const clampPhi = (value: number) => Math.max(0.2, Math.min(Math.PI * 0.8, value));
   canvas.style.touchAction = "pan-y";
   canvas.tabIndex = 0;
@@ -160,7 +160,7 @@ export function mountEngine(host: HTMLElement) {
       type: "init",
       canvas: offscreen,
       pixelRatio: Math.min(devicePixelRatio, 1.75),
-      studioUrl: new URL("/engine-studio.hdr", location.href).href,
+      studioUrl: new URL("/engine-studio-256.hdr", location.href).href,
     } satisfies EngineWorkerRequest,
     [offscreen],
   );

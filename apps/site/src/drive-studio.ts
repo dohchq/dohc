@@ -6,7 +6,7 @@ import { stageFigure } from "./figure-studio";
 
 export async function mountDriveStudio(host: HTMLElement) {
   // Share the hero's CC0 Poly Haven studio for a consistent metal finish.
-  const studioTexture = await new HDRLoader().loadAsync("/engine-studio.hdr");
+  const studioTexture = await new HDRLoader().loadAsync("/engine-studio-256.hdr");
   if (!host.isConnected) {
     studioTexture.dispose();
     return () => {};
@@ -68,6 +68,7 @@ export async function mountDriveStudio(host: HTMLElement) {
       model.update(elapsed);
     }
     renderer.render(scene, camera);
+    if (!host.classList.contains("is-loaded")) host.classList.add("is-loaded");
     if (!motion.matches && !held) frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
@@ -152,7 +153,6 @@ export async function mountDriveStudio(host: HTMLElement) {
   });
   fit();
   theme();
-  host.classList.add("is-loaded");
   function dispose() {
     if (disposed) return;
     disposed = true;
