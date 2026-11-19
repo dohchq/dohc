@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { readFile, stat } from "node:fs/promises";
+import { access, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
@@ -12,7 +12,17 @@ import {
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createSuiteTestScratchSync, createTestScratch } from "./testTemp";
-import { engine, compiledRelayMain, pushUntilDrained } from "./twoDaemonSync.fixture";
+import {
+  engine,
+  compiledRelayMain,
+  openJoinedDaemonCapture,
+  openLiveDaemonCapture,
+  pullAndExpect,
+  pullCaptured,
+  pushUntilDrained,
+  writeAndCapture,
+  type LiveDaemonCapture,
+} from "./twoDaemonSync.fixture";
 
 describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
   let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>>;
@@ -171,6 +181,60 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
       } finally {
         await capture?.stop();
         await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "drops a page from the other computer when it is deleted in a file manager, whoever wrote it",
+    async () => {
+      const workspaceId = `two-daemon-outside-delete-${randomUUID()}`;
+      const relay = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const rootA = await createTestScratch("dohc-outside-delete-a-");
+      const rootB = await createTestScratch("dohc-outside-delete-b-");
+      const agent = { kind: "agent", agentId: "helper", onBehalfOf: "local:person" } as const;
+      const deletedOutside = async (daemon: LiveDaemonCapture, root: string, path: string) => {
+        await daemon.reconcileCapture();
+        await rm(join(root, path));
+        const [latest] = (await waitForPathMoments(daemon.capture, path, 2)).sort(
+          (a, b) => b.momentOrder - a.momentOrder,
+        );
+        expect(latest?.operation, `${path} is recorded as deleted`).toBe("delete");
+      };
+      const onDisk = (root: string, path: string) =>
+        access(join(root, path)).then(
+          () => true,
+          () => false,
+        );
+      let a: LiveDaemonCapture | undefined;
+      let b: LiveDaemonCapture | undefined;
+      try {
+        a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay });
+        await a.relay.claim();
+        await a.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(a.relay);
+        await a.capture.writeAuthoredFile(join(rootA, "by-agent.md"), "from an agent\n", agent, {
+          createOnly: true,
+        });
+        await waitForPathMoments(a.capture, "by-agent.md", 1);
+        await writeAndCapture(a, rootA, "synced.md", "from the other computer\n");
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+
+        b = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay });
+        await pullAndExpect(b, rootB, "by-agent.md", "from an agent\n");
+        expect(await readFile(join(rootB, "synced.md"), "utf8")).toBe("from the other computer\n");
+
+        await deletedOutside(a, rootA, "by-agent.md");
+        await deletedOutside(b, rootB, "synced.md");
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+        expect((await pushUntilDrained(b.relay)).pushed).toBeGreaterThan(0);
+        await pullCaptured(b.relay, b.capture);
+        await pullCaptured(a.relay, a.capture);
+        expect(await onDisk(rootB, "by-agent.md"), "the agent's page leaves B").toBe(false);
+        expect(await onDisk(rootA, "synced.md"), "the synced page leaves A").toBe(false);
+      } finally {
+        await Promise.allSettled([b?.close(), a?.close()]);
       }
     },
     3 * REAL_DAEMON_DEADLINE_MS,

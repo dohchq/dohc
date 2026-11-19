@@ -1777,3 +1777,78 @@ fn a_respelled_head_retires_only_with_its_content() {
         }
     }
 }
+
+/// A file found missing retires a head another route wrote only when the file
+/// last held that head's bytes and no write there is waiting to reach disk.
+/// An old write that ended in conflict does not stop it.
+#[test]
+fn a_missing_file_retires_the_head_whose_bytes_it_held() {
+    use dohc_engine_domain::{TxnOutcome, capture_retire_absent_in_tx};
+    use dohc_engine_storage::{
+        MaterializationJobSpec, Preimage, enqueue_job, hex_sha256, put_binary_blob,
+    };
+    let text = "body\n";
+    let job = |id: &str, content: &str| MaterializationJobSpec {
+        job_id: id.to_owned(),
+        workspace_id: WS.to_owned(),
+        target_path: "notes.md".to_owned(),
+        content_sha256: hex_sha256(content.as_bytes()),
+        preimage: Preimage::Absent,
+        target_generation: 1,
+        now_ms: 11,
+    };
+    for (case, seen, retired) in [
+        ("held its bytes", text, true),
+        ("held other bytes", "older\n", false),
+        ("write pending", text, false),
+        ("old write in conflict", text, true),
+    ] {
+        let (_scratch, mut store) = open_store();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "agent".to_owned(),
+                    path: "notes.md".to_owned(),
+                    text: text.to_owned(),
+                    moment_id: "moment-agent".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect("agent head");
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                put_binary_blob(tx, b"older\n")?;
+                if matches!(case, "write pending" | "old write in conflict") {
+                    enqueue_job(tx, &job("other", "older\n"))?;
+                }
+                if case == "old write in conflict" {
+                    tx.execute(
+                        "UPDATE materialization_jobs SET status = 'conflict' WHERE job_id = 'other'",
+                        [],
+                    )
+                    .expect("conflicted write");
+                }
+                Ok::<_, DomainError>(())
+            })
+            .expect("jobs");
+        let input = CaptureRetire {
+            only_if_capture_origin: true,
+            ..retire("notes.md", 20)
+        };
+        let seen = hex_sha256(seen.as_bytes());
+        let Ok(TxnOutcome::Committed(result)) = store.write_with(&NO_FAULTS, |tx| {
+            capture_retire_absent_in_tx(tx, &input, &seen)
+        }) else {
+            panic!("{case}: retire failed");
+        };
+        assert_eq!(result.retired.is_some(), retired, "{case}");
+    }
+}

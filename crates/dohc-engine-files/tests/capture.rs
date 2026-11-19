@@ -947,6 +947,7 @@ fn plan_of(
                 )
             })
             .collect(),
+        removed_sha256: Default::default(),
         degraded: !unconfirmed_removed.is_empty(),
         degraded_paths: Vec::new(),
         prepared_from_dirty: false,

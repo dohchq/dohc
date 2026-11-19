@@ -112,9 +112,25 @@ export interface LiveDaemonCapture {
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  // Rescan the folder and wait until capture has taken in what it found.
+  reconcileCapture(): Promise<void>;
   // What the desktop does first at quit.
   beginShutdown(): void;
   close(step?: CloseStep): Promise<void>;
+}
+
+function reconcileDaemonCapture(
+  workspace: LiveDaemonWorkspace,
+  workspaceId: string,
+): Promise<void> {
+  return workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) => {
+    const adapter = new VersionedLiveAdapter(client, handle, { workspaceId });
+    let capture = await adapter.reconcileCapture();
+    for (let attempt = 0; !capture.settled && attempt < 20; attempt++) {
+      capture = await adapter.flushCapture();
+    }
+    expect(capture.settled, "capture settles after a rescan").toBe(true);
+  });
 }
 
 export function pullCaptured(relay: EngineRelayWorkspaceClient, capture: WorkspaceEngineCapture) {
@@ -161,6 +177,7 @@ export async function openLiveDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(
@@ -240,6 +257,7 @@ export async function openJoinedDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(
