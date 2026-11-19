@@ -792,29 +792,61 @@ it.each(["access ended", "stopped", "paused"] as const)(
   },
 );
 
-// Proves: after a Stop, the owner's first save reaches the stored note even when it names the file
-// before the host's last save, while other pushes and a Pause keep the stored file's check.
+// Proves: after a Stop, the owner's save replaces the host's last save when both were made from the
+// same file, and every other save, push, or Pause keeps the stored file's check.
+const last = blob("last save"),
+  owner = blob("owner save"),
+  second = blob("second computer save");
 it.each([
-  { name: "the owner after a Stop", retire: true, userId: "owner-1", moves: true },
-  { name: "the owner after a Pause", retire: false, userId: "owner-1", moves: false },
   {
-    name: "a push without the owner's account after a Stop",
+    name: "the owner after a Stop",
+    retire: true,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: owner,
+  },
+  {
+    name: "the owner after a Pause",
+    retire: false,
+    userId: "owner-1",
+    saves: [[A, owner]],
+    stored: last,
+  },
+  {
+    name: "a push without the owner's account",
     retire: true,
     userId: undefined,
-    moves: false,
+    saves: [[A, owner]],
+    stored: last,
   },
-])("lets a save that missed the host's last one replace it: $name", async (input) => {
+  {
+    name: "the owner's save from another file",
+    retire: true,
+    userId: "owner-1",
+    saves: [[C, owner]],
+    stored: last,
+  },
+  {
+    name: "a second save from the same old file",
+    retire: true,
+    userId: "owner-1",
+    saves: [
+      [A, owner],
+      [A, second],
+    ],
+    stored: owner,
+  },
+] as const)("lets the owner's save replace the host's last one: $name", async (input) => {
   const f = await fixture();
   retainServiceActivation(f.raw, namespace, true);
-  const last = blob("last save"),
-    owner = blob("owner save");
   f.raw
     .prepare(
       "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceByteLength',?)",
     )
     .run(last.sha256, last.content.byteLength);
   for (const content of [A, last]) await f.upload(content);
-  f.storage.putBlob({ workspaceId: ws, ...owner, createdAtMs: 1 });
+  for (const content of [owner, second])
+    f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
   preparedStop(f.storage, {
     workspaceId: ws,
     path: "docs/a.md",
@@ -824,28 +856,35 @@ it.each([
     nowMs: 20,
     guard() {},
   });
-  const afterA = {
+  const from = (before: Blob) => ({
     beforePresent: true,
     payloadBeforePath: "docs/a.md",
-    payloadBeforeBlobSha256: A.sha256,
-  };
+    payloadBeforeBlobSha256: before.sha256,
+  });
   await f.push([
     [
       "moment.append",
-      write(binding.objectId, "docs/a.md", last, { momentId: "moment-1", metadata: {}, ...afterA }),
+      write(binding.objectId, "docs/a.md", last, {
+        momentId: "moment-1",
+        metadata: {},
+        ...from(A),
+      }),
     ],
   ]);
   f.storage.appendLogBatch({
     workspaceId: ws,
     originId: "owner-laptop",
-    ops: [
+    ops: input.saves.map(([before, after], originSeq) =>
       parseLogOp({
-        originSeq: 0,
+        originSeq,
         opKind: "moment.append",
         recordedAtMs: 4,
-        payload: write(binding.objectId, "docs/a.md", owner, { momentId: "moment-2", ...afterA }),
+        payload: write(binding.objectId, "docs/a.md", after, {
+          momentId: `moment-owner-${originSeq}`,
+          ...from(before),
+        }),
       }),
-    ],
+    ),
     ...(input.userId === undefined
       ? {}
       : { workReferences: { userId: input.userId, references: [] } }),
@@ -854,7 +893,7 @@ it.each([
     f.raw
       .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
       .get(ws, "docs/a.md")!.blob_sha256,
-  ).toBe(input.moves ? owner.sha256 : last.sha256);
+  ).toBe(input.stored.sha256);
 });
 
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {

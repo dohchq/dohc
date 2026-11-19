@@ -3,13 +3,14 @@ import type { StorageContext } from "./context";
 import type { SqliteDb, SyncRelayShareRow } from "./types";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
 import {
   effectiveShareSelector,
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
 } from "../shareFilter";
 import { parseWorkspaceId } from "../requestInputs";
+import { SERVICE_HOST_ORIGIN_PREFIX } from "../relayLogInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
@@ -506,21 +507,45 @@ export function readServiceHostEnrollmentByObjectId(
     .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
   return value ? row(value) : null;
 }
-/** Whether the owner's save at this path continues the note they stopped, so it may build on a host save it never imported. */
+/** Whether the owner's save replaces the last save of the note's host after a Stop, both made from the same file. */
 export function isOwnerSaveOfStoppedNote(
   storage: StorageContext,
-  input: { workspaceId: string; userId: string; objectId: string; path: string },
+  input: { workspaceId: string; userId: string; payloadJson: string },
 ): boolean {
-  const { workspaceId, userId, objectId, path } = input;
+  const { workspaceId, userId } = input;
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(input.payloadJson));
+  } catch {
+    return false;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256;
+  if (typeof objectId !== "string" || typeof path !== "string" || typeof before !== "string")
+    return false;
   const enrollment = storage.db
     .prepare(
       `SELECT path FROM ${SERVICE_HOST_ENROLLMENTS}
         WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND owner_stop='retire'`,
     )
     .get(workspaceId, objectId, userId);
+  if (
+    enrollment?.path !== path ||
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) !== objectId
+  )
+    return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT l.origin_id,json_extract(l.payload_json,'$.payloadBeforeBlobSha256') AS before
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(workspaceId, path);
   return (
-    enrollment?.path === path &&
-    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId
+    typeof stored?.origin_id === "string" &&
+    stored.origin_id.startsWith(SERVICE_HOST_ORIGIN_PREFIX) &&
+    stored.before === before
   );
 }
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */

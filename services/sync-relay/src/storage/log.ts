@@ -354,18 +354,16 @@ export function appendLogBatchInTransaction(
         op.payloadJson,
         Number(result.lastInsertRowid),
       );
-    const resolved =
-      op.opKind === "moment.append" ? objectPathFromMomentPayload(op.payloadJson) : null;
     const ownerSaveOfStoppedNote =
       owner !== undefined &&
-      resolved?.path != null &&
+      op.opKind === "moment.append" &&
       isOwnerSaveOfStoppedNote(storage, {
         workspaceId: input.workspaceId,
         userId: owner,
-        objectId: resolved.objectId,
-        path: resolved.path,
+        payloadJson: op.payloadJson,
       });
     if (op.opKind === "moment.append") {
+      const resolved = objectPathFromMomentPayload(op.payloadJson);
       if (resolved) {
         objectPathStmt.run(
           input.workspaceId,
