@@ -408,10 +408,12 @@ function resolvePersonalReach(
 }
 
 /**
- * Each workspace is the account's, or one it is an active member of, once, at
- * View, Comment, or Edit. A change may keep an entry the agent already holds
- * at the same level, such as one whose membership ended, so dropping one such
- * workspace never needs the others dropped too.
+ * Each workspace appears once: one the account owns at View, Comment, or Edit,
+ * or one it is an active member of at View or Comment. A member's agent never
+ * writes a member's files, so Edit there would only promise what no route
+ * grants. A change may keep an entry the agent already holds at the same
+ * level, such as one whose membership ended, so dropping one such workspace
+ * never needs the others dropped too.
  */
 function reachIsAllowed(
   storage: StorageContext,
@@ -429,7 +431,8 @@ function reachIsAllowed(
           (kept) => kept.workspaceId === entry.workspaceId && kept.level === entry.level,
         ) ||
           ownsWorkspace(storage, ownerUserId, entry.workspaceId) ||
-          joinedSelector(storage, ownerUserId, entry.workspaceId) !== null),
+          (entry.level !== "edit" &&
+            joinedSelector(storage, ownerUserId, entry.workspaceId) !== null)),
     )
   );
 }
@@ -661,7 +664,7 @@ export function cancelPersonalAuthorization(
 /**
  * Allow turns the request into a single-use code bound to the account, its
  * fence epoch read at consent, the chosen reach, and, when signing in again,
- * the agent's epoch. Every workspace in the reach must be the account's.
+ * the agent's epoch. `reachIsAllowed` decides the reach.
  */
 export function allowPersonalAuthorization(
   storage: StorageContext,
@@ -750,8 +753,9 @@ export function personalCredentialOwner(
 
 /**
  * Redeems a code once, in one transaction. It checks the code's bindings,
- * the account's fence against `fenceEpoch` read just before, that the account
- * still owns every workspace, and, when signing in again, the agent's epoch.
+ * the account's fence against `fenceEpoch` read just before, that
+ * `reachIsAllowed` still allows the reach, and, when signing in again, the
+ * agent's epoch.
  * It then creates or reuses the agent, writes its reach, and issues the
  * connection's tokens. Signing in again ends the agent's other connections.
  * Any mismatch spends the code; replaying a redeemed code ends its connection.

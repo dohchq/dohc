@@ -2359,7 +2359,7 @@ describe("a personal agent in a workspace its person joined", () => {
     const agent = await signIn(f, {
       reach: [
         { workspaceId: WS_A, level: "view" },
-        { workspaceId: COMMUNITY, level: "edit" },
+        { workspaceId: COMMUNITY, level: "comment" },
       ],
     });
     expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toContainEqual({
@@ -2835,17 +2835,38 @@ describe("a personal agent in a workspace its person joined", () => {
     expect((await roster(f)).revision).toBe(unchanged);
   });
 
-  it("refuses a Collection write in a joined workspace, even at Edit", async () => {
+  it("never takes Edit in a joined workspace, by consent or a reach change, and refuses a Collection write there even from an Edit row", async () => {
     const f = await fixture();
-    joinCommunity(f, { level: "edit" });
+    joinCommunity(f, { level: "edit", role: "admin" });
     const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
     await communityWrite(f, "trip/packing/collection.yaml", SCHEMA);
+    const joinedEdit: Reach = [
+      { workspaceId: WS_A, level: "edit" },
+      { workspaceId: COMMUNITY, level: "edit" },
+    ];
+    const clientId = await registerClient(f);
+    await expectRefused(
+      await allow(f, await beginRequest(f, clientId, COMMUNITY), { reach: joinedEdit }),
+    );
     const agent = await signIn(f, {
+      clientId,
       reach: [
         { workspaceId: WS_A, level: "edit" },
-        { workspaceId: COMMUNITY, level: "edit" },
+        { workspaceId: COMMUNITY, level: "comment" },
       ],
     });
+    expect((await setReach(f, agent, joinedEdit)).status).toBe(400);
+    expect((await roster(f)).agents[0]?.reach).toEqual([
+      { workspaceId: WS_A, level: "edit" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ]);
+
+    // A row no route writes any more still writes nothing.
+    const db = inspectDatabase(f.dbPath);
+    db.prepare(
+      "UPDATE sync_relay_personal_agent_reach SET level = 'edit' WHERE workspace_id = ?",
+    ).run(COMMUNITY);
+    db.close();
     const before = logOf(f, COMMUNITY).length;
     await expectCode(
       await tool(
