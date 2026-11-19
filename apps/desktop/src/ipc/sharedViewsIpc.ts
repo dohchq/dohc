@@ -1280,6 +1280,21 @@ export function registerSharedViewsIpcHandlers<
               if (!currentView || currentView.shareId !== view.shareId || !currentPin)
                 return { status: "unverified" };
               if (currentView.ended) return { status: "ended" };
+              // Main's write gate reads a membership's levels from its stored
+              // reach, so the relay's reach now goes in with a new level. A
+              // changed visibility is left to the rebuild the next pull starts.
+              let reach: { reach: ListedReach } | null = null;
+              if (currentPin.wholeWorkspace === true && statedAccess !== currentPin.access) {
+                const listed = await dependencies.fetchShareViewReach({
+                  relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+                  shareId: view.shareId,
+                  signal: AbortSignal.any([controller.signal, operation.signal]),
+                });
+                scoped.assertCurrent();
+                const stored = storedShareViewReach(currentView);
+                if (!stored || stored.visibilitySignature === listed.visibilitySignature)
+                  reach = { reach: listed };
+              }
               const ranks = { view: 0, comment: 1, edit: 2 };
               if (
                 currentPin.wholeWorkspace === true &&
@@ -1288,6 +1303,7 @@ export function registerSharedViewsIpcHandlers<
                 await setWorkspaceShareView(workspace.workspaceId, {
                   ...currentView,
                   grantedSelector: { ...currentPin, access: statedAccess },
+                  ...reach,
                 });
                 refreshNativeWorkspaceSurfaces();
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
@@ -1310,6 +1326,7 @@ export function registerSharedViewsIpcHandlers<
                       await setWorkspaceShareView(workspace.workspaceId, {
                         ...latest,
                         grantedSelector: { ...latestPin, access: narrowed },
+                        ...reach,
                         unsavedPaths,
                         unconfirmedChanges,
                       });

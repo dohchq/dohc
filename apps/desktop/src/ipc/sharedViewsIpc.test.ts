@@ -22,7 +22,11 @@ import {
   type ShareViewInfo,
 } from "../workspaces/shareViewInfo";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
-import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
+import {
+  shareViewWriteLevel,
+  shareViewWriteScopeOf,
+  workspaceWriteRefusal,
+} from "../workspaces/shareWriteGate";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
 import { shareViewRebuildStop } from "../workspaces/shareViewRebuild";
 import { buildShareCode } from "../workspaces/syncCode";
@@ -428,6 +432,39 @@ describe("metadata-only access checks", () => {
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "comment" });
+  });
+  // Main's write gate takes a membership's levels from its stored reach, and
+  // the window offers New page from the level. A check that moves the level
+  // stores the relay's reach with it, so a page made offline after the owner
+  // raised members to Edit is written, and one after a drop is refused.
+  it("stores the relay's reach with a membership's new level", async () => {
+    const h = await harness();
+    const listed = (signature: string, rootLevel: "comment" | "edit") => ({
+      signature,
+      visibilitySignature: "v1",
+      rootLevel,
+      folders: [],
+    });
+    Object.assign(h.workspace.shareView!, {
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      reach: listed("r1", "comment"),
+    });
+    const levelAt = (path: string) =>
+      shareViewWriteLevel(shareViewWriteScopeOf(h.workspace.shareView, null)!, { path });
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    h.fetchReach.mockResolvedValue(listed("r2", "edit"));
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(levelAt("notes/Budget.md")).toBe("edit");
+    h.fetchAccess.mockResolvedValue({ access: "comment" });
+    h.fetchReach.mockResolvedValue(listed("r3", "comment"));
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(levelAt("notes/Budget.md")).toBe("comment");
+    expect(h.workspace.shareView!.reach).toEqual(listed("r3", "comment"));
+    // A changed visibility is the rebuild's to install, not this check's.
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    h.fetchReach.mockResolvedValue({ ...listed("r4", "edit"), visibilitySignature: "v2" });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.workspace.shareView!.reach).toEqual(listed("r3", "comment"));
   });
   it("names who changed a membership's level only when this check moved it", async () => {
     const h = await harness();
