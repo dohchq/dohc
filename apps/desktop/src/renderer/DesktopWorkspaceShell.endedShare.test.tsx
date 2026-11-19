@@ -542,11 +542,14 @@ describe("ended Edit Collection shares", () => {
           ok: false,
           errorKind: "transient",
           changedPaths: 0,
-          errorMessage: "dohc could not turn on editing for this share.",
+          errorMessage:
+            "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
         }),
       );
       const notice = await screen.findByTestId("workspace-shell-error");
-      expect(notice.textContent).toContain("dohc could not turn on editing for this share.");
+      expect(notice.textContent).toContain(
+        "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
+      );
       expect(fullRefreshes()).toBe(1);
       fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
       await waitFor(() => expect(fullRefreshes()).toBe(2));
