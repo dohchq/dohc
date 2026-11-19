@@ -23,6 +23,8 @@ import {
   type WorkspaceCollections,
 } from "../collections/collectionStore";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
+import { DamagedKept } from "../conversation/DamagedKept";
+import { useOutboxState } from "../conversation/useOutbox";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
@@ -123,7 +125,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     createAccount({
       store: secureSignInStore,
       fetch,
-      onSignOut: teardown.signOut((leave) => outbox.signOut(leave)),
+      onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
       pendingSignOuts: pendingSignOuts(kept),
     }),
   );
@@ -336,7 +338,8 @@ export function useSignIn(): SignIn {
 
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
-  const { account, state, deletion } = useAccount();
+  const { account, state, deletion, outbox } = useAccount();
+  const damaged = useOutboxState(outbox)?.status === "damaged";
   // Once Connect shows, it stays while a Sign out's delete has failed, even if a sign-in finishes meanwhile, so the
   // failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
   const [onConnect, setOnConnect] = useState(false);
@@ -347,6 +350,9 @@ export function AccountGate({ children }: { children: ReactNode }) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: "center", padding: 24 }}>
         <ProblemLine text={accountWords.savedUnreadable} onRetry={() => void account.restore()} />
+        {damaged ? (
+          <DamagedKept outbox={outbox} live={() => true} onDeleted={() => void account.restore()} />
+        ) : null}
       </View>
     );
   if (showConnect) return <Connect />;

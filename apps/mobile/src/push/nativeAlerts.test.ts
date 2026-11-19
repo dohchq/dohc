@@ -52,4 +52,12 @@ describe("clearing alerts", () => {
     plain.move(out(null));
     expect(cleared).toEqual(["dismiss", "unregister"]);
   });
+
+  it("happens when a launch can't read whether a Sign out is pending", () => {
+    cleared.length = 0;
+    const launch = account({ status: "loading" });
+    clearAlertsAtSignOut(launch);
+    launch.move({ status: "unreadable" });
+    expect(cleared).toEqual(["dismiss", "unregister"]);
+  });
 });

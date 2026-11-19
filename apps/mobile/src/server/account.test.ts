@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { createAccount, type Account, type SignIn, type StoredSignIn } from "./account";
 import { listWorkspaces } from "./api";
 import { ServerError } from "./client";
-import type { PendingSignOuts } from "./pushRegistration";
+import {
+  pendingSignOuts,
+  readRegistration,
+  saveRegistration,
+  type PendingSignOuts,
+} from "./pushRegistration";
+import { keptDisk } from "./testKeptDisk";
 import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 
 const SAVED: StoredSignIn = {
@@ -33,6 +39,10 @@ function memoryPending() {
       rows.add(key(owner));
     },
     isPending: async (owner) => rows.has(key(owner)),
+    cancel: async (owner) => {
+      log.push("cancel");
+      rows.delete(key(owner));
+    },
     end: async (owner) => {
       log.push("end");
       rows.delete(key(owner));
@@ -657,21 +667,27 @@ describe("signing out", () => {
     expect(tokens.current()).toBeNull();
   });
 
-  it("clears the mark when the hook rejects before leave", async () => {
+  it("puts the registration row back, alerts on, when the hook rejects before leave", async () => {
     const { server, tokens } = setup();
-    const { pending, rows } = memoryPending();
+    const kept = keptDisk().launch();
+    const owner = { origin: SAVED.origin, userId: SAVED.userId };
+    await saveRegistration(kept, owner, true, 4);
     const account = createAccount({
       store: tokens.store,
       fetch: server.fetch,
       onSignOut: async () => {
-        expect(rows.size).toBe(1);
+        expect(await readRegistration(kept, owner)).toMatchObject({ signingOut: true });
         throw new Error("couldn't delete");
       },
-      pendingSignOuts: pending,
+      pendingSignOuts: pendingSignOuts(kept),
     });
     await account.restore();
     await expect(account.signOut()).rejects.toThrow("couldn't delete");
-    expect(rows.size).toBe(0);
+    expect(await readRegistration(kept, owner)).toEqual({
+      alerts: true,
+      generation: 4,
+      signingOut: false,
+    });
     expect(account.state().status).toBe("signed-in");
   });
 

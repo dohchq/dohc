@@ -1,29 +1,18 @@
+import type { SignIn } from "./account";
 import type { KeptStore } from "./keptStore";
 
-export interface Owner {
-  readonly origin: string;
-  readonly userId: string;
-}
+type Owner = Pick<SignIn, "origin" | "userId">;
 
-export interface Registration {
-  readonly alerts: boolean;
-  readonly generation: number | null;
-  readonly signingOut: boolean;
-}
-
-/** A Sign out waiting for the server, kept in the account's registration row so a relaunch finishes it. */
 export interface PendingSignOuts {
   begin(owner: Owner): Promise<void>;
   isPending(owner: Owner): Promise<boolean>;
+  cancel(owner: Owner): Promise<void>;
   end(owner: Owner): Promise<void>;
 }
 
 const key = (owner: Owner) => [owner.origin, owner.userId];
 
-export async function readRegistration(
-  store: KeptStore,
-  owner: Owner,
-): Promise<Registration | null> {
+export async function readRegistration(store: KeptStore, owner: Owner) {
   const [row] = await store.read(
     "SELECT alerts, generation, signing_out FROM push_registrations WHERE origin = ? AND account_id = ?",
     key(owner),
@@ -33,7 +22,7 @@ export async function readRegistration(
     alerts: row.alerts === 1,
     generation: typeof row.generation === "number" ? row.generation : null,
     signingOut: row.signing_out === 1,
-  };
+  } as const;
 }
 
 export const saveRegistration = (
@@ -53,16 +42,19 @@ export const saveRegistration = (
     );
   });
 
-export const pendingSignOuts = (store: KeptStore): PendingSignOuts => ({
-  begin: (owner) =>
-    store.transaction((sql) =>
-      sql.run(
-        `INSERT INTO push_registrations (origin, account_id, alerts, generation, signing_out) VALUES (?, ?, 0, NULL, 1)
-         ON CONFLICT (origin, account_id) DO UPDATE SET alerts = 0, signing_out = 1`,
-        key(owner),
-      ),
+const mark = (store: KeptStore, owner: Owner, signingOut: 0 | 1) =>
+  store.transaction((sql) =>
+    sql.run(
+      `INSERT INTO push_registrations (origin, account_id, alerts, generation, signing_out) VALUES (?, ?, 0, NULL, ?)
+       ON CONFLICT (origin, account_id) DO UPDATE SET signing_out = excluded.signing_out`,
+      [...key(owner), signingOut],
     ),
+  );
+
+export const pendingSignOuts = (store: KeptStore): PendingSignOuts => ({
+  begin: (owner) => mark(store, owner, 1),
   isPending: async (owner) => (await readRegistration(store, owner))?.signingOut ?? false,
+  cancel: (owner) => mark(store, owner, 0),
   end: (owner) =>
     store.transaction((sql) =>
       sql.run("DELETE FROM push_registrations WHERE origin = ? AND account_id = ?", key(owner)),

@@ -20,7 +20,6 @@ export interface NativeAlerts {
   onToken(listener: (token: string) => void): () => void;
 }
 
-/** `problem` is `kept` when this phone couldn't save the choice. */
 export type AlertsState =
   | { readonly status: "loading" }
   | { readonly status: "unavailable" }
@@ -35,10 +34,8 @@ export type AlertsState =
 export interface Alerts {
   state(): AlertsState;
   subscribe(listener: () => void): () => void;
-  /** The binding the server last acknowledged for this sign-in, or null. */
   generation(): number | null;
   sync(): Promise<void>;
-  /** Saves a choice that failed to save, then syncs. */
   retry(): void;
   turnOn(): void;
   turnOff(): void;
@@ -182,12 +179,6 @@ export function createAlerts(options: {
   };
 }
 
-export interface AlertTarget {
-  readonly workspaceId: string;
-  readonly threadId: string;
-  readonly messageId: string;
-}
-
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 
@@ -195,7 +186,7 @@ export function alertTarget(
   data: unknown,
   generation: number | null,
   workspaces: readonly AccountWorkspace[],
-): AlertTarget | null {
+) {
   if (!isFields(data) || generation === null || data.generation !== generation) return null;
   const { workspaceId, threadId, messageId } = data;
   if (!id(workspaceId) || !id(threadId) || !id(messageId)) return null;
@@ -203,12 +194,7 @@ export function alertTarget(
   return entry?.showOnPhone && entry.canOpen ? { workspaceId, threadId, messageId } : null;
 }
 
-/** Reads the workspaces from the server first. Null when the sign-in changed; a problem to retry when offline. */
-export async function openTap(
-  signIn: SignIn,
-  data: unknown,
-  generation: () => number | null,
-): Promise<AlertTarget | "home" | "offline" | "server-busy" | null> {
+export async function openTap(signIn: SignIn, data: unknown, generation: () => number | null) {
   try {
     const workspaces = await listWorkspaces(signIn.client);
     if (!signIn.isCurrent()) return null;

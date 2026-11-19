@@ -1,13 +1,11 @@
 import { accountWords, type ServerProblemKind } from "@dohc/interface-words/account";
+import { noticesWords } from "@dohc/interface-words/notices";
 import * as Notifications from "expo-notifications";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "../account/AccountProvider";
-import { ProblemLine } from "../account/ProblemLine";
+import { Toast } from "../notices/Toast";
 import { serverName } from "../server/origin";
-import { useTheme } from "../theme";
 import { openTap, type AlertsState } from "./alerts";
 
 const UNAVAILABLE: AlertsState = { status: "unavailable" };
@@ -15,8 +13,6 @@ const none = { subscribe: () => () => undefined, state: () => UNAVAILABLE };
 
 export function AlertTaps() {
   const router = useRouter();
-  const theme = useTheme();
-  const insets = useSafeAreaInsets();
   const response = Notifications.useLastNotificationResponse();
   const { state, alerts, chooseWorkspace } = useAccount();
   const signIn = state.status === "signed-in" ? state.signIn : null;
@@ -57,21 +53,16 @@ export function AlertTaps() {
 
   if (!failed || !signIn) return null;
   return (
-    <View
-      style={{
-        position: "absolute",
-        left: 16,
-        right: 16,
-        bottom: insets.bottom + 66,
-        paddingHorizontal: 16,
-        borderRadius: 12,
-        backgroundColor: theme.raised,
+    <Toast
+      message={{
+        tone: "failure",
+        title: accountWords.problem(failed, serverName(signIn.origin)),
+        action: {
+          label: noticesWords.tryAgain,
+          onPress: () => setAttempt((count) => count + 1),
+        },
       }}
-    >
-      <ProblemLine
-        text={accountWords.problem(failed, serverName(signIn.origin))}
-        onRetry={() => setAttempt((count) => count + 1)}
-      />
-    </View>
+      onClose={() => setFailed(null)}
+    />
   );
 }

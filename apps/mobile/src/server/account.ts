@@ -7,6 +7,7 @@ import {
   type ServerProblem,
 } from "./client";
 import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
+import { StoreError } from "./keptStore";
 import type { PendingSignOuts } from "./pushRegistration";
 
 // The phone's sign-in to one server, as the desktop's cloud login keeps its (apps/desktop/src/workspaces/cloudLogin.ts).
@@ -97,10 +98,13 @@ export function createAccount(options: {
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /**
-   * Sign out's own cleanup. It calls `leave`, which ends the sign-in and deletes the token, once its cleanup can't be
-   * lost. Only Sign out runs it: a 401 and a launch never do.
+   * Sign out's own cleanup of `ending`, the account it signs out, or null after a 401. It calls `leave`, which ends the
+   * sign-in and deletes the token, once its cleanup can't be lost. Only Sign out runs it: a 401 never does.
    */
-  readonly onSignOut?: (leave: () => Promise<void>) => Promise<void>;
+  readonly onSignOut?: (
+    leave: () => Promise<void>,
+    ending: Pick<SignIn, "origin" | "userId"> | null,
+  ) => Promise<void>;
   readonly pendingSignOuts?: PendingSignOuts;
 }): Account {
   const { store, fetch } = options;
@@ -242,7 +246,14 @@ export function createAccount(options: {
     const at = generation;
     const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
     const marked = ending !== null && ending === saved;
-    if (marked && options.pendingSignOuts) await options.pendingSignOuts.begin(ending);
+    // A damaged kept.db takes no mark until the hook has deleted it, as the Sign out sheet warned.
+    let unmarked = false;
+    if (marked && options.pendingSignOuts)
+      await options.pendingSignOuts.begin(ending).catch((error: unknown) => {
+        if (!options.onSignOut || !(error instanceof StoreError && error.kind === "damaged"))
+          throw error;
+        unmarked = true;
+      });
     let leaving: Promise<void> | null = null;
     const leaveOnce = async () => {
       // A 401 moved the generation while the hook ran: the server has ended the session, and what it holds now stays.
@@ -250,6 +261,7 @@ export function createAccount(options: {
         if (ending) await forget(ending.origin, ending.token);
         return;
       }
+      if (unmarked && ending) await options.pendingSignOuts?.begin(ending);
       advance();
       saved = null;
       unrevoked = ending;
@@ -270,14 +282,14 @@ export function createAccount(options: {
         await options.pendingSignOuts?.end(ending).catch(() => undefined);
     };
     const leave = () => (leaving ??= leaveOnce());
-    const cleaning = options.onSignOut?.(leave);
+    const cleaning = options.onSignOut?.(leave, ending);
     if (cleaning) {
       try {
         await cleaning;
       } catch (error) {
         if (!leaving) {
           if (marked && saved === ending)
-            await options.pendingSignOuts?.end(ending).catch(() => undefined);
+            await options.pendingSignOuts?.cancel(ending).catch(() => undefined);
           throw error;
         }
       }

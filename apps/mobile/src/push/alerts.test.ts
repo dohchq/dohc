@@ -257,7 +257,7 @@ describe("a pending Sign out's row", () => {
     expect(await rows.isPending(OWNER)).toBe(true);
     await saveRegistration(store, OWNER, true, 3);
     expect(await readRegistration(store, OWNER)).toEqual({
-      alerts: false,
+      alerts: true,
       generation: 2,
       signingOut: true,
     });

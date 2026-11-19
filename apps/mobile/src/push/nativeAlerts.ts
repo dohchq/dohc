@@ -29,11 +29,10 @@ export const nativeAlerts: NativeAlerts = {
 const phase = (state: AccountState) =>
   state.status === "signed-in"
     ? "in"
-    : state.status === "signed-out" && state.pendingSignOut !== null
+    : state.status === "unreadable" || (state.status === "signed-out" && state.pendingSignOut)
       ? "pending"
       : "out";
 
-/** When a sign-in ends, or a launch finds a Sign out pending, its alerts leave the phone until the next sign-in. */
 export function clearAlertsAtSignOut(account: Pick<Account, "state" | "subscribe">): () => void {
   let was: ReturnType<typeof phase> = "out";
   const check = () => {
