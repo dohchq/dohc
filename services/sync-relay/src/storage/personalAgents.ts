@@ -1141,7 +1141,15 @@ export function listPersonalAgents(storage: StorageContext, ownerUserId: string)
       .sort()
       .map((workspaceId) => ({
         workspaceId,
-        name: membershipName(storage, workspaceId),
+        // Only the membership the account was removed from keeps its entry, so
+        // a membership started again for others never tells it a new name.
+        name: storage.db
+          .prepare(
+            "SELECT 1 FROM sync_relay_workspace_members WHERE workspace_id = ? AND user_id = ?",
+          )
+          .get(workspaceId, ownerUserId)
+          ? membershipName(storage, workspaceId)
+          : null,
         role: "ended" as const,
       }));
     return { revision, agents, workspaces: [...owned, ...joined, ...ended] };

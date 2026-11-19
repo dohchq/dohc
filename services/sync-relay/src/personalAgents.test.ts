@@ -2735,6 +2735,29 @@ describe("a personal agent in a workspace its person joined", () => {
       role: "ended",
     });
 
+    // A membership started again for others never tells the ended member its new name.
+    expect(
+      f.storage.endWorkspaceMembership({ workspaceId: COMMUNITY, actorUserId: OTHER, nowMs: 8 }),
+    ).toEqual({ ok: true });
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Private new project",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community-new",
+        nowMs: 9,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await roster(f)).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: null,
+      role: "ended",
+    });
+
     // A change elsewhere keeps the ended workspace as it was, never higher, and Remove drops it.
     const keeping = (level: "comment" | "edit"): Reach => [
       { workspaceId: WS_A, level: "view" },
