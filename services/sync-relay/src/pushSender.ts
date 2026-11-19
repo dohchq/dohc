@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
 import type { ApnsClient } from "./apnsClient";
-import { apnsBodyText, apnsPayload } from "./apnsPayload";
+import { apnsPayload, apnsText } from "./apnsPayload";
 import {
   isOwnAgentMessage,
   phoneCanShow,
@@ -22,7 +22,7 @@ import {
   claimPushDelivery,
   finishPushDelivery,
   nextPushDeliveryAt,
-  ownsPushLease,
+  readPushLease,
   pausePushDelivery,
   type PushDelivery,
 } from "./storage/pushDeliveries";
@@ -330,7 +330,7 @@ export function createPushSender(options: {
       subscription.generation !== delivery.generation ||
       subscription.expiresAtMs <= now() ||
       subscription.vapidKeyId !== config?.keyId ||
-      !ownsPushLease(storage, delivery, now())
+      !readPushLease(storage, delivery, now())
     )
       return null;
     const access = pushMessageAccess(storage, message, delivery.userId);
@@ -342,26 +342,27 @@ export function createPushSender(options: {
     const nowMs = now();
     const binding = readLivePushDevice(storage, delivery.generation, nowMs);
     const message = readPushMessage(storage, delivery.relaySeq);
+    const lease = readPushLease(storage, delivery, nowMs);
     if (
       !binding ||
       !message ||
+      !lease ||
       binding.userId !== delivery.userId ||
       binding.topic !== client.config.topic ||
       !client.config.environments.has(binding.environment) ||
-      !ownsPushLease(storage, delivery, nowMs) ||
       !phoneCanShow(storage, delivery.userId, message.workspaceId, message.threadId)
     )
       return null;
+    const { noticeId } = lease;
     // An agent's answer alerts only while it is the recipient's own agent's, and its run Notice is still listed.
     if (
-      (delivery.reason === "agent" || delivery.noticeId !== null) &&
+      (delivery.reason === "agent" || noticeId !== null) &&
       (!isOwnAgentMessage(message, delivery.userId) ||
-        (delivery.noticeId !== null &&
-          !noticeIsListed(storage, delivery.userId, delivery.noticeId, nowMs)))
+        (noticeId !== null && !noticeIsListed(storage, delivery.userId, noticeId, nowMs)))
     )
       return null;
     const access = pushMessageAccess(storage, message, delivery.userId);
-    return access ? { binding, message, access } : null;
+    return access ? { binding, message, access, noticeId } : null;
   };
 
   const attemptNative = async (
@@ -391,7 +392,7 @@ export function createPushSender(options: {
       expiration <= Math.floor(nowMs / 1000)
     )
       return drop(delivery);
-    const { binding, message } = fresh;
+    const { binding, message, noticeId } = fresh;
     // Stable for the thread, so a newer alert replaces an older one on the phone.
     const threadKey = createHash("sha256")
       .update(JSON.stringify([binding.generation, message.workspaceId, message.threadId]))
@@ -407,8 +408,11 @@ export function createPushSender(options: {
         "apns-collapse-id": threadKey,
       },
       apnsPayload({
-        title: alertLabel(message, delivery.reason, fresh.access.place, accountName, true),
-        body: apnsBodyText(message.body),
+        // A chosen name or chat name can hold a URL too.
+        title: apnsText(
+          alertLabel(message, delivery.reason, fresh.access.place, accountName, true),
+        ),
+        body: apnsText(message.body),
         threadKey,
         data: {
           generation: binding.generation,
@@ -416,7 +420,7 @@ export function createPushSender(options: {
           threadId: message.threadId,
           messageId: message.messageId,
           deliveryId: delivery.deliveryId,
-          ...(delivery.noticeId === null ? {} : { noticeId: delivery.noticeId }),
+          ...(noticeId === null ? {} : { noticeId }),
         },
       }),
       signal,

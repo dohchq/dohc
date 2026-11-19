@@ -1,22 +1,37 @@
+import { domainToUnicode } from "node:url";
 import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
 import { hiddenFile } from "./accountFeed";
 
 export const APNS_PAYLOAD_MAX_BYTES = 4096;
 
-// A URL, with or without its scheme, or a bare host followed by a path. Only the host is kept.
-const URL_PATTERN =
-  /\b(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^\s/?#@[\]]+@)?((?:[\p{L}\p{N}-]+\.)+\p{L}{2,}|localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?:[/?#][^\s]*)?/giu;
+// Each URL pattern costs a bounded amount per position, so it stays linear in the text.
+// A URL with a scheme, whatever its host.
+const SCHEME_URL = /[a-z][a-z0-9+.-]{0,31}:\/\/\S*/giu;
+// A URL without one: a dotted host, localhost, or an IP, perhaps after a user and before a path.
+const BARE_URL =
+  /(?<![\p{L}\p{N}_-])(?:[^\s/?#@[\]]{1,64}@)?((?:[\p{L}\p{N}-]{1,63}\.){1,8}\p{L}{2,63}|localhost|\[[0-9a-f:.]{2,45}\]|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?:[/?#]\S*)?/giu;
 // A capability path pasted without its host.
 const BARE_LINK_PATH = /(?<![\w/])\/l\/[A-Za-z0-9_-]+\S*/gu;
 
+const urlHost = (url: string) => {
+  try {
+    const { hostname } = new URL(url);
+    return domainToUnicode(hostname) || hostname || "a link";
+  } catch {
+    return "a link";
+  }
+};
+
 /**
- * A message body as a lock screen may show it: plain text, a file link as
- * its file's name unless that file is hidden, no work-link reference, no
- * Markdown target, and every URL reduced to its host.
+ * Text as a lock screen may show it: plain text, a file link as its file's
+ * name unless that file is hidden, no work-link reference, no Markdown
+ * target, and every URL reduced to its host. Reads at most the first 4096
+ * code points, more than an alert can show.
  */
-export function apnsBodyText(message: string): string {
+export function apnsText(message: string): string {
   // A lone surrogate becomes U+FFFD, which keeps every index the link scan returns.
-  const body = message.toWellFormed();
+  const points = [...message.toWellFormed()];
+  const body = points.slice(0, APNS_PAYLOAD_MAX_BYTES).join("");
   let text = "";
   let at = 0;
   const { files, works } = scanChatLinks(body);
@@ -31,21 +46,21 @@ export function apnsBodyText(message: string): string {
     at = link.end;
   }
   text += body.slice(at);
-  return (
-    text
-      // A malformed link the scan refused keeps nothing after its opener.
-      .replace(/@\[[^\]\r\n]*\]?/gu, "a file")
-      // Markdown images and links keep their words, never their targets.
-      .replace(/!?\[([^\]\r\n]*)\]\([^)\r\n]*\)/gu, "$1")
-      .replace(URL_PATTERN, (_match, host: string) => host)
-      .replace(BARE_LINK_PATH, "a link")
-      .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d{1,9}[.)])\s+/gmu, "")
-      .replace(/(\*\*|__|~~)(.+?)\1/gu, "$2")
-      .replace(/`+/gu, "")
-      .replace(/[\p{Cc}\p{Cf}<>]/gu, " ")
-      .replace(/\s+/gu, " ")
-      .trim()
-  );
+  const cleaned = text
+    // A malformed link the scan refused keeps nothing after its opener.
+    .replace(/@\[[^\]\r\n]*\]?/gu, "a file")
+    // Markdown images and links keep their words, never their targets, even one with parentheses.
+    .replace(/!?\[([^[\]\r\n]*)\]\((?:[^()[\]\s]|\([^()[\]\s]*\))*\)/gu, "$1")
+    .replace(SCHEME_URL, urlHost)
+    .replace(BARE_URL, (_match, host: string) => host)
+    .replace(BARE_LINK_PATH, "a link")
+    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d{1,9}[.)])\s+/gmu, "")
+    .replace(/(\*\*|__|~~)(.+?)\1/gu, "$2")
+    .replace(/`+/gu, "")
+    .replace(/[\p{Cc}\p{Cf}<>]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return points.length > APNS_PAYLOAD_MAX_BYTES ? `${cleaned}…` : cleaned;
 }
 
 const byteLength = (value: unknown) => Buffer.byteLength(JSON.stringify(value));

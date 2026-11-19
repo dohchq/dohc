@@ -414,7 +414,6 @@ export interface PushDelivery {
   installationId: string | null;
   generation: number;
   reason: ChatMessageReason;
-  noticeId: string | null;
   attempts: number;
   expiresAtMs: number;
   leaseToken: string;
@@ -489,7 +488,6 @@ export function claimPushDelivery(
       installationId: row.installation_id === null ? null : String(row.installation_id),
       generation: Number(row.generation),
       reason: row.reason as ChatMessageReason,
-      noticeId: row.notice_id === null ? null : String(row.notice_id),
       attempts: Number(row.attempts) + 1,
       expiresAtMs: Number(row.expires_at_ms),
       leaseToken,
@@ -503,8 +501,8 @@ export function finishPushDelivery(
   outcome: "sent" | "dropped" | "retry",
   nowMs: number,
 ): void {
-  storage.quietTx(() =>
-    storage.db
+  storage.quietTx(() => {
+    const finished = storage.db
       .prepare(`UPDATE ${TABLE} SET state = ?, available_at_ms = ?, lease_token = NULL, lease_until_ms = NULL
     WHERE delivery_id = ? AND lease_token = ? AND state = 'pending'`)
       .run(
@@ -516,8 +514,17 @@ export function finishPushDelivery(
         nowMs + Math.min(120_000, 1000 * 2 ** delivery.attempts),
         delivery.deliveryId,
         delivery.leaseToken,
-      ),
-  );
+      ).changes;
+    // A newer alert for the thread arrived during the attempt; retried, this one would replace it on the phone.
+    if (finished && outcome === "retry" && delivery.installationId === null)
+      storage.db
+        .prepare(`UPDATE ${TABLE} SET state = 'dropped' WHERE delivery_id = ? AND state = 'pending'
+          AND EXISTS (SELECT 1 FROM ${TABLE} n WHERE n.installation_id IS NULL
+            AND n.generation = ${TABLE}.generation AND n.workspace_id = ${TABLE}.workspace_id
+            AND n.thread_id = ${TABLE}.thread_id AND n.relay_seq > ${TABLE}.relay_seq
+            AND n.state IN ('pending', 'sent'))`)
+        .run(delivery.deliveryId);
+  });
 }
 
 /** Returns a delivery to the queue until `untilMs` and gives back the attempt it took. */
@@ -573,15 +580,15 @@ export function nextPushDeliveryAt(
   return row?.next_at == null ? null : Math.max(nowMs, Number(row.next_at));
 }
 
-export function ownsPushLease(
+/** The leased delivery's Notice as it stands now, since a run Notice can arrive after the claim; null without the lease. */
+export function readPushLease(
   storage: StorageContext,
   delivery: PushDelivery,
   nowMs: number,
-): boolean {
-  return Boolean(
-    storage.db
-      .prepare(`SELECT 1 FROM ${TABLE} WHERE delivery_id = ? AND lease_token = ?
+): { noticeId: string | null } | null {
+  const row = storage.db
+    .prepare(`SELECT notice_id FROM ${TABLE} WHERE delivery_id = ? AND lease_token = ?
     AND state = 'pending' AND lease_until_ms > ? AND expires_at_ms > ?`)
-      .get(delivery.deliveryId, delivery.leaseToken, nowMs, nowMs),
-  );
+    .get(delivery.deliveryId, delivery.leaseToken, nowMs, nowMs);
+  return row ? { noticeId: row.notice_id === null ? null : String(row.notice_id) } : null;
 }

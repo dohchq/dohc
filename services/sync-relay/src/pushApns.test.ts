@@ -1,15 +1,17 @@
 import { generateKeyPairSync, verify } from "node:crypto";
 import {
+  constants,
   createServer,
   type Http2Server,
   type IncomingHttpHeaders,
   type ServerHttp2Session,
 } from "node:http2";
 import type { AddressInfo } from "node:net";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { accountDeletionIdentity } from "@dohc/workspace-auth/accountDeletion";
 import { afterEach, expect, it, vi } from "vitest";
 import { createApnsClient, type ApnsClient } from "./apnsClient";
-import { APNS_PAYLOAD_MAX_BYTES, apnsBodyText, apnsPayload } from "./apnsPayload";
+import { APNS_PAYLOAD_MAX_BYTES, apnsPayload, apnsText } from "./apnsPayload";
 import { readApnsConfig } from "./pushConfig";
 import { APNS_PAUSE_MS, createPushSender, PUSH_STREAMS } from "./pushSender";
 import { initializeAccountDeletion } from "./storage/accountDeletion";
@@ -53,6 +55,8 @@ interface ApnsRequest {
 interface ApnsAnswer {
   status: number;
   body?: Record<string, unknown>;
+  // Cancel the stream after the headers, before any body.
+  reset?: boolean;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -91,6 +95,7 @@ async function fakeApns() {
       void Promise.resolve(answer(request)).then((reply) => {
         if (stream.destroyed || stream.closed) return;
         stream.respond({ ":status": reply.status });
+        if (reply.reset) return stream.close(constants.NGHTTP2_CANCEL);
         stream.end(reply.body === undefined ? undefined : JSON.stringify(reply.body));
       });
     });
@@ -159,10 +164,10 @@ async function relay(people: Array<[string, string]> = [["owner", "Kim"]]) {
           type: "both",
           folderPath: "team",
         }),
-        chatChannelCreate("assistant", { kind: "agent", name: "Claude" }),
+        chatChannelCreate(AGENT_CHANNEL_WIRE_ID, { kind: "agent", name: "Claude" }),
         chatThreadCreate("team-thread", "team"),
         chatThreadCreate("other-thread", "team"),
-        chatThreadCreate("agent-thread", "assistant"),
+        chatThreadCreate("agent-thread", AGENT_CHANNEL_WIRE_ID),
       ],
       userId,
     );
@@ -486,6 +491,59 @@ it("sends an agent's answer only while its run Notice is still listed", async ()
   expect(f.apple.requests).toEqual([]);
 });
 
+it.each([
+  ["dismissed before the final check, sends nothing", true],
+  ["still listed, names it in the alert", false],
+] as const)(
+  "reads a run Notice that arrives during the session check: %s",
+  async (_name, dismissed) => {
+    const f = await relay();
+    f.agent("owner", "answer", "agent-thread");
+    expect(f.rows()).toEqual([expect.objectContaining({ reason: "agent", notice_id: null })]);
+    const sender = f.sender({
+      async sessionIsValid() {
+        f.notice("owner", "answer", "agent-thread");
+        if (dismissed)
+          f.storage.db.prepare("UPDATE sync_relay_notices SET dismissed_at_ms = ?").run(Date.now());
+        return true;
+      },
+    });
+    await sender.runOnce();
+    await sender.close();
+    expect(f.rows()).toEqual([expect.objectContaining({ notice_id: "agent-run:1" })]);
+    if (dismissed) return expect(f.apple.requests).toEqual([]);
+    expect(f.apple.requests).toHaveLength(1);
+    expect(JSON.parse(f.apple.requests[0]!.body)).toMatchObject({ noticeId: "agent-run:1" });
+  },
+);
+
+it("drops an alert that failed while a newer one for its thread arrived, so the retry cannot replace it", async () => {
+  const f = await relay();
+  f.say("alice", "owner", "older", "team-thread", "@Kim first");
+  let offsetMs = 0;
+  f.apple.answer(() => {
+    if (f.apple.requests.length > 1) return { status: 200 };
+    f.say("alice", "owner", "newer", "team-thread", "@Kim second");
+    return { status: 500 };
+  });
+  const sender = f.sender({ now: () => Date.now() + offsetMs });
+  await sender.runOnce();
+  await sender.runOnce();
+  // Past the older alert's backoff.
+  offsetMs = 10_000;
+  expect(await sender.runOnce()).toBe(false);
+  await sender.close();
+  expect(
+    f.apple.requests.map(
+      (request) => (JSON.parse(request.body) as { messageId: string }).messageId,
+    ),
+  ).toEqual(["older", "newer"]);
+  expect(f.rows().map((row) => [row.message_id, row.state])).toEqual([
+    ["older", "dropped"],
+    ["newer", "sent"],
+  ]);
+});
+
 it("pauses phone alerts for 20 minutes on a 403, spending no attempt and keeping the token", async () => {
   const f = await relay();
   f.say("alice", "owner", "first", "team-thread", "@Kim one");
@@ -534,6 +592,19 @@ it.each([
   await sender.close();
   expect(f.binding("owner")).toEqual(kept ? { generation: f.generations.get("owner") } : undefined);
   expect(f.binding("ben")).toEqual({ generation: f.generations.get("ben") });
+});
+
+it("keeps the binding when a 410's stream is reset before its body arrives", async () => {
+  const f = await relay();
+  f.say("alice", "owner", "message", "team-thread", "@Kim hi");
+  f.apple.answer(() => ({ status: 410, reset: true }));
+  const onError = vi.fn();
+  const sender = f.sender({ onError });
+  await sender.runOnce();
+  await sender.close();
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(f.binding("owner")).toEqual({ generation: f.generations.get("owner") });
+  expect(f.rows()).toEqual([expect.objectContaining({ state: "pending", lease_token: null })]);
 });
 
 it(`runs at most ${PUSH_STREAMS} streams at once, one per recipient`, async () => {
@@ -638,19 +709,55 @@ it("keeps tokens, provider tokens, the key, and message text out of every log an
     expect(text).not.toContain(secret);
 });
 
-it("cleans a lock-screen body: file names unless hidden, hosts only, no Markdown targets or control characters", () => {
+it("cleans lock-screen text: file names unless hidden, hosts only, no Markdown targets or control characters", () => {
   const work = `@[work:${"a".repeat(43)}]`;
   expect(
-    apnsBodyText(
+    apnsText(
       `# Plan\n**Read** [the doc](https://docs.example.com/x/y?k=1) ![map](/blob/abc) ${work} ` +
         "and @[notes/trip.md] or @[docs/.env.local]; join example.org/l/AbCdEfGh /l/AbCdEfGh12 " +
-        "mail ana@mail.example.com a\u0000b‮c​d <script>",
+        "mail ana@mail.example.com a\u0000b\u202ec\u200bd <script>",
     ),
   ).toBe(
     "Plan Read the doc map a link and trip.md or a file; join example.org a link mail mail.example.com a b c d script",
   );
-  expect(apnsBodyText("broken @[unclosed and more")).toBe("broken a file");
-  expect(apnsBodyText("lone \uD800 surrogate")).toBe("lone � surrogate");
+  expect(apnsText("broken @[unclosed and more")).toBe("broken a file");
+  expect(apnsText("lone \uD800 surrogate")).toBe("lone \uFFFD surrogate");
+});
+
+it.each([
+  ["a target with parentheses", "[doc](https://files.example/report(2026)/invite/SECRET)", "doc"],
+  ["a target with a query after parentheses", "[doc](https://example.com/a(b)?secret=4417)", "doc"],
+  ["a host without a dot", "see https://intranet/private?code=SECRET now", "see intranet now"],
+  ["a URL with no host", "open file:///Users/kim/SECRET.txt", "open a link"],
+  ["a Unicode host", "https://例え.jp/l/SECRET", "例え.jp"],
+  ["a Unicode host without a scheme", "at 例え.jp/l/SECRET", "at 例え.jp"],
+])("keeps no URL path from %s", (_name, text, cleaned) => {
+  expect(apnsText(text)).toBe(cleaned);
+});
+
+it.each([
+  ["hyphenated words", "a-".repeat(32_768)],
+  ["single-letter domain labels", "a.".repeat(32_768)],
+  ["user names without a host", "a@".repeat(32_768)],
+  ["Markdown openers", "[a](".repeat(16_384)],
+  ["brackets", "[".repeat(65_536)],
+])("cleans 64 KB of %s quickly", (_name, text) => {
+  apnsText("warm https://example.com/x [a](b)");
+  const start = performance.now();
+  const cleaned = apnsText(text);
+  const elapsed = performance.now() - start;
+  expect(elapsed).toBeLessThan(25);
+  expect(cleaned.endsWith("…")).toBe(true);
+});
+
+it("cleans a URL out of the sender's name in the title", async () => {
+  const f = await relay();
+  f.say("alice", "owner", "message", "team-thread", "@Kim hi");
+  const sender = f.sender({ lookupAccountName: () => "https://example.com/l/SECRET" });
+  await sender.runOnce();
+  await sender.close();
+  const payload = JSON.parse(f.apple.requests[0]!.body) as { aps: { alert: { title: string } } };
+  expect(payload.aps.alert.title).toBe("example.com mentioned you in Team");
 });
 
 it.each([

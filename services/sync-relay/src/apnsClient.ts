@@ -139,7 +139,9 @@ export function createApnsClient(
             });
             stream.on("error", reject);
             stream.once("close", () => {
-              if (!status || received > 8192) return reject(Error("APNs response interrupted"));
+              // A reset after the headers leaves the status unconfirmed, so a 410 then ends nothing.
+              if (!status || received > 8192 || stream.rstCode !== constants.NGHTTP2_NO_ERROR)
+                return reject(Error("APNs response interrupted"));
               let reason: string | null = null;
               let timestampMs: number | null = null;
               try {
