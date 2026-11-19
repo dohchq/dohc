@@ -145,32 +145,34 @@ function snapshotObject(
     .get(workspaceId, versionId, value);
 }
 
-// A chat's wire id and kind, from the first create of its wire. A later
-// create, such as a share member's for the same wire, never names the chat.
+type ChatCreatePayload = { channelId?: unknown; wireId?: unknown; kind?: unknown };
+const chatCreates = (field: "channelId" | "wireId") =>
+  `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
+  AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq`;
+
+// A chat's wire id and kind, from the first create of its wire. A share member
+// can push a create of a granted wire under any id, and that create never names a chat.
 function chatCreate(
   storage: StorageContext,
   workspaceId: string,
   channelId: string,
 ): { wireId: string; kind: unknown } | null {
-  const first = (field: "channelId" | "wireId", value: string) => {
-    const row = storage.db
-      .prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
-      AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq LIMIT 1`)
-      .get(workspaceId, value);
-    return row
-      ? (JSON.parse(String(row.payload_json)) as {
-          channelId?: unknown;
-          wireId?: unknown;
-          kind?: unknown;
-        })
-      : null;
-  };
-  const named = first("channelId", channelId);
-  if (!named) return null;
-  const wireId = typeof named.wireId === "string" ? named.wireId : channelId;
-  const created = first("wireId", wireId);
-  if (typeof named.wireId === "string" && created?.channelId !== channelId) return null;
-  return { wireId, kind: named.kind };
+  const refused = new Set<string>();
+  for (const row of storage.db.prepare(chatCreates("channelId")).iterate(workspaceId, channelId)) {
+    const named = JSON.parse(String(row.payload_json)) as ChatCreatePayload;
+    if (typeof named.wireId !== "string") return { wireId: channelId, kind: named.kind };
+    if (refused.has(named.wireId)) continue;
+    const created = storage.db
+      .prepare(`${chatCreates("wireId")} LIMIT 1`)
+      .get(workspaceId, named.wireId);
+    if (
+      created &&
+      (JSON.parse(String(created.payload_json)) as ChatCreatePayload).channelId === channelId
+    )
+      return { wireId: named.wireId, kind: named.kind };
+    refused.add(named.wireId);
+  }
+  return null;
 }
 
 type Scope = {

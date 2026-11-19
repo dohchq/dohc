@@ -655,6 +655,52 @@ describe("work reference registration and resolution", () => {
     ).toMatchObject({ registeredReferences: ["K".repeat(43)] });
   });
 
+  it("resolves a General link after a member's create took General's id first", async () => {
+    const { handler } = await fixture();
+    await appendLog(handler, "owner", ws, sequenced([chatChannelCreate("group")]), {
+      originId: "device-a",
+    });
+    const shareId = await createShare(handler, "owner", ws, {
+      channelWireId: "group",
+      recipientUserId: "member",
+      access: "read-write",
+    });
+    const pushed = await handler(
+      request(
+        "member",
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "member-device",
+          ops: sequenced([chatChannelCreate("group", { channelId: "channel-general" })]),
+        }),
+      ),
+    );
+    expect(pushed.status, await pushed.clone().text()).toBe(200);
+    await appendLog(
+      handler,
+      "owner",
+      ws,
+      sequenced(
+        [
+          chatChannelCreate("channel_wire_general_v1", {
+            channelId: "channel-general",
+            name: "general",
+            slug: "general",
+          }),
+        ],
+        1,
+      ),
+      { originId: "device-a" },
+    );
+    const target = { kind: "chat", channelId: "channel-general" };
+    expect(
+      await json(await register(handler, [{ reference: ref, target, createdAtMs: 1 }])),
+    ).toMatchObject({ registeredReferences: [ref] });
+    expect(
+      await json(await handler(request("owner", `/sync/work-references/${ref}`))),
+    ).toMatchObject({ status: "found", target });
+  });
+
   it("rechecks revocation after an asynchronous dataset proof", async () => {
     const { handler, storage } = await fixture();
     const shareId = await createShare(handler, "owner", ws, {
