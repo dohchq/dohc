@@ -2710,10 +2710,21 @@ describe("CLI socket server", () => {
       await replyAsAgent(SELF_TEST_THREAD);
       callerRunSecret = undefined;
       await replyAsAgent(SELF_TEST_THREAD);
+      // An agent you run that holds the self-test's secret is still not its run.
       callerRunSecret = RUN_SECRET;
+      await invoke("reply", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        agentId: "terminal",
+        thread: SELF_TEST_THREAD,
+        body: "dohc-runner-self-test:run_check",
+        attachments: [],
+        needsDecision: false,
+      });
       holdRun("run-real");
       await replyAsAgent(SELF_TEST_THREAD);
       expect(asked).toEqual([
+        { workspaceId: WORKSPACE_ID, runAgentId: null },
         { workspaceId: WORKSPACE_ID, runAgentId: null },
         { workspaceId: WORKSPACE_ID, runAgentId: null },
         { workspaceId: WORKSPACE_ID, runAgentId: null },
