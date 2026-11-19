@@ -53,12 +53,17 @@ class FakeChild extends EventEmitter {
   private buffered = "";
   private arrived: (() => void) | undefined;
 
-  constructor() {
+  constructor({ ready = true } = {}) {
     super();
+    let unready = ready;
     this.killed = new Promise((resolve) => {
       this.markKilled = resolve;
     });
     this.stdin.on("data", (chunk: Buffer) => {
+      if (unready) {
+        unready = false;
+        this.reply("ready\r\n");
+      }
       const lines = (this.buffered + chunk.toString("utf8")).split("\n");
       this.buffered = lines.pop()!;
       this.requests.push(...lines);
@@ -89,8 +94,8 @@ class FakeChild extends EventEmitter {
 }
 
 let children: FakeChild[];
-const fakeChild = () => {
-  const child = new FakeChild();
+const fakeChild = (options?: { ready: boolean }) => {
+  const child = new FakeChild(options);
   children.push(child);
   return child as unknown as ChildProcess;
 };
@@ -110,7 +115,7 @@ function settled(promise: Promise<unknown>) {
 
 beforeEach(() => {
   children = [];
-  vi.mocked(spawn).mockImplementation(fakeChild);
+  vi.mocked(spawn).mockImplementation(() => fakeChild());
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -374,19 +379,57 @@ it("sends paths up to the Windows limit exactly and refuses longer or unpaired-s
   expect(spawn).toHaveBeenCalledOnce();
 });
 
-it("counts PowerShell startup against the first request's deadline", async () => {
+it("starts the first request's deadline once PowerShell is ready, however long its start took", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  vi.mocked(spawn).mockImplementationOnce(() => {
-    vi.advanceTimersByTime(4_000);
-    return fakeChild();
-  });
+  vi.mocked(spawn).mockImplementationOnce(() => fakeChild({ ready: false }));
+  const acl = openWindowsCredentialAcl("check");
+  const first = acl.check("C:\\private", true, false, false),
+    state = settled(first);
+  const child = children[0]!;
+  await child.request(0);
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(state.done).toBe(false);
+  child.reply("ready\r\n");
+  await vi.advanceTimersByTimeAsync(9_999);
+  child.reply("ok 1\r\n");
+  await first;
+  expect(child.kill).not.toHaveBeenCalled();
+  const late = acl.check("C:\\private\\file", false, false, false);
+  const refused = expect(late).rejects.toThrow(
+    "Credential ACL check did not answer within 10 seconds.",
+  );
+  await child.request(1);
+  await vi.advanceTimersByTimeAsync(10_000);
+  await refused;
+  expect(child.kill).toHaveReturnedWith(true);
+});
+
+it("refuses when PowerShell is not ready within its start bound", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.mocked(spawn).mockImplementationOnce(() => fakeChild({ ready: false }));
+  const acl = openWindowsCredentialAcl("check");
+  const first = acl.check("C:\\private", true, false, false),
+    state = settled(first);
+  const child = children[0]!;
+  await child.request(0);
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(state.done).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await expect(first).rejects.toThrow(
+    "Windows PowerShell did not start the credential ACL check within 60 seconds.",
+  );
+  expect(child.kill).toHaveReturnedWith(true);
+});
+
+it("refuses output before PowerShell says it is ready", async () => {
+  vi.mocked(spawn).mockImplementationOnce(() => fakeChild({ ready: false }));
   const acl = openWindowsCredentialAcl("check");
   const first = acl.check("C:\\private", true, false, false);
-  const refused = expect(first).rejects.toThrow("Credential ACL check timed out.");
-  await children[0]!.request(0);
-  await vi.advanceTimersByTimeAsync(6_000);
-  await refused;
-  expect(children[0]!.kill).toHaveReturnedWith(true);
+  const child = children[0]!;
+  await child.request(0);
+  child.reply("ok 1\r\n");
+  await expect(first).rejects.toThrow("Unexpected credential ACL response.");
+  expect(child.kill).toHaveReturnedWith(true);
 });
 
 it("gives each later request its own deadline and counts the final exit within it", async () => {
@@ -404,7 +447,9 @@ it("gives each later request its own deadline and counts the final exit within i
   child.reply("ok 2\r\n");
   await second;
   const final = acl.check("C:\\private\\temporary", false, false, true);
-  const refused = expect(final).rejects.toThrow("Credential ACL check timed out.");
+  const refused = expect(final).rejects.toThrow(
+    "Credential ACL check did not answer within 10 seconds.",
+  );
   await child.request(2);
   child.reply("ok 3\r\n");
   await vi.advanceTimersByTimeAsync(10_000);
@@ -454,7 +499,7 @@ it.each([
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const reason =
       trigger === "a timeout"
-        ? "Credential ACL check timed out."
+        ? "Credential ACL check did not answer within 10 seconds."
         : "Unexpected credential ACL response.";
     const failedAt = trigger === "a timeout" ? 10_000 : 4_000;
     const acl = openWindowsCredentialAcl("check");
