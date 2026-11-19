@@ -549,9 +549,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         }
         const outbox = new OwnerYDocOutbox(client, workspaceHandle),
           refusals = new OwnerKnownRefusals();
-        // Delivery retries a refused engine call without reporting it, so a pass that never
-        // settles would otherwise name no call. The caller still receives each rejection.
-        const observed = new Proxy(client, {
+        const clientRecordingRefusals = new Proxy(client, {
           get(target, property) {
             const value: unknown = Reflect.get(target, property, target);
             if (typeof value !== "function") return value;
@@ -585,7 +583,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
             config: deliveryConfig,
             async runPass(document, signal) {
               const result = await runNativeOwnerDeliveryPass({
-                client: observed,
+                client: clientRecordingRefusals,
                 workspaceHandle,
                 document,
                 config: deliveryConfig,
@@ -1061,7 +1059,6 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         ),
       );
     } catch (error) {
-      // A re-run deletes the attempt's uploaded result.json; the job log stays.
       console.error(
         "Owner proof failed",
         JSON.stringify({ stage: results.stage, engineRefusals: results.engineRefusals }),
