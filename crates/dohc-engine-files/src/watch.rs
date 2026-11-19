@@ -262,6 +262,22 @@ impl NativeWatcher {
         root: PathBuf,
         dirty: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<NativeWatcher, FilesError> {
+        Self::start_thread(WATCH_STARTUP_DEADLINE, move |rx, tx, state, ready| {
+            watcher_thread(root, dirty, rx, tx, state, ready);
+        })
+        .await
+    }
+
+    async fn start_thread(
+        startup_deadline: Duration,
+        run: impl FnOnce(
+            Receiver<ThreadMessage>,
+            SyncSender<ThreadMessage>,
+            Arc<WatchState>,
+            tokio::sync::oneshot::Sender<Result<(), FilesError>>,
+        ) + Send
+        + 'static,
+    ) -> Result<NativeWatcher, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
         let state = Arc::new(WatchState::default());
@@ -269,33 +285,23 @@ impl NativeWatcher {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let worker = std::thread::Builder::new()
             .name("dohc-native-watcher".to_owned())
-            .spawn(move || {
-                watcher_thread(root, dirty, message_rx, message_tx, thread_state, ready_tx)
-            })
+            .spawn(move || run(message_rx, message_tx, thread_state, ready_tx))
             .map_err(|_| FilesError::WatcherUnavailable {
                 reason: "could not spawn watcher thread",
             })?;
-        let watcher = Self {
+        let mut watcher = Self {
             stop_tx,
             state,
             worker: Some(worker),
         };
-        // The metadata owner runs on a dedicated thread and retains the native
-        // join handle even on startup failure. Its Drop must release the root.
-        match tokio::time::timeout(WATCH_STARTUP_DEADLINE, ready_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(_)) => {
-                return Err(FilesError::WatcherUnavailable {
-                    reason: "watcher thread ended during startup",
-                });
-            }
-            Err(_) => {
-                return Err(FilesError::WatcherUnavailable {
-                    reason: "native watcher startup timed out",
-                });
-            }
-        }
+        await_ready_with_deadline(
+            startup_deadline,
+            ready_rx,
+            &mut watcher.worker,
+            &watcher.stop_tx,
+            &watcher.state.unavailable,
+        )
+        .await?;
         Ok(watcher)
     }
 
@@ -309,48 +315,18 @@ impl NativeWatcher {
         token: CancellationToken,
         startup_deadline: Duration,
     ) -> Result<WatchStart, FilesError> {
-        let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
-        let stop_tx = message_tx.clone();
-        let state = Arc::new(WatchState::default());
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let thread_handle = handle.clone();
-        let thread_state = Arc::clone(&state);
-        let worker = std::thread::Builder::new()
-            .name("dohc-native-watcher".to_owned())
-            .spawn(move || {
-                watcher_thread(
-                    root,
-                    Arc::new(move || thread_handle.notify_overflow()),
-                    message_rx,
-                    message_tx,
-                    thread_state,
-                    ready_tx,
-                );
-            })
-            .map_err(|_| FilesError::WatcherUnavailable {
-                reason: "could not spawn watcher thread",
-            })?;
-        let mut watcher = NativeWatcher {
-            stop_tx,
-            state,
-            worker: Some(worker),
-        };
-        if let Err(err) = await_ready_with_deadline(
-            startup_deadline,
-            ready_rx,
-            &mut watcher.worker,
-            &watcher.stop_tx,
-            &watcher.state.unavailable,
-        )
-        .await
-        {
-            // Safe and fast on every branch: the two "thread already ended"
-            // cases join a thread that is already finishing, and the timeout
-            // case already detached `worker` (it is `None`), so `stop()` is a
-            // no-op there.
-            let _ = watcher.stop();
-            return Err(err);
-        }
+        let mut watcher = Self::start_thread(startup_deadline, move |rx, tx, state, ready| {
+            watcher_thread(
+                root,
+                Arc::new(move || thread_handle.notify_overflow()),
+                rx,
+                tx,
+                state,
+                ready,
+            );
+        })
+        .await?;
         let initial = handle.reconcile_if_dirty(token).await;
         let initial_reconcile = match initial {
             Ok(run) => run,
@@ -1101,6 +1077,34 @@ mod tests {
         assert!(
             !bound.still_bound(&root.0),
             "a recreated root must not be mistaken for the directory object the watch is bound to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_returns_on_time_while_the_watcher_thread_stays_stuck() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let result = NativeWatcher::start_thread(
+            Duration::from_millis(20),
+            move |_rx, _tx, _state, _ready| {
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        assert!(
+            matches!(
+                result,
+                Err(FilesError::WatcherUnavailable {
+                    reason: "native watcher startup timed out"
+                })
+            ),
+            "a stuck start must fail with its timeout"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the start must not wait for the stuck watcher thread: {elapsed:?}"
         );
     }
 
