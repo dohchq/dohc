@@ -444,6 +444,8 @@ describe("metadata-only access checks", () => {
       signature,
       visibilitySignature: "v1",
       rootLevel,
+      groupDefault: rootLevel,
+      groups: [],
       folders: [],
     });
     Object.assign(h.workspace.shareView!, {
@@ -484,7 +486,13 @@ describe("metadata-only access checks", () => {
   // to the rebuild.
   it("keeps a rebuild and capture a refresh records during the reach read", async () => {
     const h = await harness();
-    const stored = { signature: "r1", visibilitySignature: "v1", rootLevel: "comment" as const };
+    const stored = {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "comment" as const,
+      groupDefault: "comment" as const,
+      groups: [],
+    };
     const selector = {
       paths: [],
       versionId: null,
@@ -508,7 +516,13 @@ describe("metadata-only access checks", () => {
     await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, payload);
     const unsavedPaths = ["notes/Draft.md"];
     h.workspace.shareView = { ...h.workspace.shareView!, unsavedPaths };
-    reach.resolve({ ...stored, signature: "r2", rootLevel: "edit", folders: [] });
+    reach.resolve({
+      ...stored,
+      signature: "r2",
+      rootLevel: "edit",
+      groupDefault: "edit",
+      folders: [],
+    });
     const answer = await checked;
     expect(h.workspace.shareView).toMatchObject({
       rebuild: { rebuildId: "rebuild-concurrent" },
@@ -523,6 +537,8 @@ describe("metadata-only access checks", () => {
       signature,
       visibilitySignature,
       rootLevel: "comment" as const,
+      groupDefault: "comment" as const,
+      groups: [],
       folders: [],
     });
     const selector = {
