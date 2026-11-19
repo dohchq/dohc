@@ -465,9 +465,10 @@ export function createNoticeStore(options: {
         },
         () => {
           saving = false;
-          // Stopped, it doesn't back off. It commits again only if new removals came meanwhile, and that commit also
-          // carries the ones that just failed.
-          if (!live()) return void (gone.some((key) => !removed.includes(key)) && persist());
+          // Stopped, it doesn't back off. It commits again only if the stop or new removals asked for a commit
+          // meanwhile, and that commit also carries the ones that just failed.
+          if (!live())
+            return void ((again || gone.some((key) => !removed.includes(key))) && persist());
           saved(failure);
         },
       );

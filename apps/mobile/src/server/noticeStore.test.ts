@@ -780,6 +780,29 @@ describe("marks on the account's Notices", () => {
     expect(await nextSignInSends(disk)).toEqual(ONLY_Z);
   });
 
+  it("commits a taken mark's removal again when the commit on its way at a 401's stop fails", async () => {
+    const disk = keptDisk();
+    const first = setup({ disk });
+    first.store.resume();
+    await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+    await vi.waitFor(() => expect(listed(disk)).toHaveLength(1));
+    void first.store.mark("a", "dismissed");
+    const done = await first.server.marks();
+    const release = disk.holdCommits();
+    done.answer(200, { ok: true, dismissed: ["a"] });
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    void first.signOut();
+    first.store.stop();
+    disk.failCommits = { match: /DELETE FROM notice_marks/, lands: false };
+    release();
+    const releaseRetry = disk.holdCommits();
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    disk.failCommits = null;
+    releaseRetry();
+    await vi.waitFor(() => expect(marked(disk)).toEqual([]));
+    expect(await nextSignInSends(disk)).toEqual(ONLY_Z);
+  });
+
   it("records a mark the server took while another mark's insert was on its way, though a 401 stops the store", async () => {
     const disk = keptDisk();
     const first = setup({ disk });
