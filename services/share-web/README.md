@@ -449,9 +449,14 @@ Each phone sign-in holds at most one binding, so no request names a device or an
 - `PUT` takes `{token, environment}`: the APNs device token in lowercase hex, and `sandbox` or `production`.
 - `DELETE` takes `{generation}` and removes the binding only while it still has that generation.
 
-Configure both relay values: `DOHC_RELAY_APNS_TOPIC`, the app's bundle ID, and `DOHC_RELAY_APNS_ENVIRONMENTS`, a comma-separated list of the environments phones may register in.
-Partial configuration stops the relay and names each missing value.
-With neither set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
+Configure all five relay values:
+- `DOHC_RELAY_APNS_TOPIC`: the app's bundle ID.
+- `DOHC_RELAY_APNS_ENVIRONMENTS`: a comma-separated list of the environments phones may register in.
+- `DOHC_RELAY_APNS_KEY_FILE`: the path to Apple's `.p8` token-signing key. The relay reads it once, at startup.
+- `DOHC_RELAY_APNS_KEY_ID` and `DOHC_RELAY_APNS_TEAM_ID`: the key's 10-character ID and your Apple team ID.
+
+Partial or invalid configuration stops the relay and names each variable, never its value.
+With none set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
 Otherwise each returns `{ok: true, available: true, enabled, generation}`. The server never returns a token.
 A token another sign-in holds moves to the caller, and the answer is the same whether it was held or free.
 Revoking the sign-in through the relay and deleting the account end the binding at once. A sign-in revoked through the relay receives 404 on `PUT`, even for a request that was already in flight. A sign-out or password reset through the account server leaves it until the sign-in expires, and the relay never sends to a binding whose sign-in has ended.

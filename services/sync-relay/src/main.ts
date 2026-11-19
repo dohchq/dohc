@@ -21,6 +21,7 @@ import {
 } from "@dohc/workspace-auth/credentialFence";
 import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
+import { createApnsClient } from "./apnsClient";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -529,6 +530,7 @@ startTimeline.done("engine check");
 const storageOptions = {
   workspaceQuotaBytes,
   pushConfigured: Boolean(pool && pushConfig),
+  apnsConfigured: Boolean(pool && apnsConfig),
   ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}),
 };
 const deployment = deploymentConfig
@@ -1631,6 +1633,7 @@ const pushQuery = (text: string, values: unknown[]): QueryConfig & { query_timeo
 const pushSender = createPushSender({
   storage: storage as StorageContext,
   config: pool ? pushConfig : undefined,
+  apns: pool && apnsConfig ? createApnsClient(apnsConfig) : undefined,
   async lookupAccountName(userId, signal) {
     signal.throwIfAborted();
     const result = await pool!.query<{ name: string | null }>(
@@ -1652,6 +1655,10 @@ const pushSender = createPushSender({
     return result.rowCount === 1;
   },
   onError: () => console.error("[sync-relay] Push delivery could not finish."),
+  onApnsRefused: () =>
+    console.error(
+      "[sync-relay] Apple refused the APNs key, team, or topic. Phone alerts wait 20 minutes.",
+    ),
 });
 const stopPushSender = () => {
   void pushSender.close().catch(() => console.error("[sync-relay] Push sender could not close."));

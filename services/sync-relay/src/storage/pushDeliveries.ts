@@ -442,6 +442,10 @@ export function claimPushDelivery(
     const minute = Math.floor(nowMs / 60_000);
     storage.db.prepare("DELETE FROM sync_relay_push_rate WHERE minute < ?").run(minute - 1);
     storage.db.prepare("DELETE FROM sync_relay_push_sender_rate WHERE minute < ?").run(minute - 1);
+    // Also when phone alerts were turned off, so no message's arrival time stays.
+    storage.db
+      .prepare("DELETE FROM sync_relay_push_arrivals WHERE arrived_at_ms <= ?")
+      .run(nowMs - PUSH_DELIVERY_EXPIRY_MS);
     storage.db
       .prepare(
         `DELETE FROM ${TABLE} WHERE expires_at_ms <= ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
@@ -525,6 +529,20 @@ export function finishPushDelivery(
         delivery.deliveryId,
         delivery.leaseToken,
       ),
+  );
+}
+
+/** Returns a delivery to the queue until `untilMs` and gives back the attempt it took. */
+export function pausePushDelivery(
+  storage: StorageContext,
+  delivery: PushDelivery,
+  untilMs: number,
+): void {
+  storage.quietTx(() =>
+    storage.db
+      .prepare(`UPDATE ${TABLE} SET available_at_ms = ?, attempts = max(attempts - 1, 0),
+        lease_token = NULL, lease_until_ms = NULL WHERE delivery_id = ? AND lease_token = ? AND state = 'pending'`)
+      .run(untilMs, delivery.deliveryId, delivery.leaseToken),
   );
 }
 

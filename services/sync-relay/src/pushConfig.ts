@@ -1,4 +1,5 @@
 import { createECDH, createPrivateKey, type KeyObject } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import {
   isApnsEnvironment,
@@ -83,15 +84,33 @@ export function readPushConfig(env: Record<string, string | undefined>): PushCon
 export interface ApnsConfig {
   topic: string;
   environments: ReadonlySet<ApnsEnvironment>;
+  keyId: string;
+  teamId: string;
+  privateKey: KeyObject;
 }
 
-const APNS_NAMES = ["DOHC_RELAY_APNS_TOPIC", "DOHC_RELAY_APNS_ENVIRONMENTS"];
+const APNS_NAMES = [
+  "DOHC_RELAY_APNS_TOPIC",
+  "DOHC_RELAY_APNS_ENVIRONMENTS",
+  "DOHC_RELAY_APNS_KEY_FILE",
+  "DOHC_RELAY_APNS_KEY_ID",
+  "DOHC_RELAY_APNS_TEAM_ID",
+];
 
-/** The phone's alert topic and the APNs environments it may register in. Both or neither. */
-export function readApnsConfig(env: Record<string, string | undefined>): ApnsConfig | undefined {
+/**
+ * The phone's alert topic, the APNs environments it may register in, and the
+ * token-signing key that sends to them. All or none. The `.p8` key is read
+ * and parsed once, here; errors name variables, never their values.
+ */
+export function readApnsConfig(
+  env: Record<string, string | undefined>,
+  readKeyFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+): ApnsConfig | undefined {
   if (APNS_NAMES.every((name) => env[name] === undefined)) return undefined;
   const missing = APNS_NAMES.filter((name) => !env[name]);
   if (missing.length) throw new TypeError(`Missing APNs configuration: ${missing.join(", ")}.`);
+  const invalid = (...names: string[]) =>
+    new TypeError(`Invalid APNs configuration: ${names.join(", ")}.`);
   const topic = env.DOHC_RELAY_APNS_TOPIC!;
   const environments = env.DOHC_RELAY_APNS_ENVIRONMENTS!.split(",").map((name) => name.trim());
   if (
@@ -100,6 +119,20 @@ export function readApnsConfig(env: Record<string, string | undefined>): ApnsCon
     !environments.every(isApnsEnvironment) ||
     new Set(environments).size !== environments.length
   )
-    throw new TypeError(`Invalid APNs configuration: ${APNS_NAMES.join(", ")}.`);
-  return { topic, environments: new Set(environments) };
+    throw invalid("DOHC_RELAY_APNS_TOPIC", "DOHC_RELAY_APNS_ENVIRONMENTS");
+  const keyId = env.DOHC_RELAY_APNS_KEY_ID!;
+  const teamId = env.DOHC_RELAY_APNS_TEAM_ID!;
+  if (!/^[A-Z0-9]{10}$/u.test(keyId) || !/^[A-Z0-9]{10}$/u.test(teamId))
+    throw invalid("DOHC_RELAY_APNS_KEY_ID", "DOHC_RELAY_APNS_TEAM_ID");
+  let privateKey: KeyObject;
+  try {
+    const pem = readKeyFile(env.DOHC_RELAY_APNS_KEY_FILE!);
+    // Apple's `.p8` is a PKCS#8 P-256 key.
+    if (!pem.includes("-----BEGIN PRIVATE KEY-----")) throw Error();
+    privateKey = createPrivateKey({ key: pem, format: "pem" });
+    if (privateKey.asymmetricKeyDetails?.namedCurve !== "prime256v1") throw Error();
+  } catch {
+    throw invalid("DOHC_RELAY_APNS_KEY_FILE");
+  }
+  return { topic, environments: new Set(environments), keyId, teamId, privateKey };
 }

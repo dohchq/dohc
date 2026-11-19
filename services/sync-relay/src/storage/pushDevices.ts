@@ -106,13 +106,13 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       existing.environment === input.environment &&
       existing.topic === input.topic
     ) {
-      if (existing.expiresAtMs !== input.sessionExpiresAtMs)
-        db.prepare(`UPDATE ${PUSH_SUBSCRIPTIONS} SET expires_at_ms = ?, updated_at_ms = max(updated_at_ms, ?)
+      // The registration time decides whether Apple's later "unregistered" still applies.
+      db.prepare(`UPDATE ${PUSH_SUBSCRIPTIONS} SET expires_at_ms = ?, updated_at_ms = max(updated_at_ms, ?)
           WHERE kind = 'apns' AND session_id = ?`).run(
-          input.sessionExpiresAtMs,
-          input.nowMs,
-          input.sessionId,
-        );
+        input.sessionExpiresAtMs,
+        input.nowMs,
+        input.sessionId,
+      );
       return named({ ...existing, expiresAtMs: input.sessionExpiresAtMs });
     }
     endBindings(
@@ -155,6 +155,40 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       expiresAtMs: input.sessionExpiresAtMs,
     });
   });
+}
+
+/** The phone binding under `generation`, while its sign-in has neither expired nor begun signing out. */
+export function readLivePushDevice(
+  storage: StorageContext,
+  generation: number,
+  nowMs: number,
+): PushDeviceRow | null {
+  const row = storage.db
+    .prepare(`SELECT ${COLUMNS} FROM ${PUSH_SUBSCRIPTIONS} s WHERE kind = 'apns' AND generation = ?
+      AND expires_at_ms > ? AND NOT EXISTS (SELECT 1 FROM ${PUSH_REVOKED_SESSIONS} r
+        WHERE r.session_id = s.session_id AND r.account_user_id = s.account_user_id AND r.expires_at_ms > ?)`)
+    .get(generation, nowMs, nowMs);
+  return row ? rowFrom(row) : null;
+}
+
+/**
+ * Ends the phone binding Apple called unregistered, only while it is still
+ * that generation and was last registered no later than Apple says the
+ * token stopped working.
+ */
+export function removeUnregisteredPushDevice(
+  storage: StorageContext,
+  generation: number,
+  unregisteredAtMs: number | null,
+): void {
+  storage.tx(() =>
+    endBindings(
+      storage,
+      "kind = 'apns' AND generation = ? AND updated_at_ms <= ?",
+      generation,
+      unregisteredAtMs ?? Number.MAX_SAFE_INTEGER,
+    ),
+  );
 }
 
 /** Ends the caller's phone binding only while it is still `generation`, so a late removal keeps a newer one. */

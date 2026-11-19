@@ -913,6 +913,21 @@ function phoneNotices(
   });
 }
 
+/** Whether the recipient still has the Notice, neither dismissed, removed, nor expired. */
+export function noticeIsListed(
+  storage: StorageContext,
+  recipientUserId: string,
+  noticeId: string,
+  nowMs: number,
+): boolean {
+  return Boolean(
+    storage.db
+      .prepare(`SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?
+        AND dismissed_at_ms IS NULL AND removed_at_ms IS NULL AND expires_at_ms > ?`)
+      .get(recipientUserId, noticeId, nowMs),
+  );
+}
+
 /** The recipient's change head; zero for a list that never changed. */
 export function noticeHead(storage: StorageContext, recipientUserId: string): number {
   return Number(
