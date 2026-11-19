@@ -208,6 +208,56 @@ describe("named share chat author names", () => {
     },
   );
 
+  it("names an agent's reaction through a share for its account, and serves no id of an agent a desktop runs", async () => {
+    const f = await fixture();
+    const payload = {
+      reactionId: "reaction",
+      messageId: "message",
+      threadId: "thread",
+      emoji: "👍",
+      authorId: "recipient",
+      authorKind: "agent",
+      authorAgentId: "codex",
+      authorDisplayName: "Owner",
+      state: "added",
+      atMs: 4,
+    };
+    const ops = sequenced([message("human"), { opKind: "chat.reaction.set", payload }]);
+    expect(await json(await f.push(ops))).toMatchObject({ inserted: 2, skipped: 0 });
+    const { authorAgentId: _kept, ...shared } = payload;
+    expect(JSON.parse(f.coordinate(1)!.payloadJson)).toEqual({
+      ...shared,
+      authorDisplayName: "Recipient",
+    });
+    const page = (await json(
+      await f.h(request("recipient", "/sync/shares/" + f.shareId + "/log")),
+    )) as { ops: Array<{ opKind: string; payload: Record<string, unknown> }> };
+    const served = page.ops.find((op) => op.opKind === "chat.reaction.set")?.payload;
+    expect(served).toMatchObject({ authorKind: "agent", authorDisplayName: "Recipient" });
+    expect(served).not.toHaveProperty("authorAgentId");
+  });
+
+  it("refuses a reaction that names a personal agent", async () => {
+    const f = await fixture();
+    const payload = {
+      reactionId: "reaction",
+      messageId: "message",
+      threadId: "thread",
+      emoji: "👍",
+      authorId: "recipient",
+      authorKind: "agent",
+      authorAgentId: `p-${"a".repeat(26)}`,
+      authorDisplayName: "Helper",
+      state: "added",
+      atMs: 4,
+    };
+    const response = await f.push(
+      sequenced([message("human"), { opKind: "chat.reaction.set", payload }]),
+    );
+    expect(response.status).toBe(403);
+    expect(f.coordinate(1)).toBeNull();
+  });
+
   it.each(["agent", "automation"] as const)(
     "stores and serves a trimmed %s post name",
     async (authorKind) => {

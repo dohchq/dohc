@@ -1340,6 +1340,39 @@ describe("ChatsLiveAdapter", () => {
     }
   });
 
+  it("replays an agent's reaction and refuses its key for another agent", async () => {
+    const loopback = new ChatsLoopbackEngine();
+    loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });
+    const adapter = new ChatsLiveAdapter(
+      { sendRequest: (request) => loopback.sendRequest(request), close: () => undefined },
+      WORKSPACE,
+      { workspaceId: "workspace" },
+    );
+    const started = await adapter.startChannelThread({
+      authorActorKey: null,
+      workspaceId: "workspace",
+      channelId: "channel",
+      author: { kind: "human", displayName: "Sam" },
+      body: "React here",
+    });
+    const reaction = {
+      workspaceId: "workspace",
+      threadId: started.thread.id,
+      messageId: started.message.id,
+      emoji: "👍",
+      author: { authorId: "ice", kind: "agent" as const, displayName: "Nova", agentId: "codex" },
+      state: "added" as const,
+      idempotencyKey: "agent-reaction",
+    };
+
+    const first = await adapter.setReaction(reaction);
+    expect(first.author.agentId).toBe("codex");
+    await expect(adapter.setReaction(reaction)).resolves.toEqual(first);
+    await expect(
+      adapter.setReaction({ ...reaction, author: { ...reaction.author, agentId: "claude" } }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
+  });
+
   it("claims only the listed agent when another agent has an older request", async () => {
     const loopback = new ChatsLoopbackEngine();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "General" });

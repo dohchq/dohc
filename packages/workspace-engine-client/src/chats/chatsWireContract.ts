@@ -674,6 +674,7 @@ const ChatReactionAuthorSchema = mutableStruct({
   authorId: Schema.String,
   kind: ReactorKindSchema,
   displayName: Schema.String,
+  agentId: Schema.optionalKey(Schema.String),
 });
 const ChatReactionSchema = mutableStruct({
   reactionId: Schema.String,

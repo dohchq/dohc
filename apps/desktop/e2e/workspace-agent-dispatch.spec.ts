@@ -73,7 +73,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
   }
 });
 
-type RunnerMode = "report" | "silent-fail" | "ask" | "write-report";
+type RunnerMode = "report" | "silent-fail" | "ask" | "write-report" | "react";
 
 function runnerCommand(mode: RunnerMode): string {
   return `node "${fakeRunner.replaceAll('"', '\\"')}" ${mode}`;
@@ -183,6 +183,42 @@ test("the agent dispatches a fresh successful run for each human message", async
     await expect(agentReplies).toHaveCount(2);
     await expect(page.getByTestId("chats-lane-message")).toHaveCount(4);
     await expect(agentReplies.nth(1).getByTestId("chats-lane-agent-badge")).toHaveText("agent");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("a person's reaction and their agent's same reaction stand side by side", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-reaction-e2e");
+    await seedRunnerSettings(temp, "react");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await trustOpenWorkspace(desktop);
+    const page = desktop.page;
+    await openMyAgent(page);
+
+    const composer = page.getByTestId("chats-lane-composer");
+    await composer.fill("audit the projections");
+    await composer.press("Enter");
+    await expect(page.getByTestId("chats-lane-message").filter({ hasText: REPORT })).toHaveCount(1);
+
+    const thumbs = page
+      .getByTestId("chats-lane-message")
+      .filter({ hasText: "audit the projections" })
+      .locator('[data-testid$="-reaction-pill"][data-emoji="👍"]');
+    await expect(thumbs).toHaveAttribute("aria-label", "👍 1 — Nova");
+    await expect(thumbs).toHaveAttribute("aria-pressed", "false");
+
+    await thumbs.click();
+    await expect(thumbs).toHaveAttribute("aria-pressed", "true");
+    await expect(thumbs).toHaveAttribute("aria-label", /^👍 2 — /u);
+
+    await thumbs.click();
+    await expect(thumbs).toHaveAttribute("aria-label", "👍 1 — Nova");
+    await expect(thumbs).toHaveAttribute("aria-pressed", "false");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
