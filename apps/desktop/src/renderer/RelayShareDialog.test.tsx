@@ -1368,13 +1368,13 @@ describe("RelayShareDialog", () => {
     const row = await screen.findByTestId("share-link-row-grant-link-1");
     expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
     expect(await linkOptions(user, row)).toEqual([
+      "Comments",
+      "Add another link",
+      "New separate link",
       "Copy for an agent",
       "Copy message for Grok Bot",
       "Copy commands for Claude Code",
       "Copy commands for Codex",
-      "Comments",
-      "Add another link",
-      "New separate link",
       "Reset link",
       "End link",
     ]);
