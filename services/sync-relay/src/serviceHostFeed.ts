@@ -494,7 +494,7 @@ export function createServiceHostFeed(
             files.has(path)
               ? files.get(path)
               : storage.currentFileBlobSha256({ workspaceId, versionId: "main", path });
-          const ownerSavedSince = (op: SyncRelayLogInput) => {
+          const fileMovedSince = (op: SyncRelayLogInput) => {
             if (op.opKind !== "moment.append") return false;
             const save = asRecord(JSON.parse(op.payloadJson));
             const path = save?.path,
@@ -518,7 +518,7 @@ export function createServiceHostFeed(
             else if (decision.kind === "retiring") {
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
-              else if (staysInPlace(decision.retirement) && !ownerSavedSince(op)) staying.add(op);
+              else if (staysInPlace(decision.retirement) && !fileMovedSince(op)) staying.add(op);
               else op.relayAdmission = "departed";
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }
