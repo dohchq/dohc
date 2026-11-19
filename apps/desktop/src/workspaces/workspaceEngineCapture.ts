@@ -3691,8 +3691,14 @@ export function createWorkspaceEngineCapture(
       const refused = async (error: unknown): Promise<unknown> => {
         if (!hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError))
           return error;
-        if (checkpointContentKind !== "scene")
-          await flushCheckpoint().catch((cause: unknown) => onError("Typing checkpoint", cause));
+        if (checkpointContentKind !== "scene") {
+          try {
+            await flushCheckpoint();
+          } catch (cause) {
+            onError("Typing checkpoint", cause);
+            return keyedWriteUncertain(error);
+          }
+        }
         return keyedWriteNotRecorded(error);
       };
       for (let attempt = 0; ; attempt += 1) {

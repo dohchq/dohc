@@ -1733,49 +1733,56 @@ it("tells an agent the busy engine kept nothing of its write, and never sends it
   expect(journalMarkdown().split("Busy write.")).toHaveLength(2);
 });
 
-it("tells an agent its busy write was not kept only after the checkpoint holding it retires", async () => {
-  await capture.stop();
-  const checkpointKeys: string[][] = [];
-  const retiring = deferred();
-  const retire = vi.fn(async () => {
-    await retiring.promise;
-  });
-  capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID,
-    rootPath: root,
-    attachmentId: ATTACHMENT_ID,
-    rustEngineSessions: sessions,
-    openRustYDocProviderSession: async (options) => ({
-      ...(await openEngineYdocProviderSession(options)),
-      objectId: "checkpoint-object",
-      versionId: "main",
-    }),
-    writeTypingCheckpoint: async (checkpoint) => {
-      checkpointKeys.push(checkpoint.updates.map((update) => update.requestId));
-    },
-    retireTypingCheckpoint: retire,
-    onError: (context) => captureErrors.push(context),
-  });
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-  busyRecordAttempts = 3;
-  loseNextResync = true;
-  let answered = false;
-  const write = keyedWrite(session, "Dropped agent write.").finally(() => {
-    answered = true;
-  });
-  void write.catch(() => undefined);
-  try {
-    await vi.waitFor(() => expect(checkpointKeys.flat()).toContain("claim/1/0"));
-    await vi.waitFor(() => expect(retire).toHaveBeenCalled());
-    expect(answered).toBe(false);
-    retiring.resolve();
-    await expect(write).rejects.toThrow("nothing of it was kept");
-    expect(busyRecordAttempts).toBe(0);
-  } finally {
-    retiring.resolve();
-    await session.close({ settle: false });
-  }
-});
+it.each([
+  { retirement: "succeeds", answer: "nothing of it was kept" },
+  { retirement: "fails", answer: "may have been recorded" },
+] as const)(
+  "answers an agent's dropped busy write once retiring the checkpoint holding it $retirement",
+  async ({ retirement, answer }) => {
+    await capture.stop();
+    const checkpointKeys: string[][] = [];
+    const retiring = deferred();
+    const retire = vi.fn(async () => {
+      await retiring.promise;
+      if (retirement === "fails") throw new Error("checkpoint retirement refused");
+    });
+    capture = createWorkspaceEngineCapture({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+      rustEngineSessions: sessions,
+      openRustYDocProviderSession: async (options) => ({
+        ...(await openEngineYdocProviderSession(options)),
+        objectId: "checkpoint-object",
+        versionId: "main",
+      }),
+      writeTypingCheckpoint: async (checkpoint) => {
+        checkpointKeys.push(checkpoint.updates.map((update) => update.requestId));
+      },
+      retireTypingCheckpoint: retire,
+      onError: (context) => captureErrors.push(context),
+    });
+    const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+    busyRecordAttempts = 3;
+    loseNextResync = true;
+    let answered = false;
+    const write = keyedWrite(session, "Dropped agent write.").finally(() => {
+      answered = true;
+    });
+    void write.catch(() => undefined);
+    try {
+      await vi.waitFor(() => expect(checkpointKeys.flat()).toContain("claim/1/0"));
+      await vi.waitFor(() => expect(retire).toHaveBeenCalled());
+      expect(answered).toBe(false);
+      retiring.resolve();
+      await expect(write).rejects.toThrow(answer);
+      expect(busyRecordAttempts).toBe(0);
+    } finally {
+      retiring.resolve();
+      await session.close({ settle: false });
+    }
+  },
+);
 
 it("retires a busy refusal's typing checkpoint once the engine records the resent typing", async () => {
   await capture.stop();
