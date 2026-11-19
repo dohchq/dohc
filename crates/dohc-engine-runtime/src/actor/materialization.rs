@@ -364,6 +364,39 @@ fn keep_secret_edit(
     }
 }
 
+/// Whether a protected delete of another spelling of the same disk entry, in
+/// the same version, still waits. A case-only rename's write expects the file
+/// that delete removes to be gone, so the write waits for it.
+fn alias_secret_delete_pending(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    coordinates: &SecretJobCoordinates,
+) -> Result<bool, RuntimeError> {
+    let spellings = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT j.target_path FROM materialization_jobs j \
+                 JOIN secret_moments m \
+                   ON j.workspace_id IN (m.workspace_id, '') AND m.moment_id = substr(j.job_id, 12) \
+                 WHERE j.status = 'pending' AND j.job_id GLOB 'secret-mat_*' \
+                   AND j.operation = 'delete' AND j.target_path <> ?3 \
+                   AND m.workspace_id = ?1 AND m.version_id = ?2",
+            )?;
+            statement
+                .query_map(
+                    params![coordinates.workspace_id, coordinates.version_id, coordinates.path],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(StorageError::corrupt_public)?;
+    let entry = dohc_engine_files::floor::path_collision_key(&coordinates.path);
+    Ok(spellings.iter().any(|spelling| {
+        dohc_engine_files::floor::path_collision_key(spelling) == entry
+            && dohc_engine_files::may_share_entry(root_dir, spelling, &coordinates.path)
+    }))
+}
+
 /// Whether a later protected moment on the same file still waits to reach the
 /// disk. That job writes the same tip against a newer preimage, so it alone runs.
 fn later_secret_job_pending(
@@ -1122,7 +1155,9 @@ fn replay_materializations(
                     }
                 } else {
                     let Some(coordinates) = secret_job_coordinates(store, &job)? else {
-                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                            summary.failed += 1;
+                        }
                         continue;
                     };
                     let active_version_id = VersionedTextStore::new(store)
@@ -1133,8 +1168,13 @@ fn replay_materializations(
                     }
                     let tip_present = secret_tip_exists(store, &coordinates)?;
                     match (job.operation, tip_present) {
-                        (MaterializationOperation::Write, false)
-                        | (MaterializationOperation::Delete, true) => {
+                        (MaterializationOperation::Write, false) => {
+                            if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                                summary.failed += 1;
+                            }
+                            continue;
+                        }
+                        (MaterializationOperation::Delete, true) => {
                             store.mark_materialization_complete(&job.job_id, now_ms)?;
                             continue;
                         }
@@ -1145,6 +1185,12 @@ fn replay_materializations(
                         if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
                             summary.failed += 1;
                         }
+                        continue;
+                    }
+                    if job.operation == MaterializationOperation::Write
+                        && alias_secret_delete_pending(store, root_dir, &coordinates)?
+                    {
+                        summary.failed += 1;
                         continue;
                     }
                     coordinates

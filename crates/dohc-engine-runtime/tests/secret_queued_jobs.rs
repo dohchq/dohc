@@ -302,6 +302,222 @@ async fn a_skipped_older_write_removes_the_temp_its_crash_left() {
     assert_eq!(workspace.job("second").status, JobStatus::Complete);
 }
 
+#[tokio::test]
+async fn a_write_its_delete_cancels_removes_the_temp_its_crash_left() {
+    let workspace = Workspace::new();
+    let actor = workspace.open(2);
+    workspace
+        .write(
+            &actor,
+            "main",
+            ".env",
+            "VALUE=first
+",
+            "first",
+            workspace.queue(),
+        )
+        .await
+        .unwrap();
+    workspace.close();
+    {
+        let store = EngineStore::open(&workspace.db, 3).unwrap();
+        let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterFlushBeforeRename);
+        let outcome = materialize_secret_one(
+            &store,
+            workspace.root.path(),
+            &workspace.job("first"),
+            b"VALUE=first
+",
+            &MaterializeOptions {
+                policy: DurabilityPolicy::per_os(),
+                replacer: &StdReplacer,
+                backoff: &StdBackoff,
+                now_ms: 3,
+                faults: crash.as_ref(),
+                holds: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, JobOutcome::Crashed(_)), "{outcome:?}");
+    }
+
+    let actor = workspace.open(4);
+    workspace
+        .delete(&actor, "main", ".env", "gone")
+        .await
+        .unwrap();
+    workspace.replay(&actor).await;
+    workspace.close();
+
+    assert!(workspace.names().is_empty(), "{:?}", workspace.names());
+    assert_eq!(workspace.job("first").status, JobStatus::Complete);
+}
+
+#[tokio::test]
+async fn a_respelling_after_a_cancelled_write_waits_for_the_old_spellings_delete() {
+    let workspace = Workspace::new();
+    if !ignores_case(&workspace.root) {
+        eprintln!("skipping: this disk keeps case apart");
+        return;
+    }
+    std::fs::write(workspace.root.join("foo.env"), "TOKEN=base").unwrap();
+    let actor = workspace.open(2);
+    workspace
+        .write(
+            &actor,
+            "main",
+            "foo.env",
+            "TOKEN=base",
+            "base",
+            SecretWriteDisk::AlreadyOnDisk,
+        )
+        .await
+        .unwrap();
+    workspace
+        .write(
+            &actor,
+            "main",
+            "foo.env",
+            "TOKEN=edited",
+            "edited",
+            workspace.queue(),
+        )
+        .await
+        .unwrap();
+    workspace
+        .write(
+            &actor,
+            "main",
+            "Foo.env",
+            "TOKEN=respelled",
+            "respell",
+            workspace.queue(),
+        )
+        .await
+        .unwrap();
+    workspace
+        .delete(&actor, "main", "foo.env", "old-spelling")
+        .await
+        .unwrap();
+    workspace.replay(&actor).await;
+    workspace.close();
+
+    assert_eq!(workspace.names(), ["Foo.env"]);
+    assert_eq!(
+        workspace.file("Foo.env").as_deref(),
+        Some("TOKEN=respelled")
+    );
+    assert_eq!(workspace.job("respell").status, JobStatus::Complete);
+    assert_eq!(workspace.job("edited").status, JobStatus::Complete);
+}
+
+#[tokio::test]
+async fn a_write_the_disk_already_holds_removes_the_temp_its_crash_left() {
+    let workspace = Workspace::new();
+    let actor = workspace.open(2);
+    workspace
+        .write(
+            &actor,
+            "main",
+            ".env",
+            "VALUE=first
+",
+            "first",
+            workspace.queue(),
+        )
+        .await
+        .unwrap();
+    workspace.close();
+    {
+        let store = EngineStore::open(&workspace.db, 3).unwrap();
+        let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterFlushBeforeRename);
+        let outcome = materialize_secret_one(
+            &store,
+            workspace.root.path(),
+            &workspace.job("first"),
+            b"VALUE=first
+",
+            &MaterializeOptions {
+                policy: DurabilityPolicy::per_os(),
+                replacer: &StdReplacer,
+                backoff: &StdBackoff,
+                now_ms: 3,
+                faults: crash.as_ref(),
+                holds: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, JobOutcome::Crashed(_)), "{outcome:?}");
+    }
+    std::fs::write(
+        workspace.root.join(".env"),
+        "VALUE=first
+",
+    )
+    .unwrap();
+
+    let actor = workspace.open(4);
+    workspace.replay(&actor).await;
+    workspace.close();
+
+    assert_eq!(workspace.names(), [".env"]);
+    assert_eq!(workspace.job("first").status, JobStatus::Complete);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_respelling_waits_while_the_old_spellings_delete_is_held_up() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let workspace = Workspace::new();
+    std::fs::write(workspace.root.join("foo.env"), "TOKEN=base").unwrap();
+    let actor = workspace.open(2);
+    workspace
+        .write(
+            &actor,
+            "main",
+            "foo.env",
+            "TOKEN=base",
+            "base",
+            SecretWriteDisk::AlreadyOnDisk,
+        )
+        .await
+        .unwrap();
+    workspace
+        .write(
+            &actor,
+            "main",
+            "Foo.env",
+            "TOKEN=respelled",
+            "respell",
+            workspace.queue(),
+        )
+        .await
+        .unwrap();
+    workspace
+        .delete(&actor, "main", "foo.env", "old-spelling")
+        .await
+        .unwrap();
+
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(workspace.root.join("foo.env"))
+        .unwrap();
+    workspace.replay(&actor).await;
+    assert_eq!(workspace.job("respell").status, JobStatus::Pending);
+    assert_eq!(workspace.file("foo.env").as_deref(), Some("TOKEN=base"));
+    drop(held);
+
+    workspace.replay(&actor).await;
+    workspace.close();
+    assert_eq!(workspace.names(), ["Foo.env"]);
+    assert_eq!(
+        workspace.file("Foo.env").as_deref(),
+        Some("TOKEN=respelled")
+    );
+    assert_eq!(workspace.job("respell").status, JobStatus::Complete);
+}
+
 async fn inactive_version_ignores_the_active_file(block: impl Fn(&Path)) {
     let workspace = Workspace::new();
     std::fs::write(workspace.root.join(".env"), "VALUE=main\n").unwrap();

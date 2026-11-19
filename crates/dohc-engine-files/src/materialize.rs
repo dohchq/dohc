@@ -1303,7 +1303,7 @@ fn materialize_secret_one_with_remover(
         && hex_sha256(bytes) == desired_sha
         && !target_has_other_leaf_spelling(&target)
     {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        complete_secret_job_unrun(store, &canonical_root, job, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     }
     let plaintext_job = MaterializationJob {
