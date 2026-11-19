@@ -59,8 +59,8 @@ export class ClientClosedRequest extends DOMException {
 }
 
 /**
- * The request signal's abort reason, and its body's error, when the server refused the body and already sent the
- * refusal. The handler's own answer to that request is never sent.
+ * The request signal's abort reason, and its body's error, when the server refused the body. The server sends its own
+ * refusal, and the handler's answer to that request is never sent.
  */
 export class RefusedRequest extends DOMException {}
 

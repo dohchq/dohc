@@ -672,7 +672,8 @@ describe("serveFetchHandler", () => {
     socket.on("data", (chunk) => {
       seen += chunk.toString("latin1");
     });
-    const failed = new Promise<Error>((resolve) => socket.once("error", resolve));
+    const errors: Error[] = [];
+    socket.on("error", (error) => errors.push(error));
     const bytes = 512 * 1024;
     socket.write(
       `PUT /blob HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: a\r\ncontent-length: ${bytes}\r\n\r\n`,
@@ -683,8 +684,8 @@ describe("serveFetchHandler", () => {
     expect(seen.toLowerCase()).not.toContain("connection: close");
     socket.write("GET /next HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n");
     await vi.waitFor(() => expect(seen).toContain("next"));
+    expect(errors).toEqual([]);
     socket.destroy();
-    expect(await Promise.race([failed, Promise.resolve(null)])).toBeNull();
     expect(releases).toHaveLength(0);
   });
 
