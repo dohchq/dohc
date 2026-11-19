@@ -88,6 +88,22 @@ fn storage_failure(error: &RuntimeError) -> Option<&dohc_engine_storage::Storage
     }
 }
 
+fn named_storage_failure(error: &RuntimeError) -> Option<&dohc_engine_storage::StorageError> {
+    use dohc_engine_storage::StorageError;
+    storage_failure(error).filter(|refused| {
+        matches!(
+            refused,
+            StorageError::UnsupportedFingerprint { .. }
+                | StorageError::ForeignDatabase
+                | StorageError::MigrationFailed { .. }
+                | StorageError::MigratedByNewerBuild { .. }
+                | StorageError::StateCorrupt { .. }
+                | StorageError::DiskFull { .. }
+                | StorageError::PermissionDenied { .. }
+        )
+    })
+}
+
 /// The transient store lock, through every wrapper that carries it to this
 /// seam. Matched on the variant: `code()` delegates through each wrapper, so
 /// "file-locked" alone cannot tell a busy database apart from a busy file.
@@ -317,16 +333,7 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
             "Open the workspace in dohc first, then try again.",
         );
     }
-    if let Some(
-        refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
-        | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }
-        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }
-        | dohc_engine_storage::StorageError::StateCorrupt { .. }
-        | dohc_engine_storage::StorageError::DiskFull { .. }
-        | dohc_engine_storage::StorageError::PermissionDenied { .. }),
-    ) = storage_failure(error)
-    {
+    if let Some(refused) = named_storage_failure(error) {
         return storage_refusal(refused);
     }
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error
@@ -523,7 +530,9 @@ fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
                     .map_or("search-storage", |named| named.code())
                     .into()
             }
-            other => other.code().into(),
+            other => named_storage_failure(other)
+                .map_or_else(|| other.code(), dohc_engine_storage::StorageError::code)
+                .into(),
         };
         format!("engine: internal refusal: {} {word}", code.as_str())
     })
@@ -1001,7 +1010,7 @@ mod tests {
                     std::io::Error::other("missing search table"),
                 ))),
                 "state-corrupt",
-                "engine: internal refusal: INTERNAL search-storage-core",
+                "engine: internal refusal: INTERNAL state-corrupt",
             ),
             (
                 RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
