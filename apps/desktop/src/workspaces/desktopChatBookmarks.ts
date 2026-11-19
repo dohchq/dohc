@@ -4,6 +4,7 @@ import { isLivePageOwnedRefusal } from "../ipc/errorWords";
 import type { DesktopLinkedChatStore } from "./liveLinkedChatStore";
 import type { WorkspaceAuthorityLease } from "./workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "./workspaceAuthorityLane";
+import { logUnlessClosedCopy } from "./shareViewRebuild";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
 import {
@@ -251,7 +252,7 @@ export function createDesktopChatBookmarks<
     });
     for (const bookmark of pending) {
       await materializeForAuthority(workspace, capture, bookmark, lease).catch((error) => {
-        console.error("[desktop] chat bookmark projection:", error);
+        logUnlessClosedCopy("[desktop] chat bookmark projection:")(error);
         // Re-flag so the worker's next tick retries. If markBookmarkFailed
         // itself failed, the row is still pending and this is the only retry
         // path; if it succeeded, the row left listPendingBookmarks and the
@@ -353,7 +354,7 @@ export function createDesktopChatBookmarks<
       await materializePendingForAuthority(workspace, capture, lease);
       lease.assertCurrent();
     } catch (error) {
-      console.error(`[desktop] chat bookmark projection (${workspaceId}):`, error);
+      logUnlessClosedCopy(`[desktop] chat bookmark projection (${workspaceId}):`)(error);
       if (lease) retryProjection(lease);
     } finally {
       lease?.release();
@@ -391,7 +392,7 @@ export function createDesktopChatBookmarks<
         void materializePendingForAuthority(workspace, capture, lease)
           .then(() => lease.assertCurrent())
           .catch((error) => {
-            console.error("[desktop] live chat bookmark projection:", error);
+            logUnlessClosedCopy("[desktop] live chat bookmark projection:")(error);
             retryProjection(lease);
           })
           .finally(() => {

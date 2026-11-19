@@ -378,6 +378,25 @@ pub struct ShareViewResponse {
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
+    /// The member's reach signatures the relay selected this page under. A
+    /// membership's pages carry them; a path share's carry none.
+    pub reach_signatures: Option<ShareReachSignatures>,
+}
+
+/// The two signatures of a member's reach (`ShareReach`), as one page lists
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareReachSignatures {
+    pub signature: String,
+    pub visibility_signature: String,
+    /// The relay log's newest seq when the relay read this page. The client
+    /// checks that every marked op on the page is at or below it.
+    pub log_head: i64,
+    /// The relay seq of the page's newest op that marks an owner's move
+    /// across the edge of the reach, which it serves as a delete or a write.
+    /// The copy may hold History of the moved file that the relay no longer
+    /// serves, so it rebuilds as for a changed visibility.
+    pub newest_move: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,6 +701,15 @@ pub struct ShareViewPullOutcome {
     /// it; one that advanced silently would lose the skip. So it advances,
     /// and the skip is recorded.
     pub pending_cursor: crate::ShareCursor,
+    /// The page's reach signatures, when they differ from the reach the grant
+    /// carries. The page then applied nothing and the cursor stays where it
+    /// was: the caller reads the reach again before it pulls on.
+    pub reach_changed: Option<ShareReachSignatures>,
+    /// The page marks a move across the reach's edge past the head the
+    /// copy's first page named, or was read before that page. The copy may
+    /// hold History the relay no longer serves, so it rebuilds. Set only with
+    /// `reach_changed`.
+    pub stopped_at_move: bool,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -4851,8 +4879,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     }
 
     /// Send a whole-workspace share view's own posts in its Groups to the
-    /// owner, through the share's append lane. Only a Comment or Edit grant
-    /// posts. A view that never posted has no identity and sends nothing.
+    /// owner, through the share's append lane. Only a grant with Comment or
+    /// Edit in its Groups or on some file posts: file rules don't lower the
+    /// Group level. A view that never posted has no identity and sends
+    /// nothing.
     pub fn push_share_view_groups(
         &self,
         store: &mut EngineStore,
@@ -4862,10 +4892,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
         if granted.scope != crate::share::ShareScope::Workspace
-            || granted.access == crate::share::ShareAccess::View
+            || !(granted.group_level().takes_comments()
+                || granted
+                    .highest()
+                    .is_some_and(crate::share::ShareAccess::takes_comments))
         {
             return Err(local(SyncError::InvalidInput {
-                reason: "only a Comment or Edit membership posts in its Groups",
+                reason: "only a membership with Comment or Edit somewhere posts in its Groups and on its files",
             }));
         }
         let Some(identity) = read_sync_identity(store, workspace_id).map_err(local)? else {
@@ -5115,8 +5148,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
-        // View or Comment share never contacts the relay at all.
-        if granted.access != crate::ShareAccess::Edit {
+        // View or Comment share never contacts the relay at all. A membership
+        // offers once it has Edit somewhere.
+        if granted.highest() != Some(crate::ShareAccess::Edit) {
             return Ok(ShareProposalSubmitOutcome::default());
         }
         let identity = read_sync_identity(store, workspace_id)
@@ -5251,6 +5285,22 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// claiming a version it does not grant — is skipped before replay, so
     /// its blob is never requested. There is no unscoped pull: the grant is
     /// required, and one that selects nothing admits nothing.
+    ///
+    /// A membership's page that marks a move across the edge of its reach
+    /// applies nothing, as one under another reach does, and reports
+    /// `stopped_at_move`: the copy may hold History of the moved file that the
+    /// relay no longer serves. The relay selects each object by what the reach
+    /// serves when it reads the page, so a move marked at or below the log's
+    /// head that the copy's first page named is already in what every page of
+    /// that pull reads, and applies. The store keeps that head
+    /// (`share_view_fences`), written before the first page applies. Only a
+    /// page read at cursor 0 with no head stored is that first page. A copy
+    /// that has a cursor but no head stops at any marked move.
+    ///
+    /// A page whose head is below the stored one was read before the page
+    /// that stored it, as when two pulls of one share overlap. It may hold
+    /// History of a file whose move an applied page already marked, so it
+    /// stops too.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
@@ -5273,6 +5323,63 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             limit: crate::model::MAX_PULL_OPS_PER_PASS,
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+        // The relay selected this page under the member's reach at its own
+        // signatures. A page selected under another reach than the one stored
+        // here applies nothing, whether the levels or the visible paths moved,
+        // and nor does one that marks a move the copy can't take in place.
+        if let Some(known) = &granted.reach {
+            let Some(served) = page.reach_signatures else {
+                return Err(RelayError::InvalidResponse);
+            };
+            // Read after the page: the actor runs one store operation at a
+            // time, so no other pull can store a head between this read and
+            // the write below.
+            let fence = crate::cursor::read_share_view_fence(store, workspace_id, share_id)
+                .map_err(local)?;
+            let from_start = cursor == 0 && fence.is_none();
+            let stopped_at_move = match fence {
+                Some(fence) => {
+                    served.log_head < fence || served.newest_move.is_some_and(|seq| seq > fence)
+                }
+                None => !from_start && served.newest_move.is_some(),
+            };
+            if served.signature != known.signature
+                || served.visibility_signature != known.visibility_signature
+                || stopped_at_move
+            {
+                return Ok(ShareViewPullOutcome {
+                    fetched: 0,
+                    has_more: false,
+                    applied: 0,
+                    skipped: 0,
+                    refusals: Vec::new(),
+                    changed_paths: Vec::new(),
+                    pending_cursor: crate::ShareCursor {
+                        kind: crate::CursorKind::ShareView,
+                        share_id: share_id.to_owned(),
+                        cursor,
+                    },
+                    reach_changed: Some(served),
+                    stopped_at_move,
+                });
+            }
+            if from_start {
+                match crate::cursor::record_share_view_fence(
+                    store,
+                    workspace_id,
+                    share_id,
+                    served.log_head,
+                    faults,
+                )
+                .map_err(local)?
+                {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => {
+                        return Err(RelayError::Local("injected-crash".to_owned()));
+                    }
+                }
+            }
+        }
         let fetched = page.ops.len();
         let ops = page.ops;
         // The cursor this page was fetched at, kept for the ops that carry no
@@ -5421,6 +5528,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 share_id: share_id.to_owned(),
                 cursor,
             },
+            reach_changed: None,
+            stopped_at_move: false,
         })
     }
 

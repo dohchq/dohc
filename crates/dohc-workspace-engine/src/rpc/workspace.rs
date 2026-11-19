@@ -435,6 +435,10 @@ struct WorkspaceOpenParams {
     /// reconcile them.
     #[serde(default)]
     abandon_ordinary_pull: bool,
+    /// The rebuild under way at this root. A root whose rebuild has not
+    /// swapped in its new store opens only for that rebuild.
+    #[serde(default)]
+    rebuild_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -789,6 +793,7 @@ impl EngineService {
         work.step();
         let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
             .map_err(map_root_binding)?;
+        self.admit_rebuilding_root(&root, params.rebuild_id.as_deref())?;
         let requested_mode = if passive {
             WorkspaceOpenMode::Passive
         } else if params.skip_startup_maintenance {

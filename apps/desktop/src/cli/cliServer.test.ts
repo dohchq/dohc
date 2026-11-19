@@ -543,6 +543,8 @@ describe("CLI socket server", () => {
       },
       chatWrites: createChatWrites({
         findWorkspace: () => chatRow,
+        // The one file these tests comment on.
+        currentPathOf: async () => "tracked.md",
         async warmCredentials() {
           calls.identity += 1;
         },

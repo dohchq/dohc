@@ -56,7 +56,7 @@ import type {
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
-import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import { shareViewWriteLevel, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import type { JoinedGroupInput } from "../workspaces/joinedGroupCreate";
 import type { ReceivedRecordDraft } from "../workspaces/receivedShareRecordCreation";
 import type { CreateCollectionRecordPayload } from "../ipc/bridgeContract";
@@ -110,9 +110,14 @@ import {
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
 
-// A member's refusal names the command that lists their level and role.
-const needsEdit = (action: string, access: string | null | undefined) =>
-  `${action} needs Edit. You can ${access ?? "view"} here. Run dohc members list to see what you can do.`;
+// A member's refusal says why: the membership ended, another account is
+// signed in, or the level here, with the command that lists levels and roles.
+const needsEdit = (action: string, view: ShareViewWriteScope, access: string | null) =>
+  view.ended
+    ? `${action} isn't possible here. Your membership ended.`
+    : view.writer === "other"
+      ? `${action} isn't possible here. This computer is signed in to a different account than the one the owner invited.`
+      : `${action} needs Edit. ${access === null ? "You have no access here." : `You can ${access} here.`} Run dohc members list to see what you can do.`;
 
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
@@ -377,6 +382,24 @@ interface DesktopCliServerDependencies<State> {
   rememberPendingCliRunMessageLink(link: CliRunMessageLink, pending: boolean): void;
 }
 
+/**
+ * A joined copy the engine closed for its access refuses every request, so the
+ * CLI says why instead of passing on the engine's refusal code.
+ */
+function refuseClosedCopy(workspace: RegistryEntry): void {
+  const rebuild = workspace.shareView?.rebuild;
+  if (!rebuild) return;
+  if (workspace.shareView?.ended === true || rebuild.stopped?.reason === "ended") {
+    throw new Error("Your membership of this workspace ended. What arrived stays in its folder.");
+  }
+  // A stopped update reopens only once someone chooses Try again.
+  throw new Error(
+    rebuild.stopped?.reason === "failed"
+      ? "dohc stopped updating your access to this workspace. Open it in dohc, then choose Try again."
+      : "dohc is updating your access to this workspace. Run this again once it opens in dohc.",
+  );
+}
+
 export function createDesktopCliServer<State>(dependencies: DesktopCliServerDependencies<State>) {
   const {
     findWorkspace,
@@ -434,6 +457,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     if (!workspace || resolve(workspace.rootPath) !== resolve(requested.rootPath)) {
       throw new Error("dohc: not inside a dohc workspace");
     }
+    refuseClosedCopy(workspace);
     await openWorkspaceActivity(workspace);
     // A share view has no capture. Its files resolve through the view's own
     // engine session, and its History is what its share imported.
@@ -808,16 +832,18 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               return await cliCollectionEdit((context) =>
                 setCollectionRecordFields(context, input),
               );
-            if (view.access !== "edit")
-              throw new Error(needsEdit("Changing a Collection record", view.access));
+            const level = shareViewWriteLevel(view, { path: input.recordPath });
+            if (level !== "edit")
+              throw new Error(needsEdit("Changing a Collection record", view, level));
             return await setCollectionRecordFields(joinedRecordContext(), input);
           },
           createRecord: async (input) => {
             const view = sharedViewOf(workspace.workspaceId);
             if (view?.membership !== true)
               return await runCollectionRecordCreation(cliCollectionEdit, input);
-            if (view.access !== "edit")
-              throw new Error(needsEdit("Adding a Collection record", view.access));
+            const level = shareViewWriteLevel(view, { folder: input.collectionPath });
+            if (level !== "edit")
+              throw new Error(needsEdit("Adding a Collection record", view, level));
             const created = await withPhysicalWorkspaceOperation(
               workspace.workspaceId,
               async (operation) => {
@@ -953,8 +979,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           // A joined workspace's page changes through its live session on the
           // server, as its editor does, and the server decides again.
           const view = sharedViewOf(workspace.workspaceId);
-          if (view?.membership === true && view.access !== "edit") {
-            throw new Error(needsEdit("Editing a page", view.access));
+          if (view?.membership === true && shareViewWriteLevel(view, "somewhere") !== "edit") {
+            throw new Error(
+              needsEdit("Editing a page", view, shareViewWriteLevel(view, "somewhere")),
+            );
           }
           return await liveDocuments.editDocument({
             ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
@@ -962,6 +990,11 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             path,
             origin,
             assertEditable: async (resolved) => {
+              // An existing page takes the level at its current path.
+              if (view?.membership === true) {
+                const level = shareViewWriteLevel(view, { path: resolved });
+                if (level !== "edit") throw new Error(needsEdit("Editing a page", view, level));
+              }
               const source = await lossyNoteText(workspace.rootPath, resolved);
               if (
                 source !== null &&
@@ -987,7 +1020,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true) {
-            if (view.access !== "edit") throw new Error(needsEdit("Adding a page", view.access));
+            const level = shareViewWriteLevel(view, { path });
+            if (level !== "edit") throw new Error(needsEdit("Adding a page", view, level));
             const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             if (
               folder !== "" &&
@@ -1372,6 +1406,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
     withPhysicalWorkspaceOperation(requested.workspaceId, (operation) => {
       if (resolve(operation.workspace.rootPath) !== resolve(requested.rootPath))
         throw new Error("The workspace attachment changed.");
+      refuseClosedCopy(operation.workspace);
       return run(operation.workspace);
     });
 

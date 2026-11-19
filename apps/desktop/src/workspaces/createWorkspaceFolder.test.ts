@@ -18,6 +18,7 @@ import {
   assertNotStateFolder,
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
+  DOHC_FOLDER_REFUSAL,
 } from "./createWorkspaceFolder";
 import {
   joinedThroughServer,
@@ -453,6 +454,37 @@ describe("createWorkspaceFolder", () => {
       }),
     ).rejects.toMatchObject(refusal(stateFolderRefusal("inside")));
     expect(await readdir(inside)).toEqual([]);
+  });
+
+  it("refuses a folder inside a workspace's .dohc folder, by any path, and makes nothing there", async () => {
+    const workspace = join(base, "Trip");
+    await createWorkspaceFolder({
+      rootPath: workspace,
+      homeDir,
+      stateDir,
+      computer,
+      kind: "personal",
+    });
+    const records = join(workspace, ".dohc");
+    const engine = join(records, "engine");
+    await mkdir(engine);
+    const recordsLink = join(base, "records-link");
+    await symlink(records, recordsLink, linkType);
+    for (const rootPath of [
+      records,
+      engine,
+      join(records, "missing"),
+      recordsLink,
+      join(recordsLink, "engine"),
+      join(recordsLink, "missing"),
+    ]) {
+      await expect(
+        createWorkspaceFolder({ rootPath, homeDir, stateDir, computer, kind: "personal" }),
+        rootPath,
+      ).rejects.toMatchObject(refusal(DOHC_FOLDER_REFUSAL));
+    }
+    expect(existsSync(join(records, "missing"))).toBe(false);
+    expect(await readdir(engine)).toEqual([]);
   });
 
   it("refuses to open an already registered workspace that holds dohc's state folder, and leaves it as it was", async () => {

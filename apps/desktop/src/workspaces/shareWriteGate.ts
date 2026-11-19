@@ -1,12 +1,8 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { isRecord } from "@dohc/workspace-core/records";
 import { relayUrlsMatch } from "@dohc/workspace-contracts/relay-values";
-import {
-  readableShareLevel,
-  shareViewGranterEmail,
-  shareViewIdentityIsIntact,
-  shareViewIsPresent,
-} from "./shareViewMarker";
+import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
+import { shareViewLevels, type ShareViewLevels } from "./shareViewReach";
 import { recordedShareSelector } from "./shareViewRecords";
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
@@ -25,13 +21,24 @@ import { recordedShareSelector } from "./shareViewRecords";
 //   `requireShareViewProposalScope` decides whether the recipient may send
 //   what it wrote.
 //
+// Each asks `shareViewWriteLevel` with the place it writes: a path, a folder,
+// a Group, or somewhere when the place is not known yet.
+//
 // It lives here rather than inside main's IPC closure so tests drive the real
 // rule: a hand-copied re-implementation in a test proves only that the copy
 // behaves.
 export interface ShareViewWriteScope {
-  // The level the PINNED grant names, or null when the grant cannot be read
-  // or the marker lost its identity.
+  // The highest level the share view has anywhere, or null when the grant
+  // cannot be read or the marker lost its identity. For a path share, or a
+  // joined workspace with no stored reach yet, the level the PINNED grant
+  // names.
   access: ShareAccess | null;
+  // The pinned grant's level, which a Group takes. Absent, `access`.
+  member?: ShareAccess | null;
+  // The level at one path and inside one folder (`shareViewLevels`). Absent,
+  // every path takes `access`.
+  levelAt?: (path: string) => ShareAccess | null;
+  levelIn?: (folder: string) => ShareAccess | null;
   ended: boolean;
   // The pinned grant is the whole workspace: a joined workspace.
   membership?: boolean;
@@ -78,20 +85,52 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
   "A shared view can't hold an empty folder. Make a file in the folder you want.";
 
 /**
- * Whether a share view may take the recipient's own local writes.
+ * Where a write lands:
+ * - a file's `path`: an existing file's current path, or a new file's;
+ * - a `folder`, "" for the root: where a new file in it lands;
+ * - `"group"`: a Group's posts, which take the member level until Group rules
+ *   exist;
+ * - `"somewhere"`: any folder, for a create offer before its folder is known
+ *   and for sending what waits. Each change is judged again at its own path,
+ *   here when it is made and by the relay when it is sent.
+ */
+export type ShareViewWritePlace = { path: string } | { folder: string } | "group" | "somewhere";
+
+/**
+ * The level at which a share view takes the recipient's own write at one
+ * place, or null where it takes none. Every local write gate asks this, so a
+ * person and an agent get the same answer at the same place. A file write
+ * needs `edit`, a post `comment` or `edit`.
  *
- * Positive recognition on `edit`, and nothing else. The registry file is
- * DATA, so a stored grant can name a level this process cannot read, and a
- * damaged grant names none at all — reading either as writable is the one
- * direction this must never fail.
+ * Positive recognition only. The registry file is DATA, so a stored grant can
+ * name a level this process cannot read, and a damaged grant names none at
+ * all — reading either as writable is the one direction this must never fail.
  *
  * An ended share is a frozen local copy: the submit route is gone, so a write
- * admitted here would land durably and never reach the granter. That is the
- * same rule main's chat write gate applies to the same state.
+ * admitted here would land durably and never reach the granter. A joined
+ * workspace's level belongs to the account that joined, so another account
+ * signed in takes no write at any place (`ShareViewWriter`).
  */
-export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
-  if (scope.ended || scope.writer === "other") return false;
-  return scope.access === "edit";
+export function shareViewWriteLevel(
+  scope: ShareViewWriteScope,
+  place: ShareViewWritePlace,
+): ShareAccess | null {
+  if (scope.ended || scope.writer === "other") return null;
+  if (place === "somewhere") return scope.access;
+  if (place === "group") return scope.member === undefined ? scope.access : scope.member;
+  if ("path" in place) return scope.levelAt ? scope.levelAt(place.path) : scope.access;
+  return scope.levelIn ? scope.levelIn(place.folder) : scope.access;
+}
+
+/**
+ * Whether a joined workspace takes its member's posts anywhere: in its Groups
+ * or on some file. File rules don't lower the Group level, so a Comment member
+ * under a `members: view` rule still posts in Groups.
+ */
+export function shareViewTakesPosts(scope: ShareViewWriteScope): boolean {
+  return [shareViewWriteLevel(scope, "group"), shareViewWriteLevel(scope, "somewhere")].some(
+    (level) => level === "comment" || level === "edit",
+  );
 }
 
 /**
@@ -108,8 +147,9 @@ export function workspaceCreateOffers(
   collection: boolean;
 } {
   // Create, rename, delete and import: everywhere in an ordinary workspace,
-  // and in a share view only at the level `shareViewTakesLocalWrites` names.
-  const write = shareView === null || shareViewTakesLocalWrites(shareView);
+  // and in a share view where some folder takes Edit. Each handler asks again
+  // at its own path.
+  const write = shareView === null || shareViewWriteLevel(shareView, "somewhere") === "edit";
   // In a joined workspace only an admin starts a folder; the relay reads the
   // role again. `role` is the relay's last answer, or unknown.
   const startsFolders = shareView?.membership === true && role === "admin";
@@ -146,10 +186,20 @@ export function shareViewWriteScopeOf(
   const ended = marker.ended === true;
   return {
     granterEmail: shareViewGranterEmail(marker),
-    access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
-    ended,
+    ...writeScopeOfLevels(shareViewLevels(marker), ended),
     membership,
     ...(membership && !ended ? { writer: shareViewWriterOf(marker, credentials) } : {}),
+  };
+}
+
+/** The write scope some levels give, for a caller that holds the levels. */
+export function writeScopeOfLevels(levels: ShareViewLevels, ended: boolean): ShareViewWriteScope {
+  return {
+    access: levels.highest,
+    member: levels.member,
+    levelAt: levels.at,
+    levelIn: levels.in,
+    ended,
   };
 }
 
@@ -166,7 +216,7 @@ export function shareViewWriteScopeOf(
  *
  * File changes admitted by an edit grant do not come through here. They route
  * to the engine through `ShareViewFiles.change`, which asks
- * `shareViewTakesLocalWrites` at the seam that would otherwise write.
+ * `shareViewWriteLevel` at the seam that would otherwise write.
  * Widening this rule to the same level would open every guarded handler with
  * it.
  *

@@ -404,6 +404,26 @@ export const WorkspaceSummary = z.object({
       unconfirmedChanges: ShareUnconfirmedChangesSchema.optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
+      // The relay changed which items this member sees, and the copy is
+      // closed while it is rebuilt. The shell shows "Updating access"
+      // instead of the workspace.
+      updatingAccess: z.literal(true).optional(),
+      // Why the update stopped, when it did; Try again starts it again.
+      updatingAccessStopped: z
+        .object({
+          reason: z.enum(["waiting", "failed", "ended"]),
+          // What failed, when `detail` says only why and what to do.
+          title: z.string().optional(),
+          detail: z.string(),
+          // The engine's code, for Copy details only.
+          cause: z.string().optional(),
+        })
+        .optional(),
+      // The recovery folder the last update of access saved items into, until
+      // the member opens it from its notice.
+      accessSaved: z
+        .object({ folder: z.string(), count: z.number().int().nonnegative() })
+        .optional(),
     })
     .optional(),
   // Share mounts: received shares materialized into this workspace's
@@ -504,7 +524,14 @@ export type CollectionCopyChangedEvent = z.infer<typeof CollectionCopyChangedEve
 
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
+  // The recovery folder an update of access saved into.
+  accessSaved: z.literal(true).optional(),
 });
+
+// How a refresh of a joined copy answers while its access is being updated:
+// it starts the update, and how that ends arrives as the view's state.
+export const UPDATING_ACCESS_MESSAGE =
+  "dohc could not refresh this workspace while its access is being updated.";
 export type RevealWorkspaceFolderPayload = z.infer<typeof RevealWorkspaceFolderPayload>;
 
 // Who asked for a sync pass now. A person's retry counts toward the attempts
@@ -6614,6 +6641,21 @@ export const sharedViewAccessOperations = {
     result: RefreshSharedViewResult,
     guard: "trusted-sender",
   },
+  // Try again on Updating access. After a restart that panel shows with no
+  // workspace open in its window, so no session names it. This starts only
+  // the rebuild the copy's record names.
+  retryShareViewRebuild: {
+    capabilityId: "share.view.refresh",
+    scope: "workspace",
+    handlerCheck: {
+      check: "sharedViewsIpc.retryShareViewRebuild",
+      reason:
+        "A closed copy has no session. The handler starts only the rebuild its record names, for a membership that has not ended.",
+    },
+    channel: "desktop:retry-share-view-rebuild",
+    payload: z.object({ workspaceId: WORKSPACE_ID }),
+    guard: "trusted-sender",
+  },
   dismissShareCaptureNotice: {
     capabilityId: "share.capture.notice.dismiss",
     scope: "workspace",
@@ -6621,6 +6663,16 @@ export const sharedViewAccessOperations = {
     payload: z.object({ workspaceId: WORKSPACE_ID, shareId: OPAQUE_ID, key: z.string() }),
     guard: "active-workspace",
     inactiveMessage: "This share's Notice is no longer open in this window.",
+  },
+  // Forgets the recovery folder an update of access saved into, so its Notice
+  // stops coming back. The folder stays on disk.
+  dismissAccessSavedNotice: {
+    capabilityId: "share.access.saved.dismiss",
+    scope: "workspace",
+    channel: "desktop:dismiss-access-saved-notice",
+    payload: z.object({ workspaceId: WORKSPACE_ID, folder: z.string() }),
+    guard: "active-workspace",
+    inactiveMessage: "This workspace's Notice is no longer open in this window.",
   },
   checkSharedViewAccess: {
     capabilityId: "share.access.read",

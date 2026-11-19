@@ -61,7 +61,8 @@ import {
 } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
 import {
-  shareViewTakesLocalWrites,
+  shareViewWriteLevel,
+  shareViewWriteScopeOf,
   shareViewWriterOf,
   type ShareViewWriter,
 } from "./shareWriteGate";
@@ -94,6 +95,8 @@ export interface ResolvedShareViewFilesTarget {
   shareId: string | null;
   granterEmail: string | null;
   grantedSelector: unknown;
+  /** A joined workspace's stored reach, as the registry holds it. */
+  reach?: unknown;
   ended: boolean;
   relayUrl?: string | null;
   recipientEmail?: string | null;
@@ -425,20 +428,8 @@ function writableSelector(target: ActiveShareViewFilesTarget, writer: ShareViewW
   if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
     throw new SharedFileReadOnlyError(SHARE_VIEW_REOPEN_MESSAGE);
   }
-  if (
-    target.kind === "mount" ||
-    !shareViewTakesLocalWrites({
-      access: selector.access,
-      ended: target.ended,
-      writer,
-    })
-  ) {
-    if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
-    const granter = target.granterEmail ?? "the person who shared it";
-    throw new SharedFileReadOnlyError(
-      `This shared view is read-only for you. Ask ${granter} for changes.`,
-    );
-  }
+  if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
+  if (target.kind === "mount") throw new SharedFileReadOnlyError(readOnlyWords(target));
   return selector;
 }
 
@@ -448,6 +439,37 @@ function joinedWorkspace(target: ActiveShareViewFilesTarget): boolean {
     !target.ended &&
     recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true
   );
+}
+
+// The levels alone: `writableSelector` checks the signed-in account.
+function targetScope(target: ResolvedShareViewFilesTarget) {
+  return (
+    shareViewWriteScopeOf(
+      {
+        shareId: target.shareId,
+        recipientUserId: target.recipientUserId,
+        grantedSelector: target.grantedSelector,
+        ended: target.ended,
+        ...(target.reach === undefined ? {} : { reach: target.reach }),
+      },
+      null,
+    ) ?? { access: null, ended: true }
+  );
+}
+
+function readOnlyWords(target: ResolvedShareViewFilesTarget): string {
+  return `This shared view is read-only for you. Ask ${target.granterEmail ?? "the person who shared it"} for changes.`;
+}
+
+// The level at the path a change touches: an existing file's current path,
+// or the path a new one takes. The relay decides again when it is sent.
+function assertEditableAt(target: ActiveShareViewFilesTarget, path: string): void {
+  const scope = targetScope(target);
+  if (shareViewWriteLevel(scope, { path }) === "edit") return;
+  if (shareViewWriteLevel(scope, "somewhere") !== "edit")
+    throw new SharedFileReadOnlyError(readOnlyWords(target));
+  const granter = target.granterEmail ?? "the person who shared it";
+  throw new SharedFileReadOnlyError(`${path} is read-only for you. Ask ${granter} for Edit.`);
 }
 
 function assertPathWithinGrant(
@@ -770,13 +792,15 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     assertAdmitted: () => void,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
-    if (change.kind === "save" || change.kind === "create") {
-      assertPathWithinGrant(selector, change.path);
+    const assertWritable = (path: string) => {
+      assertPathWithinGrant(selector, path);
+      assertEditableAt(target, prepareSharePath(path)?.path ?? path);
+    };
+    if (change.kind === "save" || change.kind === "create" || change.kind === "delete") {
+      assertWritable(change.path);
     } else if (change.kind === "move") {
-      assertPathWithinGrant(selector, change.fromPath);
-      assertPathWithinGrant(selector, change.toPath);
-    } else if (change.kind === "delete") {
-      assertPathWithinGrant(selector, change.path);
+      assertWritable(change.fromPath);
+      assertWritable(change.toPath);
     }
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
@@ -786,6 +810,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         workspaceId: target.storeWorkspaceId,
         store,
         pinnedSelector: target.grantedSelector,
+        reach: target.reach,
         shareId: target.shareId,
         ended: target.ended,
         paths: divergenceScopes,
@@ -841,7 +866,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
             assertAdmitted,
-            assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
+            assertPathAllowed: assertWritable,
           });
           break;
       }
@@ -934,6 +959,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       workspaceId: target.storeWorkspaceId,
       store,
       pinnedSelector: target.grantedSelector,
+      reach: target.reach,
       shareId: target.shareId,
       ended: target.ended,
       workspaceLease: lease,
@@ -947,7 +973,8 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             rootDir: target.rootPath,
             workspaceId: target.storeWorkspaceId,
             store,
-            allowLocalJournaling: false,
+            // A mount is read-only: every edit is put back.
+            journalsAt: () => false,
             shareId: target.shareId,
           });
 
@@ -1116,6 +1143,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
           workspaceId: target.storeWorkspaceId,
           store: dependencies.openStore(target),
           pinnedSelector: target.grantedSelector,
+          reach: target.reach,
           shareId: target.shareId,
           ended: target.ended,
           workspaceLease: lease,

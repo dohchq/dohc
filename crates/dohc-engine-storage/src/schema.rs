@@ -252,6 +252,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "shared_channel_peers",
     "shared_channel_push_state",
     "share_view_cursors",
+    "share_view_fences",
     "hosted_replicas",
     "hosted_documents",
     "hosted_withheld_befores",

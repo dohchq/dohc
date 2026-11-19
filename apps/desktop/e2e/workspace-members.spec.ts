@@ -45,6 +45,18 @@ const ADMIN = { token: JOINER.token, user: "e2e-members-kai", email: JOINER.emai
 const VIEWER_ORIGIN = "https://viewer.example.com";
 const GUEST = "e2e-members-lee@dohc.test";
 
+// A deployed relay must have a link key, which keys a member's reach
+// signatures, so a restart keeps them. A relay with none picks a new key at
+// each start, and a joined copy then rebuilds as if the owner changed what
+// the member sees. A test that restarts its relay passes the same keys again.
+function relayLinkBoundary() {
+  return {
+    linkKey: randomBytes(32).toString("base64url"),
+    relayExchangeKey: randomBytes(32).toString("base64url"),
+    publicViewerOrigin: VIEWER_ORIGIN,
+  };
+}
+
 interface MembersView {
   workspaceName: string;
   memberLevel: string;
@@ -307,8 +319,12 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
   let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const shot = (name: string) => test.info().outputPath(`${name}.png`);
 
+  const linkBoundary = relayLinkBoundary();
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      linkBoundary,
+    });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
     await writeWorkspaceFiles(ownerTemp, [
@@ -496,6 +512,7 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     relay = await spawnSyncRelay({
       dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
       port: relayPort,
+      linkBoundary,
     });
     await expect
       .poll(refreshMembership, { timeout: 60_000, intervals: [1_000] })
@@ -1150,8 +1167,12 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     expect(set.status, set.body).toBe(200);
   };
 
+  const linkBoundary = relayLinkBoundary();
   try {
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      linkBoundary,
+    });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
     await seedWorkspaceManifest(ownerTemp, workspaceId);
     await writeWorkspaceFiles(ownerTemp, [
@@ -1335,6 +1356,7 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     relay = await spawnSyncRelay({
       dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
       port: relayPort,
+      linkBoundary,
     });
     await setLevel("comment");
     // The level drop is found by a push the view never sent or by one the relay refused, so the count may be unknown.

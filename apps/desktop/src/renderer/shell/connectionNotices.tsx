@@ -7,7 +7,12 @@ import {
   type WorkspaceErrorNotice,
 } from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
-import { ShellErrorReporter, useShellError, type ReportShellFailure } from "./useShellError";
+import {
+  ShellErrorReporter,
+  ShellNoticeClear,
+  useShellError,
+  type ReportShellFailure,
+} from "./useShellError";
 
 // What a connection attempt hands the surface that owns its notices. The
 // owner raises the toast and the Notices row; the panel shows nothing inline.
@@ -130,15 +135,17 @@ export function StandaloneNotices(props: { children: ReactNode }) {
   const own = useConnectionNotices();
   return (
     <ShellErrorReporter.Provider value={own.reportFailure}>
-      {props.children}
-      <ConnectionNotices
-        notices={own.notices}
-        reportFailure={own.reportFailure}
-        onRetry={own.retryNotice}
-        onAction={own.runNoticeAction}
-        onHide={own.hideNotice}
-        onDismiss={own.dismissNotice}
-      />
+      <ShellNoticeClear.Provider value={own.clearIdentity}>
+        {props.children}
+        <ConnectionNotices
+          notices={own.notices}
+          reportFailure={own.reportFailure}
+          onRetry={own.retryNotice}
+          onAction={own.runNoticeAction}
+          onHide={own.hideNotice}
+          onDismiss={own.dismissNotice}
+        />
+      </ShellNoticeClear.Provider>
     </ShellErrorReporter.Provider>
   );
 }

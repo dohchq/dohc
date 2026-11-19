@@ -260,6 +260,44 @@ describe("workspaceActivity capture hooks", () => {
     },
   );
 
+  // A rebuild closes a copy the engine already closed, so the drain's reads
+  // are refused. The close ignores that refusal, and still throws a real one.
+  it.each([false, true])(
+    "ignores a failure the caller expects, and throws a later real one (%s)",
+    async (captureFails) => {
+      const refused = new Error("refused: the copy is closed");
+      const full = new Error("ENOSPC: the disk is full");
+      const activity = createWorkspaceActivity(vi.fn(), {
+        observationFor: () => ({
+          ...idleObservation(workspace(), {} as never),
+          stop: async () => {
+            throw refused;
+          },
+        }),
+        captureFor: () => ({
+          shareView: false,
+          capture: {
+            start: () => {},
+            observationDrainFailed: () => {},
+            resyncFileObservation: async () => {
+              throw refused;
+            },
+            settleAndCloseAllLiveSessions: async () => undefined,
+            stop: async () => {
+              if (captureFails) throw full;
+            },
+          } as never,
+        }),
+      });
+      await activity.open(workspace());
+      const closed = activity.close("activity-test", {
+        ignoreFailure: (error) => error === refused,
+      });
+      if (captureFails) await expect(closed).rejects.toBe(full);
+      else await expect(closed).resolves.toBe(true);
+    },
+  );
+
   it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();
     try {

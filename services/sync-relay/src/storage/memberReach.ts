@@ -21,6 +21,22 @@ export interface EvaluatedMemberReach {
   rules: [string, ShareAccess | null][];
 }
 
+/**
+ * A member's reach as their pages list it. A path takes the level of the
+ * nearest listed folder at or above it, or the root's. The folders are each
+ * ruled folder the member reaches at a level other than its parent's; the
+ * root is never one. The desktop reads it as `ListedReach`, the engine as
+ * `ShareReach`.
+ */
+export interface ListedMemberReach {
+  /** Changes whenever the member's levels do. */
+  signature: string;
+  /** Changes only when what the member reaches does. */
+  visibilitySignature: string;
+  rootLevel: ShareAccess | null;
+  folders: Array<{ path: string; level: ShareAccess }>;
+}
+
 export interface MemberReach {
   evaluated: EvaluatedMemberReach;
   /** Whether the member holds `level` on some folder. */
@@ -35,10 +51,17 @@ export interface MemberReach {
    */
   signature(): string;
   /**
+   * Equal exactly when two reaches reach the same things, whatever their
+   * levels. It names hidden folders too, so it stays in the relay.
+   */
+  visibilitySignature(): string;
+  /**
    * The signature a member is served on their pages: `signature`, keyed with
    * a relay secret and bound to this member, so a guess can't be tested.
    */
   keyedSignature(key: string | Uint8Array): string;
+  /** The reach a member's pages list, both signatures keyed as `keyedSignature` is. */
+  listed(key: string | Uint8Array): ListedMemberReach;
   levelAt(path: string): ShareAccess | null;
   folderLevel(folder: string): ShareAccess | null;
   objectVisible(objectId: string): boolean;
@@ -120,22 +143,43 @@ export function memberReach(
     objects.set(id, result);
     return result;
   };
+  const digest = (value: unknown) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const ruled = () => [...rules.exact.keys()].sort();
   const signature = () =>
-    createHash("sha256")
-      .update(
-        JSON.stringify([
-          role,
-          atFolder(""),
-          [...rules.exact.keys()]
-            .sort()
-            .flatMap((folder) =>
-              folder !== "" && atFolder(folder) === atFolder(accessRuleFolder(folder))
-                ? []
-                : [[folder, atFolder(folder)]],
-            ),
-        ]),
-      )
+    digest([
+      role,
+      atFolder(""),
+      ruled().flatMap((folder) =>
+        folder !== "" && atFolder(folder) === atFolder(accessRuleFolder(folder))
+          ? []
+          : [[folder, atFolder(folder)]],
+      ),
+    ]);
+  // A hidden folder hides all under it, so reach can only stop at a ruled
+  // folder. Reach is the same for every spelling of a folded name, so each
+  // edge is named once by its folded name: a rule on a twin moves no edge.
+  const reaches = (folder: string) => atFolder(folder) !== null;
+  const visibilitySignature = () =>
+    digest([
+      role,
+      reaches(""),
+      [
+        ...new Set(
+          ruled()
+            .filter(
+              (folder) => folder !== "" && reaches(folder) !== reaches(accessRuleFolder(folder)),
+            )
+            .map(pathCollisionKey),
+        ),
+      ].sort(),
+    ]);
+  const keyed = (key: string | Uint8Array, tag: string, value: string) =>
+    createHmac("sha256", key)
+      .update(JSON.stringify([tag, workspaceId, userId, value]))
       .digest("hex");
+  const keyedSignature = (key: string | Uint8Array) =>
+    keyed(key, "dohc/member-reach/v1", signature());
   return {
     evaluated: {
       role,
@@ -151,10 +195,23 @@ export function memberReach(
     groupLevel: () => level,
     hasGroupLevel: (wanted) => wanted === level,
     signature,
-    keyedSignature: (key) =>
-      createHmac("sha256", key)
-        .update(JSON.stringify(["dohc/member-reach/v1", workspaceId, userId, signature()]))
-        .digest("hex"),
+    visibilitySignature,
+    keyedSignature,
+    listed: (key) => {
+      const rootLevel = atFolder("");
+      return {
+        signature: keyedSignature(key),
+        visibilitySignature: keyed(key, "dohc/member-visibility/v1", visibilitySignature()),
+        rootLevel,
+        // The folders `signature` names, less hidden ones.
+        folders: ruled().flatMap((path) => {
+          const level = path === "" ? null : atFolder(path);
+          return level === null || level === atFolder(accessRuleFolder(path))
+            ? []
+            : [{ path, level }];
+        }),
+      };
+    },
     levelAt,
     folderLevel: atFolder,
     nearestRule: (path) => nearestRuleFolder(rules, path),

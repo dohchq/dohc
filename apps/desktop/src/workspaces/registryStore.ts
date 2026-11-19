@@ -248,10 +248,33 @@ export interface ShareViewIdentity {
   // routes name. Neither grants anything; the relay decides every action.
   role?: "admin" | "member";
   membersWorkspaceId?: string;
+  // A joined workspace's reach as the relay last listed it: the level of each
+  // folder where a rule changes it, and the two signatures the pull compares.
+  // Replaced whole, so the gates never see half of an old set
+  // (`shareViewLevels`).
+  reach?: import("@dohc/security-contract/listed-reach").ListedReach;
   // Paths capture could not save before a restriction. Null protects the whole
   // copy when capture failed before it could enumerate paths. Reopen to resume.
   unsavedPaths?: string[] | null;
   unconfirmedChanges?: ShareUnconfirmedChanges;
+  // Set when the relay changed which items this member sees. The engine closed
+  // the copy and answers it only for this rebuild; the view shows "Updating
+  // access" until the new copy is swapped in. `stopped` says why the rebuild
+  // isn't running: it waits for the server, a step failed, or the membership
+  // ended. Try again starts it again.
+  rebuild?: { rebuildId: string; stopped?: ShareViewRebuildStop };
+  // The recovery folder the last rebuild saved items into, relative to the
+  // root, until the member opens it from its notice.
+  accessSaved?: { folder: string; count: number };
+}
+
+export interface ShareViewRebuildStop {
+  reason: "waiting" | "failed" | "ended";
+  // What failed, when `detail` says only why and what to do.
+  title?: string;
+  detail: string;
+  // The engine's code, for Copy details only.
+  cause?: string;
 }
 
 // A shared channel this workspace joined through a chat grant:

@@ -8,6 +8,7 @@ import type {
   EngineWorkspace,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
@@ -28,6 +29,7 @@ import {
 } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
+import type { GrantedSelector } from "./shareViewRecords";
 import {
   createShareViewFiles,
   type ResolvedShareViewFilesTarget,
@@ -86,7 +88,11 @@ afterEach(async () => {
 export async function harness(
   prefix: string,
   access?: "comment" | "edit",
-  options: { chatFirst?: boolean; relayUrl?: string } = {},
+  options: {
+    chatFirst?: boolean;
+    relayUrl?: string;
+    joined?: { grantedSelector: GrantedSelector; reach: ListedReach };
+  } = {},
 ): Promise<Harness> {
   const rootPath = await createTestScratch(prefix);
   roots.push(rootPath);
@@ -135,9 +141,11 @@ export async function harness(
       relay: { baseUrl: options.relayUrl ?? "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     directClient = client;
-    await client.recordShareViewIdentity({
-      grantedSelector: { paths: ["docs"], versionId: null, access },
-    });
+    await client.recordShareViewIdentity(
+      options.joined ?? {
+        grantedSelector: { paths: ["docs"], versionId: null, access },
+      },
+    );
   }
   const store = access
     ? receivedShareEngine.storeFor(receivedShareLocation)

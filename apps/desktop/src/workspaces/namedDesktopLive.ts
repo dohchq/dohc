@@ -18,10 +18,16 @@ import type { LiveDraft } from "./liveDraftRecovery";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { EngineYDocSessionCapture, EngineYDocSessionProvider } from "./engineYDocSessionIpc";
 
-/** Only main is live. The relay decides again at admission. */
-function editsLive(selector: ShareViewSelector, path: string): boolean {
+/** Only main is live. The relay decides again at admission. A joined
+ * workspace edits live where its path takes Edit (`levelAt`). */
+function editsLive(
+  selector: ShareViewSelector,
+  path: string,
+  levelAt?: (path: string) => string | null,
+): boolean {
+  const access = levelAt ? levelAt(path) : selector.access;
   return (
-    selector.access === "edit" &&
+    access === "edit" &&
     (selector.versionId === null || selector.versionId === "main") &&
     visibleSharePath(selector, path) === path
   );
@@ -69,6 +75,7 @@ export function createNamedDesktopLiveCapture(options: {
   accessEnded(): boolean;
   recordDelivery?(path: string): Promise<ShareRecordStatus | null>;
   isOnline?(): boolean;
+  levelAt?(path: string): string | null;
 }): EngineYDocSessionCapture {
   const credentials = { ...options.credentials },
     origin = new URL(credentials.relayUrl);
@@ -155,7 +162,7 @@ export function createNamedDesktopLiveCapture(options: {
     async waitForAdmission(path, signal) {
       options.assertCurrent();
       signal.throwIfAborted();
-      if (!editsLive(options.selector, path)) return false;
+      if (!editsLive(options.selector, path, options.levelAt)) return false;
       const ready = await waitForNamedDesktopAdmission({
         relayUrl: credentials.relayUrl,
         token: credentials.token,
@@ -169,7 +176,7 @@ export function createNamedDesktopLiveCapture(options: {
       return ready;
     },
     async openYDocSession(input): Promise<EngineYDocSessionProvider> {
-      if (!editsLive(options.selector, input.path))
+      if (!editsLive(options.selector, input.path, options.levelAt))
         throw new Error("The shared file is outside this view.");
       if (input.contentKind !== "richdoc" || !/\.md$/i.test(input.path))
         throw new Error("Only shared Markdown supports live editing.");

@@ -23,7 +23,11 @@ import {
   serverHistorySources,
 } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
-import { createEngineFileResolver, workspaceFileRef } from "./workspaces/resolveEngineFiles";
+import {
+  createEngineFileResolver,
+  resolveEngineFileTargets,
+  workspaceFileRef,
+} from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import {
   writeTypingCheckpointSync,
@@ -67,6 +71,7 @@ import {
 } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import {
+  finishRebuildDrafts,
   hasWorkspaceLiveDrafts,
   hasRetainedLiveDraft,
   listKeptTyping,
@@ -225,6 +230,16 @@ import { protectedCopyOperations } from "./ipc/writeOperations";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
+import {
+  classifyShareViewRebuildError,
+  closeCopyIgnoring,
+  closeLivePages,
+  createShareViewRebuilds,
+  holdShareViewCopy,
+  logUnlessClosedCopy,
+  parseShareViewRebuildAnswer,
+  shareViewRebuildStop,
+} from "./workspaces/shareViewRebuild";
 import {
   createWorkspaceSyncStop,
   reopenWithoutSync,
@@ -606,10 +621,13 @@ import {
 } from "./workspaces/shareViewMarker";
 import {
   joinedByAccount,
+  shareViewTakesPosts,
+  shareViewWriteLevel,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
+import { storedShareViewReach } from "./workspaces/shareViewReach";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -686,6 +704,7 @@ import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   fetchShareViewInfo,
   fetchShareViewAccess,
+  fetchShareViewReach,
   probeShareViewLog,
   fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
@@ -739,7 +758,12 @@ import {
 } from "./ipc/workspaceActivityBroadcast";
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
 import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
-import { type EngineRelayWorkspaceClient } from "./workspaces/engineRelayClient";
+import {
+  relayOpenConfiguration,
+  type EngineRelayWorkspaceClient,
+} from "./workspaces/engineRelayClient";
+import type { JsonValue } from "@dohc/workspace-engine-client";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 // The proposal routes that do not go through the engine: reviewing,
 // settling, listing and withdrawing read and write only relay state.
 import {
@@ -974,9 +998,9 @@ function agentTrustChanged(workspaceId: string, trusted: boolean): void {
   chatDispatchNotices.clear(workspaceId, "restricted");
   if (!trusted) return;
   chatWakes.resume();
-  void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
-    console.error("[desktop] chat dispatch scan after trust:", error);
-  });
+  void chatDispatchService
+    .scanWorkspace(workspaceId)
+    .catch(logUnlessClosedCopy("[desktop] chat dispatch scan after trust:"));
 }
 
 // The windows showing a workspace follow its trust at once.
@@ -3745,6 +3769,7 @@ const activity = {
       preserveAgentRun?: boolean;
       notify?: boolean;
       expectedRootPath?: string;
+      ignoreFailure?: (error: unknown) => boolean;
     },
   ) => {
     if (!findWorkspace(workspaceId)) return Promise.resolve(false);
@@ -4348,7 +4373,7 @@ async function openChatWakeWorkspace(
     dispatch: () => {
       void chatDispatchService
         .scanWorkspace(workspaceId, workspace.attachmentId)
-        .catch((error: unknown) => console.error("[desktop] chat dispatch scan:", error));
+        .catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
     },
     release,
   };
@@ -4613,7 +4638,11 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 
 async function closeDispatchRunActivity(
   workspace: Pick<CreatedWorkspace, "workspaceId"> & { attachmentId?: symbol },
-  options: { notifyRenderer?: boolean; unlessInUse?: boolean } = {},
+  options: {
+    notifyRenderer?: boolean;
+    unlessInUse?: boolean;
+    ignoreFailure?: (error: unknown) => boolean;
+  } = {},
 ): Promise<void> {
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
@@ -4633,6 +4662,11 @@ async function closeDispatchRunActivity(
               expectedRootPath: current.rootPath,
               preserveStatus: true,
               notify: options.notifyRenderer,
+              ignoreFailure: closeCopyIgnoring(
+                current.workspaceId,
+                desktopEngine.sessions,
+                options.ignoreFailure,
+              ),
             });
           },
           ...(relayCloseTarget
@@ -4835,14 +4869,10 @@ const chatDispatchService = createChatDispatchService({
       activity.queueCloudSync(workspace.workspaceId);
       void withWorkspaceAttachmentAsync(workspace, () =>
         syncSharedChannelsForChatTarget(workspace.workspaceId, { threadId }),
-      ).catch((error) => {
-        console.error("[desktop] shared channel sync:", error);
-      });
+      ).catch(logUnlessClosedCopy("[desktop] shared channel sync:"));
       void chatDispatchService
         .scanWorkspace(workspace.workspaceId, workspace.attachmentId)
-        .catch((error) => {
-          console.error("[desktop] chat dispatch scan:", error);
-        });
+        .catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
     });
   },
   // The tray and every window show the pause, wherever it changed.
@@ -4910,9 +4940,7 @@ const chatDispatchService = createChatDispatchService({
         )
       : [];
   },
-  onError: (error) => {
-    console.error("[desktop] chat dispatch:", error);
-  },
+  onError: logUnlessClosedCopy("[desktop] chat dispatch:"),
 });
 
 function assertChatRunnerIdle(workspaceId: string): void {
@@ -4941,9 +4969,7 @@ async function openWorkspaceActivityForOperation(
   operation.assertCurrent();
   void chatDispatchService
     .scanWorkspace(canonicalWorkspace.workspaceId, canonicalWorkspace.attachmentId)
-    .catch((error) => {
-      console.error("[desktop] chat dispatch workspace-open scan:", error);
-    });
+    .catch(logUnlessClosedCopy("[desktop] chat dispatch workspace-open scan:"));
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
   // Automations run where changes are captured: never in a shared view.
@@ -5129,15 +5155,19 @@ async function createShareViewRecord(
           return null;
         const generation = credentialCacheGeneration;
         try {
-          const info = await fetchShareViewInfo({
-            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-            shareId: resolved.shareId!,
-          });
+          const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+          const info = await fetchShareViewInfo({ relay, shareId: resolved.shareId! });
           operation.assertCurrent();
           if (generation !== credentialCacheGeneration)
             throw new Error("The shared file session changed.");
           if (!info.selector) throw new Error("This Collection does not have Edit access.");
-          return info.selector;
+          if (info.selector.wholeWorkspace !== true) return { selector: info.selector };
+          // The stored reach can predate the grant: the relay's reach now decides.
+          const reach = await fetchShareViewReach({ relay, shareId: resolved.shareId! });
+          operation.assertCurrent();
+          if (generation !== credentialCacheGeneration)
+            throw new Error("The shared file session changed.");
+          return { selector: info.selector, reach };
         } catch (error) {
           operation.assertCurrent();
           if (generation !== credentialCacheGeneration)
@@ -5341,9 +5371,7 @@ async function wakeAutomationAgent(
           signal.throwIfAborted();
           const scan = chatDispatchService.scanWorkspace(workspaceId, lease.binding.attachmentId);
           if (waitForDispatch) return scan;
-          void scan.catch((error: unknown) =>
-            console.error("[desktop] chat dispatch scan:", error),
-          );
+          void scan.catch(logUnlessClosedCopy("[desktop] chat dispatch scan:"));
         },
       },
       message,
@@ -6913,15 +6941,24 @@ const localDatasetHostFor = async (
     operation.assertCurrent();
     return host;
   });
-// Sends a joined workspace's own Group posts to the owner, at Comment or
-// Edit, for the account that joined. Anything else sends nothing.
+// Sends a joined workspace's own Group posts and file comments to the owner,
+// with Comment or Edit in its Groups or on some file, for the account that
+// joined. The engine and
+// relay check each one's own level. Anything else sends nothing.
 function shareViewChatPush(
   workspace: RegistryEntry & { attachmentId?: symbol },
   relay: { baseUrl: string; token: string },
 ): Promise<unknown> | null {
   const view = workspace.shareView;
   const pin = recordedShareSelector(view?.grantedSelector);
-  if (!view || view.ended || !view.shareId || pin?.wholeWorkspace !== true || pin.access === "view")
+  const scope = shareViewWriteScopeOf(view, cachedCredentials);
+  if (
+    !view ||
+    !view.shareId ||
+    pin?.wholeWorkspace !== true ||
+    scope === null ||
+    !shareViewTakesPosts(scope)
+  )
     return null;
   return receivedShareEngine
     .relayFor({
@@ -6930,7 +6967,11 @@ function shareViewChatPush(
       ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
       relay,
     })
-    .pushShareViewChat({ shareId: view.shareId, grantedSelector: pin });
+    .pushShareViewChat({
+      shareId: view.shareId,
+      grantedSelector: pin,
+      reach: storedShareViewReach(view),
+    });
 }
 
 async function pushShareViewChat(workspaceId: string): Promise<unknown> {
@@ -6973,6 +7014,15 @@ const chatWrites = createChatWrites({
   betweenDispatchScans: (workspaceId, write) =>
     chatDispatchService.betweenScans(workspaceId, write),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  currentPathOf: async (workspaceId, objectId) => {
+    const workspace = findWorkspace(workspaceId);
+    if (!workspace) return null;
+    const [found] =
+      (await withEngineAdapter(workspace, (adapter, assertCurrent) =>
+        resolveEngineFileTargets(adapter, workspaceId, [{ objectId }], assertCurrent),
+      )) ?? [];
+    return found?.status === "found" ? found.path : null;
+  },
 });
 
 let ownerAppPublicationForCli:
@@ -7438,7 +7488,10 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       !marker ||
       !marker.relayUrl ||
       !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
-      marker.grantedSelector?.access !== "edit" ||
+      shareViewWriteLevel(
+        shareViewWriteScopeOf(marker, credentials) ?? { access: null, ended: true },
+        "somewhere",
+      ) !== "edit" ||
       (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")
     ) {
       throw new SharedDocumentWaitingError({
@@ -7459,6 +7512,13 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       shareId: marker.shareId,
       selector: marker.grantedSelector,
       accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
+      levelAt: (path) => {
+        const scope = shareViewWriteScopeOf(
+          findWorkspace(workspace.workspaceId)?.shareView,
+          cachedCredentials,
+        );
+        return scope === null ? null : shareViewWriteLevel(scope, { path });
+      },
       isOnline: () => net.isOnline(),
       recordDelivery: (path) =>
         requireEngineSessions()
@@ -7875,6 +7935,9 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
         .pullShareView({
           shareId: target.shareId,
           grantedSelector: input.grantedSelector,
+          // A joined workspace's stored reach. A page under another reach
+          // applies nothing, and the refresh reads the reach again.
+          reach: target.kind === "standalone" ? storedShareViewReach(target) : null,
           recordRefusals: input.recordRefusals,
           recordCollisions: input.recordCollisions,
           recordChangedPaths: input.recordChangedPaths,
@@ -9161,6 +9224,13 @@ function registerIpcHandlers(): void {
     forgetWorkspace,
     trustNewWorkspace: (workspace, fresh) => workspaceTrust.trust(workspace, fresh),
     showItemInFolder: (path) => shell.showItemInFolder(path),
+    forgetAccessSaved: async (workspaceId) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (!view?.accessSaved) return;
+      const { accessSaved: _opened, ...rest } = view;
+      await setWorkspaceShareView(workspaceId, rest);
+      notifyRenderer({ workspaceId, summaryChanged: true });
+    },
     openWorkspaceWindow: (workspace) =>
       desktopWindows.openWorkspaceInWindow(workspace, (window) =>
         windowShowsWorkspace(
@@ -10664,7 +10734,127 @@ function registerIpcHandlers(): void {
   shareDirectWrites = shareProposalsIpc;
   registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);
 
-  registerSharedViewsIpcHandlers<
+  // A joined copy the engine closed for its access: main holds its sessions,
+  // asks the engine to rebuild it with no workspace open, and reopens it.
+  const shareViewRebuildEngine = async (
+    method: string,
+    params: Record<string, JsonValue>,
+  ): Promise<JsonValue> => {
+    await desktopEngine.startup;
+    const client = desktopEngine.daemon?.currentClient();
+    if (!(client instanceof EngineClient)) throw new Error("the engine is not running");
+    return (await client.sendRequest({ id: 0, method, params })).result;
+  };
+  const shareViewRebuildRelay = (workspaceId: string) => {
+    const view = requireWorkspace(workspaceId).shareView,
+      credentials = cachedCredentials;
+    if (
+      !view ||
+      !credentials?.relayUrl ||
+      credentials.userId !== view.recipientUserId ||
+      (view.relayUrl && !relayUrlsMatch(credentials.relayUrl, view.relayUrl))
+    ) {
+      throw new Error("sign in to the account that joined this workspace");
+    }
+    return { view, relay: { baseUrl: credentials.relayUrl, token: credentials.token } };
+  };
+  const shareViewRebuilds = createShareViewRebuilds<ListedReach>({
+    hold: async (workspaceId) => {
+      const reopen = activity.listOpenWorkspaceIds().includes(workspaceId);
+      await holdShareViewCopy(workspaceId, {
+        sessions: requireEngineSessions(),
+        closeActivity: (ignoreFailure) =>
+          closeDispatchRunActivity(requireWorkspace(workspaceId), {
+            notifyRenderer: false,
+            ignoreFailure,
+          }),
+        // Each joined live page keeps its unsent edits as a draft before it
+        // closes, and the rebuild saves those drafts. A copy with no window
+        // attached has no pages open.
+        closeLivePages: async () => {
+          let attachment: symbol | undefined;
+          try {
+            attachment = workspaceAuthorities.currentBinding(workspaceId).attachmentId;
+          } catch {
+            /* Not attached. */
+          }
+          if (attachment)
+            await closeLivePages(() => engineYDocSessionIpc.retireAuthority(attachment));
+        },
+      });
+      return { reopen };
+    },
+    release: async (workspaceId, reopen) => {
+      requireEngineSessions().releaseRebuildHold(workspaceId);
+      if (reopen) await openWorkspaceActivity(requireWorkspace(workspaceId));
+    },
+    readReach: async (workspaceId) => {
+      await warmCredentialCache();
+      const { view, relay } = shareViewRebuildRelay(workspaceId);
+      return fetchShareViewReach({ relay, shareId: view.shareId });
+    },
+    rebuild: async (workspaceId, rebuildId, reach) => {
+      const { view, relay } = shareViewRebuildRelay(workspaceId);
+      const selector = recordedShareSelector(view.grantedSelector);
+      if (selector?.wholeWorkspace !== true) throw new Error("this workspace's record is damaged");
+      // The rebuild saves each draft a live page kept in the recovery folder.
+      const liveDrafts = (
+        await listLiveDraftRecovery(join(stateDir(), "live-draft-recovery"), workspaceId)
+      ).map(({ recordId, path, text }) => ({ recordId, path, text }));
+      return parseShareViewRebuildAnswer(
+        await shareViewRebuildEngine("share.view.rebuild", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          workspaceId,
+          rebuildId,
+          shareId: view.shareId,
+          grantedSelector: engineGrantedSelector(selector, reach) as unknown as JsonValue,
+          relay: relayOpenConfiguration(relay) as JsonValue,
+          liveDrafts,
+        }),
+        reach,
+      );
+    },
+    finish: (workspaceId, rebuildId, savedDrafts) =>
+      finishRebuildDrafts(join(stateDir(), "live-draft-recovery"), workspaceId, async () => {
+        await shareViewRebuildEngine("share.view.rebuildFinish", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          rebuildId,
+        });
+        return savedDrafts;
+      }),
+    // Stores the reach the copy was built under, and the folder that holds
+    // what it saved for its notice, in the same write that opens the copy.
+    install: async (workspaceId, rebuildId, result) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (view?.rebuild?.rebuildId !== rebuildId) return;
+      const { rebuild: _rebuilt, ...rest } = view;
+      await setWorkspaceShareView(workspaceId, {
+        ...rest,
+        ...(result
+          ? { reach: result.reach, ...(result.recovered ? { accessSaved: result.recovered } : {}) }
+          : {}),
+      });
+    },
+    notice: (workspaceId, notice) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (!view?.rebuild) return;
+      const stopped = shareViewRebuildStop(notice);
+      if (!stopped && !view.rebuild.stopped) return;
+      void setWorkspaceShareView(workspaceId, {
+        ...view,
+        rebuild: { rebuildId: view.rebuild.rebuildId, ...(stopped ? { stopped } : {}) },
+      })
+        .then(() => notifyRenderer({ workspaceId, summaryChanged: true }))
+        .catch((error: unknown) => console.error("[desktop] joined copy rebuild state:", error));
+    },
+    classify: classifyShareViewRebuildError,
+    sleep: (ms) =>
+      new Promise((resolveSleep) => {
+        setTimeout(resolveSleep, ms);
+      }),
+  });
+
+  const sharedViews = registerSharedViewsIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation,
@@ -10687,6 +10877,7 @@ function registerIpcHandlers(): void {
     engineDaemonStartup: () => desktopEngine.startup,
     fetchShareViewInfo,
     fetchShareViewAccess,
+    fetchShareViewReach,
     probeShareViewLog,
     usableRoot,
     readdir,
@@ -10707,7 +10898,33 @@ function registerIpcHandlers(): void {
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
     recheckRemovedShares,
     showsLive: (attachmentId, path) => engineYDocSessionIpc.showsLive(attachmentId, path),
+    rebuildShareView: (workspaceId, rebuildId) => shareViewRebuilds.run(workspaceId, rebuildId),
+    readShareViewRebuild: async (workspaceId) => {
+      const status = await shareViewRebuildEngine("share.view.rebuildStatus", {
+        rootDir: requireWorkspace(workspaceId).rootPath,
+      });
+      const { rebuildId, phase } = (status ?? {}) as { rebuildId?: unknown; phase?: unknown };
+      return typeof rebuildId === "string" && typeof phase === "string"
+        ? { rebuildId, phase }
+        : null;
+    },
+    // A retried finish has lost the rebuild's answer, so it takes the saved
+    // drafts to delete from the engine's.
+    finishShareViewRebuild: (workspaceId, rebuildId) =>
+      finishRebuildDrafts(join(stateDir(), "live-draft-recovery"), workspaceId, async () => {
+        const finished = await shareViewRebuildEngine("share.view.rebuildFinish", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          rebuildId,
+        });
+        return isRecordValue(finished) && Array.isArray(finished.savedDrafts)
+          ? finished.savedDrafts
+          : [];
+      }),
   });
+  // Rebuilds a restart stopped, and any whose id never reached the record.
+  void desktopEngine.startup
+    .then(() => sharedViews.resumeRebuilds())
+    .catch((error: unknown) => console.error("[desktop] joined copy rebuild resume:", error));
 
   // ---- Share mounts ----
   // The receive side materialized inside a host workspace: the share's

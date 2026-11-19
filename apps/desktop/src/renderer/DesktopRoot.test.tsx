@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   MenuCommand,
@@ -175,6 +175,319 @@ describe("workspace summary changes", () => {
       },
     };
   }
+
+  // The engine closed the copy: the shell would read it, so it is not
+  // mounted until the summary says the access is current again.
+  // A rebuild that stopped says why beside its text, which copies, and Try
+  // again asks main to start it again.
+  it("says why an update of access stopped and starts it again", async () => {
+    const h = setup();
+    const retryShareViewRebuild = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      retryShareViewRebuild,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail = "dohc could not update access: the disk is full.";
+    const toastsWith = (text: string) =>
+      screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((toast) => toast.textContent?.includes(text));
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "failed" as const, detail },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: "Details" })).toBeTruthy();
+    // Nothing is updating now, so the label doesn't say it is.
+    expect(within(panel).getByText("Access update stopped")).toBeTruthy();
+    expect(within(panel).queryByText("Updating access")).toBeNull();
+    // A stopped update is one thing that failed: a toast and a Notices row with Try again.
+    const [toast] = await waitFor(() => {
+      const found = toastsWith(detail);
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    expect(within(toast!).getByRole("button", { name: "Try again" })).toBeTruthy();
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(retryShareViewRebuild).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" }),
+    );
+  });
+
+  it("titles a stop that says only why, and keeps its code out of the toast", async () => {
+    const h = setup();
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const title = "dohc could not update access";
+    const detail =
+      "The file or folder at projects/site is a link. Put what it links to in its place, then choose Try again.";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: {
+        reason: "failed" as const,
+        title,
+        detail,
+        cause: "share-view-rebuild-linked-folder",
+      },
+    };
+    h.replace([{ ...workspace("a"), shareView }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText(title)).toBeTruthy();
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    const [toast] = await waitFor(() => {
+      const found = screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((t) => t.textContent?.includes(title));
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    expect(toast!.textContent).toContain(detail);
+    expect(toast!.textContent).not.toContain("share-view-rebuild-linked-folder");
+  });
+
+  // The panel's Details is the toast's: what it copies, with the engine's
+  // code, shows under the actions, and Copy details copies exactly that.
+  it("shows a stop's code and copies it from the panel's Details", async () => {
+    const h = setup();
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      platform: "win32",
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const title = "dohc could not update access";
+    const detail =
+      "dohc could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.";
+    const code = "share-view-rebuild-disk-unreadable";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "failed" as const, title, detail, cause: code },
+    };
+    h.replace([{ ...workspace("a"), shareView }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).queryByRole("button", { name: "Copy" })).toBeNull();
+    expect(panel.textContent).not.toContain(code);
+    const details = within(panel).getByRole("button", { name: "Details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect(details.textContent).toBe("Hide details");
+    const block = document.getElementById(details.getAttribute("aria-controls")!)!;
+    const report = block.querySelector("pre")!.textContent!;
+    expect(report).toBe(
+      [`Error: ${detail}`, `Title: ${title}`, `Code: ${code}`, "Platform: win32"].join("\n"),
+    );
+    fireEvent.click(within(block).getByRole("button", { name: "Copy details" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(report));
+    fireEvent.click(details);
+    expect(document.getElementById(details.getAttribute("aria-controls")!)).toBeNull();
+    // The toast's Details carries the same code.
+    const [toast] = await waitFor(() => {
+      const found = screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$/u)
+        .filter((t) => t.textContent?.includes(title));
+      expect(found).toHaveLength(1);
+      return found;
+    });
+    fireEvent.click(within(toast!).getByRole("button", { name: "Details" }));
+    expect(toast!.textContent).toContain(`Code: ${code}`);
+  });
+
+  // A new try clears the stop, and an ended membership offers no Try again:
+  // the stop's toast and Notices row go with it.
+  it.each([
+    ["a new try runs", { updatingAccess: true as const }],
+    [
+      "the membership ended",
+      {
+        ended: true,
+        updatingAccess: true as const,
+        updatingAccessStopped: {
+          reason: "ended" as const,
+          detail: "Your membership ended. What arrived stays in this folder.",
+        },
+      },
+    ],
+  ])("takes back a stopped update's notice once %s", async (_case, next) => {
+    const h = setup();
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail = "dohc could not update access: the disk is full.";
+    const noticesWith = (text: string) =>
+      screen
+        .queryAllByTestId(/^workspace-shell-(?:toast|error)$|^workspace-error-notice$/u)
+        .filter((notice) => notice.textContent?.includes(text));
+    const view = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+    };
+    h.replace([
+      {
+        ...workspace("a"),
+        shareView: {
+          ...view,
+          updatingAccess: true as const,
+          updatingAccessStopped: { reason: "failed" as const, detail },
+        },
+      },
+    ]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    await waitFor(() => expect(noticesWith(detail).length).toBeGreaterThan(0));
+    h.replace([{ ...workspace("a"), shareView: { ...view, ...next } }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(screen.getByTestId("workspace-updating-access")).toBeTruthy();
+    await waitFor(() => expect(noticesWith(detail)).toHaveLength(0));
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+  });
+
+  // Try again's own refresh can fail before it starts the update again.
+  it("reports what stopped Try again", async () => {
+    const h = setup();
+    const retryShareViewRebuild = vi.fn(async () => {
+      throw new Error("dohc could not reach the server.");
+    });
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      retryShareViewRebuild,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+      updatingAccessStopped: {
+        reason: "waiting" as const,
+        detail: "dohc could not reach the server. It keeps trying.",
+      },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    // Waiting for the server is no failure yet: it shows here only.
+    expect(screen.queryAllByTestId("workspace-shell-error")).toHaveLength(0);
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not reach the server");
+  });
+
+  it("says a membership ended during an update, with no Try again, and shows its folder", async () => {
+    const h = setup();
+    const revealWorkspaceFolder = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      platform: "win32",
+      revealWorkspaceFolder,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const detail = "Your membership ended. What arrived stays in this folder.";
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      ended: true,
+      updatingAccess: true as const,
+      updatingAccessStopped: { reason: "ended" as const, detail },
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(within(panel).getByText("Access ended")).toBeTruthy();
+    expect(within(panel).queryByText("Updating access")).toBeNull();
+    expect(within(panel).getByText(detail)).toBeTruthy();
+    expect(within(panel).queryByText(/The owner changed what you can see/u)).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Open another workspace" })).toBeTruthy();
+    // "This folder" is named, and opens.
+    expect(panel.textContent).toContain("/tmp/a");
+    fireEvent.click(within(panel).getByRole("button", { name: "Show in File Explorer" }));
+    expect(revealWorkspaceFolder).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
+  });
+
+  it("shows Updating access instead of the shell while a joined copy is closed", async () => {
+    const h = setup();
+    const openWorkspaceManager = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", {
+      ...(globalThis as unknown as { dohcDesktop: object }).dohcDesktop,
+      openWorkspaceManager,
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+    });
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      subjectName: "Community",
+      access: "edit" as const,
+      membership: true as const,
+      updatingAccess: true as const,
+    };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    const panel = screen.getByTestId("workspace-updating-access");
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+    expect(within(panel).getByText("Updating access")).toBeTruthy();
+    expect(within(panel).getByRole("heading", { name: "Community" })).toBeTruthy();
+    fireEvent.click(within(panel).getByRole("button", { name: "Open another workspace" }));
+    expect(openWorkspaceManager).toHaveBeenCalledOnce();
+    const { updatingAccess: _, ...current } = shareView;
+    h.replace([{ ...workspace("a"), shareView: current }, workspace("b")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(await screen.findByTestId("workspace-shell")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-updating-access")).toBeNull();
+  });
 
   it("keeps all registry changes when a summary refresh overtakes a full refresh", async () => {
     const h = setup();

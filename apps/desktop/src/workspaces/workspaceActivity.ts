@@ -807,6 +807,9 @@ export function createWorkspaceActivity(
       preserveAgentRun?: boolean;
       notify?: boolean;
       expectedRootPath?: string;
+      // A failure the caller expects, such as a closed copy's refusal. Every
+      // step still runs, and the first other failure is thrown.
+      ignoreFailure?: (error: unknown) => boolean;
     } = {},
   ): Promise<boolean> {
     const { workspaceId } = workspace;
@@ -856,7 +859,8 @@ export function createWorkspaceActivity(
     ]);
     if (closeOptions.notify !== false) notify({ workspaceId });
     const failed = [...stopped, ...liveSessionsRetired, ...captureStopped].find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
+      (result): result is PromiseRejectedResult =>
+        result.status === "rejected" && closeOptions.ignoreFailure?.(result.reason) !== true,
     );
     if (failed) throw failed.reason;
     return true;

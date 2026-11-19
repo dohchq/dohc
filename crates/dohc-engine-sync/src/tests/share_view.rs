@@ -22,6 +22,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
                     (
                         0,
                         ShareViewResponse {
+                            reach_signatures: None,
                             work_references: Vec::new(),
                             next_reference_after: None,
                             reference_has_more: false,
@@ -51,6 +52,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
                     (
                         5,
                         ShareViewResponse {
+                            reach_signatures: None,
                             work_references: Vec::new(),
                             next_reference_after: None,
                             reference_has_more: false,
@@ -68,6 +70,7 @@ fn received_collection_projection_reads_pulls_incrementally_without_owner_side_e
             ),
         );
         let grant = ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["docs".to_owned()]),
             version_id: None,
             access,
@@ -206,6 +209,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
@@ -253,6 +257,7 @@ fn share_view_version_boundary(version_id: Option<&str>) -> ShareBoundary {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: version_id.map(str::to_owned),
             access: ShareAccess::View,
@@ -363,6 +368,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
             (
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -374,6 +380,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
             (
                 1,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -497,6 +504,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -619,6 +627,7 @@ fn share_view_replay_discards_invalid_or_oversized_provenance_without_losing_con
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -707,6 +716,7 @@ fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours(
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -776,6 +786,7 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
         [(
             0,
             ShareViewResponse {
+                reach_signatures: None,
                 work_references: Vec::new(),
                 next_reference_after: None,
                 reference_has_more: false,
@@ -877,6 +888,7 @@ fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -953,6 +965,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1021,6 +1034,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 /// pins for every share except a version share.
 fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
     ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Paths(paths.into_iter().map(str::to_owned).collect()),
         version_id: None,
         access: ShareAccess::View,
@@ -1031,6 +1045,7 @@ fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
 /// because the relay serves nothing through a selector with neither dimension.
 fn version_grant<'a>(paths: impl IntoIterator<Item = &'a str>, version_id: &str) -> ShareGrant {
     ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Paths(paths.into_iter().map(str::to_owned).collect()),
         version_id: Some(version_id.to_owned()),
         access: ShareAccess::View,
@@ -1067,6 +1082,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1148,6 +1164,7 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1204,6 +1221,7 @@ fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1280,6 +1298,7 @@ fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths()
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1355,6 +1374,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1461,6 +1481,7 @@ fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1548,6 +1569,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1642,6 +1664,7 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1716,6 +1739,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1815,6 +1839,7 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -1899,6 +1924,7 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -2009,6 +2035,7 @@ fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -2100,6 +2127,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
                 [(
                     0,
                     ShareViewResponse {
+                        reach_signatures: None,
                         work_references: Vec::new(),
                         next_reference_after: None,
                         reference_has_more: false,
@@ -2185,6 +2213,7 @@ fn share_view_chat_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, Sh
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: crate::ShareAccess::Comment,
@@ -2508,6 +2537,7 @@ fn share_view_chat_composes_paths_with_a_version() {
             surface: ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(ShareGrant {
+                reach: None,
                 scope: crate::ShareScope::Paths(paths),
                 version_id: version_id.map(str::to_owned),
                 access: crate::ShareAccess::Comment,
@@ -3163,6 +3193,7 @@ fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
                 (
                     "outside",
                     ShareGrant {
+                        reach: None,
                         scope: crate::ShareScope::Paths(vec!["private".to_owned()]),
                         version_id: None,
                         access: ShareAccess::Edit,
@@ -3171,6 +3202,7 @@ fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
                 (
                     "version",
                     ShareGrant {
+                        reach: None,
                         scope: crate::ShareScope::Paths(vec![]),
                         version_id: Some("other".to_owned()),
                         access: ShareAccess::Edit,
@@ -3301,6 +3333,7 @@ fn received_token_survives_rename_delete_restore_and_visible_half_reentry() {
                 (
                     since,
                     ShareViewResponse {
+                        reach_signatures: None,
                         work_references: Vec::new(),
                         next_reference_after: None,
                         reference_has_more: false,
@@ -3388,6 +3421,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3479,6 +3513,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
             [(
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: vec![
                         serde_json::from_value(json!({
                             "reference": "V".repeat(43), "createdAtMs": 1,
@@ -3506,6 +3541,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
             "ws",
             "share",
             &ShareGrant {
+                reach: None,
                 scope: crate::ShareScope::Paths(vec!["docs".into()]),
                 version_id: Some("v".into()),
                 access: ShareAccess::View,
@@ -3564,6 +3600,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                 (
                     0,
                     ShareViewResponse {
+                        reach_signatures: None,
                         work_references: Vec::new(),
                         next_reference_after: None,
                         reference_has_more: false,
@@ -3575,6 +3612,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                 (
                     1,
                     ShareViewResponse {
+                        reach_signatures: None,
                         work_references: Vec::new(),
                         next_reference_after: None,
                         reference_has_more: false,
@@ -3586,6 +3624,7 @@ fn received_rename_mismatch_replays_as_write_delete(case: &str) {
                 (
                     2,
                     ShareViewResponse {
+                        reach_signatures: None,
                         work_references: Vec::new(),
                         next_reference_after: None,
                         reference_has_more: false,
@@ -3715,6 +3754,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
             (
                 0,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3726,6 +3766,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
             (
                 1,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3741,6 +3782,7 @@ fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) 
             (
                 4,
                 ShareViewResponse {
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,
@@ -3872,6 +3914,7 @@ fn received_fallback_rename_commits_write_and_delete_together() {
                     (
                         0,
                         ShareViewResponse {
+                            reach_signatures: None,
                             work_references: Vec::new(),
                             next_reference_after: None,
                             reference_has_more: false,
@@ -3883,6 +3926,7 @@ fn received_fallback_rename_commits_write_and_delete_together() {
                     (
                         1,
                         ShareViewResponse {
+                            reach_signatures: None,
                             work_references: Vec::new(),
                             next_reference_after: None,
                             reference_has_more: false,
@@ -3954,6 +3998,7 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
 fn member_view_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, ShareBoundary) {
     let (scratch, path, engine, mut boundary) = share_view_chat_fixture();
     boundary.granted = Some(ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access: crate::ShareAccess::Comment,
@@ -4187,4 +4232,251 @@ fn a_member_view_keeps_the_file_comment_rule() {
         ),
         Err(SyncError::InvalidInput { .. })
     ));
+}
+
+/// A membership's grant carrying the reach the recipient last stored.
+fn reach_grant(signature: &str, visibility_signature: &str) -> ShareGrant {
+    ShareGrant {
+        reach: Some(crate::ShareReach {
+            signature: signature.to_owned(),
+            visibility_signature: visibility_signature.to_owned(),
+            root_level: Some(crate::ShareAccess::Edit),
+            folders: Default::default(),
+        }),
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: crate::ShareAccess::Edit,
+    }
+}
+
+/// The relay names the reach it selected each membership page under. A page
+/// selected under another reach than the stored one applies nothing and keeps
+/// the cursor where it was, whether the levels moved or what the member can
+/// see did. The caller reads the reach again before it pulls on.
+#[test]
+fn a_membership_page_selected_under_another_reach_applies_nothing() {
+    let body = b"Day one\n".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let page = |signatures: Option<(&str, &str)>| ShareViewResponse {
+        reach_signatures: signatures.map(|(signature, visibility_signature)| {
+            crate::ShareReachSignatures {
+                signature: signature.to_owned(),
+                visibility_signature: visibility_signature.to_owned(),
+                log_head: 0,
+                newest_move: None,
+            }
+        }),
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
+        ops: vec![share_view_write_op(0, "plans/day-1.md", &sha)],
+        next_cursor: 1,
+        has_more: false,
+    };
+    let pull = |served: ShareViewResponse| {
+        let (scratch, path, mut engine) = open_store();
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], [(0, served)]).with_view_blobs([(sha.clone(), body.clone())]),
+        );
+        let outcome = client.pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &reach_grant("r1", "v1"),
+            &NoFaults,
+        );
+        // Nothing applied leaves no main version to read.
+        let text = VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "plans/day-1.md")
+            .ok()
+            .flatten()
+            .map(|snapshot| snapshot.text);
+        drop((scratch, path));
+        (outcome, text)
+    };
+
+    for (signature, visibility_signature) in [("r2", "v1"), ("r2", "v2")] {
+        let (outcome, text) = pull(page(Some((signature, visibility_signature))));
+        let outcome = outcome.expect("a page under another reach is an answer, not a failure");
+        assert_eq!(
+            outcome.reach_changed,
+            Some(crate::ShareReachSignatures {
+                signature: signature.to_owned(),
+                visibility_signature: visibility_signature.to_owned(),
+                log_head: 0,
+                newest_move: None,
+            }),
+            "{signature}/{visibility_signature}: the caller is not told to read the reach again"
+        );
+        assert_eq!(
+            (
+                outcome.fetched,
+                outcome.applied,
+                outcome.has_more,
+                outcome.pending_cursor.cursor
+            ),
+            (0, 0, false, 0),
+            "{signature}/{visibility_signature}: a page under another reach moved the view"
+        );
+        assert_eq!(
+            text, None,
+            "{signature}/{visibility_signature}: the page's write applied"
+        );
+    }
+
+    let (outcome, text) = pull(page(Some(("r1", "v1"))));
+    let outcome = outcome.expect("a page under the stored reach applies");
+    assert_eq!((outcome.applied, outcome.reach_changed), (1, None));
+    assert_eq!(text.as_deref(), Some("Day one\n"));
+
+    // A membership page that names no reach can't be checked against one.
+    let (outcome, text) = pull(page(None));
+    assert!(
+        matches!(outcome, Err(RelayError::InvalidResponse)),
+        "{outcome:?}"
+    );
+    assert_eq!(text, None);
+}
+
+/// A membership page that marks an owner's move across the edge of the
+/// member's reach applies nothing once the copy holds earlier pages: the copy
+/// may hold History the relay no longer serves, so it closes for a rebuild.
+/// A new copy's first page applies it and stores the log's head it names.
+/// Every later page applies a move marked at or below that head, whether it is
+/// read at a committed cursor or again at cursor 0: the relay already selected
+/// it under the moved reach. A move marked after that head stops the pull, and
+/// so does a page read before the head was stored. A copy with a cursor and no
+/// stored head stops at any marked move.
+#[test]
+fn a_page_marking_a_move_across_the_reach_stops_a_copy_that_holds_earlier_pages() {
+    let body = b"Day one
+"
+    .to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    // One op at `seq`, marked when `marked`, on a page whose read saw the log's
+    // head at `head`, under the levels `signature`.
+    let page = |marked: bool, seq: i64, head: i64, signature: &str| ShareViewResponse {
+        reach_signatures: Some(crate::ShareReachSignatures {
+            signature: signature.to_owned(),
+            visibility_signature: "v1".to_owned(),
+            log_head: head,
+            newest_move: marked.then_some(seq),
+        }),
+        work_references: Vec::new(),
+        next_reference_after: None,
+        reference_has_more: false,
+        ops: vec![share_view_write_op(seq, &format!("plans/{seq}.md"), &sha)],
+        next_cursor: seq + 1,
+        has_more: true,
+    };
+    // Pulls each page in turn from one store, at the cursor it has then, and
+    // commits the cursor after each page marked to. Answers what each applied,
+    // whether a move stopped it, whether the reach changed, and its cursor.
+    let pulls = |committed: Option<i64>, pages: Vec<(ShareViewResponse, bool)>| {
+        let (scratch, path, mut engine) = open_store();
+        let grant = reach_grant("r1", "v1");
+        let mut cursor = 0;
+        if let Some(committed) = committed {
+            cursor = committed;
+            crate::commit_share_cursor(
+                &mut engine,
+                "ws",
+                &crate::ShareCursor {
+                    kind: crate::CursorKind::ShareView,
+                    share_id: "share".to_owned(),
+                    cursor,
+                },
+                &NoFaults,
+            )
+            .expect("commit");
+        }
+        let mut answers = Vec::new();
+        for (served, commit) in pages {
+            let client = RelaySyncClient::new(
+                PagedShareRelay::new([], [(cursor, served)])
+                    .with_view_blobs([(sha.clone(), body.clone())]),
+            );
+            let pull = client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .expect("a marked page is an answer");
+            answers.push((
+                pull.applied,
+                pull.stopped_at_move,
+                pull.reach_changed.is_some(),
+                pull.pending_cursor.cursor,
+            ));
+            if commit {
+                client
+                    .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+                    .expect("commit");
+                cursor = pull.pending_cursor.cursor;
+            }
+        }
+        drop((scratch, path));
+        answers
+    };
+    let first = |head| (page(false, 0, head, "r1"), true);
+    assert_eq!(
+        pulls(Some(1), vec![(page(true, 3, 4, "r1"), true)]),
+        vec![(0, true, true, 1)],
+        "a copy with a cursor and no stored head stops at a marked move"
+    );
+    assert_eq!(
+        pulls(None, vec![(page(true, 0, 4, "r1"), true)]),
+        vec![(1, false, false, 1)],
+        "a new copy's first page applies its move"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 3, 4, "r1"), true)]),
+        vec![(1, false, false, 1), (1, false, false, 4)],
+        "a first pull applies a move marked at or below its first head"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 4, 4, "r1"), true)]),
+        vec![(1, false, false, 1), (1, false, false, 5)],
+        "the head itself is a move the first page saw"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 5, 5, "r1"), true)]),
+        vec![(1, false, false, 1), (0, true, true, 1)],
+        "a move marked after the first page's head stops the pull"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 4, "r1"), false),
+                (page(true, 5, 5, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (0, true, true, 0)],
+        "a first page read again before its cursor commits stops at a later move"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 4, "r1"), false),
+                (page(true, 3, 4, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (1, false, false, 4)],
+        "a first page read again applies a move marked at or below the stored head"
+    );
+    assert_eq!(
+        pulls(
+            None,
+            vec![
+                (page(false, 0, 5, "r1"), false),
+                (page(false, 1, 4, "r1"), true)
+            ]
+        ),
+        vec![(1, false, false, 1), (0, true, true, 0)],
+        "a page read before the stored head's page stops the pull"
+    );
+    assert_eq!(
+        pulls(None, vec![first(4), (page(true, 3, 4, "r2"), true)]),
+        vec![(1, false, false, 1), (0, false, true, 1)],
+        "an old mark on a page under other levels is a change of levels, not a move"
+    );
 }

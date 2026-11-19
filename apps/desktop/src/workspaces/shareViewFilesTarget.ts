@@ -66,6 +66,7 @@ export function resolveRegisteredShareViewFilesTarget(
           : null,
       granterEmail: typeof shareView.granterEmail === "string" ? shareView.granterEmail : null,
       grantedSelector: shareView.grantedSelector,
+      ...(shareView.reach === undefined ? {} : { reach: shareView.reach }),
       recipientUserId:
         typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
       ended: shareView.ended === true,

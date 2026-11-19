@@ -917,7 +917,10 @@ fn replay_materializations(
         job.status == JobStatus::Pending
             && !job.job_id.starts_with("restore-delete-mat_")
             && (job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
-            && selected.is_none_or(|selected| selected.contains(&job.job_id))
+            && match selected {
+                Some(selected) => selected.contains(&job.job_id),
+                None => !job.job_id.starts_with(super::rebuild::REBUILD_JOB_PREFIX),
+            }
     });
     let jobs = switch_parent_deletes_first(jobs);
     // Filter small replays in SQL; cache the full version only for larger batches.

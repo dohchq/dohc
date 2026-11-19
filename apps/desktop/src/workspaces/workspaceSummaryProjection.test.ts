@@ -526,3 +526,28 @@ it("carries sanitized share labels independently of pinned access", () => {
     access: "view",
   });
 });
+
+it("carries a stopped update's title and code, and drops ones it cannot read", () => {
+  const stopped = (stop: unknown) =>
+    workspaceSummaryFor(
+      entry({
+        shareView: { ...shareView(goodSelector), rebuild: { rebuildId: "r1", stopped: stop } },
+      }),
+    ).shareView?.updatingAccessStopped;
+  expect(
+    stopped({
+      reason: "failed",
+      title: "dohc could not update access",
+      detail: "This workspace was still open.",
+      cause: "share-view-rebuild-root-open",
+    }),
+  ).toEqual({
+    reason: "failed",
+    title: "dohc could not update access",
+    detail: "This workspace was still open.",
+    cause: "share-view-rebuild-root-open",
+  });
+  expect(
+    stopped({ reason: "failed", title: 3, detail: "dohc could not update access.", cause: "" }),
+  ).toEqual({ reason: "failed", detail: "dohc could not update access." });
+});

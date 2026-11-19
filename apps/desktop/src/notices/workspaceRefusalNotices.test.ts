@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "@dohc/workspace-engine-client";
-import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { EngineRequestError, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiveStore";
@@ -35,7 +35,21 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
   });
   let pending = [notice];
   let heldRead: { started: Deferred; release: Deferred } | null = null;
+  // Set once the engine closed the copy for its access: it answers nothing
+  // but close.
+  let closedForAccess = false;
   const sendRequest = vi.fn(async (request: Request): Promise<Response> => {
+    if (closedForAccess && request.method !== "workspace.close") {
+      throw new EngineRequestError(
+        request.id,
+        {
+          code: "FORBIDDEN",
+          message: "share-view-updating-access",
+          retry: "no",
+        } as ConstructorParameters<typeof EngineRequestError>[1],
+        request.method,
+      );
+    }
     if (request.method === "sync.refusalNotices" && heldRead) {
       const held = heldRead;
       heldRead = null;
@@ -132,6 +146,7 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     ...refusals,
     deps,
     sendRequest,
+    sessions,
     authorities,
     createStore,
     onChanged,
@@ -140,6 +155,9 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
     requests: (method: string) =>
       sendRequest.mock.calls.filter(([request]) => request.method === method).length,
     holdRefusalRead: () => (heldRead = { started: deferred(), release: deferred() }),
+    closeForAccess: () => {
+      closedForAccess = true;
+    },
     arriveRefusal: () => {
       pending.push({
         ...notice,
@@ -312,6 +330,34 @@ describe("workspace refusal notices", () => {
       }
     },
   );
+
+  // A joined copy closed for its access refuses every read until it is
+  // rebuilt. The background read skips it quietly instead of logging.
+  it("skips a copy closed for its access without logging", async () => {
+    const f = await fixture();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      // The engine closed the open copy; main has not held its sessions yet.
+      await f.openEditor();
+      f.closeForAccess();
+      await expect(f.refusalNotices()).resolves.toEqual([
+        { workspaceId: "workspace", notices: null },
+      ]);
+      // Main's hold for the rebuild, then a stopped rebuild that released it.
+      await f.sessions.holdForRebuild("workspace");
+      await expect(f.refusalNotices()).resolves.toEqual([
+        { workspaceId: "workspace", notices: null },
+      ]);
+      f.sessions.releaseRebuildHold("workspace");
+      await expect(f.refusalNotices()).resolves.toEqual([
+        { workspaceId: "workspace", notices: null },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await f.close();
+    }
+  });
 
   it("stops refusal work before authorities close, finishing only the read already running", async () => {
     const f = await fixture();

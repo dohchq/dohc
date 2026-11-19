@@ -4,6 +4,11 @@ import {
   isValidShareVersionId,
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
+import {
+  highestListedLevel,
+  parseListedReach,
+  type ListedReach,
+} from "@dohc/security-contract/listed-reach";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
   formatSize,
@@ -182,15 +187,31 @@ type EngineGrantedSelector = {
   versionId: string | null;
   access: ShareAccess;
   wholeWorkspace?: true;
+  reach?: {
+    signature: string;
+    visibilitySignature: string;
+    rootLevel: ShareAccess | null;
+    folders: { path: string; level: ShareAccess }[];
+  };
 };
 
-/** The pinned grant a share RPC carries: every dimension, always. */
-export function engineGrantedSelector(selector: GrantedSelector): EngineGrantedSelector {
+/**
+ * The pinned grant a share RPC carries: every dimension, always. A
+ * membership also carries the reach it last stored, which opens its lanes
+ * on the highest level it lists and tells the pull which pages it can apply.
+ */
+export function engineGrantedSelector(
+  selector: GrantedSelector,
+  reach?: ListedReach | null,
+): EngineGrantedSelector {
   return {
     paths: [...selector.paths],
     versionId: selector.versionId,
     access: selector.access,
     ...(selector.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
+    ...(selector.wholeWorkspace === true && reach
+      ? { reach: { ...reach, folders: reach.folders.map(({ path, level }) => ({ path, level })) } }
+      : {}),
   };
 }
 
@@ -200,6 +221,7 @@ export function shareViewIdentitySelector(input: {
         grantedSelector?: unknown;
         ended?: boolean;
         relayUrl?: string | null;
+        reach?: unknown;
       }
     | null
     | undefined;
@@ -210,7 +232,14 @@ export function shareViewIdentitySelector(input: {
   if (!shareView || shareView.ended === true) return null;
   const grantedSelector = recordedShareSelector(shareView.grantedSelector);
   if (!grantedSelector) return null;
-  if (grantedSelector.access !== "edit") return null;
+  // A membership can send file changes wherever its stored reach lists Edit,
+  // whatever its member level. A reach dohc can't read lists no level.
+  const reach =
+    grantedSelector.wholeWorkspace === true && shareView.reach !== undefined
+      ? parseListedReach(shareView.reach)
+      : undefined;
+  const highest = reach === undefined ? grantedSelector.access : reach && highestListedLevel(reach);
+  if (highest !== "edit") return null;
   if (!relayUrl) return null;
   if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
     return null;

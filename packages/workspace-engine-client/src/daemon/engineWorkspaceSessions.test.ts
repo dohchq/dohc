@@ -582,6 +582,59 @@ it("gives nothing to wait on after a rebuild during which a close kept the works
   await sessions.closeAll();
 });
 
+// A joined copy's rebuild holds the workspace, whichever attachment has it
+// open: the open binding closes once its run ends, nothing opens it again,
+// and the release lets the next run open it.
+it("holds every session of a workspace closed for its rebuild", async () => {
+  const workspace = { ...(await tempWorkspace()), attachmentId: Symbol("window") };
+  const client = new MockClient("held", { localStateReady: true });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
+  const running = deferred<void>();
+  const run = sessions.run(workspace, async () => {
+    await running.promise;
+  });
+  await vi.waitFor(() =>
+    expect(client.requests.map((request) => request.method)).toEqual(["workspace.open"]),
+  );
+  const holding = sessions.holdForRebuild(workspace.workspaceId);
+  await Promise.resolve();
+  expect(client.requests.map((request) => request.method)).toEqual(["workspace.open"]);
+  running.resolve();
+  await run;
+  await holding;
+  expect(client.requests.map((request) => request.method)).toEqual([
+    "workspace.open",
+    "workspace.close",
+  ]);
+  await expect(sessions.run(workspace, async () => undefined)).rejects.toEqual(
+    new EngineWorkspaceRebuildingError(workspace.workspaceId),
+  );
+  await expect(
+    sessions.run(
+      { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+      async () => undefined,
+    ),
+  ).rejects.toEqual(new EngineWorkspaceRebuildingError(workspace.workspaceId));
+  expect(client.requests.map((request) => request.method)).toEqual([
+    "workspace.open",
+    "workspace.close",
+  ]);
+  sessions.releaseRebuildHold(workspace.workspaceId);
+  await sessions.run(workspace, async () => undefined);
+  expect(client.requests.map((request) => request.method)).toEqual([
+    "workspace.open",
+    "workspace.close",
+    "workspace.open",
+  ]);
+  await sessions.closeAll();
+});
+
 it("ends a wait on a close that keeps the workspace once a close for good starts", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("rebind", { localStateReady: true });

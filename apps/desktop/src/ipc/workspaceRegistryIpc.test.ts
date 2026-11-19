@@ -72,6 +72,9 @@ async function registryHarness() {
   const reveal = vi.fn((_path: string) => {
     steps.push("reveal");
   });
+  const forgetAccessSaved = vi.fn(async (_workspaceId: string) => {
+    steps.push("forget-access-saved");
+  });
   registerWorkspaceRegistryIpcHandlers<Event>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
@@ -96,6 +99,7 @@ async function registryHarness() {
     },
     forgetWorkspace: forget,
     showItemInFolder: reveal,
+    forgetAccessSaved,
     openWorkspaceWindow: async () => undefined,
     openWorkspaceManager: () => undefined,
     closeWindowOf: () => undefined,
@@ -130,6 +134,7 @@ async function registryHarness() {
     pick,
     forget,
     reveal,
+    forgetAccessSaved,
     steps,
     summaries,
     invoke,
@@ -472,5 +477,38 @@ describe("forget and reveal", () => {
     await expect(h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-9" })).rejects.toThrow(
       "not in the registry",
     );
+  });
+
+  // An access change moved items of the member's into a recovery folder.
+  // Opening it from the notice shows that folder, and the notice stops
+  // coming back at the next start.
+  it("reveals the recovery folder an access change saved into, once", async () => {
+    const h = await registryHarness();
+    const folder = ".dohc/local/recovery/2026-11-16 10-00 UTC";
+    h.summaries.push({
+      workspaceId: "ws-1",
+      rootPath: "/w/one",
+      kind: "personal",
+      mode: "local-first",
+      shareView: {
+        shareId: "share",
+        granterEmail: null,
+        access: "edit",
+        membership: true,
+        accessSaved: { folder, count: 2 },
+      },
+    });
+    await h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1", accessSaved: true });
+    expect(h.reveal).toHaveBeenLastCalledWith(join("/w/one", folder));
+    expect(h.forgetAccessSaved).toHaveBeenCalledExactlyOnceWith("ws-1");
+    h.summaries[0] = {
+      workspaceId: "ws-1",
+      rootPath: "/w/one",
+      kind: "personal",
+      mode: "local-first",
+    };
+    await expect(
+      h.invoke(CHANNELS.revealWorkspaceFolder, { workspaceId: "ws-1", accessSaved: true }),
+    ).rejects.toThrow("no recovery folder");
   });
 });

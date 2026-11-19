@@ -150,7 +150,102 @@ pub struct ShareGrant {
     /// time (`ShareAccess::parse`) and refused, not defaulted, when
     /// unreadable. Neither this type nor `ShareAccess` derives `Default`, so
     /// every construction states a level.
+    ///
+    /// For a membership this is the member level, which a Group takes until
+    /// Group rules exist. A path's level comes from `reach`.
     pub access: ShareAccess,
+    /// The levels the relay last listed for a membership, which the recipient
+    /// stores with its view. `None` until one is stored, and for a path share:
+    /// every path then takes `access`.
+    pub reach: Option<ShareReach>,
+}
+
+/// A member's reach as each of their share log pages lists it. The Rust twin
+/// of `ListedReach` in `packages/security-contract/src/listedReach.ts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareReach {
+    /// Changes whenever the member's levels do. The relay keys it.
+    pub signature: String,
+    /// Changes only when what the member reaches does. The relay keys it.
+    pub visibility_signature: String,
+    /// `None` when the root is hidden.
+    pub root_level: Option<ShareAccess>,
+    /// Each listed folder's exact path and level. The root is never listed.
+    pub folders: std::collections::BTreeMap<String, ShareAccess>,
+}
+
+impl ShareAccess {
+    fn rank(self) -> u8 {
+        match self {
+            Self::View => 0,
+            Self::Comment => 1,
+            Self::Edit => 2,
+        }
+    }
+
+    /// Whether this level posts in chat: Comment and Edit do.
+    pub fn takes_comments(self) -> bool {
+        self != Self::View
+    }
+}
+
+impl ShareReach {
+    /// The level of the nearest listed folder at or above `folder`, the root
+    /// included. Folders match exactly, as `listedFolderLevel` does.
+    pub fn folder_level(&self, folder: &str) -> Option<ShareAccess> {
+        let mut current = folder;
+        while !current.is_empty() {
+            if let Some(level) = self.folders.get(current) {
+                return Some(*level);
+            }
+            current = current.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+        self.root_level
+    }
+
+    /// The level at a file path, or `None` where the member has none. A rule
+    /// file or a copy of one is never the member's, as `levelAtPath` says.
+    pub fn level_at(&self, path: &str) -> Option<ShareAccess> {
+        let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+        if dohc_engine_files::floor::collision_key(name).contains("access.yaml") {
+            return None;
+        }
+        self.folder_level(folder)
+    }
+
+    /// The highest level anywhere in the reach.
+    pub fn highest(&self) -> Option<ShareAccess> {
+        self.folders
+            .values()
+            .copied()
+            .chain(self.root_level)
+            .max_by_key(|level| level.rank())
+    }
+}
+
+impl ShareGrant {
+    /// The highest level the grant gives anywhere. A lane that carries writes
+    /// opens on it; each write's own path decides the rest, here and at the
+    /// relay.
+    pub fn highest(&self) -> Option<ShareAccess> {
+        match &self.reach {
+            Some(reach) => reach.highest(),
+            None => Some(self.access),
+        }
+    }
+
+    /// The level at a file path.
+    pub fn level_at(&self, path: &str) -> Option<ShareAccess> {
+        match &self.reach {
+            Some(reach) => reach.level_at(path),
+            None => Some(self.access),
+        }
+    }
+
+    /// The level a Group takes: the member level, until Group rules exist.
+    pub fn group_level(&self) -> ShareAccess {
+        self.access
+    }
 }
 
 /// Apply an inbound shared op only if its channel/path selector remains inside
@@ -894,6 +989,7 @@ mod granted_path_tests {
 
     fn grant(paths: &[&str], version_id: Option<&str>) -> ShareGrant {
         ShareGrant {
+            reach: None,
             scope: super::ShareScope::Paths(paths.iter().map(|path| (*path).to_owned()).collect()),
             version_id: version_id.map(str::to_owned),
             access: ShareAccess::View,
@@ -937,6 +1033,7 @@ mod granted_path_tests {
     #[test]
     fn a_workspace_grant_admits_every_tracked_path_on_main() {
         let workspace = ShareGrant {
+            reach: None,
             scope: ShareScope::Workspace,
             version_id: None,
             access: ShareAccess::Comment,
@@ -952,6 +1049,7 @@ mod granted_path_tests {
         // A workspace grant naming a version selects nothing: the relay never
         // builds one.
         let versioned = ShareGrant {
+            reach: None,
             version_id: Some("v1".to_owned()),
             ..workspace
         };
@@ -966,7 +1064,8 @@ mod share_view_boundary_tests {
     use serde_json::{Value, json};
 
     use super::{
-        ShareAccess, ShareBoundary, ShareGrant, ShareSurface, enforce_share_view_boundary,
+        ShareAccess, ShareBoundary, ShareGrant, ShareScope, ShareSurface,
+        enforce_share_view_boundary,
     };
     use crate::{ReplicationEnvelope, SyncError};
 
@@ -978,6 +1077,7 @@ mod share_view_boundary_tests {
             surface: ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(ShareGrant {
+                reach: None,
                 scope: super::ShareScope::Paths(vec!["shared/docs".to_owned()]),
                 version_id: version_id.map(str::to_owned),
                 access: ShareAccess::View,
@@ -1096,6 +1196,7 @@ mod share_view_boundary_tests {
     fn a_workspace_grant_admits_main_moments_and_never_a_version_create() {
         let workspace = ShareBoundary {
             granted: Some(ShareGrant {
+                reach: None,
                 scope: super::ShareScope::Workspace,
                 version_id: None,
                 access: ShareAccess::Edit,
@@ -1137,5 +1238,78 @@ mod share_view_boundary_tests {
             check(&main, "secret.file.put", payload),
             Err(SyncError::ShareBoundaryViolation)
         ));
+    }
+
+    // The Rust twin of `levelAtPath` (`listedReach.test.ts` holds the same cases).
+    fn reach(root: Option<ShareAccess>, folders: &[(&str, ShareAccess)]) -> crate::ShareReach {
+        crate::ShareReach {
+            signature: "r1".to_owned(),
+            visibility_signature: "v1".to_owned(),
+            root_level: root,
+            folders: folders
+                .iter()
+                .map(|(path, level)| ((*path).to_owned(), *level))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_path_takes_its_nearest_listed_folder_s_level() {
+        let listed = reach(
+            Some(ShareAccess::View),
+            &[
+                ("Plans", ShareAccess::Edit),
+                ("Plans/Budget", ShareAccess::Comment),
+            ],
+        );
+        assert_eq!(listed.level_at("notes.md"), Some(ShareAccess::View));
+        assert_eq!(listed.level_at("Plans/day-1.md"), Some(ShareAccess::Edit));
+        assert_eq!(
+            listed.level_at("Plans/Budget/q1.md"),
+            Some(ShareAccess::Comment)
+        );
+        // An unlisted folder, a hidden one included, takes its nearest listed ancestor's level.
+        assert_eq!(
+            listed.level_at("Plans/Secret/new.md"),
+            Some(ShareAccess::Edit)
+        );
+        // Folders match exactly.
+        assert_eq!(listed.level_at("plans/day-1.md"), Some(ShareAccess::View));
+        assert_eq!(listed.level_at("Plans2/day-1.md"), Some(ShareAccess::View));
+        // A rule file and a copy of one are never the member's.
+        assert_eq!(listed.level_at("Plans/access.yaml"), None);
+        assert_eq!(listed.level_at("Plans/ACCESS.yaml.swp"), None);
+        assert_eq!(listed.highest(), Some(ShareAccess::Edit));
+
+        let hidden_root = reach(None, &[("Shared", ShareAccess::Comment)]);
+        assert_eq!(hidden_root.level_at("notes.md"), None);
+        assert_eq!(
+            hidden_root.level_at("Shared/notes.md"),
+            Some(ShareAccess::Comment)
+        );
+        assert_eq!(hidden_root.highest(), Some(ShareAccess::Comment));
+        assert_eq!(reach(None, &[]).highest(), None);
+    }
+
+    #[test]
+    fn a_grant_with_no_reach_gives_every_path_its_level() {
+        let grant = ShareGrant {
+            reach: None,
+            scope: ShareScope::Workspace,
+            version_id: None,
+            access: ShareAccess::Comment,
+        };
+        assert_eq!(grant.level_at("Plans/day-1.md"), Some(ShareAccess::Comment));
+        assert_eq!(grant.highest(), Some(ShareAccess::Comment));
+        let listed = ShareGrant {
+            reach: Some(reach(
+                Some(ShareAccess::View),
+                &[("Plans", ShareAccess::Edit)],
+            )),
+            access: ShareAccess::View,
+            ..grant
+        };
+        assert_eq!(listed.highest(), Some(ShareAccess::Edit));
+        assert_eq!(listed.group_level(), ShareAccess::View);
     }
 }
