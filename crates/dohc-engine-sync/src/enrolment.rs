@@ -990,7 +990,7 @@ mod tests {
         CreateNamedVersion, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
         WriteText,
     };
-    use dohc_engine_storage::{EngineStore, NoFaults};
+    use dohc_engine_storage::{EngineStore, NoFaults, Preimage};
     use dohc_engine_testkit::open_store;
     use rusqlite::params;
 
@@ -1235,7 +1235,9 @@ mod tests {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretDiskIntent::Materialize {
+                    expected: Preimage::Absent,
                 },
                 &NoFaults,
             )

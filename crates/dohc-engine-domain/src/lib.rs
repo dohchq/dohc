@@ -178,7 +178,7 @@ pub use secrets::{
     fork_version_keyless_with, get_secret_moment_keyless, has_secret_state,
     list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_keyless,
     list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
-    secret_file_len_keyless,
+    secret_file_len_keyless, validate_secret_path,
 };
 pub use store::{
     CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CLEARED_MERGE_REMOVAL_ORIGIN,

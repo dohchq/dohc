@@ -1252,9 +1252,8 @@ pub fn materialize_write_conflict(
 }
 
 /// Execute a secret write through the same atomic-replace pipeline without
-/// ever persisting plaintext in the content-blob table. Ordinary secret jobs
-/// adopt the current disk state as their immediate preimage; version-switch
-/// jobs retain the preimage probed during phase 1 so an intervening edit
+/// ever persisting plaintext in the content-blob table. Every secret job keeps
+/// the preimage probed when it was queued, so an edit made since then
 /// conflicts. Conflict handling never writes a plaintext `.conflict` sibling.
 pub fn materialize_secret_one(
     store: &EngineStore,
@@ -1307,20 +1306,8 @@ fn materialize_secret_one_with_remover(
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     }
-    let preimage = if job.job_id.starts_with("version-switch-secret-mat_") {
-        job.preimage.clone()
-    } else {
-        match current {
-            CurrentTarget::Absent => Preimage::Absent,
-            CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
-            CurrentTarget::Oversized => {
-                return Err(MaterializeError::BlockedTarget);
-            }
-        }
-    };
     let plaintext_job = MaterializationJob {
         content_sha256: desired_sha,
-        preimage,
         ..job.clone()
     };
     materialize_secret_write(
@@ -1337,10 +1324,9 @@ fn materialize_secret_one_with_remover(
 /// Execute an active-version secret delete after the runtime has resolved the
 /// versioned current tip. Unlike the generic pipeline, this deliberately has no
 /// workspace-wide generation fence: generations from another version cannot
-/// suppress deletion of the active disk projection. Ordinary keyless deletes
-/// adopt the current regular file; version-switch deletes retain their
-/// phase-1 plaintext hash so an intervening edit conflicts. Neither path emits
-/// a plaintext conflict artifact.
+/// suppress deletion of the active disk projection. Every delete keeps the
+/// preimage probed when it was queued, so an edit made since then conflicts.
+/// A conflict emits no plaintext artifact.
 /// Deletion does not use `options.replacer` or `options.backoff`.
 pub fn materialize_secret_delete_one(
     store: &EngineStore,
@@ -1394,18 +1380,14 @@ fn materialize_secret_delete_with_hook(
         faults,
         ..
     } = *options;
-    let current = read_current_no_follow(target)?;
-    let preimage = match current {
+    match read_current_no_follow(target)? {
         CurrentTarget::Absent => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
-        CurrentTarget::Present(_) if job.job_id.starts_with("version-switch-secret-mat_") => {
-            job.preimage.clone()
-        }
-        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
+        CurrentTarget::Present(_) => {}
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
-    };
+    }
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
@@ -1420,10 +1402,6 @@ fn materialize_secret_delete_with_hook(
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     };
-    // Re-read immediately before unlinking to preserve no-follow semantics.
-    // Any regular file currently at the active secret's own resolved path is
-    // the disk projection being retired; no plaintext hash or conflict copy is
-    // needed (or safe) for a secret delete.
     let current_now = parent.read_current(target_name, target)?;
     match &current_now {
         CurrentTarget::Absent => {
@@ -1433,7 +1411,7 @@ fn materialize_secret_delete_with_hook(
         CurrentTarget::Present(_) => {}
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
     }
-    if !preimage_matches(&preimage, &current_now) {
+    if !preimage_matches(&job.preimage, &current_now) {
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
@@ -6620,7 +6598,10 @@ mod tests {
 
     #[cfg(windows)]
     fn write_new_by_secret_job(scratch: &Scratch) {
-        let (store, job) = prepare_secret_job(scratch, "secret-write", ".env");
+        let (store, mut job) = prepare_secret_job(scratch, "secret-write", ".env");
+        if let Ok(before) = std::fs::read(scratch.root.join(".env")) {
+            job.preimage = Preimage::Present(hex_sha256(&before));
+        }
         let options = options_with(&StdReplacer);
         let outcome = materialize_secret_one(&store, &scratch.root, &job, b"new", &options);
         assert_eq!(outcome.unwrap(), JobOutcome::Completed);
@@ -7505,7 +7486,7 @@ mod tests {
                         workspace_id: "ws".to_owned(),
                         target_path: ".env".to_owned(),
                         content_sha256: staged_sha.clone(),
-                        preimage: Preimage::Absent,
+                        preimage: Preimage::Present(hex_sha256(b"ORIGINAL=preimage\n")),
                         target_generation: 1,
                         now_ms: 1,
                     },
@@ -7556,6 +7537,71 @@ mod tests {
             leaked.is_empty(),
             "plaintext secret temps leaked: {leaked:?}"
         );
+    }
+
+    #[test]
+    fn a_secret_job_conflicts_with_a_file_edited_since_it_was_queued() {
+        for operation in [
+            MaterializationOperation::Write,
+            MaterializationOperation::Delete,
+        ] {
+            let scratch = Scratch::new("secret-edited-since-queued");
+            let target = scratch.root.join(".env");
+            std::fs::write(&target, b"EDITED=while-closed\n").unwrap();
+            let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+            let staged_sha = store.put_binary_blob(b"encrypted-placeholder").unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    let spec = MaterializationJobSpec {
+                        job_id: "secret-mat_restore".to_owned(),
+                        workspace_id: "ws".to_owned(),
+                        target_path: ".env".to_owned(),
+                        content_sha256: staged_sha.clone(),
+                        preimage: Preimage::Present(hex_sha256(b"QUEUED=over-this\n")),
+                        target_generation: 1,
+                        now_ms: 1,
+                    };
+                    match operation {
+                        MaterializationOperation::Write => enqueue_job(tx, &spec),
+                        MaterializationOperation::Delete => {
+                            dohc_engine_storage::enqueue_delete_job(tx, &spec)
+                        }
+                    }
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("secret-mat_restore")
+                .unwrap()
+                .unwrap();
+            let options = options_with(&StdReplacer);
+
+            let outcome = match operation {
+                MaterializationOperation::Write => materialize_secret_one(
+                    &store,
+                    &scratch.root,
+                    &job,
+                    b"RESTORED=secret\n",
+                    &options,
+                ),
+                MaterializationOperation::Delete => {
+                    materialize_secret_delete_one(&store, &scratch.root, &job, &options)
+                }
+            }
+            .unwrap();
+
+            assert_eq!(outcome, JobOutcome::Conflict, "{operation:?}");
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                b"EDITED=while-closed\n",
+                "{operation:?} keeps the edit"
+            );
+            let mut names = std::fs::read_dir(&scratch.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, [".dohc", ".env"], "{operation:?} leaves no sibling");
+        }
     }
 }
 

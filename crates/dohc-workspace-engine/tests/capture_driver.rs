@@ -570,6 +570,7 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
     use dohc_engine_domain::{
         NoFaults, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
     };
+    use dohc_engine_storage::Preimage;
 
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -608,7 +609,9 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms: 5,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretDiskIntent::Materialize {
+                    expected: Preimage::Absent,
                 },
                 &NoFaults,
             )

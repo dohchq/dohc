@@ -14,7 +14,6 @@ use crate::rpc::workspace::OpenWorkspace;
 use crate::rpc::workspace::validate_workspace_param;
 use dohc_engine_domain::DomainError;
 use dohc_engine_domain::SecretDelete;
-use dohc_engine_domain::SecretDiskIntent;
 use dohc_engine_domain::SecretMomentRecord;
 use dohc_engine_domain::SecretWrite;
 use dohc_engine_domain::VersionFileChangeStatus;
@@ -24,6 +23,7 @@ use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RuntimeError;
+use dohc_engine_runtime::SecretWriteDisk;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -341,7 +341,9 @@ impl EngineService {
                     metadata_summary: params.summary,
                     metadata_correlation_id: params.correlation_id,
                     now_ms: now_ms()?,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretWriteDisk::Queue {
+                    root_dir: open.root.clone(),
                 },
                 key,
                 Arc::new(NoFaults),
@@ -371,6 +373,7 @@ impl EngineService {
         let moment = open
             .actor
             .delete_secret_file(
+                open.root.clone(),
                 SecretDelete {
                     workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
@@ -654,6 +657,7 @@ impl EngineService {
         let result = open
             .actor
             .apply_secret_file(
+                open.root.clone(),
                 open.workspace_id.clone(),
                 path,
                 params.source_version_id,
@@ -691,6 +695,7 @@ impl EngineService {
         let result = open
             .actor
             .restore_secret_file(
+                open.root.clone(),
                 open.workspace_id.clone(),
                 path,
                 params.before_moment_id,

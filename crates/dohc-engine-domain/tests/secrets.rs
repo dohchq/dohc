@@ -5,7 +5,7 @@ use dohc_engine_domain::{
     delete_secret_file_keyless_with, list_secret_files_keyless,
     restore_secret_file_verbatim_with_metadata_and_after,
 };
-use dohc_engine_storage::{EngineStore, FaultPoint};
+use dohc_engine_storage::{EngineStore, FaultPoint, Preimage};
 use dohc_engine_testkit::harness::open_readonly_keeper;
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, decode_hex, engine_db_path};
 use rusqlite::params;
@@ -46,7 +46,9 @@ fn write(
                 metadata_summary: Some("Updated .env".to_owned()),
                 metadata_correlation_id: None,
                 now_ms,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             &NO_FAULTS,
         )
@@ -74,7 +76,9 @@ fn write_version(
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             &NO_FAULTS,
         )
@@ -118,7 +122,9 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             &NO_FAULTS,
         )
@@ -137,6 +143,7 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 metadata_correlation_id: None,
                 now_ms: 11,
             },
+            Preimage::Absent,
             &NO_FAULTS,
         )
         .expect_err("ordinary path delete must fail at the store door");
@@ -155,7 +162,6 @@ fn secret_write_debug_redacts_cleartext() {
         metadata_summary: None,
         metadata_correlation_id: None,
         now_ms: 1,
-        disk_intent: SecretDiskIntent::Materialize,
     };
     let rendered = format!("{w:?}");
     assert!(
@@ -313,7 +319,9 @@ fn crash_before_persist_rolls_back_secret_write() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             faults.as_ref(),
         );
@@ -349,7 +357,9 @@ fn crash_after_commit_is_durable() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             faults.as_ref(),
         );
@@ -510,6 +520,7 @@ fn secret_apply_propagates_source_delete() {
             metadata_correlation_id: None,
             now_ms: 11,
         },
+        Preimage::Absent,
         &NO_FAULTS,
         |_, _| Ok(()),
     )
@@ -525,9 +536,15 @@ fn secret_apply_propagates_source_delete() {
         metadata_correlation_id: Some("corr-apply-delete".to_owned()),
         now_ms: 20,
     };
-    let result =
-        apply_secret_file_from_version_with(&mut store, &key, &input, &NO_FAULTS, |_, _| Ok(()))
-            .unwrap();
+    let result = apply_secret_file_from_version_with(
+        &mut store,
+        &key,
+        &input,
+        Preimage::Absent,
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .unwrap();
     assert!(result.changed);
     let moment = result.moment.unwrap();
     assert_eq!(moment.operation, SecretOp::Delete);
@@ -607,9 +624,15 @@ fn a_divergent_secret_merge_records_no_conflict() {
         source_text,
         target_text,
     );
-    let merged =
-        apply_secret_file_from_version_with(&mut store, &key, &input, &NO_FAULTS, |_, _| Ok(()))
-            .unwrap();
+    let merged = apply_secret_file_from_version_with(
+        &mut store,
+        &key,
+        &input,
+        Preimage::Absent,
+        &NO_FAULTS,
+        |_, _| Ok(()),
+    )
+    .unwrap();
     assert!(
         merged.changed,
         "both sides moved, so the merge must take the source"
@@ -690,16 +713,17 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
         None,
         None,
         20,
+        Preimage::Present("disk-sha".to_owned()),
         &NO_FAULTS,
         |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(restored.restored, "deleted");
 
-    let marker: (String, String, String, i64, i64) = store
+    let marker: (String, String, String, Option<String>, i64) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT status, operation, content_sha256, preimage_present, target_generation \
+                "SELECT status, operation, content_sha256, preimage_sha256, target_generation \
                  FROM materialization_jobs WHERE job_id = 'secret-mat_restore-to-absent'",
                 [],
                 |row| {
@@ -726,7 +750,11 @@ fn secret_restore_to_absent_enqueues_a_pending_delete() {
     assert_eq!(marker.0, "pending");
     assert_eq!(marker.1, "delete");
     assert_eq!(marker.2, outgoing_sha);
-    assert_eq!(marker.3, 0, "the restore delete uses an absent preimage");
+    assert_eq!(
+        marker.3.as_deref(),
+        Some("disk-sha"),
+        "the restore delete keeps what the file held when it was queued"
+    );
     assert_eq!(marker.4, restored_order);
 }
 
@@ -1057,7 +1085,9 @@ fn capture_ownership_never_crosses_a_workspace_boundary() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
-                disk_intent: SecretDiskIntent::Materialize,
+            },
+            SecretDiskIntent::Materialize {
+                expected: Preimage::Absent,
             },
             &NO_FAULTS,
         )

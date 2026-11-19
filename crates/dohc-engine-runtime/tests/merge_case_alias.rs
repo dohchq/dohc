@@ -7,7 +7,7 @@ use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
     WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus};
+use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, Preimage};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
@@ -51,7 +51,6 @@ fn secret_write(version: &str, path: &str, moment: &str, now_ms: i64) -> SecretW
         metadata_summary: None,
         metadata_correlation_id: None,
         now_ms,
-        disk_intent: SecretDiskIntent::AlreadyOnDisk,
     }
 }
 
@@ -75,7 +74,7 @@ async fn secret_merge_replay(
         let mut base = secret_write("main", "foo.env", "base", 1);
         base.text = "TOKEN=base".into();
         SecretFileStore::new(&mut store, &key)
-            .write_secret_file(&base, &NoFaults)
+            .write_secret_file(&base, SecretDiskIntent::AlreadyOnDisk, &NoFaults)
             .unwrap();
         fork(&mut store);
         let mut secrets = SecretFileStore::new(&mut store, &key);
@@ -91,16 +90,19 @@ async fn secret_merge_replay(
                     metadata_correlation_id: None,
                     now_ms: 3,
                 },
+                Preimage::Absent,
                 &NoFaults,
             )
             .unwrap();
         secrets
             .write_secret_file(
                 &secret_write("draft", "Foo.env", "draft-write", 3),
+                SecretDiskIntent::AlreadyOnDisk,
                 &NoFaults,
             )
             .unwrap();
     }
+    std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).unwrap().actor;
     let paths = if delete_first {
@@ -112,6 +114,7 @@ async fn secret_merge_replay(
         assert!(
             actor
                 .apply_secret_file(
+                    root.path().to_path_buf(),
                     WS.into(),
                     path.into(),
                     "draft".into(),
@@ -158,7 +161,6 @@ async fn secret_merge_replay(
                 .unwrap();
         }
     }
-    std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
     if !delete_first {
         // The desktop's merge places deletes before writes.
         std::fs::remove_file(root.join("foo.env")).unwrap();
@@ -246,7 +248,11 @@ async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
             .unwrap();
         let mut secrets = SecretFileStore::new(&mut store, &key);
         secrets
-            .write_secret_file(&secret_write("main", "foo.env", "base", 1), &NoFaults)
+            .write_secret_file(
+                &secret_write("main", "foo.env", "base", 1),
+                SecretDiskIntent::AlreadyOnDisk,
+                &NoFaults,
+            )
             .unwrap();
         secrets
             .delete_secret_file(
@@ -260,11 +266,16 @@ async fn secret_delete_with_live_exact_tip_keeps_main_behavior() {
                     metadata_correlation_id: None,
                     now_ms: 2,
                 },
+                Preimage::Absent,
                 &NoFaults,
             )
             .unwrap();
         secrets
-            .write_secret_file(&secret_write("main", "foo.env", "restore", 3), &NoFaults)
+            .write_secret_file(
+                &secret_write("main", "foo.env", "restore", 3),
+                SecretDiskIntent::AlreadyOnDisk,
+                &NoFaults,
+            )
             .unwrap();
         assert_eq!(
             store

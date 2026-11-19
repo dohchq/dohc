@@ -343,6 +343,37 @@ fn secret_tip_exists(
         .map_err(RuntimeError::from)
 }
 
+/// Whether a later protected moment on the same file still waits to reach the
+/// disk. That job writes the same tip against a newer preimage, so it alone runs.
+fn later_secret_job_pending(
+    store: &EngineStore,
+    coordinates: &SecretJobCoordinates,
+    moment_order: i64,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM materialization_jobs j \
+                 JOIN secret_moments m ON m.moment_id = substr(j.job_id, 12) \
+                 WHERE j.status = 'pending' AND j.job_id GLOB 'secret-mat_*' \
+                   AND j.target_path = ?3 AND j.target_generation > ?4 \
+                   AND m.workspace_id = ?1 AND m.version_id = ?2 AND m.path = ?3 \
+                 LIMIT 1",
+                params![
+                    coordinates.workspace_id,
+                    coordinates.version_id,
+                    coordinates.path,
+                    moment_order
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
 fn secret_plaintext_for_job(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -1048,6 +1079,10 @@ fn replay_materializations(
                         }
                         (MaterializationOperation::Delete, false)
                         | (MaterializationOperation::Write, true) => {}
+                    }
+                    if later_secret_job_pending(store, &coordinates, job.target_generation)? {
+                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        continue;
                     }
                     coordinates
                 };
