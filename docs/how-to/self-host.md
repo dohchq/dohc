@@ -30,6 +30,7 @@ To turn it on, follow [Publish apps](#publish-apps).
 
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
 Have an SMTP service ready for verification and password reset emails.
+The server emails share invitations through it too.
 The SMTP service must support TLS.
 
 ## Build the deployment bundle

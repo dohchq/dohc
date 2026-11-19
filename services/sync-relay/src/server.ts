@@ -99,6 +99,7 @@ import {
   type PersonalAgents,
 } from "./personalAgents";
 import type { CredentialFence } from "@dohc/workspace-auth/credentialFence";
+import type { SendEmail } from "@dohc/workspace-auth/smtp";
 import { accountDisplayName } from "./accountDisplayName";
 import { createDiscussionRoutes } from "./discussionRoutes";
 import { shareSenderLabel as formatShareSender } from "@dohc/security-contract/share-labels";
@@ -113,6 +114,7 @@ import {
 } from "./linkAuthority";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
+import { createShareInvitationEmailer } from "./shareInvitationEmail";
 import { createShareInventoryRoutes } from "./shareInventoryRoutes";
 import {
   hashRelayExchangeKey,
@@ -202,6 +204,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
+  sendShareInvitationEmail?: SendEmail;
   // Better Auth display name for discussion authorship; never used for authz.
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
@@ -293,6 +296,7 @@ export function createSyncRelayHandler({
   lookupVerifiedUserEmail,
   lookupUserEmail,
   lookupUserEmails,
+  sendShareInvitationEmail,
   lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
@@ -860,6 +864,13 @@ export function createSyncRelayHandler({
     namedGrantTransitionBody,
     dependentGrantSummary,
     namedBrowserInvitation,
+    createShareInvitationEmailer({
+      storage,
+      nowMs,
+      sendEmail: sendShareInvitationEmail,
+      lookupVerifiedUserEmail,
+      relayPublicOrigin,
+    }),
     publicEditRelease,
     liveRooms,
   );
