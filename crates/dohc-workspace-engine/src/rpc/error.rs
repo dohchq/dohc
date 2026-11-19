@@ -70,46 +70,59 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
     WireError::new(ErrorCode::InvalidParams, message)
 }
 
+/// The storage failure under `error`, through every wrapper that carries one
+/// to this seam.
+fn storage_failure(error: &RuntimeError) -> Option<&dohc_engine_storage::StorageError> {
+    match error {
+        RuntimeError::Storage(storage)
+        | RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(storage))
+        | RuntimeError::Domain(DomainError::Storage(storage))
+        | RuntimeError::Collab(CollabError::Storage(storage))
+        | RuntimeError::LiveApplication(ApplicationError::Storage(storage))
+        | RuntimeError::Search(SearchError::Store(storage)) => Some(storage),
+        RuntimeError::Sync(sync) => match sync.original() {
+            SyncError::Storage(storage) => Some(storage),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The transient store lock, through every wrapper that carries it to this
-/// seam.
-///
-/// One condition, so one answer. Reading it as retryable under materialization
-/// and terminal under collaboration would make the same busy database mean two
-/// different things to the same caller, which is the defect this recognizer
-/// exists to remove.
-///
-/// Matched on the variant for the reason the artifact lock above is: `code()`
-/// delegates through each wrapper, so "file-locked" alone cannot tell a busy
-/// database apart from a busy file.
+/// seam. Matched on the variant: `code()` delegates through each wrapper, so
+/// "file-locked" alone cannot tell a busy database apart from a busy file.
 pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
-    // The search index keeps the raw rusqlite failure instead of wrapping it
-    // in the storage taxonomy, so it carries no `FileLocked` to match on and
-    // has to be asked directly.
-    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
-        return StorageError::is_transient_lock(sqlite);
+    match error {
+        RuntimeError::Search(SearchError::Storage(sqlite)) => {
+            StorageError::is_transient_lock(sqlite)
+        }
+        RuntimeError::Relay(RelayError::StoreBusy) => true,
+        error => matches!(storage_failure(error), Some(StorageError::FileLocked)),
     }
-    // A shared sync failure is busy when its original is.
-    if let RuntimeError::Sync(sync) = error {
-        return matches!(
-            sync.original(),
-            SyncError::Storage(StorageError::FileLocked)
-        );
-    }
-    matches!(
-        error,
-        RuntimeError::Storage(StorageError::FileLocked)
-            | RuntimeError::Materialize(dohc_engine_files::MaterializeError::Storage(
-                StorageError::FileLocked
-            ))
-            | RuntimeError::Domain(DomainError::Storage(StorageError::FileLocked))
-            | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
-            | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
-            // The relay route carries it under its own type rather than a
-            // storage error, because `RelayError` is where a relay operation's
-            // local failures land. Same condition, same answer.
-            | RuntimeError::Relay(RelayError::StoreBusy)
-    )
+}
+
+/// A storage failure leaves as its code word, so the desktop can name a
+/// damaged store or a full disk and a server's log shows which one it was.
+/// A migration refusal names its cause after the code, the way other
+/// refusals carry a detail: the desktop matches the code prefix and shows the
+/// rest. The cause is the storage crate's constant text plus a migration id,
+/// never a path or content.
+fn storage_refusal(refused: &dohc_engine_storage::StorageError) -> WireError {
+    use dohc_engine_storage::{SpaceShortfall, StorageError};
+    let message = match refused {
+        StorageError::MigrationFailed { .. } | StorageError::MigratedByNewerBuild { .. } => {
+            format!("{}: {}", refused.code(), error_chain(refused))
+        }
+        StorageError::DiskFull {
+            shortfall: Some(SpaceShortfall { needed, available }),
+        } => format!(
+            "{}: need {needed} bytes, {available} available",
+            refused.code()
+        ),
+        _ => refused.code().to_owned(),
+    };
+    WireError::new(ErrorCode::Internal, message)
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
@@ -301,27 +314,8 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
             "Open the workspace in dohc first, then try again.",
         );
     }
-    // Keep the storage refusal code so the desktop can offer move-aside
-    // recovery instead of reporting a generic workspace failure.
-    if let RuntimeError::Storage(
-        refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
-        | dohc_engine_storage::StorageError::ForeignDatabase
-        | dohc_engine_storage::StorageError::MigrationFailed { .. }
-        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }),
-    ) = error
-    {
-        // A migration refusal names its cause after the code, the way other
-        // refusals carry a detail: the desktop matches the code prefix and
-        // shows the rest. The cause is the storage crate's constant text
-        // plus a migration id, never a path or content.
-        let message = match refused {
-            dohc_engine_storage::StorageError::MigrationFailed { .. }
-            | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. } => {
-                format!("{}: {}", refused.code(), error_chain(refused))
-            }
-            _ => refused.code().to_string(),
-        };
-        return WireError::new(ErrorCode::Internal, message);
+    if let Some(refused) = storage_failure(error) {
+        return storage_refusal(refused);
     }
     match error {
         RuntimeError::RecoveryImportRefused { reason } => {
@@ -984,7 +978,7 @@ mod tests {
                 RuntimeError::Search(SearchError::Store(StorageError::corrupt_public(
                     std::io::Error::other("missing search table"),
                 ))),
-                "workspace operation failed",
+                "state-corrupt",
                 "engine: internal refusal: INTERNAL search-storage-core",
             ),
             (

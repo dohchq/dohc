@@ -4,6 +4,7 @@ use crate::lock;
 use crate::rpc::error::initial_capture_updating;
 use crate::rpc::workspace::WorkspaceOpenMode;
 use dohc_engine_protocol::error::ErrorCode;
+use dohc_engine_runtime::LifecycleState;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::transport::ServiceResponse;
@@ -1302,16 +1303,20 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        let (projects_collections, read_only, passive) = lock(&self.handles)
+        let (projects_collections, read_only, passive, damaged) = lock(&self.handles)
             .get(handle)
             .map(|open| {
                 (
                     open.projects_collections(),
                     open.mode == WorkspaceOpenMode::ReadOnly,
                     open.mode == WorkspaceOpenMode::Passive,
+                    open.actor.lifecycle() == LifecycleState::Damaged,
                 )
             })
             .unwrap_or_default();
+        if damaged && method != "workspace.close" {
+            return Err(WireError::new(ErrorCode::Internal, "state-corrupt"));
+        }
         if passive
             && !matches!(
                 method,
