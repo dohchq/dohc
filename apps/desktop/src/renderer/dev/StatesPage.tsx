@@ -232,6 +232,7 @@ import {
   type ShareMount,
   type SharingActions,
   type SharingLane,
+  type SharingLaneView,
   type SkipView,
 } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
@@ -2409,8 +2410,8 @@ const SHARING_ACTIONS: SharingActions = {
 const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
 
 function SharingSpecimen(props: {
-  granted: AccessView | null;
-  received: AccessView;
+  granted: SharingLaneView | null;
+  received: SharingLaneView;
   grantedReason?: AccessReason;
   receivedReason?: AccessReason;
   conflictCount?: number;
@@ -4663,6 +4664,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             granted={{ status: "loading" }}
             received={{ status: "failed" }}
             lane="received"
+          />
+        </Specimen>
+        <Specimen label="Show more failed: the loaded rows stay, words in Notices">
+          <SharingSpecimen
+            granted={{
+              status: "ready",
+              answer: { ...SHARING_GRANTED, nextCursor: "page-2" },
+              moreFailed: true,
+            }}
+            received={ready(SHARING_RECEIVED)}
           />
         </Specimen>
         <Specimen label="a shared view: only Shared with me">

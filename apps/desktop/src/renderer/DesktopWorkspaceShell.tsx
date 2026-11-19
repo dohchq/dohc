@@ -8434,7 +8434,7 @@ export function DesktopWorkspaceShell(props: {
                                   onUnmount: unmountShare,
                                   shareRemovals,
                                   sharesRevision,
-                                  reportError: reportShellError,
+                                  reportError: reportButtonError,
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
