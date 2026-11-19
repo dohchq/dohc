@@ -268,7 +268,7 @@ fn lex(
             }
         }
         if first == Some(b'`') {
-            if let Some(length) = code_span(rest, marks, out)? {
+            if let Some(length) = code_span(rest, marks, work, out)? {
                 at += length;
                 continue;
             }
@@ -671,6 +671,7 @@ fn del(src: &[u16], mask: &[u16], previous: Option<u16>, work: &mut usize) -> Re
 fn code_span(
     src: &[u16],
     marks: &[MarkdownMark],
+    work: &mut usize,
     out: &mut Vec<InlinePiece>,
 ) -> Read<Option<usize>> {
     let tick = u16::from(b'`');
@@ -691,6 +692,7 @@ fn code_span(
                     text: value,
                     marks: add_mark(marks, plain(MarkKind::Code))?,
                 }));
+                spend(work, at)?;
                 return Ok(Some(at + run));
             }
             at += closing;
@@ -698,6 +700,7 @@ fn code_span(
             at += 1;
         }
     }
+    spend(work, src.len())?;
     Ok(None)
 }
 

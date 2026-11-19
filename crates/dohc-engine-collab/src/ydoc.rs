@@ -1679,7 +1679,8 @@ impl Ydoc {
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
                     // adds only what changed.
-                    let inline = inline_reading_fits::<_, WIRE_SEED>(&*txn, &map, &blocks);
+                    let inline = reading != MarkdownReading::Successor
+                        && inline_reading_fits::<_, WIRE_SEED>(&*txn, &map, &blocks);
                     let (start, end) = if file_fold {
                         unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks, inline)
                     } else {
@@ -4861,16 +4862,17 @@ fn inline_reading_fits<T: ReadTxn, const WIRE_DEFAULTS: bool>(
             projection_frontmatter_value(txn, value, 0, &mut remaining, &mut bytes).is_ok()
         })
     });
+    if !frontmatter_fits {
+        return false;
+    }
     let scratch = yrs::Doc::new();
     let body = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
     for block in blocks.iter().rev() {
         insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &body, 0, block, true);
     }
-    frontmatter_fits
-        && body
-            .children(&scratch_txn)
-            .all(|child| markdown_node(&scratch_txn, child, 0, &mut remaining, &mut bytes).is_ok())
+    body.children(&scratch_txn)
+        .all(|child| markdown_node(&scratch_txn, child, 0, &mut remaining, &mut bytes).is_ok())
 }
 
 fn insert_md_paragraph<F: XmlFragment>(
