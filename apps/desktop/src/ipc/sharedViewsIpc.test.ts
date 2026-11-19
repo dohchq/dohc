@@ -21,6 +21,7 @@ import {
   ShareSelectorInvalidError,
   type ShareViewInfo,
 } from "../workspaces/shareViewInfo";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import {
   shareViewWriteLevel,
@@ -460,11 +461,103 @@ describe("metadata-only access checks", () => {
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
     expect(levelAt("notes/Budget.md")).toBe("comment");
     expect(h.workspace.shareView!.reach).toEqual(listed("r3", "comment"));
-    // A changed visibility is the rebuild's to install, not this check's.
+    // A changed visibility is the rebuild's to install, not this check's. The
+    // raise waits for it, so the window offers no more than the gate allows.
     h.fetchAccess.mockResolvedValue({ access: "edit" });
-    h.fetchReach.mockResolvedValue({ ...listed("r4", "edit"), visibilitySignature: "v2" });
-    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    const v2 = { ...listed("r4", "edit"), visibilitySignature: "v2" };
+    h.fetchReach.mockResolvedValue(v2);
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "unverified" });
     expect(h.workspace.shareView!.reach).toEqual(listed("r3", "comment"));
+    expect(h.workspace.shareView!.grantedSelector.access).toBe("comment");
+    expect(levelAt("notes/Budget.md")).toBe("comment");
+    // Once the rebuild installs the new visibility's reach, a check raises it.
+    h.workspace.shareView = { ...h.workspace.shareView!, reach: v2 };
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", levelChanged: true });
+    expect(levelAt("notes/Budget.md")).toBe("edit");
+  });
+  // The window runs the check beside a pull, and the pull can close the copy
+  // for a rebuild while the reach is read. The check then leaves the record
+  // to the rebuild.
+  it("keeps a rebuild and capture a refresh records during the reach read", async () => {
+    const h = await harness();
+    const stored = { signature: "r1", visibilitySignature: "v1", rootLevel: "comment" as const };
+    const selector = {
+      paths: [],
+      versionId: null,
+      access: "comment" as const,
+      wholeWorkspace: true as const,
+    };
+    Object.assign(h.workspace.shareView!, {
+      grantedSelector: selector,
+      reach: { ...stored, folders: [] },
+    });
+    h.fetchInfo.mockResolvedValue({ ...info, role: "member", selector });
+    h.reconcile.mockImplementationOnce(async () => ({
+      kind: "refresh",
+      outcome: { ...outcome, status: "unchanged", rebuildId: "rebuild-concurrent" },
+    }));
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    const reach = deferred<ListedReach>();
+    h.fetchReach.mockReturnValueOnce(reach.promise);
+    const checked = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    await vi.waitFor(() => expect(h.fetchReach).toHaveBeenCalledOnce());
+    await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, payload);
+    const unsavedPaths = ["notes/Draft.md"];
+    h.workspace.shareView = { ...h.workspace.shareView!, unsavedPaths };
+    reach.resolve({ ...stored, signature: "r2", rootLevel: "edit", folders: [] });
+    const answer = await checked;
+    expect(h.workspace.shareView).toMatchObject({
+      rebuild: { rebuildId: "rebuild-concurrent" },
+      unsavedPaths,
+      grantedSelector: selector,
+    });
+    expect(answer).toEqual({ status: "unverified" });
+  });
+  it("leaves a closed copy and a newer reach alone when a drop commits", async () => {
+    const h = await harness();
+    const reach = (signature: string, visibilitySignature: string) => ({
+      signature,
+      visibilitySignature,
+      rootLevel: "comment" as const,
+      folders: [],
+    });
+    const selector = {
+      paths: [],
+      versionId: null,
+      access: "edit" as const,
+      wholeWorkspace: true as const,
+    };
+    Object.assign(h.workspace.shareView!, { grantedSelector: selector, reach: reach("r1", "v1") });
+    h.fetchAccess.mockResolvedValue({ access: "comment" });
+    h.fetchReach.mockResolvedValue(reach("r2", "v1"));
+    // A rebuild installs the new visibility's reach while capture runs.
+    h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
+      assertCurrent();
+      h.workspace.shareView = { ...h.workspace.shareView!, reach: reach("r3", "v2") };
+      await commit([], { paths: [], unchecked: false, checked: 0 });
+    });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.workspace.shareView!.reach).toEqual(reach("r3", "v2"));
+    // A refresh closed the copy while the reach was read: nothing narrows it.
+    Object.assign(h.workspace.shareView!, { grantedSelector: selector, reach: reach("r1", "v1") });
+    h.narrow.mockClear();
+    const held = deferred<ListedReach>();
+    h.fetchReach.mockReturnValueOnce(held.promise);
+    const checked = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    await vi.waitFor(() => expect(h.fetchReach).toHaveBeenCalledTimes(2));
+    h.workspace.shareView = { ...h.workspace.shareView!, rebuild: { rebuildId: "rebuild-1" } };
+    held.resolve(reach("r2", "v1"));
+    expect(await checked).toEqual({ status: "unverified" });
+    expect(h.narrow).not.toHaveBeenCalled();
+    expect(h.workspace.shareView).toMatchObject({
+      grantedSelector: selector,
+      reach: reach("r1", "v1"),
+      rebuild: { rebuildId: "rebuild-1" },
+    });
   });
   it("names who changed a membership's level only when this check moved it", async () => {
     const h = await harness();
@@ -571,6 +664,37 @@ describe("metadata-only access checks", () => {
       expect(await result).toEqual({ status: "unverified" });
       expect(h.fetchAccess).toHaveBeenCalledTimes(1);
       expect(h.end).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("bounds a hung reach read by the same deadline", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    };
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
+    vi.useFakeTimers();
+    try {
+      const started = deferred<AbortSignal>();
+      h.fetchReach.mockImplementationOnce(async ({ signal }) => {
+        started.resolve(signal!);
+        return new Promise((_resolve, reject) =>
+          signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }),
+        );
+      });
+      const result = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+      const signal = await started.promise;
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(signal.aborted).toBe(true);
+      expect(await result).toEqual({ status: "unverified" });
+      expect(h.workspace.shareView!.grantedSelector.access).toBe("comment");
+      // The sender left the running checks, so the next one asks the relay.
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+      expect(h.fetchAccess).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

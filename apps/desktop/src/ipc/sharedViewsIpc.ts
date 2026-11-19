@@ -1269,8 +1269,29 @@ export function registerSharedViewsIpcHandlers<
                 return { status: "ended" };
               }
               scoped.assertCurrent();
-              clearTimeout(timeout);
               const statedAccess = stated.access;
+              // Main's write gate reads a membership's levels from its stored
+              // reach, so the relay's reach goes in with a new level. It is read
+              // under the same deadline, before the record it is compared with.
+              let listed: ListedReach | null = null;
+              if (pin.wholeWorkspace === true && statedAccess !== pin.access) {
+                listed = await dependencies.fetchShareViewReach({
+                  relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+                  shareId: view.shareId,
+                  signal: AbortSignal.any([controller.signal, operation.signal]),
+                });
+                scoped.assertCurrent();
+              }
+              clearTimeout(timeout);
+              // The listed reach goes in only under the visibility the copy
+              // already has. A changed one is the rebuild's to install.
+              const reachFor = (current: unknown) => {
+                const stored = storedShareViewReach(current);
+                return listed &&
+                  (!stored || stored.visibilitySignature === listed.visibilitySignature)
+                  ? { reach: listed }
+                  : null;
+              };
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
               // A membership's level is the owner's member level now, so it also
@@ -1280,26 +1301,18 @@ export function registerSharedViewsIpcHandlers<
               if (!currentView || currentView.shareId !== view.shareId || !currentPin)
                 return { status: "unverified" };
               if (currentView.ended) return { status: "ended" };
-              // Main's write gate reads a membership's levels from its stored
-              // reach, so the relay's reach now goes in with a new level. A
-              // changed visibility is left to the rebuild the next pull starts.
-              let reach: { reach: ListedReach } | null = null;
-              if (currentPin.wholeWorkspace === true && statedAccess !== currentPin.access) {
-                const listed = await dependencies.fetchShareViewReach({
-                  relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-                  shareId: view.shareId,
-                  signal: AbortSignal.any([controller.signal, operation.signal]),
-                });
-                scoped.assertCurrent();
-                const stored = storedShareViewReach(currentView);
-                if (!stored || stored.visibilitySignature === listed.visibilitySignature)
-                  reach = { reach: listed };
-              }
+              // A pull beside this check may have closed the copy meanwhile.
+              if (currentView.rebuild) return { status: "unverified" };
+              const moves =
+                currentPin.wholeWorkspace === true && statedAccess !== currentPin.access;
+              // Another window moved the level after this one read it.
+              if (moves && !listed) return { status: "unverified" };
               const ranks = { view: 0, comment: 1, edit: 2 };
-              if (
-                currentPin.wholeWorkspace === true &&
-                ranks[statedAccess] > ranks[currentPin.access]
-              ) {
+              if (moves && ranks[statedAccess] > ranks[currentPin.access]) {
+                // Under a new visibility the gate keeps the old levels until the
+                // rebuild, so the raise waits for it and a later check makes it.
+                const reach = reachFor(currentView);
+                if (!reach) return { status: "unverified" };
                 await setWorkspaceShareView(workspace.workspaceId, {
                   ...currentView,
                   grantedSelector: { ...currentPin, access: statedAccess },
@@ -1319,14 +1332,20 @@ export function registerSharedViewsIpcHandlers<
                     async (unsavedPaths, unconfirmedChanges) => {
                       const latest = operation.workspace.shareView;
                       const latestPin = recordedShareSelector(latest?.grantedSelector);
-                      if (!latest || latest.shareId !== view.shareId || !latestPin || latest.ended)
+                      if (
+                        !latest ||
+                        latest.shareId !== view.shareId ||
+                        !latestPin ||
+                        latest.ended ||
+                        latest.rebuild
+                      )
                         return;
                       const narrowed =
                         ranks[access] < ranks[latestPin.access] ? access : latestPin.access;
                       await setWorkspaceShareView(workspace.workspaceId, {
                         ...latest,
                         grantedSelector: { ...latestPin, access: narrowed },
-                        ...reach,
+                        ...reachFor(latest),
                         unsavedPaths,
                         unconfirmedChanges,
                       });
@@ -1340,7 +1359,7 @@ export function registerSharedViewsIpcHandlers<
               const committed = operation.workspace.shareView;
               if (committed?.ended) return { status: "ended" };
               const committedPin = recordedShareSelector(committed?.grantedSelector);
-              if (committed?.shareId !== view.shareId || !committedPin)
+              if (committed?.shareId !== view.shareId || !committedPin || committed.rebuild)
                 return { status: "unverified" };
               // Only a membership has a role, and a level that the owner changes
               // for everyone; the window says so when this check moved it. The
