@@ -1,16 +1,36 @@
 import { collectionWords } from "@dohc/interface-words/collections";
 import { confirmWords } from "@dohc/interface-words/confirmations";
+import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import * as Haptics from "expo-haptics";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Check } from "lucide-react-native";
-import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { useEffect, useState } from "react";
+import {
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import type { CollectionField, RecordValue } from "../server/phoneCollections";
 import { phoneWrites } from "../server/phoneWrites";
 import { useTheme } from "../theme";
 import { ScreenFailure } from "../workspace/ListStates";
-import { draftOf, editorKind, valueOf, type Draft, type EditorKind } from "./collectionFields";
+import {
+  dateOf,
+  dayOf,
+  draftOf,
+  editorKind,
+  rowText,
+  shownValue,
+  valueOf,
+  type Draft,
+  type EditorKind,
+} from "./collectionFields";
 
 // One field of the open record, changed in a sheet: Cancel and Save in its header, as iOS edits a value. Save sends the
 // change and closes the sheet; the record's screen shows it saving, or the Collection's refusal.
@@ -59,8 +79,8 @@ function Editor(props: {
   const theme = useTheme();
   const router = useRouter();
   const [draft, setDraft] = useState<Draft>(() => draftOf(field, props.start));
-  const save = () => {
-    const result = valueOf(field, draft);
+  const save = (next: Draft = draft) => {
+    const result = valueOf(field, next);
     // Text that isn't a number stays to be corrected.
     if (!result) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -76,7 +96,9 @@ function Editor(props: {
         headerLeft: () => (
           <HeaderButton label={confirmWords.cancel} onPress={() => router.back()} />
         ),
-        headerRight: () => <HeaderButton label={collectionWords.save} onPress={save} strong />,
+        headerRight: () => (
+          <HeaderButton label={collectionWords.save} onPress={() => save()} strong />
+        ),
       }}
     />
   );
@@ -92,6 +114,16 @@ function Editor(props: {
           trackColor={{ true: theme.accent }}
         />
       </View>
+    );
+  else if (kind === "date")
+    editor = (
+      <DateEditor
+        name={field.name}
+        day={typeof draft === "string" ? draft : ""}
+        onPick={setDraft}
+        // Clearing an empty field changes nothing. A required field's Collection refuses it, with its reason.
+        onClear={props.current === null || props.current === "" ? null : () => save("")}
+      />
     );
   else if (kind === "select" || kind === "multi-select") {
     const chosen = Array.isArray(draft) ? draft : [];
@@ -133,7 +165,7 @@ function Editor(props: {
         autoCapitalize={kind === "text" ? "sentences" : "none"}
         autoCorrect={kind === "text"}
         returnKeyType={kind === "text" ? "default" : "done"}
-        onSubmitEditing={kind === "text" ? undefined : save}
+        onSubmitEditing={kind === "text" ? undefined : () => save()}
         accessibilityLabel={field.name}
         style={[
           styles.input,
@@ -152,6 +184,56 @@ function Editor(props: {
       {header}
       {editor}
     </ScrollView>
+  );
+}
+
+/** The system's date picker: inline in the sheet on iOS; on Android its dialog, which opens with the sheet and from its row. */
+function DateEditor(props: {
+  name: string;
+  day: string;
+  onPick(day: string): void;
+  onClear: (() => void) | null;
+}) {
+  const theme = useTheme();
+  const value = dateOf(props.day) ?? new Date();
+  const pick = (_: unknown, picked: Date) => props.onPick(dayOf(picked));
+  const openDialog = () => DateTimePickerAndroid.open({ value, mode: "date", onValueChange: pick });
+  useEffect(() => {
+    if (Platform.OS === "android") openDialog();
+  }, []);
+  return (
+    <>
+      {Platform.OS === "ios" ? (
+        <DateTimePicker
+          value={value}
+          mode="date"
+          display="inline"
+          accentColor={theme.accent}
+          onValueChange={pick}
+          accessibilityLabel={props.name}
+        />
+      ) : (
+        <Pressable
+          onPress={openDialog}
+          style={[styles.row, { borderColor: theme.line }]}
+          accessibilityRole="button"
+          accessibilityLabel={props.name}
+        >
+          <Text style={[styles.text, { color: theme.ink }]}>
+            {rowText(shownValue({ type: "date" }, props.day, {}), props.name)}
+          </Text>
+        </Pressable>
+      )}
+      {props.onClear ? (
+        <Pressable
+          onPress={props.onClear}
+          style={[styles.row, { borderColor: theme.line }]}
+          accessibilityRole="button"
+        >
+          <Text style={[styles.text, { color: theme.accent }]}>{collectionWords.clearValue}</Text>
+        </Pressable>
+      ) : null}
+    </>
   );
 }
 
