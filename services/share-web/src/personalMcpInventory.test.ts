@@ -41,7 +41,13 @@ async function advertisedPersonalTools(live = true): Promise<Tool[]> {
                   ok: true,
                   agent: { agentId: "agent", name: "Helper", handle: "Helper" },
                   workspaces: [
-                    { workspaceId: "trip", name: "Trip", level: "view", dmChannelWireId: "dm" },
+                    {
+                      workspaceId: "trip",
+                      name: "Trip",
+                      level: "view",
+                      role: "owner",
+                      dmChannelWireId: "dm",
+                    },
                   ],
                 });
               },
