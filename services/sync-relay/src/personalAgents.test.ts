@@ -511,6 +511,10 @@ async function roster(f: Fixture, userId = OWNER) {
   };
 }
 
+function reachOf(list: Awaited<ReturnType<typeof roster>>, agentId: string): Reach | undefined {
+  return list.agents.find((agent) => agent.agentId === agentId)?.reach;
+}
+
 function count(f: Fixture, table: string, where = "1", ...params: unknown[]): number {
   return inspect(f.dbPath, (db) =>
     Number(
@@ -2754,19 +2758,40 @@ describe("a personal agent in a workspace its person joined", () => {
       { workspaceId: COMMUNITY, level: "comment" },
     ];
     const agent = await signIn(f, { reach });
+    // Codes allowed under the earlier membership, for this agent and for a new one.
+    const reconnect = await approve(f, {
+      clientId: agent.clientId,
+      agent: { kind: "existing", agentId: agent.agentId },
+      reach,
+    });
+    const otherClient = await registerClient(f);
+    const added = await approve(f, { clientId: otherClient, reach });
+    const ownedOnly = await approve(f, {
+      clientId: otherClient,
+      reach: [{ workspaceId: WS_A, level: "view" }],
+    });
     await removeFromCommunity(f);
     expect((await roster(f)).agents[0]?.reach).toEqual(reach);
+    const revision = (await roster(f)).revision;
 
     const back = await f.h(
       request(OTHER, `/sync/${COMMUNITY}/members/${MEMBER_ID}/let-back-in`, jsonBody({})),
     );
     expect(back.status, await back.clone().text()).toBe(200);
+    expect((await roster(f)).revision).toBeGreaterThan(revision);
+    await expectRefused(await redeem(f, { clientId: agent.clientId, ...reconnect }));
+    await expectRefused(await redeem(f, { clientId: otherClient, ...added }));
+    expect((await roster(f)).agents).toEqual([
+      expect.objectContaining({ agentId: agent.agentId, reach: [reach[0]] }),
+    ]);
+    // A code that names no rejoined workspace still signs in.
+    await ok(await redeem(f, { clientId: otherClient, ...ownedOnly }));
     expect((await roster(f)).workspaces).toContainEqual({
       workspaceId: COMMUNITY,
       name: "Community",
       role: "member",
     });
-    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    expect(reachOf(await roster(f), agent.agentId)).toEqual([{ workspaceId: WS_A, level: "view" }]);
     expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
       expect.objectContaining({ workspaceId: WS_A }),
     ]);
@@ -2780,23 +2805,34 @@ describe("a personal agent in a workspace its person joined", () => {
     await ok(await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
 
     // Leaving, then an invite back, starts over too.
-    const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
-    expect(left.status, await left.clone().text()).toBe(200);
-    expect((await roster(f)).agents[0]?.reach).toEqual(reach);
-    expect(
-      f.storage.inviteWorkspaceMember({
-        workspaceId: COMMUNITY,
-        actorUserId: OTHER,
-        workspaceName: undefined,
-        email: "ada@dohc.test",
-        recipientUserId: OWNER,
-        newMemberId: () => "member-ada-again",
-        newGrantId: () => "grant-ada-again",
-        newShareId: () => "unused-share",
-        nowMs: 7,
-      }),
-    ).toMatchObject({ ok: true });
-    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    const leave = async () => {
+      const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
+      expect(left.status, await left.clone().text()).toBe(200);
+    };
+    const inviteBack = (memberId: string) =>
+      expect(
+        f.storage.inviteWorkspaceMember({
+          workspaceId: COMMUNITY,
+          actorUserId: OTHER,
+          workspaceName: undefined,
+          email: "ada@dohc.test",
+          recipientUserId: OWNER,
+          newMemberId: () => memberId,
+          newGrantId: () => `grant-${memberId}`,
+          newShareId: () => "unused-share",
+          nowMs: 7,
+        }),
+      ).toMatchObject({ ok: true });
+    await leave();
+    expect(reachOf(await roster(f), agent.agentId)).toEqual(reach);
+    inviteBack("member-ada-again");
+    expect(reachOf(await roster(f), agent.agentId)).toEqual([{ workspaceId: WS_A, level: "view" }]);
+
+    // A rejoin that drops nothing leaves the roster as it was.
+    await leave();
+    const unchanged = (await roster(f)).revision;
+    inviteBack("member-ada-third");
+    expect((await roster(f)).revision).toBe(unchanged);
   });
 
   it("refuses a Collection write in a joined workspace, even at Edit", async () => {

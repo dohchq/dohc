@@ -293,6 +293,34 @@ function bumpRoster(storage: StorageContext, ownerUserId: string): number {
   return Number(row?.revision);
 }
 
+/**
+ * An account that becomes a member starts its personal agents with no reach
+ * there. Reach chosen under an earlier membership, which Settings lists as
+ * ended, waits for the person to choose again, and so does a code allowed then
+ * and not yet redeemed, whether for an agent or a new one. Call it in the
+ * transaction that starts the membership.
+ */
+export function startPersonalAgentsInMembership(
+  storage: StorageContext,
+  workspaceId: string,
+  ownerUserId: string,
+): void {
+  const dropped = storage.db
+    .prepare(
+      `DELETE FROM sync_relay_personal_agent_reach WHERE workspace_id = ? AND agent_id IN
+       (SELECT agent_id FROM sync_relay_personal_agents WHERE owner_user_id = ?)`,
+    )
+    .run(workspaceId, ownerUserId);
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_personal_agent_authorizations
+       WHERE owner_user_id = ? AND status = 'allowed' AND EXISTS
+       (SELECT 1 FROM json_each(reach_json) WHERE json_extract(value, '$.workspaceId') = ?)`,
+    )
+    .run(ownerUserId, workspaceId);
+  if (dropped.changes > 0) bumpRoster(storage, ownerUserId);
+}
+
 export function personalRosterRevision(storage: StorageContext, ownerUserId: string): number {
   const row = storage.db
     .prepare("SELECT revision FROM sync_relay_personal_agent_rosters WHERE owner_user_id = ?")
