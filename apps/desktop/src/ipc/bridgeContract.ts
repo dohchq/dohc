@@ -4756,12 +4756,21 @@ export const CreateRelaySharePayload = z.object({
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
+export const InvitationEmail = z.enum(["sent", "unavailable", "limit", "failed"]);
+export const InvitationEmailLimit = z.object({
+  limit: z.number().int().positive(),
+  windowHours: z.number().int().positive(),
+  sent: z.number().int().nonnegative(),
+});
+
 export const CreateRelayShareResult = z.object({
   shareId: OPAQUE_ID,
   grantId: OPAQUE_ID,
   browserInvitationUrl: z.string().url().max(4096).optional(),
   shareCode: z.string().min(1).max(4096),
   recipientEmail: EMAIL_STRING,
+  invitationEmail: InvitationEmail,
+  invitationEmailLimit: InvitationEmailLimit.optional(),
 });
 export type CreateRelayShareResult = z.infer<typeof CreateRelayShareResult>;
 

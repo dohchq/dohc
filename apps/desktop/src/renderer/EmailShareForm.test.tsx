@@ -24,6 +24,7 @@ beforeEach(() => {
     grantId: "grant-1",
     shareCode: SHARE_CODE,
     recipientEmail: "friend@dohc.test",
+    invitationEmail: "unavailable",
   });
   bridgeMock.automationShareImpact.mockResolvedValue({ stops: [] });
 });
@@ -199,6 +200,39 @@ describe("EmailShareForm", () => {
     await user.click(copy);
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(SHARE_CODE));
     expect(await screen.findByRole("button", { name: "Invitation copied" })).toBe(copy);
+  });
+
+  it.each([
+    [{ invitationEmail: "sent" }, "Invited friend@dohc.test. dohc emailed them the invitation."],
+    [
+      { invitationEmail: "failed" },
+      "Invited friend@dohc.test. The email could not be sent. Copy the invitation and send it to them.",
+    ],
+    [
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      "Invited friend@dohc.test. No email was sent: this account sent 50 of 50 invitation emails in the last 24 hours. Copy the invitation and send it to them.",
+    ],
+  ])("says whether the invitation was emailed: %j", async (emailed, words) => {
+    bridgeMock.createRelayShare.mockResolvedValue({
+      shareId: "share-1",
+      grantId: "grant-1",
+      shareCode: SHARE_CODE,
+      recipientEmail: "friend@dohc.test",
+      ...emailed,
+    });
+    const user = userEvent.setup();
+    render(
+      <EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/plan.md"] }} />,
+    );
+
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+
+    expect((await screen.findByText(/^Invited/)).textContent).toBe(words);
+    expect(screen.getByTestId("share-invitation-copy")).toBeTruthy();
   });
 
   it("invites a second person at the access chosen for the first", async () => {

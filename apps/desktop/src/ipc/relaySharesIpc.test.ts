@@ -297,6 +297,38 @@ describe("sync before live hosting", () => {
     expect(shareSent(h)).toBe(true);
   });
 
+  it.each([
+    [{ invitationEmail: "sent" }, { invitationEmail: "sent" }],
+    [{ invitationEmail: "failed" }, { invitationEmail: "failed" }],
+    [
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+    ],
+    [{ invitationEmail: "limit" }, { invitationEmail: "failed" }],
+    [{}, { invitationEmail: "unavailable" }],
+    [{ invitationEmail: "queued" }, { invitationEmail: "unavailable" }],
+  ])("says what the relay did about the invitation email: %j", async (answered, expected) => {
+    const h = harness();
+    h.request.mockResolvedValue({ shareId: "share", grantId: "grant", ...answered });
+    const created = await h.invoke(relayShareOperations.createRelayShare.channel, {
+      ...editShare,
+      access: "view",
+    });
+    expect(created).toEqual({
+      shareId: "share",
+      grantId: "grant",
+      shareCode: expect.any(String),
+      recipientEmail: editShare.recipientEmail,
+      ...expected,
+    });
+  });
+
   it("sends the share at 10 s when sync takes longer", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {

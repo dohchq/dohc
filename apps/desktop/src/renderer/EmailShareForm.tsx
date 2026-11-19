@@ -38,6 +38,20 @@ export function accessOptions(
   ];
 }
 
+const SEND_IT_YOURSELF = "Copy the invitation and send it to them.";
+
+export function invitationEmailNote(
+  result: Pick<CreateRelayShareResult, "invitationEmail" | "invitationEmailLimit">,
+): string {
+  const limit = result.invitationEmailLimit;
+  if (result.invitationEmail === "sent") return "dohc emailed them the invitation.";
+  if (result.invitationEmail === "failed")
+    return `The email could not be sent. ${SEND_IT_YOURSELF}`;
+  if (result.invitationEmail === "limit" && limit)
+    return `No email was sent: this account sent ${limit.sent} of ${limit.limit} invitation emails in the last ${limit.windowHours} hours. ${SEND_IT_YOURSELF}`;
+  return SEND_IT_YOURSELF;
+}
+
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
@@ -209,8 +223,8 @@ export function EmailShareForm(props: {
         <p role="status" className="m-0 min-w-48 flex-1 text-[12px] leading-4 text-muted">
           {invited ? (
             <>
-              Invited <span className="break-all text-ink">{invited.result.recipientEmail}</span>.
-              Copy the invitation and send it to them.
+              Invited <span className="break-all text-ink">{invited.result.recipientEmail}</span>.{" "}
+              {invitationEmailNote(invited.result)}
             </>
           ) : null}
         </p>

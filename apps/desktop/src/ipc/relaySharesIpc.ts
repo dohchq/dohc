@@ -22,6 +22,8 @@ import {
   type StopOwnerLiveDocumentResult,
   type ResumeOwnerLiveDocumentResult,
   CreateRelayShareResult,
+  InvitationEmail,
+  InvitationEmailLimit,
   GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareReceivedRow,
@@ -1302,6 +1304,8 @@ export function createRelaySharesIpcHandlers<
               shareId: string;
               grantId: string;
               browserInvitationUrl?: string;
+              invitationEmail?: unknown;
+              invitationEmailLimit?: unknown;
             }>(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`, {
               method: "POST",
               body: JSON.stringify({
@@ -1317,12 +1321,23 @@ export function createRelaySharesIpcHandlers<
           shareId: created.shareId,
           relayUrl: credentials.relayUrl!,
         });
+        const emailed = InvitationEmail.safeParse(created.invitationEmail);
+        const limit = InvitationEmailLimit.safeParse(created.invitationEmailLimit);
+        const invitationEmail = !emailed.success
+          ? "unavailable"
+          : emailed.data === "limit" && !limit.success
+            ? "failed"
+            : emailed.data;
         return CreateRelayShareResult.parse({
           shareId: created.shareId,
           grantId: created.grantId,
           browserInvitationUrl: created.browserInvitationUrl,
           shareCode,
           recipientEmail: input.recipientEmail,
+          invitationEmail,
+          ...(invitationEmail === "limit" && limit.success
+            ? { invitationEmailLimit: limit.data }
+            : {}),
         });
       },
       assertOriginalWorkspace,
