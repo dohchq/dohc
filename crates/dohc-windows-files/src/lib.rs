@@ -13,7 +13,7 @@ pub use dacl::{Dacl, create_new_with_dacl};
 #[cfg(windows)]
 pub use private_dir::{
     NotPrivate, NotPrivateReason, ensure_private_dir, ensure_private_dir_leaving,
-    ensure_private_staging_dir, not_private,
+    ensure_private_staging_dir, hold_staging_dir, not_private,
 };
 #[cfg(windows)]
 pub use staged::{

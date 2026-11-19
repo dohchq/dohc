@@ -187,6 +187,15 @@ impl System {
         }
     }
 
+    /// The real system, but failing every file ID query with `code`.
+    #[cfg(test)]
+    pub(crate) const fn identities_fail(code: u32) -> System {
+        System {
+            fail: Some((Call::Identity, code)),
+            ..System::REAL
+        }
+    }
+
     fn fails(&self, call: Call) -> io::Result<()> {
         match self.fail {
             Some((failing, code)) if failing == call => {
@@ -202,6 +211,7 @@ impl System {
 enum Call {
     Read,
     Change,
+    Identity,
 }
 
 /// [`ensure_private_dir`], returning too whether it checked everything in
@@ -277,7 +287,7 @@ fn make_private_dir(
         }
         None => None,
     };
-    let left_id = left.as_ref().and_then(file_id);
+    let left_id = left.as_ref().and_then(|left| file_id(left).ok());
     if !folder_private {
         let protected = PROTECTED_DACL_SECURITY_INFORMATION;
         match set_security(&folder, protected, private.dacl()?, system) {
@@ -385,7 +395,7 @@ impl Records {
 
     /// Where `folder`'s record is.
     fn of(&self, folder: &File) -> Option<PathBuf> {
-        Some(self.held.path.join(file_id(folder)?))
+        Some(self.held.path.join(file_id(folder).ok()?))
     }
 
     /// Remove the oldest records past [`MOST_RECORDS`].
@@ -409,7 +419,7 @@ impl Records {
 
 /// The item's volume and file ID, as `{volume}-{file id}` in lowercase
 /// hex: the same for every name of one file, and for no other file.
-pub(crate) fn file_id(item: &File) -> Option<String> {
+pub(crate) fn file_id(item: &File) -> io::Result<String> {
     let mut id = FILE_ID_INFO::default();
     // SAFETY: The handle is open and `id` is writable for this synchronous
     // call, which retains neither.
@@ -423,7 +433,7 @@ pub(crate) fn file_id(item: &File) -> Option<String> {
         )
     };
     if read == 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
     let file_id: String = id
         .FileId
@@ -431,7 +441,17 @@ pub(crate) fn file_id(item: &File) -> Option<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    Some(format!("{:016x}-{file_id}", id.VolumeSerialNumber))
+    Ok(format!("{:016x}-{file_id}", id.VolumeSerialNumber))
+}
+
+/// [`file_id`] as `system` answers it: `None` on a volume that keeps no
+/// file IDs.
+pub(crate) fn identity(item: &File, system: &System) -> io::Result<Option<String>> {
+    match system.fails(Call::Identity).and_then(|()| file_id(item)) {
+        Ok(id) => Ok(Some(id)),
+        Err(err) if unsupported(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Give the folder at `path`, named `shown`, the private DACL on itself
@@ -488,6 +508,17 @@ pub fn ensure_private_staging_dir(path: &Path) -> io::Result<()> {
     match take_private_folder(path, &shown, private, &System::REAL) {
         Err(err) if unsupported(&err) => Ok(()),
         taken => taken.map(drop),
+    }
+}
+
+/// Hold the staging folder at `path` where it is: until the handle closes,
+/// no one can rename or remove it, or a folder above it. `None` when nothing
+/// is there.
+pub fn hold_staging_dir(path: &Path) -> io::Result<Option<File>> {
+    let shown = path.file_name().unwrap_or_default().to_string_lossy();
+    match open_folder(path, &shown, HOLD) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        held => held.map(Some),
     }
 }
 
@@ -853,7 +884,7 @@ fn check_items(
             }
             item => item?,
         };
-        if left_id.is_some() && file_id(&item).as_deref() == left_id {
+        if left_id.is_some() && file_id(&item).ok().as_deref() == left_id {
             continue;
         }
         let security = Security::read(&item, system)?;

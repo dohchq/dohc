@@ -1191,7 +1191,7 @@ mod tests {
     use super::*;
 
     /// Each save replaces what was saved for the file, a reason or a DACL,
-    /// and an unknown reason is refused.
+    /// and the folder it is in, and an unknown reason is refused.
     #[test]
     fn a_staged_dacl_holds_the_last_save() {
         let dir = dohc_test_scratch::ScratchDir::new_named("staged-dacls").unwrap();
@@ -1199,32 +1199,42 @@ mod tests {
         let saved = |dacl: &str| StagedDacl::Saved(dacl.to_owned());
         let left = |reason: &str| StagedDacl::Left(reason.to_owned());
         store
-            .save_staged_dacl("a", &saved("D:AI(A;ID;FR;;;BU)"), 1)
+            .save_staged_dacl("a", "x", &saved("D:AI(A;ID;FR;;;BU)"), 1)
             .unwrap();
         store
-            .save_staged_dacl("a", &saved("D:P(A;;FA;;;SY)"), 2)
+            .save_staged_dacl("a", "y", &saved("D:P(A;;FA;;;SY)"), 2)
             .unwrap();
         assert_eq!(
             store.staged_dacl("a").unwrap(),
             Some(saved("D:P(A;;FA;;;SY)"))
         );
-        store.save_staged_dacl("a", &left("hard-links"), 3).unwrap();
+        store
+            .save_staged_dacl("a", "x", &left("hard-links"), 3)
+            .unwrap();
         assert_eq!(store.staged_dacl("a").unwrap(), Some(left("hard-links")));
 
-        store.save_staged_dacl("b", &left("hard-links"), 1).unwrap();
+        store
+            .save_staged_dacl("b", "x", &left("hard-links"), 1)
+            .unwrap();
         assert_eq!(store.staged_dacl("b").unwrap(), Some(left("hard-links")));
         store
-            .save_staged_dacl("b", &left("other-owner"), 2)
+            .save_staged_dacl("b", "x", &left("other-owner"), 2)
             .unwrap();
         assert_eq!(store.staged_dacl("b").unwrap(), Some(left("other-owner")));
-        store.save_staged_dacl("b", &saved("D:"), 3).unwrap();
+        store.save_staged_dacl("b", "x", &saved("D:"), 3).unwrap();
         assert_eq!(store.staged_dacl("b").unwrap(), Some(saved("D:")));
 
-        assert!(store.save_staged_dacl("c", &left("unknown"), 1).is_err());
-        assert_eq!(store.staged_dacl_identities().unwrap(), ["a", "b"]);
+        assert!(
+            store
+                .save_staged_dacl("c", "x", &left("unknown"), 1)
+                .is_err()
+        );
+        store.save_staged_dacl("c", "y", &saved("D:"), 1).unwrap();
+        assert_eq!(store.staged_dacls_in("x").unwrap(), ["a", "b"]);
+        assert_eq!(store.staged_dacls_in("y").unwrap(), ["c"]);
         store.forget_staged_dacls(&["a".to_owned()]).unwrap();
         assert_eq!(store.staged_dacl("a").unwrap(), None);
-        assert_eq!(store.staged_dacl_identities().unwrap(), ["b"]);
+        assert_eq!(store.staged_dacls_in("x").unwrap(), ["b"]);
     }
 
     /// A write that finds its target occupied runs this lookup, so it must

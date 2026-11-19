@@ -25,8 +25,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::private_dir::{
-    Local, PrivateDescriptor, Security, System, current_user, file_id, keeps_dacl, local_string,
-    unsupported,
+    Local, PrivateDescriptor, Security, System, current_user, file_id, identity, keeps_dacl,
+    local_string, unsupported,
 };
 
 /// Why dohc leaves a staged file's DACL as it is.
@@ -98,7 +98,8 @@ fn open_file(path: &Path, access: u32) -> io::Result<Option<File>> {
 /// leaves it as it is. `None` when nothing, a link or a folder is there, and
 /// on a volume that keeps no DACL or file IDs, or a network share, where dohc
 /// keeps nothing private. A file whose DACL Windows can't read on a volume
-/// that keeps one is [`io::ErrorKind::Unsupported`].
+/// that keeps one is [`io::ErrorKind::Unsupported`], and any other failure
+/// to read the file's ID is an error.
 pub fn read_staged(path: &Path) -> io::Result<Option<StagedFile>> {
     read_staged_in(path, &System::REAL)
 }
@@ -110,7 +111,7 @@ fn read_staged_in(path: &Path, system: &System) -> io::Result<Option<StagedFile>
     if !keeps_dacl(&file)? {
         return Ok(None);
     }
-    let Some(identity) = file_id(&file) else {
+    let Some(identity) = identity(&file, system)? else {
         return Ok(None);
     };
     let security = match Security::read(&file, system) {
@@ -179,7 +180,8 @@ fn make_staged_private_in(path: &Path, identity: &str, system: &System) -> io::R
 /// Give the file at `path`, when it is the file `identity` names, the DACL
 /// `dacl` in SDDL as it was, its protection included. Windows passes
 /// nothing down to it from its folder. `false` when nothing or another file
-/// is there.
+/// is there. A DACL Windows can no longer read, such as one naming a domain
+/// group this computer can't find, is [`io::ErrorKind::InvalidData`].
 pub fn restore_dacl(path: &Path, identity: &str, dacl: &str) -> io::Result<bool> {
     let Some(file) = open_identified(path, identity)? else {
         return Ok(false);
@@ -195,13 +197,13 @@ fn open_identified(path: &Path, identity: &str) -> io::Result<Option<File>> {
     let Some(file) = open_file(path, access)? else {
         return Ok(None);
     };
-    Ok((file_id(&file).as_deref() == Some(identity)).then_some(file))
+    Ok((file_id(&file)? == identity).then_some(file))
 }
 
 fn set_dacl(file: &File, dacl: &str) -> io::Result<()> {
     if dacl.contains('\0') {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+            io::ErrorKind::InvalidData,
             "a DACL contains a null character",
         ));
     }
@@ -219,7 +221,10 @@ fn set_dacl(file: &File, dacl: &str) -> io::Result<()> {
         )
     };
     if converted == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            io::Error::last_os_error(),
+        ));
     }
     let descriptor = Local(descriptor);
     let (mut control, mut revision) = (0, 0);
@@ -537,6 +542,60 @@ mod tests {
         let unsupported = System::reads_fail(windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED);
         let refused = read_staged_in(&file, &unsupported).expect_err("unsupported");
         assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+    }
+
+    /// Only a volume that keeps no file IDs makes a file nothing. Any other
+    /// failure to read its ID is an error, so a sweep never takes a file
+    /// that may have a saved DACL for nothing.
+    #[test]
+    fn a_file_whose_id_cannot_be_read_is_not_nothing() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let file = shared_file(&scratch);
+        let no_ids = System::identities_fail(windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED);
+        assert_eq!(read_staged_in(&file, &no_ids).expect("no IDs"), None);
+        let failing = System::identities_fail(windows_sys::Win32::Foundation::ERROR_IO_DEVICE);
+        read_staged_in(&file, &failing).expect_err("failing");
+    }
+
+    /// A saved DACL Windows can no longer read is told apart from other
+    /// failures, and the file keeps its DACL.
+    #[test]
+    fn a_dacl_windows_cannot_read_is_invalid_data() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let file = shared_file(&scratch);
+        let (identity, dacl) = own(&file);
+        for unreadable in ["D:(A;;FA;;;XX)", "D:(A;;FA;;;S-1-5-21-1-2)\0"] {
+            let refused = restore_dacl(&file, &identity, unreadable).expect_err(unreadable);
+            assert_eq!(refused.kind(), io::ErrorKind::InvalidData, "{refused}");
+        }
+        assert_eq!(staged(&file).dacl, dacl);
+    }
+
+    /// While dohc holds a staging folder, neither it nor a folder above it
+    /// can be renamed, and the files in it still can.
+    #[test]
+    fn a_held_staging_folder_stays_where_it_is() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let file = shared_file(&scratch);
+        let workspace = file.parent().expect("workspace").to_path_buf();
+        let folder = workspace.join(".dohc-write-displaced");
+        assert!(crate::hold_staging_dir(&folder).expect("missing").is_none());
+        std::fs::create_dir(&folder).expect("folder");
+        let staged = folder.join("notes.md");
+        std::fs::rename(&file, &staged).expect("stage");
+
+        let held = crate::hold_staging_dir(&folder)
+            .expect("hold")
+            .expect("held");
+        std::fs::rename(&folder, workspace.join("away")).expect_err("folder");
+        std::fs::rename(&workspace, scratch.join("away")).expect_err("above");
+        std::fs::rename(&staged, &file).expect("leave");
+        drop(held);
+        std::fs::rename(&folder, workspace.join("away")).expect("released");
+
+        let not_a_folder = scratch.join("file");
+        std::fs::write(&not_a_folder, b"file").expect("file");
+        crate::hold_staging_dir(&not_a_folder).expect_err("file");
     }
 
     #[test]

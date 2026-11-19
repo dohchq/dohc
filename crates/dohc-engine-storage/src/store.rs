@@ -1337,11 +1337,13 @@ impl EngineStore {
             .transpose()
     }
 
-    /// Save what dohc keeps for a staged file in place of what was saved,
-    /// in a FULL commit, which precedes any change to the file's DACL.
+    /// Save what dohc keeps for a file staged in `directory` in place of
+    /// what was saved, in a FULL commit, which precedes any change to the
+    /// file's DACL.
     pub fn save_staged_dacl(
         &self,
         file_identity: &str,
+        directory: &str,
         saved: &StagedDacl,
         now_ms: i64,
     ) -> Result<(), StorageError> {
@@ -1352,8 +1354,8 @@ impl EngineStore {
         };
         materialize::with_full_commit(&self.conn, |tx| {
             tx.execute(
-                "INSERT INTO materialization_staged_dacls(file_identity,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4) ON CONFLICT(file_identity) DO UPDATE SET                  dacl=excluded.dacl, left_reason=excluded.left_reason",
-                rusqlite::params![file_identity, dacl, reason, now_ms],
+                "INSERT INTO materialization_staged_dacls(file_identity,directory,dacl,left_reason,created_at_ms)                  VALUES(?1,?2,?3,?4,?5) ON CONFLICT(file_identity) DO UPDATE SET                  directory=excluded.directory, dacl=excluded.dacl, left_reason=excluded.left_reason",
+                rusqlite::params![file_identity, directory, dacl, reason, now_ms],
             )
             .map_err(StorageError::persist)?;
             Ok(())
@@ -1379,14 +1381,16 @@ impl EngineStore {
         })
     }
 
-    pub fn staged_dacl_identities(&self) -> Result<Vec<String>, StorageError> {
+    /// The files dohc saved something for while they were staged in
+    /// `directory`.
+    pub fn staged_dacls_in(&self, directory: &str) -> Result<Vec<String>, StorageError> {
         let mut q = self
             .conn
             .prepare(
-                "SELECT file_identity FROM materialization_staged_dacls ORDER BY file_identity",
+                "SELECT file_identity FROM materialization_staged_dacls WHERE directory=?1 ORDER BY file_identity",
             )
             .map_err(StorageError::corrupt)?;
-        q.query_map([], |r| r.get(0))
+        q.query_map([directory], |r| r.get(0))
             .map_err(StorageError::corrupt)?
             .collect::<Result<_, _>>()
             .map_err(StorageError::corrupt)

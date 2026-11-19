@@ -159,9 +159,16 @@ mod staged_dacl {
     pub(super) fn keep_all_private(
         _: &EngineStore,
         _: &[PathBuf],
-        _: bool,
         _: i64,
     ) -> Result<(), MaterializeError> {
+        Ok(())
+    }
+
+    pub(super) fn saved_in(_: &EngineStore, _: &Path) -> Result<bool, MaterializeError> {
+        Ok(false)
+    }
+
+    pub(super) fn forget_folder(_: &EngineStore, _: &Path) -> Result<(), MaterializeError> {
         Ok(())
     }
 }
@@ -1154,7 +1161,7 @@ fn materialize_one_ordinary_with(
             let root =
                 std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
             let dir = job_staging_dir(store, &root, &job.job_id, false)?;
-            staged_dacl::keep_all_private(store, &[dir], false, options.now_ms)
+            staged_dacl::keep_all_private(store, &[dir], options.now_ms)
         })();
         if let Err(error) = kept {
             eprintln!("staged file privacy: {error}");
@@ -2407,7 +2414,8 @@ fn all_staging_dirs(
 
 /// Called on the writer thread, so cleanup cannot race a pending job's rename.
 /// Only empty sibling staging directories can be removed; retained and kept
-/// sources keep their directory and its location rows reachable.
+/// sources keep their directory and its location rows reachable. A missing
+/// one whose files have saved DACLs keeps its rows, since it may come back.
 pub fn cleanup_staging_directory(
     store: &EngineStore,
     root: &Path,
@@ -2445,7 +2453,11 @@ fn cleanup_staging_directory_with_sync(
     let relative = relative.to_string_lossy().replace('\\', "/");
     match std::fs::remove_dir(&directory) {
         Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            if staged_dacl::saved_in(store, &directory)? {
+                return Ok(());
+            }
+        }
         Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => return Ok(()),
         Err(e) => return Err(MaterializeError::io(&directory, &e)),
     }
@@ -2453,6 +2465,7 @@ fn cleanup_staging_directory_with_sync(
     if let Some(parent) = directory.parent() {
         sync(parent)?;
     }
+    staged_dacl::forget_folder(store, &directory)?;
     store.forget_staging_directory(&relative)?;
     Ok(())
 }
@@ -3685,7 +3698,7 @@ pub fn recover_displacements(
     // One verdict for the entire sweep. A later healthy directory cannot clear
     // an earlier failure; a subsequent complete healthy sweep can.
     set_recovery_unavailable(&canonical_root, unavailable);
-    staged_dacl::keep_all_private(store, &dirs, !unavailable, options.now_ms)
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 fn recover_displacements_in(
@@ -3858,8 +3871,8 @@ pub fn recover_path_displacements(
             conflict_if_pending(store, entry.job_id(), options.now_ms)?;
         }
     }
-    let (dirs, unavailable) = all_staging_dirs(store, &canonical_root)?;
-    staged_dacl::keep_all_private(store, &dirs, !unavailable, options.now_ms)
+    let (dirs, _) = all_staging_dirs(store, &canonical_root)?;
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 /// What [`save_kept_displacement`] did with a kept file.

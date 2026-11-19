@@ -4885,6 +4885,7 @@ ALTER TABLE owner_live_stops ADD COLUMN copy_digest TEXT REFERENCES binary_blobs
 
 const V2_MATERIALIZATION_STAGED_DACLS_DDL: &str = "CREATE TABLE materialization_staged_dacls (
     file_identity TEXT PRIMARY KEY,
+    directory TEXT NOT NULL,
     dacl TEXT,
     left_reason TEXT CHECK (left_reason IN ('hard-links', 'other-owner')),
     created_at_ms INTEGER NOT NULL,
@@ -5842,7 +5843,7 @@ mod tests {
             ),
             (
                 "v2-materialization-staged-dacls",
-                "b82b1268b5c72b32fcd47bea78a8b970dbdb44764b0eae6e0b73f9793d6ca1e9",
+                "0886c99a4cf9618f67b742ed28dc9b04d18fdc2a8367a833a307da28d91dfa15",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

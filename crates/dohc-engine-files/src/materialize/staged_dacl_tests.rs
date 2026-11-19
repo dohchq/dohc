@@ -182,15 +182,16 @@ fn save(store: &EngineStore, root: &Path) -> PathBuf {
 fn a_kept_version_is_private_until_its_copy_gets_its_dacl_back() {
     let scratch = ScratchDir::new_named("staged-dacl-kept").unwrap();
     let (store, root, dacl, staged) = kept_outside_version(&scratch, false);
+    let id = identity(&staged);
     assert!(is_private(&staged));
     assert_eq!(
-        store.staged_dacl(&identity(&staged)).unwrap(),
+        store.staged_dacl(&id).unwrap(),
         Some(StagedDacl::Saved(dacl.clone()))
     );
     let copy = save(&store, &root);
     assert_eq!(std::fs::read(&copy).unwrap(), b"outside");
     assert_eq!(own_dacl(&copy), dacl);
-    assert!(store.staged_dacl_identities().unwrap().is_empty());
+    assert_eq!(store.staged_dacl(&id).unwrap(), None);
 }
 
 /// A drive the workspace's staging folder is not on stages beside the
@@ -246,10 +247,11 @@ fn a_known_version_that_cannot_be_deleted_is_private() {
         .join(staged_name("settle", 0));
     assert_eq!(std::fs::read(&staged).unwrap(), b"before");
     assert!(is_private(&staged));
+    let id = identity(&staged);
     let back = root.join("back.md");
     assert!(return_displaced(&store, &back, &staged, &options(2, &StdReplacer)).unwrap());
     assert_eq!(own_dacl(&back), dacl);
-    assert!(store.staged_dacl_identities().unwrap().is_empty());
+    assert_eq!(store.staged_dacl(&id).unwrap(), None);
 }
 
 /// A file an earlier version staged, which no row names, is made private by
@@ -350,11 +352,12 @@ fn every_crash_state_keeps_the_saved_dacl() {
 fn what_was_saved_is_forgotten_before_a_file_leaves() {
     struct Peek {
         store: Mutex<EngineStore>,
-        saved: Mutex<Option<Vec<String>>>,
+        id: String,
+        saved: Mutex<Option<Option<StagedDacl>>>,
     }
     impl AtomicReplacer for Peek {
         fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
-            let saved = self.store.lock().unwrap().staged_dacl_identities().unwrap();
+            let saved = self.store.lock().unwrap().staged_dacl(&self.id).unwrap();
             *self.saved.lock().unwrap() = Some(saved);
             StdReplacer.place(incoming, target)
         }
@@ -363,11 +366,12 @@ fn what_was_saved_is_forgotten_before_a_file_leaves() {
     let (store, root, dacl, staged) = kept_outside_version(&scratch, false);
     let peek = Peek {
         store: Mutex::new(EngineStore::open(&root.join("engine.db"), 0).unwrap()),
+        id: identity(&staged),
         saved: Mutex::new(None),
     };
     let back = root.join("back.md");
     assert!(return_displaced(&store, &back, &staged, &options(2, &peek)).unwrap());
-    assert_eq!(peek.saved.lock().unwrap().take(), Some(Vec::new()));
+    assert_eq!(peek.saved.lock().unwrap().take(), Some(None));
     assert_eq!(own_dacl(&back), dacl);
 
     let scratch = ScratchDir::new_named("staged-dacl-forget-link").unwrap();
@@ -427,7 +431,7 @@ fn a_file_dohc_could_not_make_private_still_leaves() {
     let no_change = "D:P(A;;0x1301ff;;;OW)";
     restore_dacl(&staged, &id, no_change).unwrap();
     store
-        .save_staged_dacl(&id, &StagedDacl::Saved(no_change.into()), 3)
+        .save_staged_dacl(&id, "staging", &StagedDacl::Saved(no_change.into()), 3)
         .unwrap();
     let back = root.join("back.md");
     assert!(return_displaced(&store, &back, &staged, &options(4, &StdReplacer)).unwrap());
@@ -436,7 +440,8 @@ fn a_file_dohc_could_not_make_private_still_leaves() {
 }
 
 /// A folder beside the workspace that dohc stages into and finds missing
-/// may come back, so what was saved for the files in it is kept.
+/// may come back, so dohc keeps looking for it and keeps what was saved for
+/// the files in it, however many sweeps miss it.
 #[test]
 fn a_missing_staging_folder_keeps_what_was_saved_for_its_files() {
     let scratch = ScratchDir::new_named("staged-dacl-missing").unwrap();
@@ -445,14 +450,84 @@ fn a_missing_staging_folder_keeps_what_was_saved_for_its_files() {
     let sibling = staged.parent().unwrap().to_path_buf();
     let away = root.join("away");
     std::fs::rename(&sibling, &away).unwrap();
-    staged_dacl::keep_all_private(&store, std::slice::from_ref(&sibling), true, 3).unwrap();
+    for now in [3, 4] {
+        recover_displacements(&store, &root, None, &options(now, &StdReplacer)).unwrap();
+    }
+    std::fs::rename(&away, &sibling).unwrap();
+    recover_displacements(&store, &root, None, &options(5, &StdReplacer)).unwrap();
+    assert!(is_private(&staged));
     assert_eq!(
         store.staged_dacl(&id).unwrap(),
+        Some(StagedDacl::Saved(dacl.clone()))
+    );
+    assert_eq!(own_dacl(&save(&store, &root)), dacl);
+}
+
+/// No one can rename the staging folder while a file leaves it, so the file
+/// that gets its DACL back is the one that moves.
+#[test]
+fn the_staging_folder_stays_put_while_a_file_leaves() {
+    struct Moving(Mutex<Option<bool>>);
+    impl AtomicReplacer for Moving {
+        fn place(&self, incoming: &Path, target: &Path) -> std::io::Result<Placement> {
+            let dir = incoming.parent().unwrap();
+            let away = dir.with_file_name("away");
+            let moved = std::fs::rename(dir, &away).is_ok();
+            if moved {
+                std::fs::rename(&away, dir)?;
+            }
+            *self.0.lock().unwrap() = Some(moved);
+            StdReplacer.place(incoming, target)
+        }
+    }
+    let scratch = ScratchDir::new_named("staged-dacl-hold").unwrap();
+    let (store, root, dacl, staged) = kept_outside_version(&scratch, false);
+    let moving = Moving(Mutex::new(None));
+    let back = root.join("back.md");
+    assert!(return_displaced(&store, &back, &staged, &options(2, &moving)).unwrap());
+    assert_eq!(moving.0.lock().unwrap().take(), Some(false));
+    assert_eq!(own_dacl(&back), dacl);
+}
+
+/// A saved DACL Windows can no longer read, such as one naming a group of a
+/// domain this computer has left, is forgotten, and the file leaves with
+/// the private DACL rather than staying staged for good.
+#[test]
+fn a_file_whose_saved_dacl_cannot_be_read_leaves_private() {
+    let scratch = ScratchDir::new_named("staged-dacl-unreadable").unwrap();
+    let (store, root, _, staged) = kept_outside_version(&scratch, false);
+    let id = identity(&staged);
+    store
+        .save_staged_dacl(
+            &id,
+            "staging",
+            &StagedDacl::Saved("D:(A;;FA;;;XX)".into()),
+            3,
+        )
+        .unwrap();
+    let back = root.join("back.md");
+    assert!(return_displaced(&store, &back, &staged, &options(4, &StdReplacer)).unwrap());
+    assert_eq!(std::fs::read(&back).unwrap(), b"outside");
+    assert!(is_private(&back));
+    assert_eq!(store.staged_dacl(&id).unwrap(), None);
+}
+
+/// A staged file with nothing saved that fails to leave is made private.
+#[test]
+fn a_file_with_nothing_saved_that_stays_is_private() {
+    let scratch = ScratchDir::new_named("staged-dacl-stays").unwrap();
+    let (root, _) = shared_workspace(&scratch);
+    let store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let staging = staging_dir(store.database_path(), &root, true).unwrap();
+    let staged = staging.join(staged_name("gone", 0));
+    std::fs::write(&staged, b"staged").unwrap();
+    let dacl = own_dacl(&staged);
+    assert!(!staged_dacl::leave(&store, &staged, 1, || Ok(false)).unwrap());
+    assert!(is_private(&staged));
+    assert_eq!(
+        store.staged_dacl(&identity(&staged)).unwrap(),
         Some(StagedDacl::Saved(dacl))
     );
-    std::fs::rename(&away, &sibling).unwrap();
-    staged_dacl::keep_all_private(&store, &[sibling], true, 4).unwrap();
-    assert!(store.staged_dacl(&id).unwrap().is_some());
 }
 
 /// Back in staging after leaving, before what was saved was forgotten: the
