@@ -48,11 +48,10 @@ final class ConversationDecisionTests: XCTestCase {
     _ = field(app, "Message #planning")
     let choice = app.buttons["Taberna da Rua das Flores"]
     XCTAssertTrue(choice.waitForExistence(timeout: 15), "The poll should offer its choices")
-    // Nova's answered question already says Answered, so the poll's Answered adds to the count.
     let answered = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Answered"))
-    let before = answered.count
+    let answeredBeforeTheChoice = answered.count
     choice.tap()
-    let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in answered.count > before }, object: nil)
+    let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in answered.count > answeredBeforeTheChoice }, object: nil)
     XCTAssertEqual(XCTWaiter().wait(for: [saved], timeout: 15), .completed, "The poll should say Answered once the outbox saves the choice")
     gone(labelled(app, "Answering"), "The choice should stop showing as on its way once the outbox saves it")
     XCTAssertTrue(choice.isSelected, "The saved choice should stay chosen")
