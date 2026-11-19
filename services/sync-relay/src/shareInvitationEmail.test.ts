@@ -242,6 +242,39 @@ it("answers failed at the deadline when the mail server never answers", async ()
   expect(answer).toEqual({ invitationEmail: "failed" });
 });
 
+it("starts no send, and counts nothing, when the inviter's address arrives after the deadline", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const storage = await testStorage();
+  const sendEmail = vi.fn(async () => undefined);
+  let answerLookup: (email: string) => void = () => undefined;
+  const email = createShareInvitationEmailer({
+    storage,
+    nowMs: () => 1_000_000,
+    sendEmail,
+    lookupVerifiedUserEmail: () =>
+      new Promise<string>((resolve) => {
+        answerLookup = resolve;
+      }),
+    relayPublicOrigin: RELAY_ORIGIN,
+    timeoutMs: 20,
+  });
+
+  const answer = await email({
+    inviterUserId: "owner",
+    recipientEmail: "friend@dohc.test",
+    shareId: "share-0",
+    subjectName: "Trip plan",
+    access: "edit",
+    browserInvitationUrl: null,
+  });
+  answerLookup("owner@dohc.test");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  expect(answer).toEqual({ invitationEmail: "failed" });
+  expect(sendEmail).not.toHaveBeenCalled();
+  expect(attempts(storage, "owner")).toBe(0);
+});
+
 it("sends to the address the invite holds", async () => {
   const { storage, sent, invite } = await fixture();
 
@@ -258,6 +291,9 @@ it.each([
   "Friend <friend@example.test>",
   "fri\u00adend@example.test",
   "friend\u200b@example.test",
+  "friend(x)@example.test",
+  "a(b)c@example.test",
+  "friend@example.test(x)",
 ])("sends nothing to an address that is not one plain mailbox: %s", async (recipientEmail) => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const { storage, sent, invite } = await fixture();

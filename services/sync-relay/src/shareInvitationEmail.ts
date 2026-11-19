@@ -7,7 +7,7 @@ export const SHARE_INVITATION_EMAIL_DAILY_LIMIT = 50;
 export const SHARE_INVITATION_EMAIL_WINDOW_HOURS = 24;
 export const SHARE_INVITATION_EMAIL_TIMEOUT_MS = 5_000;
 
-const ONE_MAILBOX = /^[^\s<>@,;:"\\\p{C}]+@[^\s<>@,;:"\\\p{C}]+$/u;
+const ONE_MAILBOX = /^[^\s<>()@,;:"\\\p{C}]+@[^\s<>()@,;:"\\\p{C}]+$/u;
 
 export type ShareInvitationEmailAnswer =
   | { invitationEmail: "sent" | "unavailable" | "failed" }
@@ -37,9 +37,11 @@ export function createShareInvitationEmailer(options: {
   return async (invitation) => {
     if (!sendEmail) return { invitationEmail: "unavailable" };
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    try {
+    let expired = false;
+    const email = async (): Promise<ShareInvitationEmailAnswer> => {
       const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
       if (!inviterEmail) return { invitationEmail: "unavailable" };
+      if (expired) throw new Error("timed out");
       const admission = admitShareInvitationEmail(options.storage, {
         inviterUserId: invitation.inviterUserId,
         nowMs: options.nowMs(),
@@ -56,25 +58,30 @@ export function createShareInvitationEmailer(options: {
           },
         };
       if (!ONE_MAILBOX.test(invitation.recipientEmail)) throw new Error("not one mailbox");
-      const sending = (async () =>
-        sendEmail(
-          shareInvitationMessage({
-            recipientEmail: invitation.recipientEmail,
-            inviterEmail,
-            subjectName: invitation.subjectName,
-            access: invitation.access,
-            browserInvitationUrl: invitation.browserInvitationUrl,
-            shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
-          }),
-        ))();
-      sending.catch(() => undefined);
-      await Promise.race([
-        sending,
+      await sendEmail(
+        shareInvitationMessage({
+          recipientEmail: invitation.recipientEmail,
+          inviterEmail,
+          subjectName: invitation.subjectName,
+          access: invitation.access,
+          browserInvitationUrl: invitation.browserInvitationUrl,
+          shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
+        }),
+      );
+      return { invitationEmail: "sent" };
+    };
+    try {
+      const emailing = email();
+      emailing.catch(() => undefined);
+      return await Promise.race([
+        emailing,
         new Promise<never>((_, reject) => {
-          deadline = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+          deadline = setTimeout(() => {
+            expired = true;
+            reject(new Error("timed out"));
+          }, timeoutMs);
         }),
       ]);
-      return { invitationEmail: "sent" };
     } catch {
       console.error(`[sync-relay] share invitation email failed for share ${invitation.shareId}`);
       return { invitationEmail: "failed" };
