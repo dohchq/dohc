@@ -314,8 +314,12 @@ function admittedActor(
     const { check, fenceEpoch, connectionId } = actor.credential;
     const connection = readPersonalAuthority(storage, check, fenceEpoch, nowMs);
     if (!connection || connection.connectionId !== connectionId) return null;
-    // A personal agent reaches only its account's own workspaces, whole.
-    if (!personalReachIn(storage, connection, workspaceId)) return null;
+    // An agent reaches the whole of its account's own workspace. In one its
+    // person joined, it deletes only where its person still reads the thread.
+    const reach = personalReachIn(storage, connection, workspaceId);
+    if (!reach) return null;
+    if (!reach.owned && !memberReadsThread(storage, workspaceId, connection.ownerUserId, threadId))
+      return null;
     // An agent deletes only its own messages, whatever its person's role.
     return first.originId === personalAgentOrigin(connection.agentId)
       ? `personal-agent:${connection.agentId}`

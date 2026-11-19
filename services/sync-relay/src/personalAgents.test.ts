@@ -2378,6 +2378,41 @@ describe("a personal agent in a workspace its person joined", () => {
     ]);
   });
 
+  it("deletes its own message in a joined workspace at View, and not in a Group a rule hides from its person", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const agent = await signIn(f, { reach: [{ workspaceId: COMMUNITY, level: "comment" }] });
+    const posted = async (idempotencyKey: string) =>
+      (
+        (await ok(
+          await post(f, agent, {
+            workspaceId: COMMUNITY,
+            channelWireId: "wire-team",
+            idempotencyKey,
+          }),
+        )) as { message: { messageId: string; threadId: string } }
+      ).message;
+    const first = await posted("post-1");
+    const second = await posted("post-2");
+    const remove = (message: { messageId: string; threadId: string }) =>
+      tool(f, agent, "delete", {
+        workspaceId: COMMUNITY,
+        threadId: message.threadId,
+        messageId: message.messageId,
+      });
+
+    memberLevel(f, "view");
+    expect(await ok(await remove(first))).toMatchObject({ messageId: first.messageId });
+    await groupRule(f, "wire-team", "none");
+    await expectRefused(await remove(second));
+    expect(
+      logOf(f, COMMUNITY)
+        .filter((row) => row.opKind === "chat.message.delete")
+        .map((row) => payloadOf(row).messageId),
+    ).toEqual([first.messageId]);
+  });
+
   it("acts at the lower of its own level and its person's, in the workspace and in a Group", async () => {
     const f = await fixture();
     joinCommunity(f, { level: "view" });
