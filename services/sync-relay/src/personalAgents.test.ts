@@ -2709,6 +2709,60 @@ describe("a personal agent in a workspace its person joined", () => {
     expect((await setReach(f, agent, keeping("comment"))).status).toBe(400);
   });
 
+  it("reaches nothing in a workspace its person rejoins until the person chooses its reach again", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    const reach: Reach = [
+      { workspaceId: WS_A, level: "view" },
+      { workspaceId: COMMUNITY, level: "comment" },
+    ];
+    const agent = await signIn(f, { reach });
+    await removeFromCommunity(f);
+    expect((await roster(f)).agents[0]?.reach).toEqual(reach);
+
+    const back = await f.h(
+      request(OTHER, `/sync/${COMMUNITY}/members/${MEMBER_ID}/let-back-in`, jsonBody({})),
+    );
+    expect(back.status, await back.clone().text()).toBe(200);
+    expect((await roster(f)).workspaces).toContainEqual({
+      workspaceId: COMMUNITY,
+      name: "Community",
+      role: "member",
+    });
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    expect((await ok(await tool(f, agent, "workspaces", {}))).workspaces).toEqual([
+      expect.objectContaining({ workspaceId: WS_A }),
+    ]);
+    await expectCode(
+      await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }),
+      403,
+      "personal_agent_out_of_reach",
+    );
+
+    await ok(await setReach(f, agent, reach));
+    await ok(await tool(f, agent, "chat", { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+
+    // Leaving, then an invite back, starts over too.
+    const left = await f.h(request(OWNER, `/sync/${COMMUNITY}/members/leave`, jsonBody({})));
+    expect(left.status, await left.clone().text()).toBe(200);
+    expect((await roster(f)).agents[0]?.reach).toEqual(reach);
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: undefined,
+        email: "ada@dohc.test",
+        recipientUserId: OWNER,
+        newMemberId: () => "member-ada-again",
+        newGrantId: () => "grant-ada-again",
+        newShareId: () => "unused-share",
+        nowMs: 7,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+  });
+
   it("refuses a Collection write in a joined workspace, even at Edit", async () => {
     const f = await fixture();
     joinCommunity(f, { level: "edit" });

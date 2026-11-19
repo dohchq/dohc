@@ -522,6 +522,20 @@ function grantFor(input: {
   };
 }
 
+/**
+ * An account that becomes a member starts its personal agents with no reach
+ * here. Reach chosen under an earlier membership, which Settings lists as
+ * ended, waits for the person to choose again.
+ */
+function startMembership(storage: StorageContext, workspaceId: string, userId: string): void {
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_personal_agent_reach WHERE workspace_id = ? AND agent_id IN
+       (SELECT agent_id FROM sync_relay_personal_agents WHERE owner_user_id = ?)`,
+    )
+    .run(workspaceId, userId);
+}
+
 /** A notice tells the person they were added. It waits while the grant is still an email invite. */
 function queueAddedNotice(storage: StorageContext, grantId: string, nowMs: number): void {
   storage.db
@@ -599,7 +613,10 @@ export function inviteWorkspaceMember(
       }),
     );
     queueAddedNotice(storage, grantId, nowMs);
-    if (recipient !== null) forgetReplicaCurrentViewCaches(storage, input.workspaceId);
+    if (recipient !== null) {
+      startMembership(storage, input.workspaceId, recipient);
+      forgetReplicaCurrentViewCaches(storage, input.workspaceId);
+    }
     return { ok: true };
   });
 }
@@ -760,6 +777,7 @@ export function letWorkspaceMemberBackIn(
         `UPDATE ${MEMBERS} SET grant_id = ?, role = 'member', state = 'active', joined_at_ms = ?, ended_at_ms = NULL WHERE member_id = ?`,
       )
       .run(grantId, nowMs, entry.memberId);
+    startMembership(storage, input.workspaceId, entry.userId);
     insertShareGrant(
       storage,
       grantFor({
@@ -961,6 +979,7 @@ export function joinWorkspace(
        VALUES (?, ?, ?, ?, NULL, 'member', 'active', ?)`,
       )
       .run(input.newMemberId(), membership.workspaceId, grantId, input.userId, nowMs);
+    startMembership(storage, membership.workspaceId, input.userId);
     insertShareGrant(
       storage,
       grantFor({
@@ -1023,6 +1042,7 @@ export function claimWorkspaceInvitesInTransaction(
         `UPDATE ${MEMBERS} SET user_id = ?, email = NULL, state = 'active', joined_at_ms = ? WHERE member_id = ?`,
       )
       .run(userId, Math.trunc(nowMs), invite.memberId);
+    startMembership(storage, invite.workspaceId, userId);
     forgetReplicaCurrentViewCaches(storage, invite.workspaceId);
   }
 }
