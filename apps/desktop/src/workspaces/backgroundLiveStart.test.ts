@@ -136,6 +136,29 @@ describe("background live start", () => {
     }
   });
 
+  it("waits for capture to go quiet after a write recorded during a start", async () => {
+    let release!: () => void;
+    const order: string[] = [];
+    const { queue } = setup({
+      start: async (_workspaceId, path) => {
+        order.push(path);
+        await new Promise<void>((resolve) => (release = resolve));
+      },
+    });
+    queue.note("w", ["a.md", "b.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(order).toEqual(["a.md"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    queue.note("w", ["c.md"]);
+    await vi.advanceTimersByTimeAsync(500);
+    release();
+    // The gap ends at 7.5 s; capture is quiet only at 11 s.
+    await vi.advanceTimersByTimeAsync(QUIET - 500 - 1);
+    expect(order).toEqual(["a.md"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(order).toEqual(["a.md", "b.md"]);
+  });
+
   it("skips a note past the live size cap, and starts one at the cap", async () => {
     const sizes: Record<string, number> = {
       "big.md": WYSIWYG_MARKDOWN_THRESHOLD_BYTES + 1,

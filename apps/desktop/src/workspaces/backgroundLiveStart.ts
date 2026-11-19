@@ -56,6 +56,7 @@ export function createBackgroundLiveStart(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let deadline = 0;
   let notBefore = 0;
+  let quietUntil = 0;
   let inFlight: InFlight | undefined;
   let paused = false;
   let stopped = false;
@@ -67,6 +68,12 @@ export function createBackgroundLiveStart(
       runOne();
     }, delayMs);
     timer.unref?.();
+  }
+
+  /** Waits for capture to go quiet, capped by the burst's deadline, and for the gap after the last start. */
+  function scheduleNext(): void {
+    const now = Date.now();
+    schedule(Math.max(0, notBefore - now, Math.min(quietUntil, deadline) - now));
   }
 
   function remember(key: string): void {
@@ -115,7 +122,7 @@ export function createBackgroundLiveStart(
         inFlight = undefined;
         notBefore = Date.now() + gapMs;
         if (stopped || paused) return;
-        if (queued.size > 0) schedule(gapMs);
+        if (queued.size > 0) scheduleNext();
         else deadline = 0;
       });
     inFlight = { workspaceId: note.workspaceId, cancel, ended };
@@ -137,6 +144,7 @@ export function createBackgroundLiveStart(
 
   return {
     note(workspaceId, paths) {
+      quietUntil = Date.now() + quietMs;
       if (stopped || paused || !options.eligible(workspaceId)) return;
       const before = queued.size;
       for (const path of paths) {
@@ -150,8 +158,7 @@ export function createBackgroundLiveStart(
       if (before === 0 && deadline === 0) deadline = Date.now() + maxWaitMs;
       // A note in flight schedules the next one when it ends.
       if (inFlight) return;
-      const now = Date.now();
-      schedule(Math.max(0, notBefore - now, Math.min(quietMs, deadline - now)));
+      scheduleNext();
     },
     drop,
     async pause() {

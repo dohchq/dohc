@@ -1048,9 +1048,14 @@ describe("desktop engine restart coordination", () => {
   it("passes captured notes to the background live start, and pauses it while the engine restarts", async () => {
     const f = fixture();
     const order: string[] = [];
+    // Pause stays pending: a start in flight may wait for the engine the restart holds back.
+    const paused = deferred();
     const backgroundLiveStart = {
       note: vi.fn(),
-      pause: vi.fn(async () => void order.push("pause")),
+      pause: vi.fn(async () => {
+        order.push("pause");
+        await paused.promise;
+      }),
       resume: vi.fn(() => void order.push("resume")),
     };
     f.dependencies.backgroundLiveStart = backgroundLiveStart;
@@ -1080,6 +1085,7 @@ describe("desktop engine restart coordination", () => {
       replacement.emit("capture.momentRecorded", { ...moment, paths: ["b.md"] });
       expect(backgroundLiveStart.note).toHaveBeenLastCalledWith("workspace", ["b.md"]);
     } finally {
+      paused.resolve();
       await f.close();
     }
   });
