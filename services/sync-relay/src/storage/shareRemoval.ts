@@ -292,6 +292,36 @@ export function undoShareRemoval(
   });
 }
 
+function withholdFromUndo(
+  storage: StorageContext,
+  shareId: string,
+  grantIds: ReadonlySet<string>,
+): void {
+  const receipts = storage.db
+    .prepare(
+      `SELECT undo_id, grants_json, removed_grant_id FROM sync_relay_share_removals
+       WHERE share_id = ? AND undone = 0 AND voided = 0`,
+    )
+    .all(shareId) as { undo_id: string; grants_json: string; removed_grant_id: string | null }[];
+  for (const receipt of receipts) {
+    const grants = JSON.parse(receipt.grants_json) as { grantId: string; generation: number }[];
+    const kept = grants.filter((grant) => !grantIds.has(grant.grantId));
+    if (kept.length === grants.length) continue;
+    if (
+      kept.length === 0 ||
+      (receipt.removed_grant_id !== null && grantIds.has(receipt.removed_grant_id))
+    ) {
+      storage.db
+        .prepare("UPDATE sync_relay_share_removals SET voided = 1 WHERE undo_id = ?")
+        .run(receipt.undo_id);
+    } else {
+      storage.db
+        .prepare("UPDATE sync_relay_share_removals SET grants_json = ? WHERE undo_id = ?")
+        .run(JSON.stringify(kept), receipt.undo_id);
+    }
+  }
+}
+
 export function leaveShare(
   storage: StorageContext,
   input: { shareId: string; userId: string; nowMs: number; onlyEnded: boolean },
@@ -320,6 +350,15 @@ export function leaveShare(
     }
     const [removed] = listRemovedSharesForRecipient(storage, input.userId, input.shareId);
     if (!removed) return { ok: false };
+    if (!input.onlyEnded) {
+      const mine = storage.db
+        .prepare(
+          `SELECT grant_id FROM sync_relay_share_grants
+           WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?`,
+        )
+        .all(input.shareId, input.userId) as { grant_id: string }[];
+      withholdFromUndo(storage, input.shareId, new Set(mine.map((row) => row.grant_id)));
+    }
     storage.db
       .prepare(
         `INSERT INTO sync_relay_share_departures (share_id, recipient_user_id, left_at_ms)

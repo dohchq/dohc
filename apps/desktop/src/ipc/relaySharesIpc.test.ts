@@ -200,6 +200,7 @@ function harness() {
     saveOwnerLiveRecoveryCopy,
     listOwnerLiveRecoveryPackages,
     sharesChanged,
+    receivedSharesChanged: vi.fn(),
     sendRendererActivity,
     reconcileReceivedShares,
   };
@@ -238,6 +239,7 @@ function harness() {
     warm,
     invoke,
     sharesChanged,
+    receivedSharesChanged: vi.fn(),
     sendRendererActivity,
     reconcileReceivedShares,
     unenrolled: () => {

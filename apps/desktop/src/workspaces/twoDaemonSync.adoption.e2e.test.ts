@@ -866,6 +866,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
           listOwnerLiveRecoveryPackages: unexpected,
           sendRendererActivity: () => {},
           sharesChanged: unexpected,
+          receivedSharesChanged: unexpected,
           reconcileReceivedShares: unexpected,
         });
         registerOperations(

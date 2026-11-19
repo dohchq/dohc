@@ -169,6 +169,47 @@ it("clears an ended chat share, and refuses to leave one that is active", async 
   expect((await received("reader")).removed.map((row) => row.shareId)).not.toContain("chat");
 });
 
+it("keeps the owner's Undo from bringing back someone who chose to leave", async () => {
+  const { storage, leave } = await fixture();
+  const removed = storage.removeShareAccess({ shareId: "s", actorUserId: "owner", nowMs: 3000 });
+  if (!removed.ok || !removed.undo) throw Error("removal failed");
+
+  expect((await leave("reader")).status).toBe(200);
+  storage.undoShareRemoval({
+    shareId: "s",
+    actorUserId: "owner",
+    undoId: removed.undo.undoId,
+    nowMs: 4000,
+  });
+
+  expect(storage.getShareGrant("reader")?.status).toBe("revoked");
+  expect(storage.getShareGrant("other")?.status).toBe("active");
+  expect(storage.getShareGrant("link")?.status).toBe("active");
+});
+
+it("ends the owner's Undo of one person's removal once that person leaves", async () => {
+  const { storage, leave } = await fixture();
+  const removed = storage.removeShareAccess({
+    shareId: "s",
+    grantId: "reader",
+    actorUserId: "owner",
+    nowMs: 3000,
+  });
+  if (!removed.ok || !removed.undo) throw Error("removal failed");
+
+  expect((await leave("reader")).status).toBe(200);
+
+  expect(() =>
+    storage.undoShareRemoval({
+      shareId: "s",
+      actorUserId: "owner",
+      undoId: removed.undo!.undoId,
+      nowMs: 4000,
+    }),
+  ).toThrow("Access changed after removal");
+  expect(storage.getShareGrant("reader")?.status).toBe("revoked");
+});
+
 it("touches nobody else's access", async () => {
   const { storage, leave } = await fixture();
   const owner = storage.getShare("s");

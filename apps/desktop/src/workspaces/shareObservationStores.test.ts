@@ -405,6 +405,19 @@ describe("account received observations", () => {
     expect(h.onLive).not.toHaveBeenCalled();
   });
 
+  it("reads again at once after this account changed what it receives", async () => {
+    const h = harness();
+    const a = h.acquisition();
+    await a.refresh();
+    expect(await a.refresh()).toBe("paced");
+
+    a.changedHere();
+
+    expect(a.observation().freshness).toBe("stale");
+    expect(await a.refresh()).toBe("requested");
+    expect(h.list).toHaveBeenCalledTimes(2);
+  });
+
   it("checks the current generation again while reconciliation is waiting", async () => {
     const h = harness();
     let current: (() => boolean) | undefined;

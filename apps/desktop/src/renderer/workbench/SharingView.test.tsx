@@ -623,8 +623,35 @@ describe("the actions Settings offers on a share", () => {
     await waitFor(() =>
       expect(screen.getByTestId("sharing-received-row").dataset.status).toBe("active"),
     );
-    expect(callbacks.onUnmount).not.toHaveBeenCalled();
+    expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel");
     expect(callbacks.reportError).not.toHaveBeenCalled();
+  });
+
+  it("removes an ended share's folder even when the server cannot be reached", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [received({ status: "removed", selector: null, access: null })],
+      }),
+    });
+    bridgeMock.leaveRelayShare.mockRejectedValue(new Error("offline"));
+    const mount: ShareMount = {
+      shareId: "in-1",
+      label: "funnel",
+      granterEmail: "sam@example.com",
+      access: "view",
+      ended: true,
+    };
+    render(<View mounts={[mount]} />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
+    );
+
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel");
+    await act(async () => callbacks.reportError.mock.calls[0]![2]());
+    expect(callbacks.onUnmount).toHaveBeenCalledOnce();
+    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledTimes(2);
   });
 
   it("ends a share dohc cannot read, so its reverse path stays", async () => {

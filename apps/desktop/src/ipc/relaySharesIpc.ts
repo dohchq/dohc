@@ -1055,6 +1055,7 @@ export function createRelaySharesIpcHandlers<
     ): Promise<ListOwnerLiveRecoveryPackagesResult>;
     // A grant changed on the relay. Null when the change names no workspace.
     sharesChanged(workspaceId: string | null): void;
+    receivedSharesChanged(): void;
     sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
     // An authenticated account listing, applied to this machine's received
     // shares so a share the owner restored resumes.
@@ -1421,7 +1422,7 @@ export function createRelaySharesIpcHandlers<
       `/sync/shares/${encodeURIComponent(input.shareId)}/leave`,
       { method: "POST", body: JSON.stringify({ ended: input.ended }) },
     );
-    sharesChanged(null);
+    dependencies.receivedSharesChanged();
     const parsed = RelayShareLeaveResponse.safeParse(relayResult);
     if (!parsed.success) {
       throw new Error(relayShareErrorCopy(500, null));

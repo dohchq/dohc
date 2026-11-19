@@ -219,6 +219,10 @@ export function createReceivedShareAcquisition(dependencies: {
     invalidate(): void {
       invalidation += 1;
     },
+    changedHere(): void {
+      invalidation += 1;
+      attempt = null;
+    },
     retire,
     credentialsChanged(current: ReceivedScope | null, settled = true): void {
       retire();

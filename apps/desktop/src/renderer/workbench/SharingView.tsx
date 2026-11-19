@@ -1282,7 +1282,8 @@ export function SharingView(props: {
           : `${subject[0]!.toUpperCase()}${subject.slice(1)} has already ended.`,
         restoredMessage: `Restored ${subject}.`,
       });
-      if (epoch.isCurrent(token)) setConfirmShareId(null);
+      if (epoch.isCurrent(token))
+        setConfirmShareId((confirming) => (confirming === group.shareId ? null : confirming));
     } catch (cause) {
       props.shareRemovals.failed({
         workspaceId,
@@ -1330,8 +1331,9 @@ export function SharingView(props: {
     const token = epoch.current();
     setBusyShareId(shareId);
     try {
+      if (ended && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
       const { left } = await bridge().leaveRelayShare({ shareId, ended });
-      if (left && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
+      if (!ended && left && mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
       if (epoch.isCurrent(token)) {
         setConfirmShareId((confirming) => (confirming === shareId ? null : confirming));
         void loadReceived({ refreshed: refresh() });
@@ -1342,7 +1344,7 @@ export function SharingView(props: {
           ? "dohc could not take this share off your list."
           : "dohc could not leave this share.",
         cause,
-        () => void leave(shareId, mounted, ended),
+        () => void leave(shareId, ended ? undefined : mounted, ended),
       );
     } finally {
       if (epoch.isCurrent(token)) setBusyShareId(null);
