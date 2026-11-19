@@ -1283,7 +1283,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (this.#isSharedView(workspace)) {
         throw new Error("A shared view's documents start live editing on their host.");
       }
-      const path = await this.#markdownDocumentPath(workspace, input.path);
+      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
       authority.assertCurrent();
       const attachment = workspace.attachmentId;
       const ownsDocument = () => this.#owner.ownsDocument(attachment, path);
