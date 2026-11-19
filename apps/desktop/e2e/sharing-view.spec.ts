@@ -92,8 +92,15 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
 
     await page.keyboard.press("Tab");
     await expect(row.getByTestId("sharing-granted-actions").locator(":focus")).toHaveCount(1);
+    await row.getByTestId("sharing-item-toggle").focus();
+    await page.keyboard.press("Enter");
+    await expect(row.getByTestId("sharing-item-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(row.getByTestId("sharing-person")).toContainText(RECIPIENT_EMAIL);
+    const personOptions = row.getByRole("button", { name: /^Options for/ });
     await holdSystemClipboard(test.info(), async (remainingMs) => {
-      await row.getByRole("button", { name: "Copy code" }).focus({ timeout: remainingMs() });
+      await personOptions.focus({ timeout: remainingMs() });
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("menuitem", { name: "Copy invitation" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect
         .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), {
@@ -101,6 +108,10 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
         })
         .toBe(shareCode);
     });
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(personOptions).toBeFocused();
 
     await page.getByTestId(activityPin("sharing")).click();
     await expect(view).toBeHidden();
@@ -113,7 +124,7 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await page.getByRole("menuitem", { name: "End share…" }).click();
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(
-      `End this share? ${RECIPIENT_EMAIL} keeps a read-only copy`,
+      `End this share with 1 person? ${RECIPIENT_EMAIL} keeps a read-only copy`,
     );
     await confirm.getByTestId("sharing-end").click();
     await expect(confirm).toBeHidden();
@@ -199,10 +210,12 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     await openWorkspaceFromFirstRun(page, temp);
 
     await page.getByTestId(activityPin("sharing")).click();
+    await page.getByTestId("sharing-lane-received").click();
     const row = page.locator(`[data-testid="sharing-received-row"][data-share-id="${shareId}"]`);
+    await expect(row).toHaveCount(0);
+    await page.getByTestId("sharing-received-ended-toggle").click();
     await expect(row).toHaveAttribute("data-status", "removed");
     await expect(row).toContainText("notes");
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("Removed");
 
     // Dismiss hides the skipped changes; the record stays, so the menu shows them again.
     const skipped = page.getByTestId("sharing-skipped");
@@ -214,9 +227,7 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     await page.getByRole("menuitem", { name: "Show skipped changes" }).click();
     await expect(skipped).toHaveCount(1);
 
-    await row.locator("[data-sharing-row-focus]").hover();
-    await row.getByRole("button", { name: "Share actions" }).click();
-    await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
+    await row.getByRole("button", { name: "Remove from workspace" }).click();
     await expect(row).toHaveCount(0);
   } finally {
     await relay?.stop();

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useMemo, useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,8 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { ShellErrorReporter } from "../shell/useShellError";
+import { ShellErrorReporter, ShellNoticeClear } from "../shell/useShellError";
+import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import type { AccessFacts } from "./accessReason";
 import { SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
@@ -28,9 +29,27 @@ const bridgeMock = {
     vi.fn<(input: { shareId: string; grantId: string }) => Promise<ShareCopyResult>>(),
   dismissShareSkips:
     vi.fn<(input: { workspaceId: string; shareId: string; generation: number }) => Promise<void>>(),
+  retuneRelayShareGrant:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        shareId: string;
+        grantId: string;
+        access: string;
+      }) => Promise<{ access: "view" | "comment" | "edit"; generation: number }>
+    >(),
+  revokeRelayShareGrant:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        shareId: string;
+        grantId: string;
+      }) => Promise<{ undo: { undoId: string; expiresAtMs: number } }>
+    >(),
 };
 
 const notices = { report: vi.fn(), clear: vi.fn() };
+const clearNotice = vi.fn<(identity: string) => void>();
 const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
 const callbacks = {
   onReviewConflicts: vi.fn(),
@@ -39,11 +58,17 @@ const callbacks = {
   onFocused: vi.fn(),
   onUnmount: vi.fn(async (_path: string) => undefined),
   reportError: vi.fn(),
+  onShare: vi.fn(),
+  onOpenShare: vi.fn(),
   openSyncSettings: vi.fn(),
   connect: vi.fn(),
 };
 const SYNCED: AccessFacts = {
   cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true },
+  shareView: false,
+};
+const RECONNECTING: AccessFacts = {
+  cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: false },
   shareView: false,
 };
 const SIGNED_OUT: AccessFacts = {
@@ -73,6 +98,7 @@ beforeEach(() => {
     ...Object.values(bridgeMock),
     notices.report,
     notices.clear,
+    clearNotice,
     shareRemovals.removed,
     shareRemovals.failed,
     ...Object.values(callbacks),
@@ -141,6 +167,7 @@ function received(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
     shareId: "in-1",
     grantId: "in-grant-1",
     via: "received",
+    granterUserId: "sam-id",
     granterEmail: "sam@example.com",
     sharerName: "Sam",
     recipientUserId: "me",
@@ -185,31 +212,74 @@ function View(props: {
   );
   if (props.open === false) return null;
   return (
-    <SharingView
-      sharesRevision={sharesRevision}
-      workspaceId={props.workspaceId ?? "workspace-a"}
-      shareView={props.shareView ?? false}
-      context={contextFor(props.facts ?? SYNCED)}
-      notices={notices}
-      conflictCount={props.conflictCount ?? null}
-      onReviewConflicts={callbacks.onReviewConflicts}
-      proposals={props.proposals ?? []}
-      onReviewChanges={callbacks.onReviewChanges}
-      mounts={props.mounts ?? []}
-      onMountsChanged={callbacks.onMountsChanged}
-      onUnmount={callbacks.onUnmount}
-      shareRemovals={removals}
-      reportError={callbacks.reportError}
-      focus={props.focus ?? null}
-      onFocused={callbacks.onFocused}
-      notSentWhileOpen={props.notSentWhileOpen ?? []}
-    />
+    <ShellNoticeClear.Provider value={clearNotice}>
+      <SharingView
+        sharesRevision={sharesRevision}
+        workspaceId={props.workspaceId ?? "workspace-a"}
+        shareView={props.shareView ?? false}
+        context={contextFor(props.facts ?? SYNCED)}
+        notices={notices}
+        conflictCount={props.conflictCount ?? null}
+        onReviewConflicts={callbacks.onReviewConflicts}
+        proposals={props.proposals ?? []}
+        onReviewChanges={callbacks.onReviewChanges}
+        mounts={props.mounts ?? []}
+        onMountsChanged={callbacks.onMountsChanged}
+        onUnmount={callbacks.onUnmount}
+        shareRemovals={removals}
+        reportError={callbacks.reportError}
+        focus={props.focus ?? null}
+        onFocused={callbacks.onFocused}
+        notSentWhileOpen={props.notSentWhileOpen ?? []}
+        onShare={callbacks.onShare}
+        onOpenShare={callbacks.onOpenShare}
+      />
+    </ShellNoticeClear.Provider>
   );
 }
 
 async function openMenu(row: HTMLElement) {
   await userEvent.click(within(row).getByRole("button", { name: "Share actions" }));
   return screen.getByRole("menu");
+}
+
+const LANE_NAME = { granted: /^Shared by me/, received: /^Shared with me/ };
+async function showLane(lane: Lane) {
+  await userEvent.click(await screen.findByRole("radio", { name: LANE_NAME[lane] }));
+}
+
+async function openEnded(lane: Lane) {
+  const toggle = await screen.findByTestId(`sharing-${lane}-ended-toggle`);
+  if (toggle.getAttribute("aria-expanded") !== "true") await userEvent.click(toggle);
+}
+
+async function receivedRow(options: { ended?: boolean } = {}) {
+  await showLane("received");
+  if (options.ended) await openEnded("received");
+  return screen.findByTestId("sharing-received-row");
+}
+
+async function grantedRow(shareId: string) {
+  return (await screen.findAllByTestId("sharing-granted-row")).find((row) =>
+    (row.dataset.shareIds ?? "").split(" ").includes(shareId),
+  )!;
+}
+
+async function people(item: HTMLElement) {
+  const toggle = within(item).getByTestId("sharing-item-toggle");
+  if (toggle.getAttribute("aria-expanded") !== "true") await userEvent.click(toggle);
+  return within(item).getAllByTestId("sharing-person");
+}
+
+async function personMenu(person: HTMLElement) {
+  await userEvent.click(within(person).getByRole("button", { name: /^Options for/ }));
+  return screen.getByRole("menu");
+}
+
+async function choose(row: HTMLElement, name: string) {
+  const shown = within(row).queryByRole("button", { name });
+  if (shown) return userEvent.click(shown);
+  return userEvent.click(within(await openMenu(row)).getByRole("menuitem", { name }));
 }
 
 describe("the Sharing view's two lists", () => {
@@ -233,20 +303,15 @@ describe("the Sharing view's two lists", () => {
 
     const grantedRows = await screen.findAllByTestId("sharing-granted-row");
     expect(grantedRows).toHaveLength(2);
-    expect(grantedRows[0]!.textContent).toBe("product-plan.md2 people can edit");
-    expect(within(grantedRows[0]!).getByText("product-plan").parentElement!.className).toContain(
+    expect(grantedRows[0]!.textContent).toBe("competitors.mdsam@example.com can view");
+    expect(grantedRows[1]!.textContent).toBe("product-plan.md2 people");
+    expect(within(grantedRows[1]!).getByText("product-plan").parentElement!.className).toContain(
       "text-ink",
     );
-    expect(within(grantedRows[0]!).getByTestId("sharing-row-who").getAttribute("title")).toBe(
+    expect(within(grantedRows[1]!).getByTestId("sharing-row-who").getAttribute("title")).toBe(
       "sam@example.com can edit\nnova@example.com can edit",
     );
-    expect(grantedRows[1]!.textContent).toBe("competitors.mdsam@example.com can view");
     expect(screen.getByTestId("sharing-granted-count").textContent).toBe("2");
-    const receivedRow = await screen.findByTestId("sharing-received-row");
-    expect(receivedRow.textContent).toBe("funnel.csvSam lets you view");
-    expect(within(receivedRow).getByTestId("sharing-row-who").getAttribute("title")).toBe(
-      "Sam (sam@example.com) lets you view",
-    );
     expect(screen.getByTestId("sharing-received-count").textContent).toBe("1");
     expect(screen.getByTestId("sharing-granted-freshness").getAttribute("data-state")).toBe(
       "fresh",
@@ -254,6 +319,9 @@ describe("the Sharing view's two lists", () => {
     expect(screen.getByTestId("sharing-granted-freshness-scope").textContent).toBe(
       "for this workspace",
     );
+    const row = await receivedRow();
+    expect(within(row).getByText("funnel").parentElement!.className).toContain("text-ink");
+    expect(within(row).getByTestId("sharing-row-level").textContent).toBe("Can view");
     expect(screen.getByTestId("sharing-received-freshness-scope").textContent).toBe(
       "for your account",
     );
@@ -289,6 +357,7 @@ describe("the Sharing view's two lists", () => {
       }),
     });
     render(<View notSentWhileOpen={["notes/old.md", "notes/product-plan.md"]} />);
+    await openEnded("granted");
     const rows = await screen.findAllByTestId("sharing-granted-row");
     const note = (shareId: string) =>
       within(rows.find((row) => row.dataset.shareId === shareId)!).queryByTestId("sharing-row-note")
@@ -306,6 +375,7 @@ describe("the Sharing view's two lists", () => {
   it("files a failed read in Notices and reads again from Try again", async () => {
     answerWith({ received: new Error("offline") });
     render(<View />);
+    await showLane("received");
     const failed = await screen.findByTestId("sharing-received-failed");
     expect(failed.querySelector("p")!.textContent).toBe(
       "dohc could not check the shares to your account.",
@@ -324,7 +394,15 @@ describe("the Sharing view's two lists", () => {
       lane === "received"
         ? answer("received")
         : cursor === "page-2"
-          ? answer("granted", { rows: [granted({ shareId: "share-2", grantId: "grant-2" })] })
+          ? answer("granted", {
+              rows: [
+                granted({
+                  shareId: "share-2",
+                  grantId: "grant-2",
+                  selector: { paths: ["research/competitors.md"], versionId: null },
+                }),
+              ],
+            })
           : answer("granted", { rows: [granted()], nextCursor: "page-2" }),
     );
     render(<View />);
@@ -339,6 +417,68 @@ describe("the Sharing view's two lists", () => {
       cursor: "page-2",
     });
     expect(screen.queryByTestId("sharing-granted-more")).toBeNull();
+  });
+
+  it("keeps what is loaded when Show more fails, and loads the same page from Try again", async () => {
+    let offline = true;
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane, cursor }) => {
+      if (lane === "received") return answer("received");
+      if (cursor !== "page-2")
+        return answer("granted", {
+          rows: [
+            granted(),
+            granted({
+              shareId: "share-2",
+              grantId: "grant-2",
+              status: "revoked",
+              subjectName: "budget.csv",
+              selector: null,
+              access: null,
+            }),
+          ],
+          nextCursor: "page-2",
+        });
+      if (offline) throw new Error("offline");
+      return answer("granted", {
+        rows: [
+          granted({
+            shareId: "share-2",
+            grantId: "grant-3",
+            recipientUserId: "nova",
+            recipientEmail: "nova@example.com",
+            subjectName: "budget.csv",
+            selector: { paths: ["budget.csv"], versionId: null },
+          }),
+        ],
+      });
+    });
+    render(<View />);
+    await grantedRow("share-1");
+    await userEvent.click(screen.getByTestId("sharing-granted-more"));
+
+    const failed = await screen.findByTestId("sharing-granted-more-failed");
+    expect(failed.querySelector("p")!.textContent).toBe(
+      "dohc could not load more shares from this workspace.",
+    );
+    expect(screen.queryByTestId("sharing-granted-failed")).toBeNull();
+    expect(screen.queryByTestId("sharing-granted-more")).toBeNull();
+    expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(2);
+    expect((await grantedRow("share-1")).dataset.status).toBe("active");
+    expect((await grantedRow("share-2")).dataset.status).toBe("unconfirmed");
+    expect(notices.report).toHaveBeenCalledWith(
+      expect.objectContaining({ identity: "sharing-granted" }),
+    );
+
+    offline = false;
+    const reads = bridgeMock.listSharingAccess.mock.calls.length;
+    await userEvent.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("sharing-granted-count").textContent).toBe("2"));
+    expect(bridgeMock.listSharingAccess.mock.calls.slice(reads)).toEqual([
+      [{ workspaceId: "workspace-a", lane: "granted", cursor: "page-2" }],
+    ]);
+    expect((await grantedRow("share-2")).dataset.status).toBe("active");
+    expect(screen.queryByTestId("sharing-granted-more-failed")).toBeNull();
+    expect(notices.clear).toHaveBeenCalledWith("sharing-granted");
   });
 
   it("never paints a slow answer for one workspace into another", async () => {
@@ -396,12 +536,21 @@ describe("the actions Settings offers on a share", () => {
     );
     const confirm = screen.getByTestId("sharing-end-confirm");
     expect(confirm.textContent).toContain(
-      "End this share? sam@example.com keeps a read-only copy and stops receiving updates.",
+      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates.",
     );
     expect(document.activeElement).toBe(screen.getByTestId("sharing-end-cancel"));
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByTestId("sharing-end-confirm")).toBeNull();
     expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+    const opener = within(row).getByRole("button", { name: "Share actions" });
+    expect(document.activeElement).toBe(opener);
+
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
+    );
+    await userEvent.click(screen.getByTestId("sharing-end-cancel"));
+    expect(screen.queryByTestId("sharing-end-confirm")).toBeNull();
+    expect(document.activeElement).toBe(opener);
 
     await userEvent.click(
       within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
@@ -446,6 +595,7 @@ describe("the actions Settings offers on a share", () => {
     bridgeMock.revokeRelayShare.mockResolvedValue({});
     const retry = shareRemovals.failed.mock.calls[0]![0].retry!;
     await act(async () => retry());
+    await openEnded("granted");
     await waitFor(() =>
       expect(screen.getByTestId("sharing-granted-row").getAttribute("data-status")).toBe("revoked"),
     );
@@ -460,10 +610,8 @@ describe("the actions Settings offers on a share", () => {
     });
     bridgeMock.mountShare.mockResolvedValue({});
     render(<View />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Add to workspace" }),
-    );
+    const row = await receivedRow();
+    await choose(row, "Add to workspace");
     await waitFor(() => expect(callbacks.onMountsChanged).toHaveBeenCalledOnce());
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledWith({ shareId: "in-1" });
     expect(bridgeMock.mountShare).toHaveBeenCalledWith({
@@ -479,10 +627,8 @@ describe("the actions Settings offers on a share", () => {
       removed: { message: "Sam stopped sharing this." },
     });
     render(<View />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Add to workspace" }),
-    );
+    const row = await receivedRow();
+    await choose(row, "Add to workspace");
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
     expect(callbacks.reportError.mock.calls[0]![0]).toBe(
       "dohc could not add this share to the workspace.",
@@ -494,10 +640,8 @@ describe("the actions Settings offers on a share", () => {
     answerWith({ received: answer("received", { rows: [received()] }) });
     bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
     render(<View />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Leave share…" }),
-    );
+    const row = await receivedRow();
+    await choose(row, "Leave share…");
     expect(bridgeMock.leaveRelayShare).not.toHaveBeenCalled();
     const confirm = within(row).getByTestId("sharing-leave-confirm");
     expect(confirm.textContent).toContain("You lose access to funnel.csv. Sam can share it");
@@ -532,10 +676,8 @@ describe("the actions Settings offers on a share", () => {
       access: "view",
     };
     render(<View mounts={[mount]} />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Leave share…" }),
-    );
+    const row = await receivedRow();
+    await choose(row, "Leave share…");
     expect(within(row).getByTestId("sharing-leave-confirm").textContent).toContain(
       "its folder leaves this workspace",
     );
@@ -554,11 +696,10 @@ describe("the actions Settings offers on a share", () => {
     bridgeMock.leaveRelayShare.mockRejectedValueOnce(new Error("offline"));
     bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
     render(<View />);
-    const row = await screen.findByTestId("sharing-received-row");
-    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Removed");
-    const menu = await openMenu(row);
-    expect(within(menu).queryByRole("menuitem", { name: "Leave share…" })).toBeNull();
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Remove from list" }));
+    const row = await receivedRow({ ended: true });
+    expect(row.dataset.status).toBe("removed");
+    expect(within(row).queryByRole("button", { name: "Share actions" })).toBeNull();
+    await choose(row, "Remove from list");
 
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
     expect(callbacks.reportError.mock.calls[0]![0]).toBe(
@@ -586,10 +727,8 @@ describe("the actions Settings offers on a share", () => {
       ended: true,
     };
     render(<View mounts={[mount]} />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
-    );
+    const row = await receivedRow({ ended: true });
+    await choose(row, "Remove from workspace");
 
     await waitFor(() =>
       expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel"),
@@ -614,11 +753,9 @@ describe("the actions Settings offers on a share", () => {
       access: "view",
     };
     render(<View mounts={[mount]} />);
-    const row = await screen.findByTestId("sharing-received-row");
+    const row = await receivedRow({ ended: true });
     answerWith({ received: answer("received", { rows: [received()] }) });
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
-    );
+    await choose(row, "Remove from workspace");
 
     await waitFor(() =>
       expect(screen.getByTestId("sharing-received-row").dataset.status).toBe("active"),
@@ -642,10 +779,8 @@ describe("the actions Settings offers on a share", () => {
       ended: true,
     };
     render(<View mounts={[mount]} />);
-    const row = await screen.findByTestId("sharing-received-row");
-    await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
-    );
+    const row = await receivedRow({ ended: true });
+    await choose(row, "Remove from workspace");
 
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
     expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel");
@@ -662,6 +797,7 @@ describe("the actions Settings offers on a share", () => {
     });
     bridgeMock.revokeRelayShare.mockResolvedValue({});
     render(<View />);
+    await openEnded("granted");
     const row = await screen.findByTestId("sharing-granted-row");
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Damaged");
     const end = within(await openMenu(row)).getByRole("menuitem", { name: "End share…" });
@@ -718,33 +854,42 @@ describe("copying a share's code or invitation", () => {
       access: "read-write",
     }),
   ];
-  const rowOf = async (shareId: string) =>
-    (await screen.findAllByTestId("sharing-granted-row")).find(
-      (row) => row.dataset.shareId === shareId,
-    )!;
+  const rowOf = grantedRow;
 
-  it("offers a copy only on a live named or dependent row, and an invitation only for one person's live edit", async () => {
+  it("offers a person's invitation or code from their row, and nothing for a link or a chat", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
     render(<CopyView />);
-    const named = await rowOf("share-1");
-    expect(within(named).getByRole("button", { name: "Copy code" })).toBeTruthy();
-    expect(await within(named).findByRole("button", { name: "Copy invitation" })).toBeTruthy();
-    expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce();
+    const item = await rowOf("share-1");
+    const [named, dependent] = await people(item);
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
     expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledWith({
       shareId: "share-1",
       grantId: "grant-1",
     });
-    const dependent = await rowOf("share-dep");
-    expect(within(dependent).getByRole("button", { name: "Copy code" })).toBeTruthy();
-    expect(within(dependent).queryByRole("button", { name: "Copy invitation" })).toBeNull();
-    for (const shareId of ["share-link", "share-bad", "share-chat"]) {
-      expect(within(await rowOf(shareId)).queryByRole("button", { name: /^Copy/ })).toBeNull();
-    }
-    // The actions sit over the end of the row's last line, so no row changes
-    // height; they show on hover, keyboard focus, and while their menu is open.
-    const actions = within(named).getByTestId("sharing-granted-actions");
-    expect(actions.parentElement).toBe(named.querySelector("[data-sharing-row-focus]"));
+    await userEvent.click(
+      within(await personMenu(named!)).getByRole("menuitem", { name: "Copy invitation" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(INVITING.browserInvitationUrl));
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(
+      within(await personMenu(dependent!)).getByRole("menuitem", { name: "Copy code" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(INVITING.shareCode));
+    await userEvent.keyboard("{Escape}");
+    expect(within(item).getByTestId("sharing-link").textContent).toBe(
+      "Anyone with the linkCan edit",
+    );
+    expect(within(item).getByTestId("sharing-link").querySelector("button")).toBeNull();
+    const [member] = await people(await rowOf("share-chat"));
+    expect(within(member!).queryByRole("button", { name: /^Options for/ })).toBeNull();
+    // An item's own actions sit over the end of its last line, so no row
+    // changes height; they show on hover, keyboard focus, and while their
+    // menu is open.
+    const actions = within(item).getByTestId("sharing-granted-actions");
+    expect(actions.parentElement).toBe(
+      item.querySelector("[data-sharing-row-focus]")!.parentElement,
+    );
     expect(actions.className.split(" ")).toEqual(
       expect.arrayContaining([
         "absolute",
@@ -758,13 +903,100 @@ describe("copying a share's code or invitation", () => {
     );
   });
 
+  it("offers Copy share code beside Copy invitation for a person who can edit files, and it copies the code", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    render(<CopyView />);
+    const [named, dependent] = await people(await rowOf("share-1"));
+    const menu = await personMenu(named!);
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Copy invitation", "Copy share code", "Remove access"]);
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy share code" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
+    await within(menu).findByRole("menuitem", { name: "Copied" });
+    expect(within(menu).getByRole("menuitem", { name: "Copy invitation" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(
+      within(await personMenu(dependent!))
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Copy code", "Remove access"]);
+  });
+
+  it("copies by the level the page shows for a person, not by an older listed one", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({ access: "view", generation: 3 });
+    render(<CopyView />);
+    const [person] = await people(await rowOf("share-1"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-view"));
+    await waitFor(() => expect(level).toHaveProperty("disabled", false));
+    expect(level.textContent).toBe("Can view");
+
+    const menu = await personMenu(person!);
+    expect(within(menu).queryByRole("menuitem", { name: "Copy share code" })).toBeNull();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy invitation" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
+    expect(reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("keeps the menu open for a person using the keyboard inside it, until Escape puts focus back", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    render(<CopyView />);
+    const toggle = within(await rowOf("share-1")).getByTestId("sharing-item-toggle");
+    toggle.focus();
+    await userEvent.keyboard("{Enter}");
+    const trigger = screen.getAllByRole("button", { name: "Options for sam@example.com" })[0]!;
+    trigger.focus();
+    await userEvent.keyboard("{Enter}");
+    const menu = screen.getByRole("menu");
+    expect(document.activeElement).toBe(
+      within(menu).getByRole("menuitem", { name: "Copy invitation" }),
+    );
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(INVITING.browserInvitationUrl));
+    await within(menu).findByRole("menuitem", { name: "Copied" });
+    await within(menu).findByRole(
+      "menuitem",
+      { name: "Copy invitation" },
+      { timeout: 2 * COPY_FEEDBACK_MS },
+    );
+    expect(screen.getByRole("menu")).toBe(menu);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes the menu once Copied has shown for a person using the pointer", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    render(<CopyView />);
+    const [named] = await people(await rowOf("share-1"));
+    const menu = await personMenu(named!);
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy invitation" }));
+    await within(menu).findByRole("menuitem", { name: "Copied" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull(), {
+      timeout: 2 * COPY_FEEDBACK_MS,
+    });
+  });
+
   it("reads the list again for a share that ended since, and reports nothing to fix", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue({ status: "ended" });
     render(<CopyView />);
-    const named = await rowOf("share-1");
+    const [named] = await people(await rowOf("share-1"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
     const reads = bridgeMock.listSharingAccess.mock.calls.length;
-    fireEvent.click(within(named).getByRole("button", { name: "Copy code" }));
+    await userEvent.click(
+      within(await personMenu(named!)).getByRole("menuitem", { name: "Copy invitation" }),
+    );
     await waitFor(() =>
       expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads),
     );
@@ -784,11 +1016,12 @@ describe("copying a share's code or invitation", () => {
     const target = dependent.querySelector<HTMLElement>("[data-sharing-row-focus]")!;
     await waitFor(() => expect(document.activeElement).toBe(target));
     expect(callbacks.onFocused).toHaveBeenCalledOnce();
+    expect(target.getAttribute("aria-expanded")).toBe("false");
     await userEvent.tab();
     expect(document.activeElement).toBe(
-      within(dependent).getByRole("button", { name: "Copy code" }),
+      within(dependent).getByRole("button", { name: "Share actions" }),
     );
-    // The row was focusable for the jump only: a click no longer selects it.
+    // No row is left in the tab order by the jump.
     expect(target.hasAttribute("tabindex")).toBe(false);
     for (const row of await screen.findAllByTestId("sharing-granted-row")) {
       expect(row.querySelector("[data-sharing-row-focus]")!.hasAttribute("tabindex")).toBe(false);
@@ -821,7 +1054,7 @@ describe("mounts and their skipped changes", () => {
   it("keeps a mount removable when the account's list is unknown, without claiming it was removed", async () => {
     answerWith({ received: UNKNOWN("received") });
     render(<View facts={SIGNED_OUT} mounts={[GONE]} />);
-    const row = await screen.findByTestId("sharing-received-row");
+    const row = await receivedRow();
     expect(row.dataset.status).toBe("unlisted");
     expect(within(row).queryByTestId("sharing-row-status")).toBeNull();
     expect(
@@ -840,7 +1073,7 @@ describe("mounts and their skipped changes", () => {
       skippedOps,
     };
     const { rerender } = render(<View mounts={[mount]} />);
-    const row = await screen.findByTestId("sharing-received-row");
+    const row = await receivedRow();
     expect(within(row).getAllByTestId("sharing-skipped")).toHaveLength(1);
 
     await userEvent.click(within(row).getByRole("button", { name: "Dismiss skipped changes" }));
@@ -874,7 +1107,7 @@ describe("mounts and their skipped changes", () => {
         ]}
       />,
     );
-    const row = await screen.findByTestId("sharing-received-row");
+    const row = await receivedRow();
     await userEvent.click(within(row).getByTestId("sharing-skipped-dismiss"));
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
     expect(callbacks.reportError.mock.calls[0]![0]).toBe(
@@ -884,6 +1117,1248 @@ describe("mounts and their skipped changes", () => {
     act(() => (callbacks.reportError.mock.calls[0]![2] as () => void)());
     await waitFor(() => expect(bridgeMock.dismissShareSkips).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(within(row).queryByTestId("sharing-skipped")).toBeNull());
+  });
+});
+
+describe("one list at a time", () => {
+  it("switches between the two lists, each with its count, and by the arrow keys", async () => {
+    answerWith({
+      granted: answer("granted", { rows: [granted()] }),
+      received: answer("received", {
+        rows: [received(), received({ shareId: "in-2", grantId: "in-grant-2" })],
+      }),
+    });
+    render(<View />);
+    await screen.findByTestId("sharing-granted-row");
+    const group = screen.getByRole("radiogroup", { name: "Sharing" });
+    const [byMe, withMe] = within(group).getAllByRole("radio");
+    expect(byMe!.textContent).toBe("Shared by me1");
+    expect(byMe!.getAttribute("aria-checked")).toBe("true");
+    await waitFor(() => expect(withMe!.textContent).toBe("Shared with me2"));
+    expect(screen.queryByTestId("sharing-received")).toBeNull();
+
+    byMe!.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(withMe!.getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(withMe);
+    expect(await screen.findAllByTestId("sharing-received-row")).toHaveLength(2);
+    expect(screen.queryByTestId("sharing-granted")).toBeNull();
+
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(await screen.findByTestId("sharing-granted-row")).toBeTruthy();
+  });
+
+  it("opens on the list Settings search asked for, and on an ended share inside Ended", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [received({ status: "removed", selector: null, access: null })],
+      }),
+    });
+    render(<View focus={{ lane: "received", shareId: "in-1" }} />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(row.querySelector("[data-sharing-row-focus]")),
+    );
+    expect(
+      screen.getByRole("radio", { name: LANE_NAME.received }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(callbacks.onFocused).toHaveBeenCalledOnce();
+  });
+
+  it("draws no switch in a shared view", async () => {
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    render(<View shareView />);
+    expect(await screen.findByTestId("sharing-received-row")).toBeTruthy();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("1");
+  });
+});
+
+describe("Shared by me, by what is shared", () => {
+  const SEPARATE = [
+    granted(),
+    granted({
+      shareId: "share-2",
+      grantId: "grant-2",
+      recipientUserId: "nova",
+      recipientEmail: "nova@example.com",
+      access: "view",
+    }),
+    granted({
+      shareId: "share-3",
+      grantId: "grant-3",
+      via: "link",
+      recipientUserId: null,
+      recipientEmail: null,
+      access: "view",
+    }),
+    granted({
+      shareId: "share-4",
+      grantId: "grant-4",
+      selector: { paths: ["research/competitors.md"], versionId: null },
+    }),
+  ];
+
+  it("shows several shares of one file as one item with all its people and its link", async () => {
+    answerWith({ granted: answer("granted", { rows: SEPARATE }) });
+    render(<View />);
+    const rows = await screen.findAllByTestId("sharing-granted-row");
+    expect(rows.map((row) => row.dataset.shareIds)).toEqual(["share-4", "share-1 share-2 share-3"]);
+    const item = rows[1]!;
+    expect(within(item).getByTestId("sharing-row-who").textContent).toBe(
+      "2 people and anyone with the link",
+    );
+    const toggle = within(item).getByTestId("sharing-item-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(item).queryByTestId("sharing-person")).toBeNull();
+
+    toggle.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const rowsOfPeople = within(item).getAllByTestId("sharing-person");
+    expect(rowsOfPeople.map((person) => person.textContent)).toEqual([
+      "Ssam@example.comInvited by emailCan edit",
+      "Nnova@example.comInvited by emailCan view",
+    ]);
+    expect(within(item).getByTestId("sharing-link").textContent).toBe(
+      "Anyone with the linkCan view",
+    );
+
+    await userEvent.click(within(item).getByRole("button", { name: "Open Share…" }));
+    expect(callbacks.onShare).toHaveBeenCalledExactlyOnceWith({
+      kind: "paths",
+      paths: ["notes/product-plan.md"],
+    });
+  });
+
+  it("keeps an item open when its list is read again", async () => {
+    answerWith({ granted: answer("granted", { rows: SEPARATE }) });
+    const { rerender } = render(<View />);
+    const item = await grantedRow("share-1");
+    await people(item);
+    expect(within(item).getByTestId("sharing-link")).toBeTruthy();
+    answerWith({ granted: answer("granted", { rows: SEPARATE.slice(0, 2) }) });
+    rerender(<View facts={RECONNECTING} />);
+    await waitFor(() => expect(screen.queryByTestId("sharing-link")).toBeNull());
+    expect(within(await grantedRow("share-1")).getAllByTestId("sharing-person")).toHaveLength(2);
+  });
+
+  it("puts what has changes to review first, then goes by name", async () => {
+    answerWith({ granted: answer("granted", { rows: SEPARATE }) });
+    render(
+      <View
+        proposals={[
+          {
+            proposalId: "proposal-1",
+            shareId: "share-2",
+            proposedByEmail: "nova@example.com",
+            createdAtMs: 1,
+            ops: 1,
+          },
+        ]}
+      />,
+    );
+    const rows = await screen.findAllByTestId("sharing-granted-row");
+    expect(rows.map((row) => row.dataset.shareId)).toEqual(["share-1", "share-4"]);
+    await userEvent.click(within(rows[0]!).getByRole("button", { name: "Review changes" }));
+    expect(callbacks.onReviewChanges).toHaveBeenCalledWith("proposal-1");
+    expect(within(rows[1]!).queryByTestId("sharing-review")).toBeNull();
+  });
+
+  it("changes a person's level in place, and a stale listing does not undo it", async () => {
+    let rows = [granted({ access: "view" })];
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) =>
+      answer(lane, { rows: lane === "granted" ? rows : [] }),
+    );
+    const changed = deferred<{ access: "edit"; generation: number }>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValue(changed.promise);
+    const { rerender } = render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const trigger = within(person!).getByTestId("sharing-person-access-grant-1");
+    expect(trigger.textContent).toBe("Can view");
+    await userEvent.click(trigger);
+    expect(
+      screen
+        .getAllByRole("menuitemradio", { hidden: true })
+        .map((option) => option.getAttribute("data-testid")),
+    ).toEqual(["sharing-person-access-grant-1-view", "sharing-person-access-grant-1-edit"]);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-1",
+      access: "edit",
+    });
+    expect(trigger).toHaveProperty("disabled", true);
+
+    const reads = bridgeMock.listSharingAccess.mock.calls.length;
+    await act(async () => changed.resolve({ access: "edit", generation: 3 }));
+    await waitFor(() => expect(trigger.textContent).toBe("Can edit"));
+    expect(trigger).toHaveProperty("disabled", false);
+    await waitFor(() =>
+      expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(trigger.textContent).toBe("Can edit");
+
+    rows = [granted({ access: "view", generation: 4 })];
+    rerender(<View facts={RECONNECTING} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-person-access-grant-1").textContent).toBe("Can view"),
+    );
+  });
+
+  it("shows a new level at once on the person and the item, and puts both back when the relay refuses", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "comment" })] }) });
+    const refused = deferred<{ access: "view"; generation: number }>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(refused.promise);
+    render(<View />);
+    const item = await grantedRow("share-1");
+    const [person] = await people(item);
+    const who = within(item).getByTestId("sharing-row-who");
+    const trigger = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(trigger);
+    expect(
+      screen
+        .getAllByRole("menuitemradio", { hidden: true })
+        .map((option) => option.getAttribute("data-testid")),
+    ).toEqual([
+      "sharing-person-access-grant-1-view",
+      "sharing-person-access-grant-1-comment",
+      "sharing-person-access-grant-1-edit",
+    ]);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-view"));
+    expect(trigger.textContent).toBe("Can view");
+    expect(who.textContent).toBe("sam@example.com can view");
+
+    const cause = new Error("relay down");
+    await act(async () => refused.reject(cause));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.reportError.mock.calls[0]![0]).toBe(
+      "dohc could not change sam@example.com's access to notes/product-plan.md.",
+    );
+    expect(callbacks.reportError.mock.calls[0]![1]).toBe(cause);
+    expect(trigger.textContent).toBe("Can comment");
+    expect(who.textContent).toBe("sam@example.com can comment");
+    expect(trigger).toHaveProperty("disabled", false);
+    expect(within(person!).queryByRole("alert")).toBeNull();
+
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({ access: "view", generation: 2 });
+    await act(async () => callbacks.reportError.mock.calls[0]![2]());
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(who.textContent).toBe("sam@example.com can view"));
+    expect(trigger.textContent).toBe("Can view");
+  });
+
+  it("keeps a change that is under way when its item closes or the list is switched, and ignores an older answer", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    const first = deferred<{ access: "edit"; generation: number }>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(first.promise);
+    render(<View />);
+    const access = () => screen.getByTestId("sharing-person-access-grant-1");
+    const [person] = await people(await grantedRow("share-1"));
+    await userEvent.click(access());
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    expect(access()).toHaveProperty("disabled", true);
+    const remove = within(await personMenu(person!)).getByRole("menuitem", {
+      name: "Remove access",
+    });
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    await userEvent.keyboard("{Escape}");
+
+    const toggle = within(await grantedRow("share-1")).getByTestId("sharing-item-toggle");
+    await userEvent.click(toggle);
+    expect(screen.queryByTestId("sharing-person")).toBeNull();
+    await userEvent.click(toggle);
+    expect(access().textContent).toBe("Can edit");
+    expect(access()).toHaveProperty("disabled", true);
+
+    await showLane("received");
+    await showLane("granted");
+    const [again] = await people(await grantedRow("share-1"));
+    expect(access().textContent).toBe("Can edit");
+    expect(access()).toHaveProperty("disabled", true);
+    expect(
+      within(await personMenu(again!))
+        .getByRole("menuitem", { name: "Remove access" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+    await userEvent.keyboard("{Escape}");
+
+    await act(async () => first.resolve({ access: "edit", generation: 5 }));
+    await waitFor(() => expect(access()).toHaveProperty("disabled", false));
+    expect(access().textContent).toBe("Can edit");
+
+    bridgeMock.retuneRelayShareGrant.mockResolvedValueOnce({ access: "view", generation: 3 });
+    await userEvent.click(access());
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-view"));
+    await waitFor(() => expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(access()).toHaveProperty("disabled", false));
+    expect(access().textContent).toBe("Can edit");
+    expect(within(await grantedRow("share-1")).getByTestId("sharing-row-who").textContent).toBe(
+      "sam@example.com can edit",
+    );
+  });
+
+  it("removes one person from a share of several and leaves the others", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted(),
+          granted({
+            grantId: "grant-2",
+            recipientUserId: "nova",
+            recipientEmail: "nova@example.com",
+          }),
+        ],
+      }),
+    });
+    const undo = { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 };
+    bridgeMock.revokeRelayShareGrant.mockResolvedValue({ undo });
+    render(<View />);
+    const [, nova] = await people(await grantedRow("share-1"));
+    await userEvent.click(
+      within(await personMenu(nova!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    const confirm = within(nova!).getByTestId("sharing-end-confirm");
+    expect(confirm.textContent).toContain(
+      "Remove nova@example.com's access to product-plan.md? This ends the access their email invitation gave. Copies they already made stay with them.",
+    );
+    expect(document.activeElement).toBe(within(confirm).getByTestId("sharing-end-cancel"));
+    await userEvent.click(within(confirm).getByRole("button", { name: "Remove access" }));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-2",
+    });
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+    expect(shareRemovals.removed).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      undo,
+      message: "Removed nova@example.com's access to notes/product-plan.md.",
+      restoredMessage: "Restored nova@example.com's access to notes/product-plan.md.",
+    });
+    await waitFor(() => expect(screen.queryByTestId("sharing-end-confirm")).toBeNull());
+  });
+
+  it("never ends the whole share from a person's row, even when that person is the only one listed", async () => {
+    answerWith({
+      granted: answer("granted", { rows: [granted()], nextCursor: "page-2" }),
+    });
+    const undo = { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 };
+    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    bridgeMock.revokeRelayShareGrant.mockResolvedValue({ undo });
+    render(<View />);
+    const [sam] = await people(await grantedRow("share-1"));
+    await userEvent.click(
+      within(await personMenu(sam!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    expect(within(sam!).getByTestId("sharing-end-confirm").textContent).toContain(
+      "Remove sam@example.com's access to product-plan.md?",
+    );
+    await userEvent.click(within(sam!).getByRole("button", { name: "Remove access" }));
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
+    expect(shareRemovals.failed.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "workspace-a",
+      message: "dohc could not remove sam@example.com's access to notes/product-plan.md.",
+    });
+    await act(async () => shareRemovals.failed.mock.calls[0]![0].retry());
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
+    expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({ shareId: "share-1", undo });
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-1",
+    });
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+  });
+
+  it("removes a person who joined through a link by their own grant", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted({
+            shareId: "share-link",
+            grantId: "link",
+            via: "link",
+            recipientUserId: null,
+            recipientEmail: null,
+          }),
+          granted({ shareId: "share-link", grantId: "joined", via: "dependent" }),
+        ],
+      }),
+    });
+    bridgeMock.revokeRelayShareGrant.mockResolvedValue({
+      undo: { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 },
+    });
+    render(<View />);
+    const [sam] = await people(await grantedRow("share-link"));
+    await userEvent.click(
+      within(await personMenu(sam!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    expect(within(sam!).getByTestId("sharing-end-confirm").textContent).toBe(
+      "Remove sam@example.com's access to product-plan.md? This ends the access they got by joining through a link. They can join again while the link is active. End the link in Share to keep them out.CancelRemove access",
+    );
+    await userEvent.click(within(sam!).getByRole("button", { name: "Remove access" }));
+    await waitFor(() =>
+      expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "workspace-a",
+        shareId: "share-link",
+        grantId: "joined",
+      }),
+    );
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+  });
+
+  it("removes an invitation nobody has used by its own grant, and says only that", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted(),
+          granted({
+            grantId: "grant-2",
+            recipientUserId: null,
+            recipientEmail: "nova@example.com",
+          }),
+        ],
+      }),
+    });
+    const undo = { undoId: "undo-1", expiresAtMs: Date.now() + 600_000 };
+    bridgeMock.revokeRelayShareGrant.mockResolvedValue({ undo });
+    render(<View />);
+    const [, nova] = await people(await grantedRow("share-1"));
+    const menu = await personMenu(nova!);
+    expect(within(menu).queryByRole("menuitem", { name: "End share…" })).toBeNull();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Remove access" }));
+    expect(within(nova!).getByTestId("sharing-end-confirm").textContent).toBe(
+      "Remove nova@example.com's access to product-plan.md? This ends the email invitation they have not used yet.CancelRemove access",
+    );
+    await userEvent.click(within(nova!).getByRole("button", { name: "Remove access" }));
+    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-2",
+    });
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+    expect(shareRemovals.removed).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      undo,
+      message: "Removed nova@example.com's email invitation to notes/product-plan.md.",
+      restoredMessage: "Restored nova@example.com's email invitation to notes/product-plan.md.",
+    });
+  });
+
+  it("says how many people End share ends, and that a link keeps working", async () => {
+    answerWith({ granted: answer("granted", { rows: SEPARATE }) });
+    bridgeMock.revokeRelayShare.mockResolvedValue({});
+    render(
+      <View
+        proposals={[
+          {
+            proposalId: "proposal-1",
+            shareId: "share-2",
+            proposedByEmail: "nova@example.com",
+            createdAtMs: 1,
+            ops: 1,
+          },
+        ]}
+      />,
+    );
+    const item = await grantedRow("share-1");
+    await userEvent.click(
+      within(await openMenu(item)).getByRole("menuitem", { name: "End share…" }),
+    );
+    expect(within(item).getByTestId("sharing-end-confirm").textContent).toBe(
+      "End this share with 2 people and decline 1 change nova@example.com sent? Undo restores the share, not the declined change. Anyone with the link keeps access. End links in Share.CancelEnd share",
+    );
+    await userEvent.click(within(item).getByTestId("sharing-end"));
+    await waitFor(() => expect(bridgeMock.revokeRelayShare).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.revokeRelayShare.mock.calls.map(([input]) => input.shareId)).toEqual([
+      "share-1",
+      "share-2",
+    ]);
+
+    const other = await grantedRow("share-4");
+    await userEvent.click(
+      within(await openMenu(other)).getByRole("menuitem", { name: "End share…" }),
+    );
+    expect(within(other).getByTestId("sharing-end-confirm").textContent).toContain(
+      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates.Cancel",
+    );
+  });
+
+  it("says on End share that shares not shown yet stay as they are, and loads none of them", async () => {
+    answerWith({
+      granted: answer("granted", { rows: [granted(), SEPARATE[3]!], nextCursor: "page-2" }),
+    });
+    render(<View />);
+    const item = await grantedRow("share-1");
+    await userEvent.click(
+      within(await openMenu(item)).getByRole("menuitem", { name: "End share…" }),
+    );
+    expect(within(item).getByTestId("sharing-end-confirm").textContent).toBe(
+      "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates. Not every share is shown yet. Any others stay as they are.CancelEnd share",
+    );
+    expect(bridgeMock.listSharingAccess).not.toHaveBeenCalledWith(
+      expect.objectContaining({ cursor: expect.anything() }),
+    );
+  });
+
+  it("holds an open Remove access while that person's level is changing", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    const change = deferred<{ access: "edit"; generation: number }>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(change.promise);
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    await userEvent.click(
+      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    const confirm = within(person!).getByTestId("sharing-end-confirm");
+    const remove = within(confirm).getByTestId("sharing-end");
+    expect(remove).toHaveProperty("disabled", false);
+
+    await userEvent.click(within(person!).getByTestId("sharing-person-access-grant-1"));
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce();
+    expect(remove).toHaveProperty("disabled", true);
+    expect(remove.textContent).toBe("Remove access");
+    const why = within(confirm).getByTestId("sharing-end-held");
+    expect(why.textContent).toBe("dohc is changing this access.");
+    expect(remove.getAttribute("aria-describedby")).toBe(why.id);
+    await userEvent.click(remove);
+    expect(bridgeMock.revokeRelayShareGrant).not.toHaveBeenCalled();
+
+    await act(async () => change.resolve({ access: "edit", generation: 2 }));
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false));
+    expect(within(confirm).queryByTestId("sharing-end-held")).toBeNull();
+  });
+
+  it("starts no level change from a Try again while that person's removal is under way", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    bridgeMock.retuneRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    bridgeMock.revokeRelayShareGrant.mockReturnValueOnce(
+      deferred<{ undo: { undoId: string; expiresAtMs: number } }>().promise,
+    );
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    const changeAgain = callbacks.reportError.mock.calls[0]![2] as () => void;
+
+    await userEvent.click(
+      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    await userEvent.click(within(person!).getByTestId("sharing-end"));
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledOnce();
+    await act(async () => changeAgain());
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce();
+  });
+
+  it("starts no removal from a Try again while that person's level is changing", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(
+      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+    );
+    await userEvent.click(within(person!).getByTestId("sharing-end"));
+    await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
+    const removeAgain = shareRemovals.failed.mock.calls[0]![0].retry as () => void;
+    await waitFor(() => expect(level).toHaveProperty("disabled", false));
+
+    const change = deferred<{ access: "edit"; generation: number }>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(change.promise);
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce();
+    await act(async () => removeAgain());
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledOnce();
+  });
+
+  it("takes a failed change's notice back once a later change for that person works", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    bridgeMock.retuneRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.reportError.mock.calls[0]![3]).toBe("share-access:grant-1");
+    expect(clearNotice).not.toHaveBeenCalled();
+
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({ access: "edit", generation: 2 });
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    await waitFor(() => expect(level.textContent).toBe("Can edit"));
+    expect(clearNotice).toHaveBeenCalledExactlyOnceWith("share-access:grant-1");
+    expect(callbacks.reportError).toHaveBeenCalledOnce();
+  });
+
+  it("offers no End share on an item that has only links, and says where links end", async () => {
+    answerWith({ granted: answer("granted", { rows: [SEPARATE[2]!] }) });
+    render(<View />);
+    const item = await grantedRow("share-3");
+    expect(within(item).queryByRole("button", { name: "Share actions" })).toBeNull();
+    await userEvent.click(within(item).getByTestId("sharing-item-toggle"));
+    expect(within(item).getByTestId("sharing-links-note").textContent).toBe("End links in Share.");
+    expect(within(item).getByRole("button", { name: "Open Share…" })).toBeTruthy();
+  });
+
+  it("opens the oldest waiting change of all an item's shares", async () => {
+    answerWith({ granted: answer("granted", { rows: SEPARATE }) });
+    render(
+      <View
+        proposals={[
+          {
+            proposalId: "newer",
+            shareId: "share-1",
+            proposedByEmail: "sam@example.com",
+            createdAtMs: 9,
+            ops: 1,
+          },
+          {
+            proposalId: "oldest",
+            shareId: "share-2",
+            proposedByEmail: "nova@example.com",
+            createdAtMs: 2,
+            ops: 1,
+          },
+        ]}
+      />,
+    );
+    const item = await grantedRow("share-1");
+    await userEvent.click(within(item).getByTestId("sharing-review"));
+    expect(callbacks.onReviewChanges).toHaveBeenLastCalledWith("oldest");
+    await userEvent.click(
+      within(await openMenu(item)).getByRole("menuitem", { name: "Review changes (2)" }),
+    );
+    expect(callbacks.onReviewChanges).toHaveBeenCalledTimes(2);
+    expect(callbacks.onReviewChanges).toHaveBeenLastCalledWith("oldest");
+  });
+
+  it("holds a share whose grants are not all loaded among the live items, and counts only what it knows", async () => {
+    const pageOne = [
+      granted(),
+      granted({
+        shareId: "share-2",
+        grantId: "grant-2",
+        status: "revoked",
+        subjectName: "budget.csv",
+        selector: null,
+        access: null,
+      }),
+    ];
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane, cursor }) =>
+      lane === "received"
+        ? answer("received")
+        : cursor === "page-2"
+          ? answer("granted", {
+              rows: [
+                granted({
+                  shareId: "share-2",
+                  grantId: "grant-3",
+                  recipientUserId: "nova",
+                  recipientEmail: "nova@example.com",
+                  subjectName: "budget.csv",
+                  selector: { paths: ["budget.csv"], versionId: null },
+                }),
+              ],
+            })
+          : answer("granted", { rows: pageOne, nextCursor: "page-2" }),
+    );
+    render(<View />);
+    const held = await grantedRow("share-2");
+    expect(held.dataset.status).toBe("unconfirmed");
+    expect(within(held).getByTestId("sharing-row-who").textContent).toBe(
+      "Show more to see who has it",
+    );
+    expect(screen.queryByTestId("sharing-granted-ended")).toBeNull();
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("1+1 or more shares");
+
+    await userEvent.click(screen.getByTestId("sharing-granted-more"));
+    await waitFor(() => expect(screen.getByTestId("sharing-granted-count").textContent).toBe("2"));
+    const loaded = await grantedRow("share-2");
+    expect(loaded.dataset.status).toBe("active");
+    expect(within(loaded).getByTestId("sharing-row-who").textContent).toBe(
+      "nova@example.com can edit",
+    );
+  });
+
+  it("draws no expansion control on a held item with nothing to show, and keeps it a keyboard stop", async () => {
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane, cursor }) =>
+      lane === "received"
+        ? answer("received")
+        : cursor === "page-2"
+          ? answer("granted", {
+              rows: [
+                granted({
+                  shareId: "share-2",
+                  grantId: "grant-3",
+                  subjectName: "budget.csv",
+                  selector: { paths: ["budget.csv"], versionId: null },
+                }),
+              ],
+            })
+          : answer("granted", {
+              rows: [
+                granted(),
+                granted({
+                  shareId: "share-2",
+                  grantId: "grant-2",
+                  status: "revoked",
+                  subjectName: "budget.csv",
+                  selector: null,
+                  access: null,
+                }),
+              ],
+              nextCursor: "page-2",
+            }),
+    );
+    render(<View focus={{ lane: "granted", shareId: "share-2" }} />);
+    const held = await grantedRow("share-2");
+    expect(held.querySelector("[aria-expanded]")).toBeNull();
+    expect(within(held).queryByTestId("sharing-item-toggle")).toBeNull();
+    const row = within(held).getByRole("group", {
+      name: "budget.csv, Show more to see who has it",
+    });
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    await userEvent.tab();
+    expect(document.activeElement).not.toBe(row);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(row);
+
+    await userEvent.click(screen.getByTestId("sharing-granted-more"));
+    await waitFor(() => expect(screen.getByTestId("sharing-granted-count").textContent).toBe("2"));
+    const toggle = within(await grantedRow("share-2")).getByTestId("sharing-item-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(within(await grantedRow("share-2")).getAllByTestId("sharing-person")).toHaveLength(1);
+  });
+
+  it("calls a share ended once its listing ends with only a revoked grant", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted(),
+          granted({
+            shareId: "share-2",
+            grantId: "grant-2",
+            status: "revoked",
+            selector: null,
+            access: null,
+          }),
+        ],
+      }),
+    });
+    render(<View />);
+    await grantedRow("share-1");
+    expect(screen.getByTestId("sharing-granted-ended-count").textContent).toBe("1");
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("1");
+  });
+
+  it("says whose access a level is, and cuts a long address with its whole value in a tooltip", async () => {
+    const address = "a-very-long-name-that-does-not-fit@a-long-company-name.example.com";
+    answerWith({
+      granted: answer("granted", { rows: [granted({ recipientEmail: address })] }),
+    });
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const name = within(person!).getByTestId("sharing-person-name");
+    expect(name.textContent).toBe(address);
+    expect(name.getAttribute("title")).toBe(address);
+    expect(name.className.split(" ")).toContain("truncate");
+    expect(name.className).not.toContain("break-all");
+    const trigger = within(person!).getByRole("button", { name: "Can edit" });
+    expect(trigger.getAttribute("aria-describedby")).toBe(name.id);
+    expect(name.id).not.toBe("");
+  });
+
+  it("keeps ended and damaged shares out of the list, in Ended", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          granted(),
+          granted({
+            shareId: "share-old",
+            grantId: "grant-old",
+            status: "revoked",
+            subjectName: "budget.csv",
+            selector: null,
+            access: null,
+          }),
+          granted({
+            shareId: "share-bad",
+            grantId: "grant-bad",
+            status: "damaged",
+            selector: null,
+            access: null,
+          }),
+        ],
+      }),
+    });
+    render(<View />);
+    const live = await screen.findAllByTestId("sharing-granted-row");
+    expect(live.map((row) => row.dataset.status)).toEqual(["active"]);
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("1");
+    const ended = screen.getByTestId("sharing-granted-ended");
+    expect(within(ended).getByTestId("sharing-granted-ended-count").textContent).toBe("2");
+    expect(within(ended).getByRole("img", { name: "1 damaged share" })).toBeTruthy();
+    expect(within(ended).queryByTestId("sharing-granted-row")).toBeNull();
+
+    await openEnded("granted");
+    const rows = within(ended).getAllByTestId("sharing-granted-row");
+    expect(rows.map((row) => row.dataset.status)).toEqual(["revoked", "damaged"]);
+    expect(rows[0]!.textContent).toBe("budget.csvWith sam@example.com");
+    expect(within(rows[0]!).queryByRole("button")).toBeNull();
+    expect(within(rows[1]!).getByTestId("sharing-row-status").textContent).toBe("Damaged");
+  });
+});
+
+describe("Shared with me, by who shared", () => {
+  const FROM_TWO = [
+    received(),
+    received({
+      shareId: "in-2",
+      grantId: "in-grant-2",
+      subjectName: "roadmap.md",
+      selector: { paths: ["notes/roadmap.md"], versionId: null },
+      access: "edit",
+    }),
+    received({
+      shareId: "in-3",
+      grantId: "in-grant-3",
+      granterUserId: "ana-id",
+      sharerName: null,
+      granterEmail: "ana@example.com",
+      subjectName: "budget.csv",
+      selector: { paths: ["budget.csv"], versionId: null },
+    }),
+  ];
+  const RECEIVED_SHARE = {
+    shareId: "in-2",
+    shareCode: "code-2",
+    access: "edit",
+    selector: { paths: ["notes/roadmap.md"], versionId: null },
+  };
+
+  it("groups shares under who sent them, by name, each with its level and one action", async () => {
+    answerWith({ received: answer("received", { rows: FROM_TWO }) });
+    render(<View />);
+    await showLane("received");
+    const senders = await screen.findAllByTestId("sharing-sender");
+    expect(senders.map((sender) => within(sender).getByRole("heading").textContent)).toEqual([
+      "Aana@example.com",
+      "SSam",
+    ]);
+    expect(within(senders[1]!).getByRole("heading").getAttribute("title")).toBe(
+      "Sam (sam@example.com)",
+    );
+    const rows = within(senders[1]!).getAllByTestId("sharing-received-row");
+    expect(rows.map((row) => row.dataset.shareId)).toEqual(["in-1", "in-2"]);
+    expect(rows.map((row) => within(row).getByTestId("sharing-row-level").textContent)).toEqual([
+      "Can view",
+      "Can edit",
+    ]);
+    expect(rows.map((row) => within(row).getByTestId("sharing-row-primary").textContent)).toEqual([
+      "Add to workspace",
+      "Open to edit",
+    ]);
+    const menu = await openMenu(rows[1]!);
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Add to workspace", "Leave share…"]);
+  });
+
+  it("hands the shell an edit share to open in its own window", async () => {
+    answerWith({ received: answer("received", { rows: FROM_TWO }) });
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share: RECEIVED_SHARE });
+    render(<View />);
+    await showLane("received");
+    const row = (await screen.findAllByTestId("sharing-received-row")).find(
+      (each) => each.dataset.shareId === "in-2",
+    )!;
+    await userEvent.click(within(row).getByRole("button", { name: "Open to edit" }));
+    await waitFor(() =>
+      expect(callbacks.onOpenShare).toHaveBeenCalledExactlyOnceWith({
+        shareId: "in-2",
+        shareCode: "code-2",
+        liveEditing: true,
+      }),
+    );
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({ shareId: "in-2" });
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
+  it("reports a share that could not be opened, with Try again", async () => {
+    answerWith({ received: answer("received", { rows: FROM_TWO }) });
+    bridgeMock.getRelayReceivedShare.mockRejectedValueOnce(new Error("offline"));
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: true, share: RECEIVED_SHARE });
+    render(<View />);
+    await showLane("received");
+    const row = (await screen.findAllByTestId("sharing-received-row")).find(
+      (each) => each.dataset.shareId === "in-2",
+    )!;
+    await userEvent.click(within(row).getByRole("button", { name: "Open to edit" }));
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.reportError.mock.calls[0]![0]).toBe("dohc could not open this share.");
+    expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+    await act(async () => callbacks.reportError.mock.calls[0]![2]());
+    await waitFor(() => expect(callbacks.onOpenShare).toHaveBeenCalledOnce());
+  });
+
+  it("says a share added to the workspace is there, and that an edit share's copy is read-only", async () => {
+    answerWith({ received: answer("received", { rows: FROM_TWO }) });
+    render(
+      <View
+        mounts={[
+          { shareId: "in-1", label: "funnel", granterEmail: "sam@example.com", access: "view" },
+          { shareId: "in-2", label: "roadmap", granterEmail: "sam@example.com", access: "edit" },
+        ]}
+      />,
+    );
+    await showLane("received");
+    const rows = await screen.findAllByTestId("sharing-received-row");
+    const byShare = (shareId: string) => rows.find((row) => row.dataset.shareId === shareId)!;
+    const view = within(byShare("in-1")).getByTestId("sharing-mounted");
+    expect(view.textContent).toBe("In this workspace");
+    expect(view.getAttribute("title")).toBe("shared-with-me/funnel");
+    expect(within(byShare("in-1")).queryByTestId("sharing-row-primary")).toBeNull();
+    expect(within(byShare("in-2")).getByTestId("sharing-mounted").textContent).toBe(
+      "In this workspace as a read-only copy",
+    );
+    expect(within(byShare("in-2")).getByTestId("sharing-row-primary").textContent).toBe(
+      "Open to edit",
+    );
+    expect(within(byShare("in-3")).queryByTestId("sharing-mounted")).toBeNull();
+  });
+
+  it("gives each ended share its own action, and no action for all of them", async () => {
+    const ended = (shareId: string) =>
+      received({
+        shareId,
+        grantId: `${shareId}-grant`,
+        status: "removed",
+        selector: null,
+        access: null,
+      });
+    answerWith({
+      received: answer("received", {
+        rows: [received(), ended("gone-1"), ended("gone-2"), ended("gone-3")],
+      }),
+    });
+    bridgeMock.leaveRelayShare.mockResolvedValue({ left: true });
+    render(
+      <View
+        mounts={[
+          { shareId: "gone-3", label: "kept", granterEmail: "sam@example.com", access: "view" },
+        ]}
+      />,
+    );
+    await showLane("received");
+    const live = await screen.findAllByTestId("sharing-received-row");
+    expect(live.map((row) => row.dataset.shareId)).toEqual(["in-1"]);
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("1");
+    expect(screen.getByTestId("sharing-received-ended-count").textContent).toBe("3");
+
+    await openEnded("received");
+    const group = screen.getByTestId("sharing-received-ended");
+    expect(
+      within(group)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Ended3", "Remove from list", "Remove from list", "Remove from workspace"]);
+    expect(screen.queryByRole("button", { name: "Remove all" })).toBeNull();
+
+    await userEvent.click(within(group).getAllByRole("button", { name: "Remove from list" })[0]!);
+    await waitFor(() =>
+      expect(bridgeMock.leaveRelayShare).toHaveBeenCalledExactlyOnceWith({
+        shareId: "gone-1",
+        ended: true,
+      }),
+    );
+  });
+
+  it("puts a copy whose record says it ended in Ended, also when the list is unknown or not all loaded", async () => {
+    const ENDED_COPY: ShareMount = {
+      shareId: "over-1",
+      label: "old-notes",
+      granterEmail: "sam@example.com",
+      access: "view",
+      ended: true,
+    };
+    answerWith({ received: UNKNOWN("received") });
+    const { unmount } = render(<View facts={SIGNED_OUT} mounts={[ENDED_COPY]} />);
+    await showLane("received");
+    await screen.findByTestId("sharing-received-ended");
+    expect(screen.queryByTestId("sharing-sender")).toBeNull();
+    expect(screen.queryByTestId("sharing-mounted")).toBeNull();
+    await openEnded("received");
+    const row = screen.getByTestId("sharing-received-row");
+    expect(row.dataset.status).toBe("removed");
+    expect(within(row).getByRole("button", { name: "Remove from workspace" })).toBeTruthy();
+    unmount();
+
+    answerWith({
+      received: answer("received", { rows: [received()], nextCursor: "page-2" }),
+    });
+    render(<View mounts={[ENDED_COPY]} />);
+    await showLane("received");
+    const sender = await screen.findByTestId("sharing-sender");
+    expect(
+      within(sender)
+        .getAllByTestId("sharing-received-row")
+        .map((each) => each.dataset.shareId),
+    ).toEqual(["in-1"]);
+    expect(screen.getByTestId("sharing-received-ended-count").textContent).toBe("1");
+    await openEnded("received");
+    expect(
+      within(screen.getByTestId("sharing-received-ended")).getByTestId("sharing-received-row")
+        .dataset.shareId,
+    ).toBe("over-1");
+  });
+
+  it("calls a copy whose record says it ended ended, also when the list still says it is live", async () => {
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    render(
+      <View
+        mounts={[
+          {
+            shareId: "in-1",
+            label: "funnel",
+            granterEmail: "sam@example.com",
+            access: "view",
+            ended: true,
+          },
+        ]}
+      />,
+    );
+    await showLane("received");
+    await screen.findByTestId("sharing-received-ended");
+    expect(screen.queryByTestId("sharing-sender")).toBeNull();
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("0");
+    expect(screen.getByTestId("sharing-received-ended-count").textContent).toBe("1");
+    await openEnded("received");
+    const row = screen.getByTestId("sharing-received-row");
+    expect(row.dataset.status).toBe("removed");
+    expect(within(row).queryByTestId("sharing-mounted")).toBeNull();
+    expect(within(row).queryByRole("button", { name: "Share actions" })).toBeNull();
+    await userEvent.click(within(row).getByRole("button", { name: "Remove from workspace" }));
+    await waitFor(() =>
+      expect(callbacks.onUnmount).toHaveBeenCalledExactlyOnceWith("shared-with-me/funnel"),
+    );
+    expect(bridgeMock.leaveRelayShare).not.toHaveBeenCalled();
+  });
+
+  it("counts only the shares the list confirms are live", async () => {
+    answerWith({
+      granted: answer("granted", { rows: [granted()] }),
+      received: answer("received", {
+        rows: [
+          received(),
+          received({
+            shareId: "in-bad",
+            grantId: "in-grant-bad",
+            status: "damaged",
+            selector: null,
+            access: null,
+          }),
+        ],
+        nextCursor: "page-2",
+      }),
+    });
+    render(
+      <View
+        mounts={[
+          { shareId: "local-1", label: "local", granterEmail: "kim@example.com", access: "view" },
+        ]}
+      />,
+    );
+    await showLane("received");
+    const rows = await screen.findAllByTestId("sharing-received-row");
+    expect(rows.map((row) => row.dataset.status).sort()).toEqual(["active", "damaged", "unlisted"]);
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("1+1 or more shares");
+  });
+
+  it("keeps two senders with one name apart, by who they are", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [
+          received(),
+          received({
+            shareId: "in-2",
+            grantId: "in-grant-2",
+            granterUserId: "other-sam-id",
+            granterEmail: "sam@other.example",
+            subjectName: "roadmap.md",
+            selector: { paths: ["notes/roadmap.md"], versionId: null },
+          }),
+          received({
+            shareId: "in-3",
+            grantId: "in-grant-3",
+            granterEmail: "sam.new@example.com",
+            subjectName: "budget.csv",
+            selector: { paths: ["budget.csv"], versionId: null },
+          }),
+        ],
+      }),
+    });
+    render(<View />);
+    await showLane("received");
+    const senders = await screen.findAllByTestId("sharing-sender");
+    expect(senders.map((sender) => sender.dataset.sender)).toEqual([
+      "user:sam-id",
+      "user:other-sam-id",
+    ]);
+    expect(senders.map((sender) => within(sender).getByRole("heading").textContent)).toEqual([
+      "SSam (sam@example.com)",
+      "SSam (sam@other.example)",
+    ]);
+    expect(
+      senders.map((sender) =>
+        within(sender)
+          .getAllByTestId("sharing-received-row")
+          .map((row) => row.dataset.shareId),
+      ),
+    ).toEqual([["in-3", "in-1"], ["in-2"]]);
+  });
+
+  describe("Open to edit", () => {
+    const EDITS = [
+      FROM_TWO[1]!,
+      received({
+        shareId: "in-4",
+        grantId: "in-grant-4",
+        subjectName: "agenda.md",
+        selector: { paths: ["notes/agenda.md"], versionId: null },
+        access: "edit",
+      }),
+    ];
+    const found = (shareId: string, access = "edit") => ({
+      found: true,
+      share: { ...RECEIVED_SHARE, shareId, shareCode: `code-${shareId}`, access },
+    });
+    async function openRow(shareId: string) {
+      const row = (await screen.findAllByTestId("sharing-received-row")).find(
+        (each) => each.dataset.shareId === shareId,
+      )!;
+      await userEvent.click(within(row).getByRole("button", { name: "Open to edit" }));
+    }
+
+    it("opens the share asked for last, whichever lookup answers last", async () => {
+      answerWith({ received: answer("received", { rows: EDITS }) });
+      const slow = deferred<unknown>();
+      const fast = deferred<unknown>();
+      bridgeMock.getRelayReceivedShare.mockImplementation(({ shareId }) =>
+        shareId === "in-2" ? slow.promise : fast.promise,
+      );
+      render(<View />);
+      await showLane("received");
+      await openRow("in-2");
+      await openRow("in-4");
+      await act(async () => fast.resolve(found("in-4")));
+      await waitFor(() =>
+        expect(callbacks.onOpenShare).toHaveBeenCalledExactlyOnceWith({
+          shareId: "in-4",
+          shareCode: "code-in-4",
+          liveEditing: true,
+        }),
+      );
+      await act(async () => slow.resolve(found("in-2")));
+      expect(callbacks.onOpenShare).toHaveBeenCalledOnce();
+      expect(callbacks.reportError).not.toHaveBeenCalled();
+    });
+
+    it("does nothing with a lookup that answers after the list was switched or the view closed", async () => {
+      answerWith({ received: answer("received", { rows: EDITS }) });
+      const switched = deferred<unknown>();
+      const closed = deferred<unknown>();
+      bridgeMock.getRelayReceivedShare
+        .mockReturnValueOnce(switched.promise)
+        .mockReturnValueOnce(closed.promise);
+      const { rerender } = render(<View />);
+      await showLane("received");
+      await openRow("in-2");
+      await showLane("granted");
+      await act(async () => switched.resolve(found("in-2")));
+      expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+
+      await showLane("received");
+      await openRow("in-4");
+      rerender(<View open={false} />);
+      await act(async () => closed.reject(new Error("offline")));
+      expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+      expect(callbacks.reportError).not.toHaveBeenCalled();
+    });
+
+    it("says a share the owner removed is no longer shared with you, and reads the list again", async () => {
+      let rows = EDITS;
+      bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) =>
+        answer(lane, { rows: lane === "received" ? rows : [] }),
+      );
+      bridgeMock.getRelayReceivedShare
+        .mockResolvedValueOnce({
+          found: false,
+          removed: { message: "Sam removed your access to roadmap.md." },
+        })
+        .mockResolvedValueOnce({ found: false });
+      render(<View />);
+      await showLane("received");
+      await screen.findAllByTestId("sharing-received-row");
+      rows = [EDITS[1]!];
+      await openRow("in-2");
+      await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+      expect(callbacks.reportError.mock.calls[0]![0]).toBe(
+        "Sam removed your access to roadmap.md.",
+      );
+      await waitFor(() =>
+        expect(
+          screen.getAllByTestId("sharing-received-row").map((row) => row.dataset.shareId),
+        ).toEqual(["in-4"]),
+      );
+      expect(bridgeMock.listSharingAccess).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a",
+        lane: "received",
+      });
+
+      await openRow("in-4");
+      await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledTimes(2));
+      expect(callbacks.reportError.mock.calls[1]![0]).toBe(
+        "This share is no longer shared with you.",
+      );
+      expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+    });
+
+    it("does not open a share the owner has since made view only, says so, and reads the list again", async () => {
+      answerWith({ received: answer("received", { rows: EDITS }) });
+      bridgeMock.getRelayReceivedShare.mockResolvedValue(found("in-2", "view"));
+      render(<View />);
+      await showLane("received");
+      const reads = bridgeMock.listSharingAccess.mock.calls.length;
+      await openRow("in-2");
+      await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+      expect(callbacks.reportError.mock.calls[0]![0]).toBe(
+        "The owner changed your access to this share. It no longer opens to edit.",
+      );
+      expect(callbacks.onOpenShare).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads),
+      );
+      expect(bridgeMock.listSharingAccess).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a",
+        lane: "received",
+      });
+    });
   });
 });
 

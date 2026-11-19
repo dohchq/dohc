@@ -255,7 +255,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
+    await expect(row).toHaveCount(0);
+    await page.getByTestId("sharing-granted-ended-toggle").click();
+    await expect(row).toHaveAttribute("data-status", "revoked");
 
     const revokedFetch = await relayJson(
       relay.baseUrl,

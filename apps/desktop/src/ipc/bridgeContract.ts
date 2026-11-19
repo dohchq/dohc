@@ -5403,6 +5403,7 @@ export type PromoteRelayShareGrantResult = z.infer<typeof PromoteRelayShareGrant
 export const RevokeRelayShareGrantResult = z
   .object({
     ...RelayShareNamedGrantTransitionBase,
+    parentGrantId: OPAQUE_ID.nullable(),
     status: z.literal("revoked"),
     revokedAtMs: z.number().int().nonnegative(),
     undo: RelayShareUndoReceipt,

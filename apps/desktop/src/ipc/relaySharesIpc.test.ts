@@ -1267,6 +1267,36 @@ describe("registered relay share handlers", () => {
     ).rejects.toThrow();
   });
 
+  it.each([
+    ["a person invited by email", null],
+    ["a person who joined through a link", "link-grant"],
+  ])("ends the access of %s and hands back the Undo", async (_who, parentGrantId) => {
+    const h = harness();
+    const removed = {
+      grantId: "grant",
+      access: "view",
+      generation: 2,
+      status: "revoked",
+      revokedAtMs: 20,
+      parentGrantId,
+      undo: { undoId: "undo-1", expiresAtMs: 600_020 },
+    };
+    h.request.mockResolvedValueOnce({ ok: true, ...removed });
+
+    await expect(
+      h.invoke(relayShareOperations.revokeRelayShareGrant.channel, {
+        workspaceId,
+        shareId: "share",
+        grantId: "grant",
+      }),
+    ).resolves.toEqual(removed);
+    expect(h.request).toHaveBeenCalledWith(
+      h.credentials,
+      "/sync/shares/share/grants/grant/revoke",
+      { method: "POST", body: JSON.stringify({ workspaceId: "workspace" }) },
+    );
+  });
+
   it("rejects a shared view and unauthorized remote before relay mutation", async () => {
     const h = harness();
     h.workspace.shareView = {};
