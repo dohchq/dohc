@@ -12,7 +12,9 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use windows_sys::Win32::Foundation::{ERROR_CANT_RESOLVE_FILENAME, ERROR_NO_MORE_FILES};
+use windows_sys::Win32::Foundation::{
+    ERROR_CANT_RESOLVE_FILENAME, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
@@ -175,12 +177,12 @@ impl Iterator for Listing {
 impl Listing {
     /// Reads the next batch of records into the buffer.
     fn fetch(&mut self) -> io::Result<()> {
-        let class = if self.restart {
+        let first = std::mem::take(&mut self.restart);
+        let class = if first {
             FileIdBothDirectoryRestartInfo
         } else {
             FileIdBothDirectoryInfo
         };
-        self.restart = false;
         let bytes = u32::try_from(self.buffer.len() * 8).unwrap_or(u32::MAX);
         // SAFETY: The handle is open and the buffer holds `bytes` writable,
         // 8-byte aligned bytes for this synchronous call.
@@ -195,7 +197,10 @@ impl Listing {
         };
         if listed == 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            // An empty FAT volume root has no `.` or `..`, and its first query
+            // reports "not found". `read_dir` lists it as empty too.
+            let empty = first && error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32);
+            if !empty && error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
                 return Err(error);
             }
             self.done = true;
