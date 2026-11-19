@@ -55,19 +55,31 @@ fn final_path(file: &File) -> io::Result<PathBuf> {
     }
 }
 
-fn in_place(file: File, path: &Path) -> io::Result<File> {
-    if final_path(&file)? == path {
-        Ok(file)
-    } else {
-        Err(io::Error::from_raw_os_error(
+/// `file`, opened at `path`, with the path it was found at. Only the last
+/// name may differ, and only in ASCII case, as a case-insensitive folder
+/// finds it. Any other difference, or a path Windows can't name, refuses it
+/// with an error that isn't "not found", so the walk keeps what it saw there.
+fn in_place(file: File, path: &Path) -> io::Result<(File, PathBuf)> {
+    match final_path(&file) {
+        Ok(found)
+            if found == path
+                || found.parent() == path.parent()
+                    && found
+                        .file_name()
+                        .zip(path.file_name())
+                        .is_some_and(|(found, name)| found.eq_ignore_ascii_case(name)) =>
+        {
+            Ok((file, found))
+        }
+        _ => Err(io::Error::from_raw_os_error(
             ERROR_CANT_RESOLVE_FILENAME as i32,
-        ))
+        )),
     }
 }
 
 /// A folder to list, following links only to check none was on the way.
 fn open_folder(path: &Path) -> io::Result<File> {
-    in_place(folder(path)?, path)
+    Ok(in_place(folder(path)?, path)?.0)
 }
 
 fn folder(path: &Path) -> io::Result<File> {
@@ -84,11 +96,12 @@ pub fn open_file(path: &Path) -> io::Result<File> {
         .read(true)
         .share_mode(SHARE_ALL)
         .open(path)?;
-    in_place(file, path)
+    Ok(in_place(file, path)?.0)
 }
 
-/// The entry at `path` itself, a link or not, for its metadata.
-pub fn open_entry(path: &Path) -> io::Result<File> {
+/// The entry at `path` itself, a link or not, for its metadata, with the
+/// path it was found at.
+pub fn open_entry(path: &Path) -> io::Result<(File, PathBuf)> {
     let file = File::options()
         .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .share_mode(SHARE_ALL)
@@ -321,8 +334,13 @@ mod tests {
             open_file(&at(&["link", "deeper", "secret.md"])).unwrap_err()
         ));
         assert!(refused(open_entry(&at(&["link", "deeper"])).unwrap_err()));
-        let link = open_entry(&at(&["link"])).unwrap();
+        let (link, _) = open_entry(&at(&["link"])).unwrap();
         assert!(link.metadata().unwrap().is_symlink());
+        let (_, found) = open_entry(&at(&["OUTSIDE"])).unwrap();
+        assert_eq!(found, at(&["outside"]));
+        assert!(refused(
+            open_file(&at(&["OUTSIDE", "deeper", "secret.md"])).unwrap_err()
+        ));
         assert!(open_file(&at(&["outside", "deeper", "secret.md"])).is_ok());
     }
 }

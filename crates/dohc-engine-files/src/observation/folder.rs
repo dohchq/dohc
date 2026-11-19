@@ -359,8 +359,8 @@ mod windows {
         /// `.dohc/visibility.toml`, with the folder that holds it, or the
         /// facts of a `.dohc` that isn't a folder. Neither is followed.
         pub(in super::super) fn policy(&self) -> io::Result<(Facts, Option<(Self, Child)>)> {
-            let dohc = self.0.join(".dohc");
-            let parent = in_place::open_entry(&dohc)?.metadata()?;
+            let (parent, dohc) = in_place::open_entry(&self.0.join(".dohc"))?;
+            let parent = parent.metadata()?;
             if !parent.is_dir() {
                 // A link or file in its place still changes the policy
                 // verdict, so its own facts are listed.
@@ -369,7 +369,8 @@ mod windows {
             // Tests swap `.dohc` here, after it opened and before its file is read.
             super::super::before_open(".dohc");
             let folder = Self(Rc::new(dohc));
-            let metadata = in_place::open_entry(&folder.0.join("visibility.toml"))?.metadata()?;
+            let (file, _) = in_place::open_entry(&folder.0.join("visibility.toml"))?;
+            let metadata = file.metadata()?;
             let child = Child(Entry {
                 name: "visibility.toml".into(),
                 folder: metadata.is_dir(),

@@ -1261,11 +1261,30 @@ mod tests {
                 outside.path().to_path_buf(),
             ),
         );
-        let facts = f.scan(&cursor);
+        assert_eq!(f.scan(&cursor), vec![]);
         assert!(BEFORE_OPEN.with_borrow(Option::is_none), "the swap ran");
-        assert!(
-            facts.iter().all(|fact| !fact.path.contains("secret")),
-            "{facts:?}"
+    }
+
+    /// Windows finds `.dohc/visibility.toml` under any ASCII case, and so
+    /// does the scan.
+    #[cfg(windows)]
+    #[test]
+    fn a_policy_file_renamed_by_case_still_reports_its_edits() {
+        let f = Fixture::new();
+        f.write(".dohc/visibility.toml", "a");
+        let root = f.root.path();
+        std::fs::rename(root.join(".dohc"), root.join(".DOHC")).unwrap();
+        std::fs::rename(
+            root.join(".DOHC").join("visibility.toml"),
+            root.join(".DOHC").join("VISIBILITY.TOML"),
+        )
+        .unwrap();
+        f.scan(&f.cursor());
+        let cursor = f.cursor();
+        f.write(".DOHC/VISIBILITY.TOML", "longer");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Changed)]
         );
     }
 
