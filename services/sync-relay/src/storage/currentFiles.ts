@@ -879,6 +879,18 @@ export function currentObjectFile(
   return last && Number(last.relay_seq) > Number(last.oldest_relay_seq) ? "reset" : null;
 }
 
+export function currentFileBlobSha256(
+  storage: StorageContext,
+  input: { workspaceId: string; versionId: string; path: string },
+): string | undefined {
+  const row = storage.db
+    .prepare(
+      "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id = ? AND version_id = ? AND path = ?",
+    )
+    .get(input.workspaceId, input.versionId, input.path);
+  return typeof row?.blob_sha256 === "string" ? row.blob_sha256 : undefined;
+}
+
 export function currentFileObjectId(
   storage: StorageContext,
   input: {
