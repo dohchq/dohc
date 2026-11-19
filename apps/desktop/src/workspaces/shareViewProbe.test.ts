@@ -4,9 +4,11 @@ import { probeShareViewLog } from "./shareViewInfo";
 
 it.each([
   [{ ops: [], nextCursor: 42, hasMore: false }, true],
+  [{ ops: [], nextCursor: 141, hasMore: false }, true],
+  [{ ops: [], nextCursor: 142, hasMore: false }, false],
   [{ ops: [{ relaySeq: 43 }], nextCursor: 43, hasMore: false }, false],
   [{ ops: [], nextCursor: 43, hasMore: true }, false],
-])("only skips a complete empty log page (%j)", async (body, unchanged) => {
+])("only skips a complete empty log page that read few rows (%j)", async (body, unchanged) => {
   const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(body));
   await expect(
     probeShareViewLog({
