@@ -44,6 +44,7 @@ export type ShareGrantTransitionRoute =
   | { route: "share-grant-retune"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-undo"; shareId: string }
+  | { route: "share-leave"; shareId: string }
   | { route: "share-revoke"; shareId: string };
 
 export type WorkspaceShareCreationRoute =
@@ -124,6 +125,8 @@ export function createShareGrantRoutes(
     | "removeShareAccess"
     | "serviceHostEnrollmentsCoveredByShare"
     | "undoShareRemoval"
+    | "leaveShare"
+    | "listActiveShareGrantsForRecipient"
     | "readLinkCreation"
     | "createFileLinkShare"
     | "createLinkGrant"
@@ -248,6 +251,34 @@ export function createShareGrantRoutes(
     route: ShareGrantTransitionRoute,
     actor: { userId: string },
   ): Promise<Response> {
+    if (route.route === "share-leave") {
+      if (request.method !== "POST") throw relayError("method_not_allowed");
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "ended") || typeof input.ended !== "boolean") {
+        throw badRequest("ended must be true or false, and the only field");
+      }
+      const onlyEnded = input.ended;
+      const leavesEdit =
+        !onlyEnded &&
+        storage
+          .listActiveShareGrantsForRecipient(route.shareId, actor.userId)
+          .some((grant) => grant.access === "edit");
+      const result = await endAccess(route.shareId, leavesEdit, () =>
+        storage.leaveShare({
+          shareId: route.shareId,
+          userId: actor.userId,
+          nowMs: nowMs(),
+          onlyEnded,
+        }),
+      );
+      if (!result.ok) throw notFound();
+      if (result.workspaceId !== null) {
+        discussionActivity.wake(route.shareId);
+        discussionActivity.wakeLog(result.workspaceId);
+      }
+      return jsonResponse({ ok: true, left: result.left });
+    }
+
     if (route.route === "share-undo") {
       if (request.method !== "POST") throw relayError("method_not_allowed");
       const input = await readJsonObject(request);

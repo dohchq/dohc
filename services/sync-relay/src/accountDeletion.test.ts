@@ -603,6 +603,11 @@ async function fixture() {
     ),
   ];
   seedJournal(storage, ownedShare);
+  storage.db
+    .prepare(
+      "INSERT INTO sync_relay_share_departures (share_id, recipient_user_id, left_at_ms) VALUES (?, ?, ?)",
+    )
+    .run(ownedShare, "other", 1);
   const ownedIds = {
     shareIds: storage.db
       .prepare("SELECT share_id FROM sync_relay_shares WHERE granter_user_id=?")

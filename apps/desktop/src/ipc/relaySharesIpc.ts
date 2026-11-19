@@ -36,6 +36,7 @@ import {
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessageResult,
   ListRelayShareDiscussionResult,
+  LeaveRelayShareResult,
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionResult,
   PollRelayShareDiscussionActivityResult,
@@ -49,6 +50,7 @@ import {
   RelayShareGrantPromotionResponse,
   RelayShareGrantRetuneResponse,
   RelayShareGrantRevokeResponse,
+  RelayShareLeaveResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
   RelayShareLinkEndResponse,
@@ -1055,6 +1057,7 @@ export function createRelaySharesIpcHandlers<
     ): Promise<ListOwnerLiveRecoveryPackagesResult>;
     // A grant changed on the relay. Null when the change names no workspace.
     sharesChanged(workspaceId: string | null): void;
+    receivedSharesChanged(): void;
     sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
     // An authenticated account listing, applied to this machine's received
     // shares so a share the owner restored resumes.
@@ -1414,6 +1417,20 @@ export function createRelaySharesIpcHandlers<
       throw new Error(relayShareErrorCopy(500, null));
     }
     return RevokeRelayShareResult.parse({ undo: parsed.data.undo });
+  };
+
+  const leaveRelayShare: Handlers["leaveRelayShare"] = async (input) => {
+    const relayResult = await relayShareJson<unknown>(
+      `/sync/shares/${encodeURIComponent(input.shareId)}/leave`,
+      { method: "POST", body: JSON.stringify({ ended: input.ended }) },
+    );
+    const parsed = RelayShareLeaveResponse.safeParse(relayResult);
+    if (!parsed.success) {
+      dependencies.receivedSharesChanged();
+      throw new Error(relayShareErrorCopy(500, null));
+    }
+    if (parsed.data.left) dependencies.receivedSharesChanged();
+    return LeaveRelayShareResult.parse({ left: parsed.data.left });
   };
 
   // Restores what a removal ended, from the receipt the removal returned.
@@ -2127,6 +2144,7 @@ export function createRelaySharesIpcHandlers<
     listRelayShares,
     getRelayReceivedShare,
     revokeRelayShare,
+    leaveRelayShare,
     undoRelayShare,
     createRelayShareLink,
     addRelayShareLink,

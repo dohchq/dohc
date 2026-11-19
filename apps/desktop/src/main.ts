@@ -9406,6 +9406,7 @@ function registerIpcHandlers(): void {
       invalidateHistoryLabels(workspaceId);
       shareRosters.sharesChanged(workspaceId);
     },
+    receivedSharesChanged: () => receivedShareAcquisition.changedHere(),
     reconcileReceivedShares,
   });
   registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);

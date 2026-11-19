@@ -239,6 +239,7 @@
   "share.handoff.dismiss",
   "share.handoff.retry",
   "share.handoff.status.read",
+  "share.leave",
   "share.link.access.set",
   "share.link.add",
   "share.link.agent.disconnect",

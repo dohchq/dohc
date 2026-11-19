@@ -1992,6 +1992,13 @@ export interface SyncRelayStorage {
     userId: string,
     shareId?: string,
   ): ReturnType<typeof import("./shareRemoval").listRemovedSharesForRecipient>;
+  listRemovedSharesInRecipientList(
+    userId: string,
+    shareId?: string,
+  ): ReturnType<typeof import("./shareRemoval").listRemovedSharesInRecipientList>;
+  leaveShare(
+    input: Parameters<typeof import("./shareRemoval").leaveShare>[1],
+  ): ReturnType<typeof import("./shareRemoval").leaveShare>;
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate moment rows for the shared-blob allowlist. Both semantics start
