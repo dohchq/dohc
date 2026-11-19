@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, lstat, open as openFile, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, open as openFile, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -8,6 +8,7 @@ import type { OwnerYDocOutboxEntry, OwnerYDocOutboxRecovery } from "@dohc/worksp
 import {
   existsInWorkspace,
   keepOnThisComputer,
+  listKeptRecoveryPackages,
   liveRecoveryPackage,
   parseLiveRecoveryPackage,
   saveLiveRecoveryCopy,
@@ -657,4 +658,41 @@ it("checks the note's path before looking on disk or saving its package", async 
   ).rejects.toThrow("Invalid file path");
   expect(looked).toEqual([]);
   await expect(access(join(root, "notes"))).rejects.toThrow();
+});
+
+it("lists a package saved without a readable copy for as long as it is there, and no package with one", async () => {
+  const { root, writes } = await workspace();
+  const failing: DocumentProjection = {
+    run: async () => {
+      throw new Error("dohc could not prepare the document.");
+    },
+  };
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await saveLiveRecoveryCopy(liveRecoveryPackage(queue(2).recovery, source), writes, failing);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  await saveLiveRecoveryCopy(
+    liveRecoveryPackage(queue(2).recovery, { ...source, path: "todo.md" }),
+    writes,
+    directDocumentProjection,
+  );
+  const kept = `${KEPT}/notes/plan (recovered).dohc-recovery.json`;
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([
+    { path: "notes/plan.md", packagePath: kept },
+  ]);
+  await writeFile(join(root, KEPT, "broken (recovered).dohc-recovery.json"), "{");
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([
+    { path: null, packagePath: `${KEPT}/broken (recovered).dohc-recovery.json` },
+    { path: "notes/plan.md", packagePath: kept },
+  ]);
+  await rm(join(root, kept));
+  await rm(join(root, KEPT, "broken (recovered).dohc-recovery.json"));
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([]);
+});
+
+it("lists nothing when no package was ever kept", async () => {
+  const { root } = await workspace();
+  expect(await listKeptRecoveryPackages({ rootPath: root })).toEqual([]);
 });

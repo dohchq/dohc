@@ -282,7 +282,7 @@ describe("history diff page", () => {
     renderPage(momentDetail({ origin: "capture-recovery" }));
     const copy = await screen.findByTestId("engine-diff-copy-typing");
     const restore = screen.getByTestId("engine-diff-restore-file");
-    for (const size of ["h-7", "text-[11px]"]) {
+    for (const size of ["min-h-7", "text-[11px]"]) {
       expect(restore.className.split(" ")).toContain(size);
       expect(copy.className.split(" ")).toContain(size);
     }

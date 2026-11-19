@@ -177,6 +177,18 @@ it.each([
   expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
 });
 
+it.each([
+  ["disk-full: need 4096 bytes, 512 available", "The disk is full. Free up space, then try again."],
+  [
+    "state-corrupt",
+    "This workspace's data store is damaged. Open Notices and choose Rebuild to review recovery options.",
+  ],
+])("names the engine's %s refusal across Electron", (message, words) => {
+  const received = acrossIpc(refusal("INTERNAL", message), "desktop:engine-ydoc-open");
+  expect(readError(received).words).toBe(words);
+  expect(ipcErrorMessage(received, "dohc could not save this note.")).toContain(words);
+});
+
 it("keeps the taken group name signal across IPC without matching its words", () => {
   const error = new Error("A group with that name already exists.");
   error.name = GROUP_NAME_TAKEN_ERROR;

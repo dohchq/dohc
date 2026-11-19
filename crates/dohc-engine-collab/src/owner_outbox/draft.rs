@@ -3700,6 +3700,30 @@ mod tests {
     }
 
     #[test]
+    fn a_save_whose_state_matches_a_taken_edit_keeps_its_checkpoint() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let doc = Ydoc::wire();
+        doc.apply(&checkpoint).unwrap();
+        let update = doc.richdoc_append_paragraph("First words");
+        let saved = bounded(&doc).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                super::super::taken::put_in(tx, &observed.binding, 5, &saved)
+            })
+            .unwrap();
+
+        feed(&mut store, &observed, 5, update);
+        assert_eq!(taken_rows(&store), 0);
+        let current = store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.checkpoint_digest, hex_sha256(&saved));
+        assert!(stored_text(&store).contains("First words"));
+    }
+
+    #[test]
     fn a_delivery_whose_frame_came_first_is_acknowledged_without_a_row() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);

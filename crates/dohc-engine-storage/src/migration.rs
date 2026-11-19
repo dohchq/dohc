@@ -5338,6 +5338,44 @@ mod tests {
         field_history_link_upgrade(1_000_000);
     }
 
+    #[test]
+    fn a_migration_that_runs_out_of_disk_answers_disk_full_and_runs_once_there_is_room() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1000);
+        let index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-replication-own-operations-index")
+            .expect("the index migration");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..index], &ctx, &NoFaults).unwrap();
+        let ledger = |conn: &Connection| {
+            conn.query_row(
+                "SELECT count(*) FROM engine_migrations WHERE completed_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let before = ledger(&conn);
+        let pages: i64 = conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        conn.pragma_update(None, "max_page_count", pages).unwrap();
+
+        let refused = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap_err();
+        assert_eq!(refused.code(), "disk-full", "{refused:?}");
+        assert_eq!(ledger(&conn), before);
+
+        conn.pragma_update(None, "max_page_count", i64::from(u32::MAX))
+            .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied {
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - index).unwrap()
+            }
+        );
+    }
+
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 

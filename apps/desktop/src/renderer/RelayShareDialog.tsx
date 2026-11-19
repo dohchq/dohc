@@ -6,8 +6,10 @@ import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
 import { notSentWords } from "./notSentWords";
 import { SHARE_ACCESS_WORDS, SharePersonRow } from "./shareAccess";
+import { INVITATION_SECRET } from "./shareCopySecrets";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
+import { CopyButton } from "./ui/CopyButton";
 import { MoreMenu } from "./ui/MoreMenu";
 import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
 import {
@@ -32,6 +34,72 @@ type InvitedPerson = { shareId: string; grantId: string; name: string; access: S
 
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
+
+type InvitationClick = {
+  resolve: (text: string | null) => void;
+  reject: (error: unknown) => void;
+};
+
+let newestInvitationCopy = 0;
+
+function useInvitation(
+  person: Pick<InvitedPerson, "shareId" | "grantId">,
+  reload: () => Promise<unknown>,
+): () => Promise<string | null> {
+  const { shareId, grantId } = person;
+  const asked = useRef<InvitationClick | null>(null);
+  const { retry } = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${shareId}\0${grantId}`,
+    manual: true,
+    load: async (signal) => {
+      const click = asked.current;
+      asked.current = null;
+      signal.addEventListener("abort", () => click?.resolve(null), { once: true });
+      try {
+        const details = await bridge().getShareCopyDetails({ shareId, grantId });
+        if (signal.aborted) return details.status;
+        if (details.status === "ended") {
+          void reload();
+          click?.resolve(null);
+        } else click?.resolve(details.browserInvitationUrl ?? details.shareCode);
+        return details.status;
+      } catch (error) {
+        if (!signal.aborted) click?.reject(error);
+        throw error;
+      }
+    },
+  });
+  return () =>
+    new Promise<string | null>((resolve, reject) => {
+      const copy = ++newestInvitationCopy;
+      const newest = () => copy === newestInvitationCopy;
+      const click: InvitationClick = {
+        resolve: (text) => resolve(newest() ? text : null),
+        reject: (error) => (newest() ? reject(error) : resolve(null)),
+      };
+      asked.current?.resolve(null);
+      asked.current = click;
+      void retry();
+      if (asked.current === click) {
+        asked.current = null;
+        resolve(null);
+      }
+    });
+}
+
+function CopyInvitation(props: { person: InvitedPerson; reload: () => Promise<unknown> }) {
+  const invitation = useInvitation(props.person, props.reload);
+  return (
+    <CopyButton
+      iconOnly
+      label="Copy invitation"
+      copiedLabel="Invitation copied"
+      testId={`share-copy-invitation-${props.person.grantId}`}
+      sensitive={INVITATION_SECRET}
+      getText={invitation}
+    />
+  );
+}
 
 // The people this selection was shared with by email, from the listing the
 // Sharing view reads. `scope` names the workspace and the selection. The
@@ -273,6 +341,7 @@ export function RelayShareDialog(props: {
                       name={person.name}
                       detail={`${person.access ? `${SHARE_ACCESS_WORDS[person.access]} · ` : ""}Invited by email`}
                     >
+                      <CopyInvitation person={person} reload={loadInvited} />
                       {onOpenSharing ? (
                         <MoreMenu
                           label="Share options"

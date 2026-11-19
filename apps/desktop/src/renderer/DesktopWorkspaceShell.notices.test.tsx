@@ -256,6 +256,78 @@ describe("edits the server refused", () => {
   });
 });
 
+it("names each recovery package kept without a readable copy when the workspace opens, with its path to copy", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const packagePath = ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json";
+  const unreadable = ".dohc/local/live-recovery/old (recovered).dohc-recovery.json";
+  bridge.listOwnerLiveRecoveryPackages = vi.fn(async () => ({
+    packages: [
+      { path: null, packagePath: unreadable },
+      { path: "notes/plan.md", packagePath },
+    ],
+  }));
+  renderShell(bridge);
+  const user = userEvent.setup();
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices = await screen.findByTestId("notice-center");
+  const row = (
+    await within(notices).findByText("Kept edits for notes/plan.md", { exact: false })
+  ).closest<HTMLElement>("[data-notice-row]")!;
+  expect(row.textContent).toContain(
+    "Kept edits for notes/plan.md have no readable copy. They are saved on this computer, in the file below.",
+  );
+  expect(row.textContent).toContain(packagePath);
+  await navigator.clipboard.writeText("");
+  const details = within(row).queryByRole("button", { name: "Details" });
+  if (details) await user.click(details);
+  await user.click(within(row).getByRole("button", { name: "Copy details" }));
+  expect((await navigator.clipboard.readText()).split("\n")).toContain(`Path: ${packagePath}`);
+  const other = within(notices)
+    .getByText("Kept edits have no readable copy", { exact: false })
+    .closest<HTMLElement>("[data-notice-row]")!;
+  expect(other.textContent).toContain(unreadable);
+  expect(bridge.listOwnerLiveRecoveryPackages).toHaveBeenCalledWith({
+    workspaceId: WORKSPACE.workspaceId,
+  });
+});
+
+it("never paints workspace A's late list of recovery packages into workspace B", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const answer = deferred<{ packages: { path: string; packagePath: string }[] }>();
+  bridge.listOwnerLiveRecoveryPackages = vi.fn(async ({ workspaceId }) =>
+    workspaceId === WORKSPACE.workspaceId ? answer.promise : { packages: [] },
+  );
+  vi.stubGlobal("dohcDesktop", bridge);
+  const shell = (workspace: Workspace) => (
+    <DesktopWorkspaceShell
+      workspace={workspace}
+      workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+      {...shellBootstrapProps(bridge)}
+      onSwitchWorkspace={() => {}}
+    />
+  );
+  const view = render(shell(WORKSPACE));
+  await waitFor(() => expect(bridge.listOwnerLiveRecoveryPackages).toHaveBeenCalledOnce());
+  view.rerender(shell(OTHER_WORKSPACE));
+  await waitFor(() =>
+    expect(bridge.listOwnerLiveRecoveryPackages).toHaveBeenCalledWith({
+      workspaceId: OTHER_WORKSPACE.workspaceId,
+    }),
+  );
+  await act(async () => {
+    answer.resolve({
+      packages: [
+        {
+          path: "notes/plan.md",
+          packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
+        },
+      ],
+    });
+    await answer.promise;
+  });
+  expect(screen.queryByText("Kept edits for notes/plan.md", { exact: false })).toBeNull();
+});
+
 it("reports an edit refusal once through Notices, without an ineffective retry", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();

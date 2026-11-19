@@ -345,6 +345,7 @@ interface StoppedRun {
 interface ChatDispatchThreadState {
   liveRunId: string | null;
   liveTriggerMessageId: string | null;
+  liveAgent?: { agentId: string; name: string };
   pendingCount: number;
   paused: boolean;
   waiting?: { agentId: string; name: string; triggerMessageIds: string[] };
@@ -1893,6 +1894,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     workspaceId: string,
     threadId: string | null,
     postThreadIds: readonly string[] = [],
+    laneThreadIds: readonly string[] = [],
   ): Promise<ChatDispatchThreadState> {
     const workspace = options.workspaceFor(workspaceId);
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
@@ -1904,16 +1906,18 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       threadId === null ? null : failedRunForThread(workspace, threadId, pendingRead),
     ]);
     const live = liveRuns.get(workspaceId);
+    // The conversation, in each of its threads.
+    const lane = new Set([threadId, ...laneThreadIds]);
     const running =
-      live?.claim.run.threadId === threadId && live.finalized === false ? live.claim.run : null;
-    const queued = pending.filter((pending) => pending.threadId === threadId);
+      live && lane.has(live.claim.run.threadId) && !live.finalized ? live.claim.run : null;
+    const queued = pending.filter((pending) => lane.has(pending.threadId));
     // A request to the agent at work waits while that run holds the
     // workspace, which a stopped or timed-out run does until its process
     // exits and its end is saved. A pause holds the request instead, so it
     // isn't waiting on the agent.
     const busy = paused ? undefined : live;
     // The conversation and the earlier posts its chat shows.
-    const shown = new Set([threadId, ...postThreadIds]);
+    const shown = new Set([...lane, ...postThreadIds]);
     const asked = busy
       ? pending.filter(
           (each) => shown.has(each.threadId) && each.agentId === busy.claim.run.agentId,
@@ -1933,6 +1937,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return {
       liveRunId: running?.runId ?? null,
       liveTriggerMessageId: running?.triggerMessageId ?? null,
+      ...(running && live ? { liveAgent: { agentId: running.agentId, name: live.agentName } } : {}),
       pendingCount: queued.length,
       paused: pauseState?.paused ?? false,
       ...(busy && waiting.length > 0

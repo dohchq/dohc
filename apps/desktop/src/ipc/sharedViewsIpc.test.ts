@@ -930,7 +930,7 @@ describe("background share pulls", () => {
     expect(result).not.toHaveProperty("nextCursor");
     expect(fetch).toHaveBeenCalledOnce();
     expect(fetch).toHaveBeenCalledWith(
-      "https://relay.example.test/sync/shares/share/log?since=42",
+      "https://relay.example.test/sync/shares/share/log?since=42&scan=page",
       expect.objectContaining({ headers: expect.any(Headers), signal: expect.any(AbortSignal) }),
     );
     expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer token");

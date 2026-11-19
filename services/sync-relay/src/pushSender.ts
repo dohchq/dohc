@@ -272,6 +272,7 @@ export function createPushSender(options: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let unobserve: (() => void) | undefined;
   const current = (delivery: PushDelivery) => {
+    if (delivery.installationId === null) return null;
     const subscription = readPushSubscription(storage, delivery.installationId);
     const message = readPushMessage(storage, delivery.relaySeq);
     if (
@@ -289,7 +290,8 @@ export function createPushSender(options: {
   };
   const attempt = async (): Promise<boolean> => {
     if (!config || closed) return false;
-    const delivery = claimPushDelivery(storage, now());
+    // Phone alerts have no sender yet; they wait in the queue until they expire.
+    const delivery = claimPushDelivery(storage, now(), { native: false });
     if (!delivery) return false;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
@@ -363,7 +365,8 @@ export function createPushSender(options: {
         ),
       );
       const status = await (options.transport ?? sendPushRequest)(prepared, controller.signal);
-      if (status === 404 || status === 410) removePushSubscriptionGeneration(storage, delivery);
+      if (status === 404 || status === 410)
+        removePushSubscriptionGeneration(storage, fresh.subscription);
       const outcome =
         status >= 200 && status < 300
           ? "sent"
@@ -409,7 +412,10 @@ export function createPushSender(options: {
         return false;
       })
       .then(() => {
-        if (!closed) schedule(storage.readTx(() => nextPushDeliveryAt(storage, now())));
+        if (!closed)
+          schedule(
+            storage.readTx(() => nextPushDeliveryAt(storage, now(), Number.MAX_SAFE_INTEGER)),
+          );
       });
   };
   return {

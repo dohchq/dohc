@@ -7,6 +7,7 @@ import {
 } from "@dohc/workspace-auth/session";
 import {
   NOTICE_DISMISSED_RETENTION_MS,
+  NOTICE_MARK_KEY_MAX_CHARS,
   NOTICE_MARKS_MAX_BODY_BYTES,
   NOTICE_READ_RETENTION_MS,
   NOTICE_UNREAD_RETENTION_MS,
@@ -14,7 +15,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { NOTICE_MARKS_RECEIPT_MS } from "./noticeRoutes";
 import type { SyncRelayStorage } from "./storage";
-import type { PostNoticeInput } from "./storage/notices";
+import { NOTICE_MARK_KEYS_KEPT, type PostNoticeInput } from "./storage/notices";
 import {
   closeTestStorages,
   denialBytes,
@@ -367,6 +368,144 @@ it("skips an automation wake in a phone batch and marks the rest, and no mark br
   expect(count(f.storage, "sync_relay_automation_wake_receipts")).toBe(receipts);
 });
 
+it("ignores a phone mark sent again with a key it took, after another device changed the row", async () => {
+  const f = await relay();
+  f.post("done");
+  f.post("read");
+  await ok(
+    f.phone({
+      marks: [
+        { noticeId: "done", mark: "dismissed", key: "done-1" },
+        { noticeId: "read", mark: "read", key: "read-1" },
+      ],
+    }),
+  );
+  expect(f.row("done")?.dismissedAtMs).toBe(f.now());
+  expect(f.row("read")?.readAtMs).toBe(f.now());
+  f.advance(1_000);
+  await ok(
+    f.phone({
+      marks: [
+        { noticeId: "done", mark: "restore", key: "undo-1" },
+        { noticeId: "read", mark: "unread", key: "unread-1" },
+      ],
+    }),
+  );
+  const rows = [f.row("done"), f.row("read")];
+  expect(rows).toMatchObject([{ dismissedAtMs: null }, { readAtMs: null }]);
+  const head = f.storage.noticeHead("ana");
+
+  f.advance(1_000);
+  expect(
+    await ok(
+      f.phone({
+        marks: [
+          { noticeId: "done", mark: "dismissed", key: "done-1" },
+          { noticeId: "read", mark: "read", key: "read-1" },
+        ],
+      }),
+    ),
+  ).toEqual({ ok: true, dismissed: [], repeated: ["done-1", "read-1"] });
+  expect(f.storage.noticeHead("ana")).toBe(head);
+  expect([f.row("done"), f.row("read")]).toEqual(rows);
+
+  expect(await ok(f.phone({ marks: [{ noticeId: "read", mark: "read", key: "read-2" }] }))).toEqual(
+    { ok: true, dismissed: [] },
+  );
+  expect(f.row("read")?.readAtMs).toBe(f.now());
+});
+
+it("applies a phone mark without a key each time it arrives, and keeps no key for it", async () => {
+  const f = await relay();
+  f.post("n-1");
+  const read = { marks: [{ noticeId: "n-1", mark: "read" }] };
+  await ok(f.phone(read));
+  const firstRead = f.now();
+  expect(f.row("n-1")?.readAtMs).toBe(firstRead);
+  f.advance(1_000);
+  await ok(f.phone({ marks: [{ noticeId: "n-1", mark: "unread" }] }));
+  expect(f.row("n-1")?.readAtMs).toBeNull();
+  f.advance(1_000);
+  await ok(f.phone(read));
+  expect(f.row("n-1")?.readAtMs).toBe(f.now());
+  expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(0);
+});
+
+it("keeps a mark key for one account's notice, so it never stops another account's or notice's mark", async () => {
+  const f = await relay();
+  f.post("same");
+  f.post("other");
+  f.post("same", { recipientUserId: "ben", senderUserId: "ben", reach: { workspaceId: "bens" } });
+  await ok(f.phone({ marks: [{ noticeId: "same", mark: "read", key: "shared-key" }] }));
+  expect(f.row("same")?.readAtMs).toBe(f.now());
+  expect(f.row("same", "ben")?.readAtMs).toBeNull();
+
+  await ok(
+    f.phone({ marks: [{ noticeId: "same", mark: "read", key: "shared-key" }] }, { userId: "ben" }),
+  );
+  expect(f.row("same", "ben")?.readAtMs).toBe(f.now());
+  await ok(f.phone({ marks: [{ noticeId: "other", mark: "read", key: "shared-key" }] }));
+  expect(f.row("other")?.readAtMs).toBe(f.now());
+  expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(3);
+});
+
+it("keeps a mark key when its row goes or was never there, so a notice posted again under its ID ignores the resend", async () => {
+  const f = await relay();
+  f.post("swept");
+  await ok(
+    f.phone({
+      marks: [
+        { noticeId: "swept", mark: "read", key: "read-1" },
+        { noticeId: "later", mark: "restore", key: "restore-1" },
+      ],
+    }),
+  );
+  f.advance(
+    Math.max(NOTICE_DISMISSED_RETENTION_MS, NOTICE_READ_RETENTION_MS, NOTICE_UNREAD_RETENTION_MS),
+  );
+  f.post("other");
+  expect(f.row("swept")).toBeUndefined();
+  f.post("swept");
+  f.post("later");
+  await ok(f.computer({ marks: [{ noticeId: "later", mark: "dismissed" }] }));
+  const rows = [f.row("swept"), f.row("later")];
+  expect(rows).toMatchObject([{ readAtMs: null }, { dismissedAtMs: f.now() }]);
+  const head = f.storage.noticeHead("ana");
+
+  f.advance(1_000);
+  expect(
+    await ok(
+      f.phone({
+        marks: [
+          { noticeId: "swept", mark: "read", key: "read-1" },
+          { noticeId: "later", mark: "restore", key: "restore-1" },
+        ],
+      }),
+    ),
+  ).toEqual({ ok: true, dismissed: [], repeated: ["read-1", "restore-1"] });
+  expect(f.storage.noticeHead("ana")).toBe(head);
+  expect([f.row("swept"), f.row("later")]).toEqual(rows);
+});
+
+it("keeps each person's newest mark keys", async () => {
+  const f = await relay();
+  f.post("n-2");
+  const marks = Array.from({ length: NOTICE_MARK_KEYS_KEPT + 1 }, (_, index) => ({
+    noticeId: "n-2",
+    mark: index % 2 === 0 ? ("read" as const) : ("unread" as const),
+    key: `k-${index}`,
+  }));
+  f.storage.markNotices({ recipientUserId: "ana", marks, nowMs: f.now() });
+  expect(count(f.storage, "sync_relay_notice_mark_keys")).toBe(NOTICE_MARK_KEYS_KEPT);
+  const readAt = f.now();
+  expect(f.row("n-2")?.readAtMs).toBe(readAt);
+  f.advance(1_000);
+  await ok(f.phone({ marks: [{ noticeId: "n-2", mark: "unread", key: "k-1" }] }));
+  expect(f.row("n-2")?.readAtMs).toBe(readAt);
+  await ok(f.phone({ marks: [{ noticeId: "n-2", mark: "unread", key: "k-0" }] }));
+  expect(f.row("n-2")?.readAtMs).toBeNull();
+});
+
 it("takes exactly the fields each sender may send, within its bounds, and changes nothing otherwise", async () => {
   const f = await relay();
   f.post("n-1");
@@ -379,6 +518,10 @@ it("takes exactly the fields each sender may send, within its bounds, and change
     { body: { marks: [{ ...mark, recipientUserId: "ben" }] } },
     { body: { marks: [{ noticeId: "n-1", mark: "archive" }] } },
     { body: { marks: [{ noticeId: "", mark: "read" }] } },
+    { body: { marks: [{ ...mark, key: "" }] } },
+    { body: { marks: [{ ...mark, key: "k".repeat(NOTICE_MARK_KEY_MAX_CHARS + 1) }] } },
+    { body: { marks: [{ ...mark, key: 7 }] } },
+    { body: { marks: [{ ...mark, key: "k\n" }] } },
     { body: { marks: [] } },
     { body: { marks: Array.from({ length: 101 }, () => mark) } },
     { body: [mark] },
@@ -401,6 +544,7 @@ it("takes exactly the fields each sender may send, within its bounds, and change
     { marks: [mark], userId: "ben" },
     { marks: [{ ...mark, recipientUserId: "ben" }] },
     { marks: [{ ...mark, withdraw: true }] },
+    { marks: [{ ...mark, key: "k-1" }] },
     { marks: [{ noticeId: "n-1", mark: "unread" }] },
     { marks: [{ noticeId: "n-1", mark: "restore" }] },
     { marks: [mark], installId: "" },

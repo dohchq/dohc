@@ -975,7 +975,7 @@ jobs:
         if: needs.javascript.result == 'success'
         with:
           pattern: verification-js-[0-9]*
-          path: .agent-artifacts/verification/aggregate
+          path: .agent-artifacts/verification/aggregate/published
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
 

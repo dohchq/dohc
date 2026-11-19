@@ -436,11 +436,8 @@ fn isolate_document_failure(error: SyncError) -> Result<bool, SyncError> {
                     matches!(
                         code,
                         rusqlite::ErrorCode::SystemIoFailure
-                            | rusqlite::ErrorCode::DiskFull
                             | rusqlite::ErrorCode::CannotOpen
                             | rusqlite::ErrorCode::OutOfMemory
-                            | rusqlite::ErrorCode::DatabaseBusy
-                            | rusqlite::ErrorCode::DatabaseLocked
                             | rusqlite::ErrorCode::PermissionDenied
                             | rusqlite::ErrorCode::ReadOnly
                     )
@@ -670,11 +667,7 @@ mod tests {
     fn recovery_propagates_io_persist_disk_full_busy_and_other_hard_failures() {
         for error in [
             StorageError::persist_public(std::io::Error::other("I/O failed")).into(),
-            StorageError::DiskFull {
-                needed: 2,
-                available: 1,
-            }
-            .into(),
+            StorageError::DiskFull { shortfall: None }.into(),
             StorageError::FileLocked.into(),
             StorageError::PermissionDenied { source: None }.into(),
             StorageError::BackupFailed { source: None }.into(),

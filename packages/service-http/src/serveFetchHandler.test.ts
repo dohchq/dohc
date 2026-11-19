@@ -631,11 +631,11 @@ describe("serveFetchHandler", () => {
     const first = send("a");
     await vi.waitFor(() => expect(releases).toHaveLength(1));
     // Past caller a's share, while the budget still has room.
-    expect(await refused(send("a"))).toEqual([503, "close"]);
+    expect(await refused(send("a"))).toEqual([503, "keep-alive"]);
     const second = send("b");
     await vi.waitFor(() => expect(releases).toHaveLength(2));
     // Past the budget, though caller c holds nothing.
-    expect(await refused(send("c"))).toEqual([503, "close"]);
+    expect(await refused(send("c"))).toEqual([503, "keep-alive"]);
     releases[0]!();
     expect((await first).statusCode).toBe(200);
     (await first).resume();
@@ -648,6 +648,45 @@ describe("serveFetchHandler", () => {
     expect((await third).statusCode).toBe(200);
     (await second).resume();
     (await third).resume();
+  });
+
+  it("reads the rest of an upload it refuses as busy before answering, and keeps the connection", async () => {
+    const releases: Array<() => void> = [];
+    const { port } = await serve({
+      bodiesInFlight: {
+        maxBytes: 1024 * 1024,
+        maxBytesPerCaller: 64 * 1024,
+        caller: (headers) => headers.get("authorization") ?? "",
+      },
+      busy: () => Response.json({ ok: false, error: "busy" }, { status: 503 }),
+      handler: async (request) => {
+        if (request.method === "GET") return new Response("next");
+        const bytes = (await request.arrayBuffer()).byteLength;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return Response.json({ bytes });
+      },
+    });
+    // A client that reads nothing until it has sent the whole body, as the engine's does.
+    const socket = connect(port, "127.0.0.1");
+    let seen = "";
+    socket.on("data", (chunk) => {
+      seen += chunk.toString("latin1");
+    });
+    const errors: Error[] = [];
+    socket.on("error", (error) => errors.push(error));
+    const bytes = 512 * 1024;
+    socket.write(
+      `PUT /blob HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: a\r\ncontent-length: ${bytes}\r\n\r\n`,
+    );
+    await new Promise<void>((resolve) => socket.write(Buffer.alloc(bytes), () => resolve()));
+    await vi.waitFor(() => expect(seen).toContain('"error":"busy"'));
+    expect(seen.startsWith("HTTP/1.1 503 ")).toBe(true);
+    expect(seen.toLowerCase()).not.toContain("connection: close");
+    socket.write("GET /next HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n");
+    await vi.waitFor(() => expect(seen).toContain("next"));
+    expect(errors).toEqual([]);
+    socket.destroy();
+    expect(releases).toHaveLength(0);
   });
 
   it("returns a timed-out upload's bytes to the budget as it refuses the upload", async () => {

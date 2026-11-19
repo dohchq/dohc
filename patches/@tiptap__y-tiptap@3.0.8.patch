@@ -1,8 +1,18 @@
 diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
-index 653ffe79d5edb4a040555bb222f472af1e45edc8..d57764ca55073ad595bf9607e4a3cbe28846ca46 100644
+index 653ffe79d5edb4a040555bb222f472af1e45edc8..f724c51ed1bc1bb83ef211a951109ba1fad796c3 100644
 --- a/dist/y-tiptap.cjs
 +++ b/dist/y-tiptap.cjs
-@@ -1571,6 +1571,28 @@ const marksToAttributes = (marks, meta) => {
+@@ -811,9 +811,6 @@ class ProsemirrorBinding {
+       );
+       transaction.changed.forEach(delType);
+       transaction.changedParentTypes.forEach(delType);
+-      // Rebuild the full Y↔PM mapping so relative cursor positions resolve against
+-      // current node sizes after structural changes (e.g. drag-and-drop block moves).
+-      this.mapping.clear();
+       const fragmentContent = this.type.toArray().map((t) =>
+         createNodeIfNotExists(
+           /** @type {Y.XmlElement | Y.XmlHook} */ (t),
+@@ -1571,6 +1568,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
@@ -31,7 +41,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..d57764ca55073ad595bf9607e4a3cbe2
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y__namespace.XmlElement &&
-@@ -1602,10 +1624,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1602,10 +1621,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -63,7 +73,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..d57764ca55073ad595bf9607e4a3cbe2
      return
    }
    let left = 0;
-@@ -1624,7 +1665,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1624,7 +1662,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    // find number of matching elements from right
@@ -74,7 +84,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..d57764ca55073ad595bf9607e4a3cbe2
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1698,33 +1741,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1698,33 +1738,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -192,10 +202,20 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..d57764ca55073ad595bf9607e4a3cbe2
    }, ySyncPluginKey);
  };
 diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
-index 28c55820dff13cf3d5c303970f530c17eb38f757..ae3430902e6a9d3bf92cf24bebc9307742d252fa 100644
+index 28c55820dff13cf3d5c303970f530c17eb38f757..07123c6825592d45fef2ff845e7f69d88b5c37ce 100644
 --- a/dist/y-tiptap.js
 +++ b/dist/y-tiptap.js
-@@ -1537,6 +1537,28 @@ const marksToAttributes = (marks, meta) => {
+@@ -777,9 +777,6 @@ class ProsemirrorBinding {
+       );
+       transaction.changed.forEach(delType);
+       transaction.changedParentTypes.forEach(delType);
+-      // Rebuild the full Y↔PM mapping so relative cursor positions resolve against
+-      // current node sizes after structural changes (e.g. drag-and-drop block moves).
+-      this.mapping.clear();
+       const fragmentContent = this.type.toArray().map((t) =>
+         createNodeIfNotExists(
+           /** @type {Y.XmlElement | Y.XmlHook} */ (t),
+@@ -1537,6 +1534,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
@@ -224,7 +244,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..ae3430902e6a9d3bf92cf24bebc93077
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y.XmlElement &&
-@@ -1568,10 +1590,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1568,10 +1587,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -256,7 +276,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..ae3430902e6a9d3bf92cf24bebc93077
      return
    }
    let left = 0;
-@@ -1590,7 +1631,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1590,7 +1628,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    // find number of matching elements from right
@@ -267,7 +287,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..ae3430902e6a9d3bf92cf24bebc93077
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1664,33 +1707,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1664,33 +1704,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {

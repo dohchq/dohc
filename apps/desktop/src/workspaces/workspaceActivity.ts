@@ -1,7 +1,7 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
 import { workspaceRootsMatch } from "./workspaceRootsMatch";
 import { deriveSyncStatus, type WatcherEvent } from "@dohc/workspace-core";
-import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
+import { engineStoreRefusalOf, type EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { AgentRunStateEvent, SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -839,6 +839,7 @@ export function createWorkspaceActivity(
       Promise.resolve()
         .then(() => entry.handle.stop())
         .catch(async (error) => {
+          if (engineStoreRefusalOf(error) !== null) return;
           entry.capture?.observationDrainFailed();
           await entry.capture?.resyncFileObservation();
           throw error;

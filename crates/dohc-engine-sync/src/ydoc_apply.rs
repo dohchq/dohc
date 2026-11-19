@@ -4740,21 +4740,40 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
             text,
-            LineageFoldAuthor::default(),
+            LineageFoldAuthor {
+                actor_origin_id,
+                ..LineageFoldAuthor::default()
+            },
             now_ms,
             LineageFoldCause::ConflictParent,
-        )
-        .map(|_| ()),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded { facts, .. } => Ok(facts.map(|facts| *facts)),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                path,
+                text,
+                actor_origin_id,
+                None,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
 }
 
@@ -5333,11 +5352,28 @@ pub fn fold_resolution_into_ydoc_in_tx(
     chosen_text: &str,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let key =
-        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+    fold_authored_resolution_in_tx(
+        tx,
+        &DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
-        })?;
-    let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
+        })?,
+        path,
+        chosen_text,
+        LineageFoldAuthor::default(),
+        now_ms,
+    )
+    .map(drop)
+}
+
+pub(crate) fn fold_authored_resolution_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    chosen_text: &str,
+    author: LineageFoldAuthor<'_>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    let complete = match ydoc_lineage_completeness_in_tx(tx, key)? {
         YdocLineageCompleteness::Complete(complete) => complete,
         YdocLineageCompleteness::DeferredUpdates => {
             return Err(SyncError::InvalidInput {
@@ -5351,7 +5387,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         }
     };
     let complete = CompleteYdocLineage {
-        key,
+        key: key.clone(),
         state: complete,
     };
     // Read before the supersede drops a reserved settle attempt's authors.
@@ -5365,7 +5401,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         &complete,
         path,
         chosen_text,
-        LineageFoldAuthor::default(),
+        author,
         now_ms,
         LineageFoldCause::LocalMutation { unsettled_authors },
     ) {
@@ -5375,9 +5411,12 @@ pub fn fold_resolution_into_ydoc_in_tx(
             marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
         }) && empty_seed_never_replicated_in_tx(tx, &complete.key)? =>
         {
-            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms)
+            retire_unclaimed_resolution_lineage_in_tx(tx, &complete.key, now_ms).map(|()| None)
         }
-        folded => folded.map(|_| ()),
+        folded => folded.map(|fold| match fold {
+            LineageFold::Folded { facts, .. } => facts.map(|facts| *facts),
+            LineageFold::NoContent => None,
+        }),
     }
 }
 

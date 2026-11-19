@@ -2,7 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 
 // A Windows path holds at most 32,767 UTF-16 code units, which also bounds each request line.
-const requestTimeoutMs = 10_000,
+const startTimeoutMs = 60_000,
+  requestTimeoutMs = 10_000,
+  readyLine = "ready\r\n",
   stderrLimitBytes = 1024 * 1024,
   pathLimit = 32_767;
 
@@ -11,13 +13,16 @@ export interface WindowsCredentialAcl {
   close(): Promise<void>;
 }
 
-// One credential operation owns at most one Windows PowerShell child. Each request reruns `check` against
-// the path's current ACL, and the final request also requires a clean exit within its deadline. Any other
-// outcome stops this child and refuses the operation. Requests arrive on [Console]::In; never use $input.
+// One credential operation owns at most one Windows PowerShell child. Its start has its own bound, and each
+// request's deadline counts from when the child is ready. Each request reruns `check` against the path's
+// current ACL, and the final request also requires a clean exit within its deadline. Any other outcome stops
+// this child and refuses the operation. Requests arrive on [Console]::In; never use $input.
 export function openWindowsCredentialAcl(check: string): WindowsCredentialAcl {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 $id = 0
+[Console]::Out.WriteLine('ready')
+[Console]::Out.Flush()
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   $id++
   $fields = $line.Split(' ')
@@ -33,9 +38,17 @@ ${check}
     closed: Promise<unknown> = Promise.resolve(),
     stopped: Promise<unknown> = Promise.resolve();
   let pending:
-    | { response: string; final: boolean; answered: boolean; done(error?: Error): void }
+    | {
+        response: string;
+        final: boolean;
+        answered: boolean;
+        arm(): void;
+        done(error?: Error): void;
+      }
     | undefined;
   let failure: Error | undefined,
+    startTimer: ReturnType<typeof setTimeout> | undefined,
+    ready = false,
     ended = false,
     sequence = 0,
     output = "",
@@ -47,6 +60,7 @@ ${check}
   function fail(error: Error): Error {
     const request = pending;
     pending = undefined;
+    clearTimeout(startTimer);
     if (!failure) {
       failure = error;
       stopped = new Promise((resolve) => {
@@ -79,6 +93,15 @@ ${check}
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       { windowsHide: true, stdio: "pipe" },
     );
+    startTimer = setTimeout(
+      () =>
+        fail(
+          new Error(
+            `Windows PowerShell did not start the credential ACL check within ${startTimeoutMs / 1000} seconds.`,
+          ),
+        ),
+      startTimeoutMs,
+    );
     closed = new Promise((resolve) => started.once("close", resolve));
     started.on("close", (code: number | null) => {
       if (pending?.answered && pending.final && code === 0) {
@@ -91,6 +114,16 @@ ${check}
     for (const stream of [started.stdin, started.stdout, started.stderr]) stream.on("error", fail);
     started.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString("latin1");
+      if (!ready) {
+        if (!readyLine.startsWith(output.slice(0, readyLine.length)))
+          return fail(new Error("Unexpected credential ACL response."));
+        if (output.length < readyLine.length) return;
+        ready = true;
+        clearTimeout(startTimer);
+        output = output.slice(readyLine.length);
+        pending?.arm();
+        if (!output) return;
+      }
       if (!pending || pending.answered || !pending.response.startsWith(output))
         return fail(new Error("Unexpected credential ACL response."));
       if (output !== pending.response) return;
@@ -114,19 +147,17 @@ ${check}
   return {
     check(path, directory, create, final) {
       return new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (error?: Error) => {
           clearTimeout(timer);
           if (error) reject(error);
           else resolve();
         };
-        // A refused request waits for its child to stop, but never past its own deadline.
+        // A refused request waits for its child to stop, but never past its own deadline or one deadline
+        // after the failure.
         const refuse = (error: Error) => {
           void stopped.then(() => settle(error));
         };
-        const timer = setTimeout(
-          () => settle(fail(new Error("Credential ACL check timed out."))),
-          requestTimeoutMs,
-        );
         if (pending || ended)
           fail(new Error("Credential ACL checks must run one at a time before the final check."));
         // UTF-8 would silently replace an unpaired surrogate, so the child would check another name.
@@ -134,18 +165,33 @@ ${check}
           fail(new Error("Invalid credential path."));
         if (failure) return refuse(failure);
         const id = ++sequence;
-        pending = {
+        const request = {
           response: `ok ${id}\r\n`,
           final,
           answered: false,
-          done: (error) => (error ? refuse(error) : settle()),
+          arm: () => {
+            timer ??= setTimeout(
+              () =>
+                settle(
+                  fail(
+                    new Error(
+                      `Credential ACL check did not answer within ${requestTimeoutMs / 1000} seconds.`,
+                    ),
+                  ),
+                ),
+              requestTimeoutMs,
+            );
+          },
+          done: (error?: Error) => (error ? refuse(error) : settle()),
         };
+        pending = request;
         ended = final;
         const line = `${id} ${create ? 1 : 0} ${directory ? 1 : 0} ${Buffer.from(path, "utf8").toString("base64")}\n`;
         try {
           child ??= start();
           if (final) child.stdin.end(line);
           else child.stdin.write(line);
+          if (ready && pending === request) request.arm();
         } catch (error) {
           fail(error instanceof Error ? error : new Error(String(error)));
         }

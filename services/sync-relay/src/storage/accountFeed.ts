@@ -1,3 +1,4 @@
+import { hiddenFile } from "../accountFeed";
 import type { StorageContext } from "./context";
 import { objectLastKnownPath, threadCreateRows } from "./objectIndex";
 
@@ -118,6 +119,25 @@ export function accountFeedThreadPaths(
   threadId: string,
 ): ReturnType<typeof threadPathsInTransaction> {
   return storage.readTx(() => threadPathsInTransaction(storage, workspaceId, threadId));
+}
+
+/**
+ * Whether a phone may show a thread, inside the caller's transaction: the
+ * log has its create, no path the create names is hidden, and a file it
+ * links was last placed at a path that isn't.
+ */
+export function threadShownOnPhone(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  const paths = threadPathsInTransaction(storage, workspaceId, threadId);
+  return (
+    paths.created &&
+    !paths.named.some(hiddenFile) &&
+    (paths.linkedObjectId === null ||
+      (paths.lastKnownPath !== null && !hiddenFile(paths.lastKnownPath)))
+  );
 }
 
 /**

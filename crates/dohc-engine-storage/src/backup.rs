@@ -372,7 +372,9 @@ pub fn create_verified_backup(
     //    never delete the only valid source to make room.
     let available = probe.available_bytes(recovery_dir)?;
     if available < needed {
-        return Err(StorageError::DiskFull { needed, available });
+        return Err(StorageError::DiskFull {
+            shortfall: Some(crate::SpaceShortfall { needed, available }),
+        });
     }
 
     // 2. Ensure the recovery dir (owner-only where supported).

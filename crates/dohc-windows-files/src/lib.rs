@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod dacl;
 #[cfg(windows)]
+pub mod in_place;
+#[cfg(windows)]
 mod private_dir;
 #[cfg(windows)]
 pub use dacl::{Dacl, create_new_with_dacl};

@@ -268,6 +268,7 @@ export function createAgentRunsIpc<
             input.workspaceId,
             input.threadId,
             input.postThreadIds ?? [],
+            input.laneThreadIds ?? [],
           ),
         );
       }),

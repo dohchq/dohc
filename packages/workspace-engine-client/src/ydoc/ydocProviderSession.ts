@@ -88,6 +88,7 @@ export interface EngineYdocProviderSessionOptions {
   onLocalEditError?: (error: unknown) => void;
   onLocalUpdateAcknowledged?: (idempotencyKey: string, lane: "journal" | "owner-outbox") => void;
   onLocalUpdateRefused?: (idempotencyKey: string, error: unknown) => void;
+  onLocalUpdateUncertain?: (idempotencyKey: string) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void;
   onSessionError?: (error: unknown) => void;
@@ -225,6 +226,7 @@ export async function openEngineYdocProviderSession(
   const settleDebounceMs = options.settleDebounceMs ?? DEFAULT_SETTLE_DEBOUNCE_MS;
   session.onLocalUpdateAcknowledged((id, lane) => options.onLocalUpdateAcknowledged?.(id, lane));
   session.onLocalUpdateRefused((id, error) => options.onLocalUpdateRefused?.(id, error));
+  session.onLocalUpdateUncertain((id) => options.onLocalUpdateUncertain?.(id));
   const scheduleSettle =
     options.scheduleSettle ??
     ((fn: () => void, ms: number) => {

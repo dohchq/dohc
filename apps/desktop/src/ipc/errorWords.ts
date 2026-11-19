@@ -6,6 +6,7 @@ import {
   SyncedDeletionRevivalError,
 } from "../workspaces/syncedDeletionRefusal";
 import type { FailureCode, FailureFacts } from "../notices/failure";
+import { engineStoreRefusalCopy } from "./bridgeContract";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -202,6 +203,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "History is still updating. Try again.": UPDATING,
     "dohc has not read this file yet. Open it again once dohc has read it.": NOT_READ,
     "file-locked": "Another program has this file open. Close it there, then try again.",
+    "disk-full": "The disk is full. Free up space, then try again.",
+    "state-corrupt": engineStoreRefusalCopy("state-corrupt"),
     "ydoc-session-busy": "This file is open for editing. Close its tabs, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned":

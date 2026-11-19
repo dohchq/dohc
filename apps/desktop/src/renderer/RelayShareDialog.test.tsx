@@ -334,6 +334,7 @@ const bridgeMock = {
   listRelayShares: vi.fn(),
   requestAccessRefresh: vi.fn(),
   listSharingAccess: vi.fn(),
+  getShareCopyDetails: vi.fn(),
   listRelayShareDiscussion: vi.fn(),
   pollRelayShareDiscussionActivity: vi.fn(),
   cancelRelayShareDiscussionActivity: vi.fn(),
@@ -6086,6 +6087,103 @@ codex mcp login dohc-share`);
 
 describe("people and links on one surface", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
+
+  it("copies a listed person's invitation from their row", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([
+        invitedRow("ana", "ana@dohc.test"),
+        invitedRow("ben", "ben@dohc.test", { access: "edit" }),
+      ]),
+    );
+    bridgeMock.getShareCopyDetails.mockImplementation(async ({ grantId }: { grantId: string }) =>
+      grantId === "ben"
+        ? {
+            status: "active",
+            shareCode: "dohc-share:share-ben:http://r.test",
+            browserInvitationUrl: "https://share.test/invite#ben",
+          }
+        : { status: "active", shareCode: "dohc-share:share-ana:http://r.test" },
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("dohc-share:share-ana:http://r.test"),
+    );
+    expect(bridgeMock.getShareCopyDetails).toHaveBeenLastCalledWith({
+      shareId: "share-ana",
+      grantId: "ana",
+    });
+
+    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("https://share.test/invite#ben"),
+    );
+  });
+
+  it("copies only the invitation asked for last, when an earlier one answers late", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test"), invitedRow("ben", "ben@dohc.test")]),
+    );
+    const slow = controllable<unknown>();
+    bridgeMock.getShareCopyDetails.mockImplementation(({ grantId }: { grantId: string }) =>
+      grantId === "ana"
+        ? slow.promise
+        : Promise.resolve({ status: "active", shareCode: "dohc-share:share-ben:http://r.test" }),
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("dohc-share:share-ben:http://r.test"),
+    );
+    await act(async () => {
+      slow.resolve({ status: "active", shareCode: "dohc-share:share-ana:http://r.test" });
+    });
+
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("dohc-share:share-ben:http://r.test");
+  });
+
+  it("reads the people again for a share that ended, even after another copy was asked for", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(
+        sharingAccess([invitedRow("ana", "ana@dohc.test"), invitedRow("ben", "ben@dohc.test")]),
+      )
+      .mockResolvedValue(sharingAccess([invitedRow("ben", "ben@dohc.test")]));
+    const slow = controllable<unknown>();
+    bridgeMock.getShareCopyDetails.mockImplementation(({ grantId }: { grantId: string }) =>
+      grantId === "ana"
+        ? slow.promise
+        : Promise.resolve({ status: "active", shareCode: "dohc-share:share-ben:http://r.test" }),
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    await user.click(screen.getByTestId("share-copy-invitation-ben"));
+    await act(async () => {
+      slow.resolve({ status: "ended" });
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("share-invited-ana")).toBeNull());
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("dohc-share:share-ben:http://r.test");
+  });
+
+  it("copies nothing for a share that ended, and reads the people again", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([invitedRow("ana", "ana@dohc.test")]))
+      .mockResolvedValue(sharingAccess([]));
+    bridgeMock.getShareCopyDetails.mockResolvedValue({ status: "ended" });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-copy-invitation-ana"));
+    await waitFor(() => expect(screen.queryByTestId("share-invited-ana")).toBeNull());
+    expect(writeText).not.toHaveBeenCalled();
+  });
 
   it("lists the people invited to exactly this selection, and opens one in Sharing", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
