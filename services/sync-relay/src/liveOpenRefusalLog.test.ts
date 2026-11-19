@@ -26,18 +26,16 @@ it("writes each reason at most once a minute, with how often it applied since", 
   ]);
 });
 
-it("shows a known failure's own sentence, also once the mint has wrapped it, and only the class of any other", () => {
+it("shows a fixed live host sentence whole, also once the mint has wrapped it, and of any other failure only its class, keeping no cause", () => {
   const known = new Error("Service document activation is incomplete.");
   expect(liveOpenFailureWords(known)).toBe("Service document activation is incomplete.");
   expect(liveOpenFailureWords(new LiveTicketFailure(known))).toBe(
     "Service document activation is incomplete.",
   );
-  // A message this service did not write can name a file or hold a key, so it never reaches the log.
   const other = new TypeError("Cannot read /srv/notes/private-plan.md with key K7tN9TMwIopGHUhP");
   expect(liveOpenFailureWords(other)).toBe("TypeError");
   const wrapped = new LiveTicketFailure(other);
   expect(liveOpenFailureWords(wrapped)).toBe("TypeError");
-  // The wrapper keeps the words and nothing else of the cause.
   expect(wrapped.cause).toBeUndefined();
   expect(
     JSON.stringify({ ...wrapped, message: wrapped.message, stack: wrapped.stack }),

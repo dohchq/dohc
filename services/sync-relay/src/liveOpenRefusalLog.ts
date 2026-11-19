@@ -1,10 +1,6 @@
 import { serverLogLine } from "./serverLogWords";
 
-/**
- * Failures of the live host that an open can meet, by their whole message. Each is a fixed sentence in this
- * service, so the server log may show it. Any other failure shows as `serverLogLine` has it.
- */
-const KNOWN_FAILURES: ReadonlySet<string> = new Set([
+const FIXED_LIVE_HOST_SENTENCES: ReadonlySet<string> = new Set([
   "Service document activation is incomplete.",
   "An owner delivery already holds this document.",
   "Service owner registration changed.",
@@ -19,10 +15,7 @@ const KNOWN_FAILURES: ReadonlySet<string> = new Set([
   "Named frame sync is not configured on this service host.",
 ]);
 
-/**
- * A ticket that could not be minted. It keeps the server log's words for the cause and never the cause itself,
- * whose message can hold a token or a key.
- */
+/** A ticket that could not be minted. It keeps the server log's words for its cause and nothing else of it. */
 export class LiveTicketFailure extends Error {
   readonly words: string;
   constructor(cause: unknown) {
@@ -31,19 +24,15 @@ export class LiveTicketFailure extends Error {
   }
 }
 
-/** The server log's words for what an open threw: its own sentence when it is a known failure, or its class. */
+/** A failed open's words for the server log: its message when that is a fixed live host sentence, else `serverLogLine`. */
 export function liveOpenFailureWords(error: unknown): string {
   if (error instanceof LiveTicketFailure) return error.words;
-  return error instanceof Error && KNOWN_FAILURES.has(error.message)
+  return error instanceof Error && FIXED_LIVE_HOST_SENTENCES.has(error.message)
     ? error.message
     : serverLogLine(error);
 }
 
-/**
- * Says in the server log why a page that may edit a note was told to try again. The page gets the same answer
- * whatever the reason, so without this line nothing tells a host that is still starting from one that is failing.
- * Each reason is written at most once a minute, with how many times it applied since it was last written.
- */
+/** Returns a function that writes each reason to the server log at most once a minute, with its count since the last line. */
 export function createLiveOpenRefusalLog(
   log: (line: string) => void = (line) => console.error(line),
   now: () => number = Date.now,
@@ -54,12 +43,13 @@ export function createLiveOpenRefusalLog(
     shown.set(reason, state);
     state.since++;
     if (now() - state.atMs < 60_000) return;
-    try {
-      log(`[sync-relay] live open told to try again: ${reason} (${String(state.since)}x)`);
-    } catch {
-      /* Reporting must not change the answer. */
-    }
+    const count = state.since;
     state.atMs = now();
     state.since = 0;
+    try {
+      log(`[sync-relay] live open told to try again: ${reason} (${String(count)}x)`);
+    } catch {
+      return;
+    }
   };
 }
