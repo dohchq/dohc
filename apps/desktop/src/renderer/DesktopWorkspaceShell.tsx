@@ -6677,6 +6677,9 @@ export function DesktopWorkspaceShell(props: {
           !workspaceAdmission.superseded && token === shareRefreshToken.current;
         let readShareRecords = !background;
         let probeFailure = false;
+        const retry = () => {
+          if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
+        };
         if (!background) setShareRefreshing(true);
         const repaintAfterChange = async () => {
           await refreshFiles();
@@ -6727,6 +6730,7 @@ export function DesktopWorkspaceShell(props: {
             reportShellError(
               "Couldn't refresh the shared view.",
               new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+              retry,
             );
             return "stale";
           }
@@ -6774,7 +6778,7 @@ export function DesktopWorkspaceShell(props: {
             return "stale";
           }
           if (background) throw error;
-          reportShellError("Couldn't refresh the shared view.", error);
+          reportShellError("Couldn't refresh the shared view.", error, retry);
           return "stale";
         } finally {
           // After the listing and after a FAILURE, deliberately. Refusals are
