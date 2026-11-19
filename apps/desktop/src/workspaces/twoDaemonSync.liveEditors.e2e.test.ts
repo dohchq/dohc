@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
@@ -10,6 +11,7 @@ import {
   compiledRelayMain,
   LiveDaemonCapture,
   pullCaptured,
+  pushUntilDrained,
   openLiveDaemonCapture,
   openJoinedDaemonCapture,
   OpenEditor,
@@ -124,6 +126,61 @@ it.skipIf(engine.missing)(
       await Promise.allSettled(engines.map((sync) => sync.stop()));
       await Promise.allSettled(editors.map((editor) => editor.session.close()));
       await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  180_000,
+);
+
+it.skipIf(engine.missing)(
+  "sends a new note's first file to the server while its editor stays open",
+  async () => {
+    const workspaceId = "two-daemon-open-new-note";
+    const token = `test:${workspaceId}`;
+    const path = "notes/new.txt";
+    const text = "Written in an open tab.\n";
+    const rootA = await createTestScratch("dohc-open-new-note-a-");
+    const relayRoot = await createTestScratch("dohc-open-new-note-relay-");
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
+    let daemonA: LiveDaemonCapture | null = null;
+    const editors: OpenEditor[] = [];
+    const fileRecords = () => {
+      const relayDb = new DatabaseSync(relay.dbPath, { readOnly: true });
+      try {
+        return relayDb
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND instr(payload_json, ?) > 0",
+          )
+          .get(workspaceId, JSON.stringify(path)) as { count: number };
+      } finally {
+        relayDb.close();
+      }
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: rootA,
+        relay: { baseUrl: relay.baseUrl, token },
+      });
+      await daemonA.relay.claim();
+      await mkdir(join(rootA, "notes"), { recursive: true });
+      await writeFile(join(rootA, path), "");
+      const editorA = await openEditor(daemonA, path);
+      editors.push(editorA);
+      await typeAtEnd(editorA, text);
+      expect(await readFile(join(rootA, path), "utf8")).toBe(text);
+      await pushUntilDrained(daemonA.relay);
+      await pullCaptured(daemonA.relay, daemonA.capture);
+      await pushUntilDrained(daemonA.relay);
+
+      expect(fileRecords()).toEqual({ count: 1 });
+      expect(shown(editorA)).toBe(text);
+    } finally {
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await daemonA?.close();
       await relay.stop();
     }
   },
