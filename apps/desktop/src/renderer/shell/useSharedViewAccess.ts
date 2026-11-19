@@ -97,12 +97,12 @@ export function useSharedViewAccess(input: {
             buttonPulls = [];
             return result;
           }
+          if (returned && result.relayStatesMore)
+            void Promise.resolve()
+              .then(() => latest.current.followStatedLevel())
+              .catch(() => undefined);
           for (const completion of completed)
             if (completion.status === "rejected") throw completion.reason;
-          if (returned && result.relayStatesMore) {
-            await latest.current.followStatedLevel();
-            if (!isCurrent() || startedEpoch !== epoch) return unverified();
-          }
           return result;
         } catch (error) {
           if (!isCurrent() || startedEpoch !== epoch) return unverified();

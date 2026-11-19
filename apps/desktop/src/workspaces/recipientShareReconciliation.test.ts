@@ -223,6 +223,52 @@ describe("a mount's pinned level", () => {
     ).toBeNull();
   });
 
+  it.each([
+    ["the signed-in account's id", { recipientUserId: "member" }, true],
+    [
+      "the signed-in account's id and no email",
+      { recipientUserId: "member", recipientEmail: null },
+      true,
+    ],
+    ["the signed-in account's email and no id", {}, true],
+    [
+      "another account's id and the signed-in account's email",
+      { recipientUserId: "someone" },
+      false,
+    ],
+    ["no id and no email", { recipientEmail: null }, false],
+    ["an id that is not text", { recipientUserId: 7 as unknown as string }, false],
+  ])("follows only for a mount that records %s", (_name, recipient, follows) => {
+    const after = reconcileRecipientShares(
+      entry({ shareMounts: [mount("mount", recipient)] }),
+      listing(["mount"], [], { mount: edit }),
+      credentials,
+      new Set(),
+    );
+    expect(after?.shareMounts?.[0]?.grantedSelector ?? selector).toEqual(follows ? edit : selector);
+  });
+
+  it("does not follow by email when the signed-in account states none", () => {
+    expect(
+      reconcileRecipientShares(
+        entry({ shareMounts: [mount("mount")] }),
+        listing(["mount"], [], { mount: edit }),
+        { ...credentials, email: undefined as unknown as string },
+        new Set(),
+      ),
+    ).toBeNull();
+  });
+
+  it("still resumes an ended mount that records no account, at the level it pinned", () => {
+    const after = reconcileRecipientShares(
+      entry({ shareMounts: [mount("mount", { ended: true, recipientEmail: null })] }),
+      listing(["mount"], [], { mount: edit }),
+      credentials,
+      new Set(["mount"]),
+    );
+    expect(after?.shareMounts).toEqual([mount("mount", { recipientEmail: null })]);
+  });
+
   it("keeps a pin dohc cannot read", () => {
     const damaged = { paths: ["docs"], versionId: null } as unknown as ShareViewSelector;
     expect(

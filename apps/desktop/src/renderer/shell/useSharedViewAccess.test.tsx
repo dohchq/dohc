@@ -577,22 +577,30 @@ it("asks for nothing more on returns while the levels agree", async () => {
   expect(follow).not.toHaveBeenCalled();
 });
 
-it("starts one follow for two returns in a row, and never two at once", async () => {
+it("asks for one follow when two returns come in a row", async () => {
   setup();
   await flush();
   check.mockResolvedValue(more);
-  const first = deferred<unknown>();
-  follow.mockReturnValueOnce(first.promise);
+  follow.mockReturnValue(new Promise(() => undefined));
   await returnToWindow();
   await returnToWindow(1_000);
   expect(follow).toHaveBeenCalledOnce();
   expect(check).toHaveBeenCalledTimes(2);
-  await returnToWindow(10_000);
+});
+
+it("keeps checking access while a follow has not finished", async () => {
+  setup();
+  await flush();
+  check.mockResolvedValueOnce(more);
+  follow.mockReturnValue(new Promise(() => undefined));
+  await returnToWindow();
   expect(follow).toHaveBeenCalledOnce();
-  expect(check).toHaveBeenCalledTimes(2);
-  await act(async () => first.resolve("current"));
+  check.mockResolvedValue({ status: "ended" });
+  await returnToWindow(10_000);
   expect(check).toHaveBeenCalledTimes(3);
-  expect(follow).toHaveBeenCalledTimes(2);
+  expect(verified).toHaveBeenLastCalledWith({ status: "ended" });
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(pull).toHaveBeenCalledTimes(4);
 });
 
 it("does not follow again until the next return when the pin could not follow", async () => {
@@ -618,28 +626,49 @@ it("does not follow for a write caller's check or a pull alone", async () => {
   expect(follow).not.toHaveBeenCalled();
 });
 
-it("does not follow when the return's own pull failed", async () => {
+it("follows a verified upgrade when the pull beside the check failed, and still backs the pull off", async () => {
   setup();
   await flush();
-  check.mockResolvedValue(more);
+  check.mockResolvedValueOnce(more);
   pull.mockRejectedValueOnce(new Error("offline"));
   await returnToWindow();
+  expect(follow).toHaveBeenCalledOnce();
+  expect(pull).toHaveBeenCalledTimes(2);
+  await act(() => vi.advanceTimersByTimeAsync(29_999));
+  expect(pull).toHaveBeenCalledTimes(2);
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(pull).toHaveBeenCalledTimes(3);
+  expect(follow).toHaveBeenCalledOnce();
+});
+
+it("does not follow when the check itself failed or could not verify", async () => {
+  setup();
+  await flush();
+  check.mockRejectedValueOnce(new Error("offline"));
+  await returnToWindow();
+  check.mockResolvedValueOnce({ status: "unverified" });
+  await returnToWindow(600_000);
   expect(follow).not.toHaveBeenCalled();
 });
 
-it("drops a follow's answer after the workspace changes", async () => {
-  check.mockResolvedValue(more);
-  const following = deferred<unknown>();
-  follow.mockReturnValueOnce(following.promise);
+it("starts no follow for a workspace the window has left", async () => {
+  const answer = deferred<CheckSharedViewAccessResult>();
+  check.mockReturnValueOnce(answer.promise);
   const hook = setup();
   await flush();
-  expect(follow).toHaveBeenCalledOnce();
-  check.mockResolvedValue({ status: "current", access: "edit" });
   hook.rerender({ workspaceId: "B", admission: { superseded: false } });
   await flush();
-  await act(async () => following.resolve("current"));
-  await act(() => vi.advanceTimersByTimeAsync(30_000));
-  expect(follow).toHaveBeenCalledOnce();
+  await act(async () => answer.resolve(more));
+  expect(follow).not.toHaveBeenCalled();
+});
+
+it("keeps a follow that fails out of the pull's failure count", async () => {
+  setup();
+  await flush();
+  check.mockResolvedValue(more);
+  follow.mockRejectedValue(new Error("refresh failed"));
+  for (let index = 0; index < 4; index++) await returnToWindow(6_000);
+  expect(follow).toHaveBeenCalledTimes(4);
   expect(persistent).not.toHaveBeenCalled();
 });
 
