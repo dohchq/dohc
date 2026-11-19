@@ -93,7 +93,7 @@ final class NoticesScrollTests: XCTestCase {
     // Measurement protocol, not a pass condition: let launch settle before the tap.
     Thread.sleep(forTimeInterval: 4)
     tab.tap()
-    XCTAssertTrue(row(app, "Maya Chen mentioned you in #planning").waitForExistence(timeout: 10))
+    XCTAssertTrue(row(app, "Maya Chen mentioned you in #planning").waitForExistence(timeout: 15))
     guard let open = largeTitle(app) else { return XCTFail("Notices should show its large title") }
     for _ in 0..<5 { app.swipeUp() }
     XCTAssertTrue(waitUntil(5) { self.folded(app, from: open) }, "The title should fold after opening the tab later")

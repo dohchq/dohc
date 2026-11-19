@@ -18,7 +18,7 @@ final class ConversationOutboxTests: XCTestCase {
   @MainActor
   func testEachStateShowsWhatCanBeDone() {
     let app = launch()
-    XCTAssertTrue(text(app, "This message has not been sent.").waitForExistence(timeout: 5), "A withheld message should say so")
+    XCTAssertTrue(text(app, "This message has not been sent.").waitForExistence(timeout: 15), "A withheld message should say so")
     XCTAssertTrue(app.buttons["Send"].exists, "A withheld message should offer Send")
     XCTAssertTrue(text(app, "Still sending").exists, "A message pending for long should say Still sending")
     XCTAssertTrue(app.buttons["Copy message"].exists, "A message still sending, or refused, should offer Copy message")
@@ -30,7 +30,7 @@ final class ConversationOutboxTests: XCTestCase {
   func testSendOnAWithheldMessageSendsItOnce() {
     let app = launch()
     let notSent = text(app, "This message has not been sent.")
-    XCTAssertTrue(notSent.waitForExistence(timeout: 5), "A withheld message should show")
+    XCTAssertTrue(notSent.waitForExistence(timeout: 15), "A withheld message should show")
     app.buttons["Send"].tap()
     let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: notSent)
     XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "Send should take the message out of withheld")
@@ -45,10 +45,10 @@ final class ConversationOutboxTests: XCTestCase {
   func testDiscardWarnsThatAMessageMayStillSend() {
     let app = launch()
     let stalled = text(app, "Booked the 19:52 back from Porto.")
-    XCTAssertTrue(stalled.waitForExistence(timeout: 5), "The message still sending should show")
+    XCTAssertTrue(stalled.waitForExistence(timeout: 15), "The message still sending should show")
     // The stalled message's Discard: the second, after the withheld message's.
     app.buttons.matching(NSPredicate(format: "label == %@", "Discard")).element(boundBy: 1).tap()
-    XCTAssertTrue(text(app, "It may still send.").waitForExistence(timeout: 5), "Discard should warn first")
+    XCTAssertTrue(text(app, "It may still send.").waitForExistence(timeout: 15), "Discard should warn first")
     app.sheets.firstMatch.buttons["Discard"].tap()
     let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: stalled)
     XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, "Discard should take the message off this phone")

@@ -181,6 +181,13 @@ jobs:
           [[ $udid =~ ^[0-9A-F-]{36}$ ]] || { echo "::error::simctl create returned $udid."; exit 1; }
           echo "IOS_UDID=$udid" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$udid" -b
+          # One discarded test warms the fresh simulator, so the light pass doesn't pay its first launch. It counts for nothing.
+          started=$SECONDS status=0
+          xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$udid" -derivedDataPath "$DD" \
+            -only-testing:dohcUITests/ConversationDecisionTests/testAResolvedPollOffersNoAnswer \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
+            > "$OUT/logs/warm-up.log" 2>&1 || status=$?
+          echo "Warm-up: xcodebuild exited $status in $((SECONDS - started)) s" | tee -a "$OUT/summary.txt"
           runs=0 failed=0
           for appearance in light dark; do
             xcrun simctl ui "$udid" appearance "$appearance"

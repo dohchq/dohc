@@ -274,7 +274,7 @@ final class NoticesBandTests: XCTestCase {
     XCTAssertTrue(band(app).exists, "The band should still show")
     XCTAssertTrue(waitUntil(5) { self.folded(app, from: open) }, "Scrolling should fold the large title into the bar, with the band showing")
     assertUnderTheBar(app, "Folded")
-    XCTAssertTrue(indicator(app).waitForExistence(timeout: 2), "The list should expose its scroll indicator")
+    XCTAssertTrue(indicator(app).waitForExistence(timeout: 15), "The list should expose its scroll indicator")
     XCTAssertGreaterThanOrEqual(indicator(app).frame.minY, band(app).frame.maxY - 1, "Folded, the scroll indicator should start below the band")
     XCTAssertEqual(markAllRead.frame.midX, button.midX, accuracy: 1, "Mark all read should stay in the bar")
     keep(app, "07-notices-band-end")
@@ -282,7 +282,7 @@ final class NoticesBandTests: XCTestCase {
     XCTAssertTrue(waitUntil(5) { abs(self.row(app, self.titles[0]).frame.minY - self.band(app).frame.maxY) <= 1 },
                   "Back at the top, the first row should start at the band's bottom")
     assertUnderTheBar(app, "Back at the top")
-    XCTAssertTrue(indicator(app).waitForExistence(timeout: 2), "The list should expose its scroll indicator")
+    XCTAssertTrue(indicator(app).waitForExistence(timeout: 15), "The list should expose its scroll indicator")
     XCTAssertEqual(indicator(app).frame.minY, band(app).frame.maxY, accuracy: 2,
                    "At rest, the scroll indicator should start where the content does, at the band's bottom")
     keep(app, "07-notices-band-back-to-top")
@@ -312,7 +312,7 @@ final class NoticesBandTests: XCTestCase {
         // A negative value would read as a new launch flag, so a pull-down goes by its own setting.
         app = launch(demo: "band-half-fold", extra + (by < 0 ? ["-dohcBandPull", "\(-by)"] : ["-dohcBandScroll", "\(by)"]))
         let first = row(app, titles[0])
-        XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+        XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
         XCTAssertTrue(waitUntil(5) { abs(self.band(app).frame.minY - (rest - by)) <= 1 },
                       "\(name), \(step): the band should move by the scroll, to \(rest - by) (band at \(band(app).frame.minY))")
         assertRightUnderTheBand(app, first, "\(name), \(step)")
@@ -322,7 +322,7 @@ final class NoticesBandTests: XCTestCase {
         XCTAssertTrue(band(app).frame.contains(tryAgain.frame.insetBy(dx: 1, dy: 1)), "\(name), \(step): Try again should be wholly in the band at rest (Try again at \(tryAgain.frame), band \(band(app).frame))")
         let middle = CGPoint(x: tryAgain.frame.midX, y: tryAgain.frame.midY)
         XCTAssertTrue(tryAgain.isHittable && band(app).frame.contains(middle), "\(name), \(step): Try again should be tappable where it's drawn (Try again at \(tryAgain.frame), band \(band(app).frame))")
-        if !indicator(app).waitForExistence(timeout: 2) {
+        if !indicator(app).waitForExistence(timeout: 15) {
           XCTFail("\(name), \(step): the list should expose its scroll indicator")
         } else if by > 0 {
           XCTAssertGreaterThanOrEqual(indicator(app).frame.minY, band(app).frame.maxY - 1, "\(name), \(step): the indicator should start below the band")
@@ -410,7 +410,7 @@ final class NoticesBandTests: XCTestCase {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["DOHC_TEXT_SIZE_CHANGE"] == "1", "Runs when the round script changes Text Size")
     let app = launch(demo: "band-half-fold", ["-dohcBandScroll", "20"])
     let first = row(app, titles[0])
-    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
     let usual = band(app).frame.height
     // On iOS 27 the bar's frame stays at rest partway through the fold, so the band 20 pt above it means the list moved.
     // A failed precondition ends the test before it signals, so the script never changes Text Size at rest.
@@ -507,7 +507,7 @@ final class NoticesBandTests: XCTestCase {
     XCTAssertTrue(waitUntil(5) { !last.frame.isEmpty && abs(tabBar.frame.minY - last.frame.maxY) <= 2 }, "The list should reach its end")
     tabBar.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Chats")).firstMatch.tap()
     let notices = tabBar.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Notices")).firstMatch
-    XCTAssertTrue(notices.waitForExistence(timeout: 5))
+    XCTAssertTrue(notices.waitForExistence(timeout: 15))
     notices.tap()
     XCTAssertTrue(waitUntil(5) { !last.frame.isEmpty && abs(tabBar.frame.minY - last.frame.maxY) <= 2 },
                   "Back on Notices, the last row should still end at the tab bar (row ends \(last.frame.maxY), tab bar at \(tabBar.frame.minY))")
@@ -530,7 +530,7 @@ final class NoticesBandTests: XCTestCase {
     let notices = tabBar.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Notices")).firstMatch
     chats.tap()
     notices.tap()
-    XCTAssertTrue(band(app).waitForExistence(timeout: 3), "The band should still show")
+    XCTAssertTrue(band(app).waitForExistence(timeout: 15), "The band should still show")
     XCTAssertTrue(waitUntil(5, atTheEnd), "Back with the band still showing, the last row should end at the tab bar (row ends \(last.frame.maxY))")
     assertUnderTheBar(app, "Back with the band still showing")
     chats.tap()
@@ -683,7 +683,7 @@ final class NoticesBandTests: XCTestCase {
       app.terminate()
       app = launch(demo: "band", ["-UIPreferredContentSizeCategoryName", size])
       let first = row(app, titles[0])
-      XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+      XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
       XCTAssertGreaterThan(band(app).frame.height, usual * growth, "At \(name) the band should wrap and grow")
       assertUnderTheBar(app, "At \(name)")
       XCTAssertTrue(waitUntil(3) { abs(first.frame.minY - self.band(app).frame.maxY) <= 1 },
@@ -715,7 +715,7 @@ final class NoticesBandTests: XCTestCase {
       app = launch(demo: "band-half-fold", extra + ["-dohcBandScroll", "\(fold)"])
       defer { app.terminate() }
       let first = row(app, titles[0])
-      XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+      XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
       XCTAssertTrue(waitUntil(5) { self.folded(app, from: open) }, "\(name): scrolled by the fold (\(fold) pt), the title should be folded")
       assertUnderTheBar(app, "Folded, \(name)")
       keep(app, "07-notices-band-folded-\(name.replacingOccurrences(of: " ", with: "-"))")
@@ -771,7 +771,7 @@ final class NoticesBandTests: XCTestCase {
     defer { try? voiceOver.disable() }
     // With VoiceOver on, a tap only selects; a double tap opens the tab.
     tab.doubleTap()
-    XCTAssertTrue(band(app).waitForExistence(timeout: 5), "The band should show on the first visit")
+    XCTAssertTrue(band(app).waitForExistence(timeout: 15), "The band should show on the first visit")
     let focusedFirst = try await voiceOver.currentSpeech().utterance
     let heightFirst = band(app).frame.height
     // Settled once the band is within its cap, half the space between the bar's resting edge and the tab bar.
@@ -793,13 +793,13 @@ final class NoticesBandTests: XCTestCase {
     let ax5 = ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
     var app = launch(demo: "band", ax5)
     var first = row(app, titles[0])
-    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
     let tabBar = app.tabBars.firstMatch
     let cap = (tabBar.frame.minY - barEdge(app)) / 2
     // The words scroll in a region of whole lines, and Try again stays below them, always in view.
     let words = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Server unreachable.")).firstMatch
     let tryAgain = app.buttons["Try again"]
-    XCTAssertTrue(words.waitForExistence(timeout: 5), "The band's words should be one element")
+    XCTAssertTrue(words.waitForExistence(timeout: 15), "The band's words should be one element")
     let box = band(app).frame
     print("NOTICES BAND CAP: space \(cap * 2), cap \(cap), band \(box.height), words \(words.frame)")
     XCTAssertGreaterThan(words.frame.height, box.height, "At AX5 the band's words should be taller than the band, or this test checks nothing")
@@ -812,7 +812,7 @@ final class NoticesBandTests: XCTestCase {
     // The region's identifier carries its line height. Every rest, from the start to the end, is on a line, so no line
     // is cut at rest, and the last rest shows the words' last line at the region's bottom.
     let region = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "sync-band-words:")).firstMatch
-    XCTAssertTrue(region.waitForExistence(timeout: 5), "Capped, the band should draw its words in a region")
+    XCTAssertTrue(region.waitForExistence(timeout: 15), "Capped, the band should draw its words in a region")
     let line = CGFloat(Double(region.identifier.split(separator: ":").last ?? "") ?? 0)
     XCTAssertGreaterThan(line, 0, "The region should give its line height (\(region.identifier))")
     let area = region.frame
@@ -856,7 +856,7 @@ final class NoticesBandTests: XCTestCase {
     app.terminate()
     app = launch(demo: "band", ax5)
     first = row(app, titles[0])
-    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
     let voiceOver = XCUIDevice.shared.voiceOverService
     try voiceOver.enable()
     defer { try? voiceOver.disable() }
@@ -883,12 +883,12 @@ final class NoticesBandTests: XCTestCase {
     var app = launch(demo: "empty")
     XCTAssertTrue(app.staticTexts["All clear"].firstMatch.waitForExistence(timeout: 20), "With nothing wrong, the empty list should say All clear")
     var empty = app.descendants(matching: .any)["notices-empty"]
-    XCTAssertTrue(empty.waitForExistence(timeout: 5), "The empty list should show")
+    XCTAssertTrue(empty.waitForExistence(timeout: 15), "The empty list should show")
     let plain = empty.frame.minY
     guard let open = barTitles(app).max(by: { $0.height < $1.height }) else { return XCTFail("Notices should show its large title") }
     app.terminate()
     app = launch(demo: "band-empty")
-    XCTAssertTrue(app.staticTexts["No other notices."].firstMatch.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5),
+    XCTAssertTrue(app.staticTexts["No other notices."].firstMatch.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15),
                   "Under a problem band, the empty list should say No other notices.")
     XCTAssertFalse(app.staticTexts["All clear"].exists, "Under a problem band, the empty list shouldn't say All clear")
     empty = app.descendants(matching: .any)["notices-empty"]
@@ -960,7 +960,7 @@ final class NoticesBandTests: XCTestCase {
   func testChangingTheProblemMovesTheRowsOnce() throws {
     let app = launch(demo: "band-problem-change")
     let first = row(app, titles[0])
-    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
     let before = try XCTUnwrap(boxAndFirstRow(app), "The band and the first row should be readable before the change")
     XCTAssertTrue(app.staticTexts["Server unreachable"].firstMatch.exists, "The first problem should still show before the change")
     keep(app, "07-notices-band-problem-before")
@@ -978,7 +978,7 @@ final class NoticesBandTests: XCTestCase {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["DOHC_TEXT_SIZE_CHANGE"] == "1", "Runs when the round script changes Text Size")
     let app = launch(demo: "band")
     let first = row(app, titles[0])
-    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+    XCTAssertTrue(first.waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
     let usual = band(app).frame.height
     let before = try XCTUnwrap(boxAndFirstRow(app), "The band and the first row should be readable before the change")
     keep(app, "07-notices-band-text-size-before")
@@ -1090,7 +1090,7 @@ final class NoticesBandTests: XCTestCase {
     for (name, extra) in [("default text size", [String]()),
                           ("AX5", ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])] {
       let app = launch(demo: "band", extra)
-      XCTAssertTrue(row(app, titles[0]).waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 5))
+      XCTAssertTrue(row(app, titles[0]).waitForExistence(timeout: 20) && band(app).waitForExistence(timeout: 15))
       let voiceOver = XCUIDevice.shared.voiceOverService
       try voiceOver.enable()
       // Where VoiceOver starts counts too, so the title isn't lost if it starts there.
