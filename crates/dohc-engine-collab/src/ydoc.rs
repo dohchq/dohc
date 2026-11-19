@@ -46,6 +46,7 @@ use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_N
 
 mod bounded_encoder;
 mod frontmatter_yaml;
+mod inline_reading;
 #[cfg(test)]
 mod nested_markdown_contract_tests;
 #[cfg(test)]
@@ -4853,6 +4854,23 @@ fn insert_md_paragraph<F: XmlFragment>(
     text: &str,
 ) {
     let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
+    if let Some(pieces) = inline_reading::read_inline(text, true) {
+        inline_reading::insert_pieces(txn, &el, &pieces);
+        return;
+    }
+    insert_md_paragraph_text(txn, &el, text);
+}
+
+fn insert_md_cell<F: XmlFragment>(txn: &mut yrs::TransactionMut<'_>, parent: &F, text: &str) {
+    let el = parent.insert(txn, 0, XmlElementPrelim::empty("paragraph"));
+    insert_md_paragraph_text(txn, &el, text);
+}
+
+fn insert_md_paragraph_text(
+    txn: &mut yrs::TransactionMut<'_>,
+    el: &yrs::XmlElementRef,
+    text: &str,
+) {
     let spans = if text.contains("&#") {
         inline_code_spans(text)
     } else {
@@ -4910,7 +4928,12 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
         MdBlock::Heading { level, text } => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("heading"));
             el.insert_attribute(txn, "level", *level);
-            el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+            match inline_reading::read_inline(text, false) {
+                Some(pieces) => inline_reading::insert_pieces(txn, &el, &pieces),
+                None => {
+                    el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
+                }
+            }
         }
         MdBlock::Quote(children) => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
@@ -4992,7 +5015,7 @@ fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
                     // with pipe escaping and the projector's one layer of
                     // entity encoding undone.
                     let text = decode_html_entities_once(&text.replace("\\|", "|"));
-                    insert_md_paragraph(txn, &cell, 0, &text);
+                    insert_md_cell(txn, &cell, &text);
                 }
             }
         }
