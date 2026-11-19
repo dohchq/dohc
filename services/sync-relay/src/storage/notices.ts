@@ -98,7 +98,8 @@ function formatNoticeCursor(cursor: NoticeCursor): string {
 
 export interface MarkNoticesInput {
   recipientUserId: string;
-  marks: readonly { noticeId: string; mark: NoticeMark; withdraw?: true }[];
+  // A mark with a key this recipient's notice row already took changes nothing.
+  marks: readonly { noticeId: string; mark: NoticeMark; withdraw?: true; key?: string }[];
   // The computer that dismisses. A first dismissal names it, and it hears
   // "first" again when it asks again.
   installId?: string;
@@ -936,16 +937,23 @@ export function advanceNoticeHead(storage: StorageContext, recipientUserId: stri
  * Sets read or dismissed once, or clears one with unread or restore. A mark
  * that would change nothing, or a row removed, expired, or gone, is left as
  * it is. Each change starts the row's retention again, by the state it leaves:
- * dismissed, else read, else unread. Returns the notices this call dismissed
- * for the first time ever: a receipt outlives the row, and a restore keeps
- * it, so a notice is never dismissed first twice.
+ * dismissed, else read, else unread. Returns, as `dismissed`, the notices this
+ * call dismissed for the first time ever: a receipt outlives the row, and a
+ * restore keeps it, so a notice is never dismissed first twice.
+ *
+ * A mark with a key the row already took is skipped and its key returned in
+ * `repeated`, so the phone sending a mark again never undoes a change made
+ * after the relay first took it.
  *
  * An automation wake's row stands for its waiting payload. Only a computer
  * consuming the wake dismisses it, and no unread or restore brings back a
  * payload a dismissal consumed, so such a mark skips the row and the rest of
  * the batch goes on.
  */
-export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
+export function markNotices(
+  storage: StorageContext,
+  input: MarkNoticesInput,
+): { dismissed: string[]; repeated: string[] } {
   for (const mark of input.marks) {
     if (!mark.withdraw || mark.mark !== "dismissed") continue;
     // A sender can withdraw only copies they posted under this exact id.
@@ -1010,7 +1018,23 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
     const removeWake = storage.db.prepare(
       "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
     );
-    for (const { noticeId, mark } of input.marks) {
+    const keepKey = storage.db.prepare(
+      `INSERT OR IGNORE INTO sync_relay_notice_mark_keys (recipient_user_id, notice_id, mark_key, applied_at_ms)
+       SELECT recipient_user_id, notice_id, ?, ? FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?`,
+    );
+    const keyApplied = storage.db.prepare(
+      "SELECT 1 FROM sync_relay_notice_mark_keys WHERE recipient_user_id = ? AND notice_id = ? AND mark_key = ?",
+    );
+    let keys = 0;
+    const repeated: string[] = [];
+    for (const { noticeId, mark, key } of input.marks) {
+      if (key !== undefined) {
+        if (keyApplied.get(input.recipientUserId, noticeId, key)) {
+          repeated.push(key);
+          continue;
+        }
+        keys += Number(keepKey.run(key, input.nowMs, input.recipientUserId, noticeId).changes ?? 0);
+      }
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
       if (
         wake &&
@@ -1094,8 +1118,29 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       }
     }
     if (receipts > 0) reclaimOldReceipts(storage, input.recipientUserId);
-    return dismissed;
+    if (keys > 0) reclaimOldMarkKeys(storage, input.recipientUserId);
+    return { dismissed, repeated };
   });
+}
+
+/** A person keeps at most this many mark keys, the newest. */
+export const NOTICE_MARK_KEYS_KEPT = 10_000;
+
+function reclaimOldMarkKeys(storage: StorageContext, recipientUserId: string): void {
+  const { count } = storage.db
+    .prepare(
+      "SELECT count(*) AS count FROM sync_relay_notice_mark_keys WHERE recipient_user_id = ?",
+    )
+    .get(recipientUserId) as { count: number };
+  const excess = Number(count) - NOTICE_MARK_KEYS_KEPT;
+  if (excess <= 0) return;
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_notice_mark_keys WHERE rowid IN (
+       SELECT rowid FROM sync_relay_notice_mark_keys WHERE recipient_user_id = ?
+       ORDER BY applied_at_ms, rowid LIMIT ?)`,
+    )
+    .run(recipientUserId, excess);
 }
 
 /** A person keeps at most this many first-dismissal receipts. */

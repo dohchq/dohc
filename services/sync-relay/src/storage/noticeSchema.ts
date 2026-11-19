@@ -1,11 +1,14 @@
+import { NOTICE_MARK_KEY_MAX_CHARS } from "@dohc/workspace-contracts/relay";
 import type { SqliteDb } from "./types";
 
 export const NOTICE_LISTS = "sync_relay_notice_lists";
 export const NOTICES = "sync_relay_notices";
 export const NOTICE_DISMISSALS = "sync_relay_notice_dismissals";
 export const NOTICE_DISMISSAL_FLOORS = "sync_relay_notice_dismissal_floors";
+export const NOTICE_MARK_KEYS = "sync_relay_notice_mark_keys";
 const MARKER = "notices-v1";
 const DISMISSALS_MARKER = "notice-dismissals-v1";
+const MARK_KEYS_MARKER = "notice-mark-keys-v1";
 
 // One list per person. `change_seq` is the list's change counter and never
 // goes back, so a pull cursor stays valid after rows go. `floor_seq` is the
@@ -84,6 +87,24 @@ const DISMISSAL_SCHEMA = {
   reclaimed_through_ms INTEGER NOT NULL CHECK (reclaimed_through_ms BETWEEN 0 AND 9007199254740991),
   PRIMARY KEY (recipient_user_id, schedule_key)
 ) STRICT`,
+} as const;
+
+// The keys of the phone's marks this relay applied, so a mark the phone sends
+// again changes nothing. A key belongs to one recipient's notice row and goes
+// with it: a mark on a row the relay no longer holds changes nothing anyway. A
+// person keeps at most NOTICE_MARK_KEYS_KEPT keys, and the oldest go first.
+const MARK_KEY_SCHEMA = {
+  [NOTICE_MARK_KEYS]: `CREATE TABLE sync_relay_notice_mark_keys (
+  recipient_user_id TEXT NOT NULL,
+  notice_id TEXT NOT NULL,
+  mark_key TEXT NOT NULL CHECK (length(mark_key) BETWEEN 1 AND ${NOTICE_MARK_KEY_MAX_CHARS}),
+  applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms BETWEEN 0 AND 9007199254740991),
+  PRIMARY KEY (recipient_user_id, notice_id, mark_key),
+  FOREIGN KEY (recipient_user_id, notice_id)
+    REFERENCES sync_relay_notices(recipient_user_id, notice_id) ON DELETE CASCADE
+) STRICT`,
+  idx_sync_relay_notice_mark_keys_age: `CREATE INDEX idx_sync_relay_notice_mark_keys_age
+  ON sync_relay_notice_mark_keys(recipient_user_id, applied_at_ms)`,
 } as const;
 
 function sameSql(left: string, right: string): boolean {
@@ -181,6 +202,7 @@ export function initializeNoticeSchema(db: SqliteDb): void {
     [NOTICE_DISMISSALS, NOTICE_DISMISSAL_FLOORS],
     DISMISSALS_MARKER,
   );
+  initializeSchema(db, MARK_KEY_SCHEMA, [NOTICE_MARK_KEYS], MARK_KEYS_MARKER);
   initializeSchema(
     db,
     {
