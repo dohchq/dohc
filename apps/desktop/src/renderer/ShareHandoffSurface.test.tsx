@@ -482,7 +482,12 @@ describe("ShareHandoffSurface", () => {
       }),
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
-    expect(onMounted).toHaveBeenCalledWith("granter", null);
+    expect(onMounted).toHaveBeenCalledWith({
+      label: "granter",
+      access: null,
+      alreadyAdded: false,
+      left: false,
+    });
     expect(onOpened).toHaveBeenCalledOnce();
   });
 

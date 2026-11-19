@@ -8,13 +8,14 @@ import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ipcErrorMessage } from "./ipcError";
 import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { IconButton, PrimaryButton, SectionLabel } from "./ui/controls";
 import { FolderChip } from "./ui/Step";
 
@@ -24,6 +25,15 @@ import { FolderChip } from "./ui/Step";
 // is pressed without a session. Opening as a separate view defaults to a
 // folder next to the default workspace root, named after the share, so
 // nobody has to pick a folder to see the files.
+
+// A share added to this workspace. `access` is the pinned level, null when
+// the pin could not be read. `left`: the dialog closed while dohc was adding.
+export type MountedShare = {
+  label: string;
+  access: ShareAccess | null;
+  alreadyAdded: boolean;
+  left: boolean;
+};
 
 type Gate = { kind: "checking" } | { kind: "signed-out" } | { kind: "signed-in"; email: string };
 
@@ -89,8 +99,7 @@ export function OpenSharedView(
     // first-run, where there is no workspace to mount into yet.
     mountInto?: {
       workspaceId: string;
-      // The pinned access, null when the pin could not be read.
-      onMounted: (label: string, access: ShareAccess | null) => void;
+      onMounted: (mounted: MountedShare) => void;
     };
   } & ConnectionNoticeHost,
 ) {
@@ -116,6 +125,7 @@ export function OpenSharedView(
   const signInPanel = useRef<HTMLDivElement>(null);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reportShellError = useContext(ShellErrorReporter);
   useMouseBackButton(props.onBack);
   const sessionRef = useRequestSequence();
   const folderRequestRef = useRequestSequence();
@@ -234,18 +244,25 @@ export function OpenSharedView(
     const actionRequest = actionRequests.next();
     setOpening(true);
     setError(null);
+    const adding = mounting && props.mountInto ? props.mountInto : null;
     try {
-      if (mounting && props.mountInto) {
+      if (adding) {
         const result = await bridge().mountShare({
-          workspaceId: props.mountInto.workspaceId,
+          workspaceId: adding.workspaceId,
           shareCode,
         });
-        if (!actionRequests.isCurrent(actionRequest)) return;
-        props.onOpened?.();
+        const left = actionRequests.isCutOff(actionRequest);
+        if (!left && !actionRequests.isCurrent(actionRequest)) return;
+        if (!left) props.onOpened?.();
         const pinned = result.workspace.shareMounts?.find(
           (mount) => mount.shareId === result.mount.shareId,
         );
-        props.mountInto.onMounted(result.mount.label, pinned?.access ?? null);
+        adding.onMounted({
+          label: result.mount.label,
+          access: pinned?.access ?? null,
+          alreadyAdded: result.alreadyAdded === true,
+          left,
+        });
       } else {
         const result = await bridge().openSharedView({
           shareCode,
@@ -256,6 +273,14 @@ export function OpenSharedView(
         props.onWorkspaceReady(result.workspace);
       }
     } catch (cause) {
+      if (adding && actionRequests.isCutOff(actionRequest)) {
+        reportShellError?.({
+          message: ipcErrorMessage(cause, "dohc could not add the share."),
+          cause,
+          retry: null,
+        });
+        return;
+      }
       if (!actionRequests.isCurrent(actionRequest)) return;
       setError(ipcErrorMessage(cause, "Couldn't open the share."));
     } finally {

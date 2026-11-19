@@ -97,6 +97,7 @@ export interface ShareMountCommands<WorkspaceSummary> {
   }): Promise<{
     workspace: WorkspaceSummary;
     mount: ShareMountStatusRow;
+    alreadyAdded?: true;
   }>;
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
@@ -272,8 +273,26 @@ export function createShareMountCommands<WorkspaceSummary>(
           );
         }
         const existing = dependencies.readMounts(workspace.workspaceId);
-        if (shareMountRecordsForId(existing, parsed.shareId).length > 0) {
-          throw new Error("This share is already added to this workspace.");
+        const [added] = shareMountRecordsForId(existing, parsed.shareId);
+        if (added !== undefined) {
+          const row = usableShareMountRecord(existing, added)
+            ? shareMountResultRow({
+                shareId: added.shareId,
+                label: added.label,
+                status: added.ended === true ? "ended" : "unchanged",
+                changedPaths: 0,
+              })
+            : null;
+          if (row === null) {
+            throw new Error(
+              "This share is already in this workspace, but dohc could not read its record. Remove it from Sharing, then add it again.",
+            );
+          }
+          return {
+            workspace: dependencies.workspaceSummary(workspace.workspaceId),
+            mount: row,
+            alreadyAdded: true as const,
+          };
         }
         const relay = { baseUrl: relayUrl, token: credentials.token };
         let info: Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">;

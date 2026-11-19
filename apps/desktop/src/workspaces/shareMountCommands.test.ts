@@ -563,8 +563,17 @@ describe("share mount commands", () => {
     await Promise.resolve();
     expect(calls).toBe(1);
     releaseFirst();
-    await first;
-    await expect(second).rejects.toThrow("already added");
+    const added = await first;
+    expect(added.alreadyAdded).toBeUndefined();
+    await expect(second).resolves.toMatchObject({
+      alreadyAdded: true,
+      mount: {
+        shareId: added.mount.shareId,
+        label: added.mount.label,
+        status: "unchanged",
+        changedPaths: 0,
+      },
+    });
     expect(calls).toBe(1);
   });
 
