@@ -344,7 +344,9 @@ it("gives one alert when the run Notice arrives before its message", async () =>
     }),
   ]);
   const claimed = claimPushDelivery(f.storage, Date.now());
-  expect(claimed && readPushLease(f.storage, claimed, Date.now())).toEqual({ noticeId: "agent-run:1" });
+  expect(claimed && readPushLease(f.storage, claimed, Date.now())).toEqual({
+    noticeId: "agent-run:1",
+  });
 });
 
 it("alerts for a message on its own when the run Notice that waited for it isn't its agent's", async () => {
