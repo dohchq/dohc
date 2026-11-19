@@ -1730,7 +1730,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const existing = [...state.channels.values()].find((channel) => channel.slug === wantedSlug);
     if (existing) return jsonResult(this.channelJson(existing));
     return this.channelCreate(state, workspace, {
-      channelId: "channel:general",
+      channelId: "channel-general",
       name,
       kind,
       ...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
@@ -1759,7 +1759,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     // The engine gives each agent's chat the same id on every computer.
     const channelId = agentId.startsWith("p-")
       ? `personal-dm:${agentId}`
-      : `channel:agent:${agentId}`;
+      : `channel-agent-${agentId}`;
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     // A group an earlier build named like this chat keeps its name and moves

@@ -204,7 +204,7 @@ async fn query_page_returns_ranked_snippets_from_the_active_version() {
         9,
         "chats.threads.start",
         json!({
-            "channelId": "channel:general",
+            "channelId": "channel-general",
             "threadId": "projection-thread",
             "messageId": "projection-message",
             "authorKind": "human",
@@ -667,7 +667,7 @@ async fn profiles_search_rpc_first_and_late_pages() {
                 3,
                 "chats.threads.start",
                 json!({
-                    "channelId": "channel:general",
+                    "channelId": "channel-general",
                     "threadId": "benchmark-thread",
                     "messageId": "benchmark-message",
                     "title": "界".repeat(200),

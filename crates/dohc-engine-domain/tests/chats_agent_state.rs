@@ -247,28 +247,28 @@ fn connected_reader_reads_its_chat_its_mentions_and_threads_it_posted_in() {
     let (_scratch, mut store) = open_store();
     let mut chats = LinkedChatStore::new(&mut store);
     agent_chats(&mut chats);
-    ask(&mut chats, "channel:agent:terminal", "dm", "dm-ask", 10);
+    ask(&mut chats, "channel-agent-terminal", "dm", "dm-ask", 10);
     ask(&mut chats, "channel", "group", "ask @terminal", 20);
     ask(&mut chats, "channel", "posted", "opening", 25);
     answer(&mut chats, "channel", "posted", "terminal-post", 30);
     ask(&mut chats, "channel", "posted", "reply", 40);
     ask(
         &mut chats,
-        "channel:agent:research",
+        "channel-agent-research",
         "other",
         "other-ask",
         50,
     );
     ask(
         &mut chats,
-        "channel:agent:research",
+        "channel-agent-research",
         "other",
         "other @terminal",
         55,
     );
     answer(
         &mut chats,
-        "channel:agent:terminal",
+        "channel-agent-terminal",
         "dm",
         "terminal-reply",
         60,
@@ -279,7 +279,7 @@ fn connected_reader_reads_its_chat_its_mentions_and_threads_it_posted_in() {
     ask_by(
         &mut chats,
         Some("bob"),
-        "channel:agent:terminal",
+        "channel-agent-terminal",
         "dm",
         "bob-ask",
         80,
@@ -383,7 +383,7 @@ fn only_its_persons_posts_ask_an_agent_you_run() {
     ask_by(
         &mut chats,
         Some("me"),
-        "channel:agent:terminal",
+        "channel-agent-terminal",
         "dm",
         "mine",
         10,
@@ -391,7 +391,7 @@ fn only_its_persons_posts_ask_an_agent_you_run() {
     ask_by(
         &mut chats,
         Some("owner"),
-        "channel:agent:terminal",
+        "channel-agent-terminal",
         "dm",
         "owners",
         20,
@@ -399,7 +399,7 @@ fn only_its_persons_posts_ask_an_agent_you_run() {
     ask_by(
         &mut chats,
         None,
-        "channel:agent:terminal",
+        "channel-agent-terminal",
         "dm",
         "no-account",
         30,

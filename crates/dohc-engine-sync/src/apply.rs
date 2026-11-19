@@ -1039,8 +1039,12 @@ fn apply_channel(
         || channel_id == GENERAL_CHANNEL_WIRE_ID
         || agent_id_for_channel_wire_id(&channel_id).is_some()
         || (is_well_known_channel_id(&channel_id)
-            && payload.wire_id.as_deref().and_then(well_known_channel_id)
-                != Some(channel_id.clone()))
+            && payload
+                .wire_id
+                .as_deref()
+                .and_then(well_known_channel_id)
+                .as_deref()
+                != Some(channel_id.as_str()))
     {
         return Err(SyncError::InvalidInput {
             reason: "chat channel id is invalid",

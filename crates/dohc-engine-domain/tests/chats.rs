@@ -542,7 +542,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             author_owner_display_name: Some("Ice".to_owned()),
             automation,
             ..start_thread(
-                "channel:general",
+                "channel-general",
                 &format!("t-{message_id}"),
                 message_id,
                 "Done @ana",
@@ -565,7 +565,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             StartChannelThread {
                 automation: Some(stamp.clone()),
                 ..start_thread(
-                    "channel:general",
+                    "channel-general",
                     "t-h",
                     "m-h",
                     "Hi",
@@ -579,7 +579,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             StartChannelThread {
                 automation: Some(stamp.clone()),
                 ..start_thread(
-                    "channel:general",
+                    "channel-general",
                     "t-a",
                     "m-a",
                     "Hi",
@@ -657,7 +657,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         }
     }
     let human_owner = start_thread(
-        "channel:general",
+        "channel-general",
         "t-o",
         "m-o",
         "Hi",
@@ -750,7 +750,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t-ada",
                 "m-ada",
                 "Hi",
@@ -884,7 +884,7 @@ fn local_writes_refuse_a_link_author() {
         let start = StartChannelThread {
             author_user_id,
             ..start_thread(
-                "channel:general",
+                "channel-general",
                 "t-link",
                 "m-link",
                 "hello",
@@ -899,7 +899,7 @@ fn local_writes_refuse_a_link_author() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m1",
                 "hello",
@@ -946,7 +946,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
         .expect("general");
 
     let mut opening = start_thread(
-        "channel:general",
+        "channel-general",
         "thread-revision",
         "message-opening",
         "Choose",
@@ -1078,7 +1078,7 @@ fn send_message_reply_parent_must_exist_in_thread() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m0",
                 "opening",
@@ -1118,7 +1118,7 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m0",
                 "opening",
@@ -1217,7 +1217,7 @@ fn agent_thread(chats: &mut LinkedChatStore<'_>, thread_id: &str, messages: &[(&
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 thread_id,
                 first_id,
                 "agent",
@@ -1291,7 +1291,7 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     assert_eq!(thread_read_ops(&store), 2);
 
     let summaries = LinkedChatStore::new(&mut store)
-        .list_channel_threads(WS, "channel:general", None, 10)
+        .list_channel_threads(WS, "channel-general", None, 10)
         .expect("summaries");
     let unread = |thread_id: &str| {
         summaries
@@ -1393,12 +1393,12 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
             .list_channels(WS)
             .expect("channels")
             .into_iter()
-            .find(|summary| summary.channel.channel_id == "channel:general")
+            .find(|summary| summary.channel.channel_id == "channel-general")
             .map(|summary| summary.unread_count)
     };
     let summary = |store: &mut EngineStore| {
         let summary = LinkedChatStore::new(store)
-            .list_channel_threads(WS, "channel:general", None, 10)
+            .list_channel_threads(WS, "channel-general", None, 10)
             .expect("summaries")
             .remove(0);
         (
@@ -1517,7 +1517,7 @@ fn a_persons_send_moves_the_account_mark_and_an_agents_does_not() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t2",
                 "s0",
                 "mine",
@@ -1620,7 +1620,7 @@ fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
             .collect::<Vec<_>>()
     };
     let totals = unread_by_channel(&mut store);
-    assert!(totals.contains(&("channel:general".to_owned(), 0)));
+    assert!(totals.contains(&("channel-general".to_owned(), 0)));
     assert!(totals.contains(&("joined-1".to_owned(), 1)));
 
     let mut chats = LinkedChatStore::new(&mut store);
@@ -1861,7 +1861,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m1",
                 "opening",
@@ -1974,7 +1974,7 @@ fn authorless_message_and_derived_state_stay_local() {
             .ensure_general_channel(WS, 10, &NO_FAULTS)
             .expect("general");
         let mut opening = start_thread(
-            "channel:general",
+            "channel-general",
             "local-thread",
             "local-message",
             "private before sign-in",
@@ -2058,7 +2058,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     for (t, m, ms) in [("t1", "m1", 100), ("t2", "m2", 101)] {
         chats
             .start_channel_thread(
-                &start_thread("channel:general", t, m, "body", ChatActorKind::Human, ms),
+                &start_thread("channel-general", t, m, "body", ChatActorKind::Human, ms),
                 &NO_FAULTS,
             )
             .expect("start");
@@ -2098,7 +2098,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
             .as_ref()
             .expect("hydrated channel")
             .channel_id,
-        "channel:general"
+        "channel-general"
     );
     assert!(page.items[0].parent_message.is_none());
     assert!(page.items[0].opening_message.is_none());
@@ -2156,7 +2156,7 @@ fn bookmark_generation_cas_stale_worker_loses() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m0",
                 "opening",
@@ -2215,7 +2215,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
                 &StartChannelThread {
                     own_thread: true,
                     ..start_thread(
-                        "channel:agent:default",
+                        "channel-agent-default",
                         thread_id,
                         message_id,
                         body,
@@ -2314,7 +2314,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
         chats
             .start_channel_thread(
                 &start_thread(
-                    "channel:agent:default",
+                    "channel-agent-default",
                     "t1",
                     "mA",
                     "@agent",
@@ -2376,7 +2376,7 @@ fn save_bookmark_rejects_unsafe_destination_path() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m0",
                 "opening",
@@ -2416,7 +2416,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m0",
                 "opening",
@@ -2527,7 +2527,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .ensure_agent_channel(ws, "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         let mut start = start_thread(
-            "channel:agent:default",
+            "channel-agent-default",
             "t-x",
             "m-x",
             "@agent",
@@ -2552,7 +2552,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
         .expect("complete");
     let start_y = {
         let mut start = start_thread(
-            "channel:agent:default",
+            "channel-agent-default",
             "t-y",
             "m-y",
             "@agent",
@@ -2618,7 +2618,7 @@ fn local_actor_key_commits_with_the_message_and_replays_its_original_admission()
         FaultPoint::StorageAfterCommitBeforeAck,
     ] {
         let mut input = start_thread(
-            "channel:general",
+            "channel-general",
             "key-thread",
             "key-opening",
             "Hello",
@@ -2690,7 +2690,7 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
             .ensure_general_channel(WS, 10, &NO_FAULTS)
             .expect("channel");
         let mut post = start_thread(
-            "channel:general",
+            "channel-general",
             "t1",
             "m1",
             "Opened a PR",
@@ -2728,7 +2728,7 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
         );
 
         let listed = chats
-            .list_channel_threads(WS, "channel:general", None, 10)
+            .list_channel_threads(WS, "channel-general", None, 10)
             .expect("posts");
         assert_eq!(
             listed[0]
@@ -2778,7 +2778,7 @@ fn only_a_valid_agent_report_is_kept() {
     chats
         .start_channel_thread(
             &start_thread(
-                "channel:general",
+                "channel-general",
                 "t1",
                 "m1",
                 "Hello",

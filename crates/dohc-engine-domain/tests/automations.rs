@@ -1466,7 +1466,7 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     );
 }
 
-const GROUP: &str = "channel:general";
+const GROUP: &str = "channel-general";
 const TASK: &str = "collection:object-tasks#task";
 const ALL: &str = "collection:object-tasks#all";
 
@@ -1591,7 +1591,7 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
             .ensure_agent_channel(WS, "default", "My agent", 5, &NO_FAULTS)
             .expect("agent channel");
     }
-    for channel_id in ["dm-1", "channel:agent:default", "no-such-group"] {
+    for channel_id in ["dm-1", "channel-agent-default", "no-such-group"] {
         assert!(
             matches!(
                 watch_groups(&mut store, &[(TASK, channel_id, None)]),
@@ -1980,7 +1980,7 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
 
 const STAMP: &str = "collection:tasks#stamp";
 const ASK: &str = "collection:tasks#ask";
-const MY_AGENT: &str = "channel:agent:default";
+const MY_AGENT: &str = "channel-agent-default";
 
 fn changed_by(
     origin_seq: i64,

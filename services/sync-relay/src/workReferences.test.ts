@@ -581,7 +581,7 @@ describe("work reference registration and resolution", () => {
         ws,
         sequenced([
           chatChannelCreate(general, {
-            channelId: "channel:general",
+            channelId: "channel-general",
             name: "general",
             slug: "general",
           }),
@@ -596,17 +596,17 @@ describe("work reference registration and resolution", () => {
         await register(handler, [
           {
             reference: references[0],
-            target: { kind: "chat", channelId: "channel:general" },
+            target: { kind: "chat", channelId: "channel-general" },
             createdAtMs: 1,
           },
           {
             reference: references[1],
-            target: { kind: "thread", threadId: "thread-device-b", channelId: "channel:general" },
+            target: { kind: "thread", threadId: "thread-device-b", channelId: "channel-general" },
             createdAtMs: 1,
           },
           {
             reference: references[2],
-            target: { kind: "thread", threadId: "thread-device-a", channelId: "channel:general" },
+            target: { kind: "thread", threadId: "thread-device-a", channelId: "channel-general" },
             createdAtMs: 1,
           },
         ]),
@@ -630,7 +630,7 @@ describe("work reference registration and resolution", () => {
         jsonBody({
           originId: "member-device",
           ops: sequenced([
-            chatChannelCreate("group", { channelId: "channel:general" }),
+            chatChannelCreate("group", { channelId: "channel-general" }),
             chatChannelCreate("group", { channelId: "member-group" }),
           ]),
         }),
@@ -647,7 +647,7 @@ describe("work reference registration and resolution", () => {
           },
           {
             reference: "K".repeat(43),
-            target: { kind: "chat", channelId: "channel:general" },
+            target: { kind: "chat", channelId: "channel-general" },
             createdAtMs: 1,
           },
         ]),

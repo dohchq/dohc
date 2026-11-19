@@ -1388,7 +1388,7 @@ describe("CLI socket server", () => {
       ).kind,
     ).toBe("file");
     // The CLI names chats by short ids; links name them by their engine ids.
-    expect(general.id).toBe("ch_1");
+    expect(general.id).toBe("ch_general");
     expect(made).toEqual([
       { kind: "chat", channelId: expect.stringMatching(/^channel-/u) },
       { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },

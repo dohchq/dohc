@@ -68,9 +68,9 @@ pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
 /// The channel id every computer gives the General chat it creates, so a
 /// link to General made on one of a person's computers opens on the others.
 /// It is never a wire id.
-pub const GENERAL_CHANNEL_ID: &str = "channel:general";
+pub const GENERAL_CHANNEL_ID: &str = "channel-general";
 /// An agent's chat's channel id is this prefix and the agent id.
-const AGENT_CHANNEL_ID_PREFIX: &str = "channel:agent:";
+const AGENT_CHANNEL_ID_PREFIX: &str = "channel-agent-";
 /// The relay names a personal agent's chat with this prefix and the agent id.
 const PERSONAL_AGENT_CHANNEL_ID_PREFIX: &str = "personal-dm:";
 /// The default agent's chat's display name. Another agent's chat is named

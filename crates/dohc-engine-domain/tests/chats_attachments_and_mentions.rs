@@ -457,7 +457,7 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
         .expect("agent chat");
     start_waking(
         &mut store,
-        "channel:agent:research",
+        "channel-agent-research",
         "agent-thread",
         "direct",
         ChatActorKind::Human,
@@ -579,7 +579,7 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
         .expect("agent chat");
     start_message(
         &mut store,
-        "channel:agent:default",
+        "channel-agent-default",
         "thread",
         "cli",
         ChatActorKind::Human,
