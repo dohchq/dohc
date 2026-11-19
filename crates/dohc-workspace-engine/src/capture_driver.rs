@@ -74,6 +74,8 @@ pub struct CaptureApplyProbe {
     collection_committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
     #[cfg(test)]
     pub(crate) observation_root: Option<PathBuf>,
+    #[cfg(test)]
+    open_install_actor: Arc<std::sync::Mutex<Option<ActorHandle>>>,
     #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
     #[cfg(any(test, feature = "harness"))]
@@ -120,6 +122,11 @@ impl CaptureApplyProbe {
 
     pub async fn wait_until_open_install_paused(&self) {
         self.open_install_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paused_open_actor(&self) -> Option<ActorHandle> {
+        crate::lock(&self.open_install_actor).clone()
     }
 
     pub fn release_open_install(&self) {
@@ -524,9 +531,13 @@ impl Drop for CaptureGateWait<'_> {
 }
 
 impl CaptureApplyProbe {
-    pub(crate) fn pause_open_install_if_armed(&self) {
+    pub(crate) fn pause_open_install_if_armed(&self, _actor: &ActorHandle) {
         #[cfg(any(test, feature = "harness"))]
         if self.open_install_armed.swap(false, Ordering::AcqRel) {
+            #[cfg(test)]
+            {
+                *crate::lock(&self.open_install_actor) = Some(_actor.clone());
+            }
             self.open_install_reached.notify_one();
             tokio::runtime::Handle::current().block_on(self.open_install_release.notified());
         }

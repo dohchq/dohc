@@ -1257,6 +1257,7 @@ fn worker_main(
         }
     }
     let store_damaged = Arc::new(AtomicBool::new(false));
+    let mut unserved_after_damage = Vec::new();
     let _closed_guard = ClosedGuard {
         state: Arc::clone(&state),
         damaged: Arc::clone(&store_damaged),
@@ -1488,9 +1489,10 @@ fn worker_main(
             }
             continue;
         };
-        // A damaged store serves nothing more. Dropping the command tells
-        // its caller that the actor is unavailable.
+        // A damaged store serves nothing more. Its caller hears that the
+        // actor is unavailable once the actor has published Damaged.
         if store_damaged.load(Ordering::Acquire) {
+            unserved_after_damage.push(cmd);
             break;
         }
         // Counted as each command starts, so its caller sees the count by the
