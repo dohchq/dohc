@@ -223,7 +223,7 @@ export function RelayShareDialog(props: {
   const [invitedRevision, setInvitedRevision] = useState(0);
   const [removedHere, setRemovedHere] = useState<GrantsOfScope>({ scope, grantIds: [] });
   const removedNow = grantsIn(removedHere, scope);
-  const [retiredInvitations, setRetiredInvitations] = useState<GrantsOfScope>({
+  const [invitedByCodeOnly, setInvitedByCodeOnly] = useState<GrantsOfScope>({
     scope,
     grantIds: [],
   });
@@ -249,7 +249,7 @@ export function RelayShareDialog(props: {
         independent.keep(person);
         reloadInvited();
       },
-      removed: independent.drop,
+      removed: independent.retire,
     },
     ...(props.shareRemovals ? { shareRemovals: props.shareRemovals } : {}),
     ...(props.disconnectedAgents ? { disconnectedAgents: props.disconnectedAgents } : {}),
@@ -260,13 +260,6 @@ export function RelayShareDialog(props: {
     (person) =>
       !linkPane.peopleShareIds.has(person.shareId) && !removedNow.includes(person.grantId),
   );
-  const retireInvitation = (grantId: string) => {
-    setRetiredInvitations((current) => ({
-      scope,
-      grantIds: [...grantsIn(current, scope).filter((retired) => retired !== grantId), grantId],
-    }));
-    local.drop(grantId);
-  };
   const invitedFailed = !held && invited.failed;
 
   // While the body scrolls, the title sits in a band with a rule. The band
@@ -322,9 +315,14 @@ export function RelayShareDialog(props: {
               key={scope}
               workspaceId={props.workspaceId}
               target={props.target}
-              retiredGrantIds={grantsIn(retiredInvitations, scope)}
-              onCreated={(person) => {
+              retiredGrantIds={local.retired}
+              onCreated={({ browserInvitation, ...person }) => {
                 local.keep({ ...person, email: person.name, generation: 1 });
+                if (!browserInvitation && invitationCanBeBrowserLink(person.access, props.target))
+                  setInvitedByCodeOnly((current) => ({
+                    scope,
+                    grantIds: [...grantsIn(current, scope), person.grantId],
+                  }));
                 reloadInvited();
               }}
             />
@@ -351,7 +349,7 @@ export function RelayShareDialog(props: {
                       );
                       return { scope, grantIds: gone ? [...others, person.grantId] : others };
                     });
-                    if (gone) retireInvitation(person.grantId);
+                    if (gone) local.retire(person.grantId);
                     reloadInvited();
                   };
                   return (
@@ -361,8 +359,12 @@ export function RelayShareDialog(props: {
                       target={props.target}
                       person={person}
                       shareRemovals={props.shareRemovals}
+                      shareCodeToo={
+                        invitationCanBeBrowserLink(person.access, props.target) &&
+                        !grantsIn(invitedByCodeOnly, scope).includes(person.grantId)
+                      }
                       onEnded={() => {
-                        retireInvitation(person.grantId);
+                        local.retire(person.grantId);
                         void loadInvited();
                       }}
                       onAccessChanged={(changed) => {
@@ -413,6 +415,7 @@ function InvitedPersonRow(props: {
   target: RelayShareTarget;
   person: ListedPerson;
   shareRemovals: ShareRemovalNotices | undefined;
+  shareCodeToo: boolean;
   onEnded: () => void;
   onAccessChanged: (changed: ChangedAccess) => void;
   onRemoved: () => void;
@@ -495,7 +498,7 @@ function InvitedPersonRow(props: {
             invitationCopy.copy();
           },
         },
-        ...(invitationCanBeBrowserLink(person.access, props.target)
+        ...(props.shareCodeToo
           ? [
               {
                 id: "copy-code",

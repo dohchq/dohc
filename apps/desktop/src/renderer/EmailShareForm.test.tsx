@@ -284,6 +284,11 @@ describe("EmailShareForm", () => {
       target: { kind: "version", versionId: "v1" },
       level: "edit",
     },
+    {
+      name: "an Edit share of files the relay answers without a browser invitation",
+      target: { kind: "paths", paths: ["docs"] },
+      level: "edit",
+    },
   ])("offers one copy for $name, whose invitation is the code", async ({ target, level }) => {
     const user = userEvent.setup();
     render(<EmailShareForm workspaceId="ws-1" target={target} />);

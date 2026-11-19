@@ -11,7 +11,7 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton } from "./ui/controls";
 import { CopyButton } from "./ui/CopyButton";
-import { invitationCanBeBrowserLink, nextInvitationCopy } from "./invitationCopy";
+import { nextInvitationCopy } from "./invitationCopy";
 import { ShareAccessMenu } from "./shareAccess";
 import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
@@ -42,7 +42,7 @@ export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
   // People whose invitation this form no longer offers to copy: their access
-  // was removed here, or their share ended.
+  // was removed here, or it ended.
   retiredGrantIds?: readonly string[];
   // A share was made, so whoever lists this selection's people shows them.
   onCreated?: (person: {
@@ -50,6 +50,7 @@ export function EmailShareForm(props: {
     grantId: string;
     name: string;
     access: ShareAccess;
+    browserInvitation: boolean;
   }) => void;
 }) {
   const [email, setEmail] = useState("");
@@ -128,6 +129,7 @@ export function EmailShareForm(props: {
           grantId: result.grantId,
           name: result.recipientEmail,
           access: asked.access,
+          browserInvitation: result.browserInvitationUrl !== undefined,
         });
       }
     } catch (cause) {
@@ -225,7 +227,7 @@ export function EmailShareForm(props: {
                 return invited.result.browserInvitationUrl ?? invited.result.shareCode;
               }}
             />
-            {invitationCanBeBrowserLink(invited.share.access, props.target) ? (
+            {invited.result.browserInvitationUrl !== undefined ? (
               <CopyButton
                 key={`code:${invited.result.grantId}`}
                 label="Copy share code"

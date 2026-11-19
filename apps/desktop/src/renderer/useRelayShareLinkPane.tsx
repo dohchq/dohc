@@ -536,9 +536,9 @@ export function useRelayShareLinkPane(props: {
   shareRemovals?: ShareRemovalNotices;
   // The shell's useDisconnectedLinkAgents set.
   disconnectedAgents?: ReadonlySet<string>;
-  // The dialog's answers about the people who no longer depend on a link:
-  // their access as the relay answered it, kept by the rule the invited
-  // people follow.
+  // What the dialog knows about the people who no longer depend on a link:
+  // their access from the newest of the relay's answers and the Sharing
+  // listing, kept by the rule the invited people follow.
   people: {
     answered: (listed: readonly ListedPerson[]) => ListedPerson[];
     changed: (person: AnsweredPerson) => void;
@@ -581,7 +581,6 @@ export function useRelayShareLinkPane(props: {
   const shownShareId = useRef<string | null>(null);
   const shownGrantId = useRef<string | null>(null);
   const draftOpeners = useRef(new Map<string, string>());
-  const changedGrantIds = useRef(new Set<string>());
   // Links whose last change may have landed without its answer: no URL
   // shows for them until the list reads again.
   const [unsureUrls, setUnsureUrls] = useState<ReadonlySet<string>>(() => new Set());
@@ -772,7 +771,6 @@ export function useRelayShareLinkPane(props: {
     setLifecycleError(null);
     setOwnerDiscussionByShareId({});
     setIndependentGrants([]);
-    changedGrantIds.current.clear();
     setOwnerAppendBusy(null);
     setOwnerMutationBusy(null);
     setOwnerMutationError(null);
@@ -1417,7 +1415,10 @@ export function useRelayShareLinkPane(props: {
         shareRemovals,
         restored: readAgain,
       });
-      changedGrantIds.current.delete(action.grantId);
+      if (isCurrentLinkScope(scopeGeneration))
+        setIndependentGrants((current) =>
+          current.filter((grant) => grant.grantId !== action.grantId),
+        );
       props.people.removed(action.grantId);
     };
     const retry = () =>
@@ -1517,7 +1518,6 @@ export function useRelayShareLinkPane(props: {
         setLinksRevision((revision) => revision + 1);
       }
       setIndependentGrants([...independentInventory.values()]);
-      changedGrantIds.current.clear();
       if (!options.preserveOwnerMutationError) {
         setOwnerMutationError((current) =>
           current !== null && isGrantMutationAction(current.actionKey) ? null : current,
@@ -1539,9 +1539,6 @@ export function useRelayShareLinkPane(props: {
       if (!isCurrentLinkScope(scopeGeneration) || latestInventoryRequest.current !== requestId) {
         return;
       }
-      setIndependentGrants((current) =>
-        current.filter((grant) => changedGrantIds.current.has(grant.grantId)),
-      );
       setSupportedLinkAccess(["view", "comment"]);
       setLinkAccess("view");
       setAddAccessByShareId({});
@@ -2417,14 +2414,6 @@ export function useRelayShareLinkPane(props: {
               ]}
               onAccessChanged={(changed) => {
                 if (!isCurrentLinkScope(scopeGeneration)) return;
-                changedGrantIds.current.add(person.grantId);
-                setIndependentGrants((current) =>
-                  current.map((listed) =>
-                    listed.grantId === person.grantId
-                      ? { ...listed, access: changed.access }
-                      : listed,
-                  ),
-                );
                 props.people.changed({ ...person, ...changed });
                 void refreshLinks(scopeGeneration);
               }}

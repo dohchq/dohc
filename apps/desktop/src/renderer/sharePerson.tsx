@@ -33,26 +33,34 @@ export const isShareAccess = (access: string | null): access is ShareAccess =>
 export type ListedPerson = SharedPerson & { generation: number | null };
 export type AnsweredPerson = SharedPerson & { generation: number };
 type LocalPerson = { person: AnsweredPerson; listed: boolean };
+type LocalPeople = {
+  scope: string;
+  byGrant: Readonly<Record<string, LocalPerson>>;
+  retired: readonly string[];
+};
 
 const NO_LOCAL_PEOPLE: Readonly<Record<string, LocalPerson>> = {};
+const NO_RETIRED: readonly string[] = [];
+const noLocalPeople = (scope: string): LocalPeople => ({
+  scope,
+  byGrant: NO_LOCAL_PEOPLE,
+  retired: NO_RETIRED,
+});
 
-const listedSince = (listed: ListedPerson, answered: AnsweredPerson) =>
-  listed.generation !== null && listed.generation >= answered.generation;
+const isVersioned = (person: ListedPerson | undefined): person is AnsweredPerson =>
+  person !== undefined && person.generation !== null;
 
 /**
  * The people Share knows from the relay's own answers: a person invited here,
  * or one whose access changed here. `listing` is the newest list of grants
  * with their generations that was read, and a failed read leaves it as it
- * was. An answer stands until that list holds the grant at the answer's
- * generation or a later one. A grant the list has held and a later list
- * leaves out has ended, so it goes.
+ * was. An answer stands while that list holds the grant at an older
+ * generation, or not yet. A grant the list has held and a later list leaves
+ * out has ended, so it goes and joins `retired`.
  */
 export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) {
-  const [held, setHeld] = useState<{
-    scope: string;
-    byGrant: Readonly<Record<string, LocalPerson>>;
-  }>({ scope, byGrant: NO_LOCAL_PEOPLE });
-  const byGrant = held.scope === scope ? held.byGrant : NO_LOCAL_PEOPLE;
+  const [held, setHeld] = useState(() => noLocalPeople(scope));
+  const { byGrant, retired } = held.scope === scope ? held : noLocalPeople(scope);
   const newestListing = useRef(listing);
   newestListing.current = listing;
   useEffect(() => {
@@ -60,24 +68,41 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) 
       if (current.scope !== scope) return current;
       let changed = false;
       const kept: Record<string, LocalPerson> = {};
+      const leftOut: string[] = [];
       for (const [grantId, local] of Object.entries(current.byGrant)) {
-        const listed = listing.find((person) => person.grantId === grantId);
-        if (listed ? listedSince(listed, local.person) : local.listed) changed = true;
-        else if (listed && !local.listed) {
+        const listed = listing.some((person) => person.grantId === grantId);
+        if (listed === local.listed) kept[grantId] = local;
+        else {
           changed = true;
-          kept[grantId] = { ...local, listed: true };
-        } else kept[grantId] = local;
+          if (listed) kept[grantId] = { ...local, listed };
+          else if (!current.retired.includes(grantId)) leftOut.push(grantId);
+        }
       }
-      return changed ? { scope, byGrant: kept } : current;
+      return changed
+        ? { scope, byGrant: kept, retired: [...current.retired, ...leftOut] }
+        : current;
     });
   }, [listing, scope]);
   return {
-    /** The listed people, each at the access the relay answered while the list is older. */
-    answered(listed: readonly ListedPerson[]): ListedPerson[] {
-      return listed.map((person) => {
-        const answered = byGrant[person.grantId]?.person;
-        return answered && !listedSince(person, answered)
-          ? { ...person, access: answered.access }
+    /**
+     * The people given, each at the access of the newest source that carries a
+     * generation: the person as given, their grant in `listing`, or the
+     * relay's answer. A person none of them knows keeps the access given.
+     */
+    answered(people: readonly ListedPerson[]): ListedPerson[] {
+      return people.map((person) => {
+        const newest = [
+          person,
+          listing.find((listed) => listed.grantId === person.grantId),
+          byGrant[person.grantId]?.person,
+        ]
+          .filter(isVersioned)
+          .reduce<AnsweredPerson | null>(
+            (best, known) => (best === null || known.generation > best.generation ? known : best),
+            null,
+          );
+        return newest
+          ? { ...person, access: newest.access, generation: newest.generation }
           : person;
       });
     },
@@ -87,24 +112,24 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) 
         .map((local) => local.person)
         .filter((person) => !listed.some((known) => known.grantId === person.grantId));
     },
+    /** The grants that ended: retired here, or left out by a list that had held them. */
+    retired,
     keep(person: AnsweredPerson) {
       const listed = newestListing.current.some((known) => known.grantId === person.grantId);
-      setHeld((current) => ({
-        scope,
-        byGrant: {
-          ...(current.scope === scope ? current.byGrant : NO_LOCAL_PEOPLE),
-          [person.grantId]: { person, listed },
-        },
-      }));
-    },
-    drop(grantId: string) {
       setHeld((current) => {
-        if (current.scope !== scope || !(grantId in current.byGrant)) return current;
+        const now = current.scope === scope ? current : noLocalPeople(scope);
+        return { ...now, byGrant: { ...now.byGrant, [person.grantId]: { person, listed } } };
+      });
+    },
+    retire(grantId: string) {
+      setHeld((current) => {
+        const now = current.scope === scope ? current : noLocalPeople(scope);
         return {
           scope,
           byGrant: Object.fromEntries(
-            Object.entries(current.byGrant).filter(([held]) => held !== grantId),
+            Object.entries(now.byGrant).filter(([kept]) => kept !== grantId),
           ),
+          retired: now.retired.includes(grantId) ? now.retired : [...now.retired, grantId],
         };
       });
     },

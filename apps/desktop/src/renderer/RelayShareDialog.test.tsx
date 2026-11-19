@@ -2739,7 +2739,7 @@ codex mcp login dohc-share`);
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
 
-  it("does not use stale root-grant eligibility after its inventory refresh fails", async () => {
+  it("keeps a person on a link's share, with Try again, when Remove access and the next read of the links both fail", async () => {
     const inventory = {
       links: [
         readableLink("ended-link", {
@@ -2753,9 +2753,9 @@ codex mcp login dohc-share`);
     };
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce(inventory)
-      .mockRejectedValueOnce(new Error("independent inventory unavailable"))
-      .mockResolvedValueOnce(inventory);
-    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(new Error("revoke unavailable"));
+      .mockRejectedValueOnce(new Error("dohc could not reach the sync relay."))
+      .mockResolvedValue({ ...inventory, independentGrants: [] });
+    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -2766,35 +2766,63 @@ codex mcp login dohc-share`);
     );
 
     const group = await linkGroup(user, "share-1");
-    await toggleComments(user, group);
-    const namedGrant = await screen.findByTestId("share-independent-named-root");
-    await choosePersonOption(user, namedGrant, "Remove access");
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-independent-named-root"),
+      "Remove access",
+    );
     await user.click(
       within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
         name: "Remove access",
       }),
     );
 
-    await vi.waitFor(() => {
-      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
-      expect(within(group).queryByRole("button", { name: "Link options" })).toBeNull();
-    });
-    expect(screen.queryByTestId("share-independent-named-root")).toBeNull();
+    expect(await screen.findByText("dohc could not reach the sync relay.")).toBeTruthy();
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    const kept = screen.getByTestId("share-independent-named-root");
+    expect(within(kept).getByTestId("share-remove-error-named-root").textContent).toBe(
+      "dohc could not end named-root@example.test's access to docs/plan.md. relay down",
+    );
+    expect(within(group).getByRole("button", { name: "Link options" })).toBeTruthy();
 
-    const inventoryError = await screen.findByText("independent inventory unavailable");
-    await user.click(
-      within(inventoryError.parentElement!).getByRole("button", { name: "Try again" }),
+    await user.click(within(kept).getByTestId("share-remove-retry-named-root"));
+    await waitFor(() => expect(screen.queryByTestId("share-independent-named-root")).toBeNull());
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
+  });
+
+  it("takes only the person whose access ended off the list when the links cannot be read again", async () => {
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [readableLink("link-1", { shareId: "share-1" })],
+        supportedLinkAccess: ["view", "comment"],
+        independentGrants: [independentGrant("named-1"), independentGrant("named-2")],
+      })
+      .mockRejectedValue(new Error("dohc could not reach the sync relay."));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
     );
 
-    await vi.waitFor(() => {
-      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
-      expect(within(group).getByRole("button", { name: "Link options" })).toBeTruthy();
-    });
-    expect(await linkOptions(user, group)).toEqual(["Comments", "Add another link"]);
-    expect(screen.queryByText("independent inventory unavailable")).toBeNull();
-    await toggleComments(user, group);
-    expect(await screen.findByTestId("share-independent-named-root")).toBeTruthy();
-    expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-independent-named-1"),
+      "Remove access",
+    );
+    await user.click(
+      within(screen.getByTestId("owner-comments-confirmation")).getByRole("button", {
+        name: "Remove access",
+      }),
+    );
+
+    expect(await screen.findByText("dohc could not reach the sync relay.")).toBeTruthy();
+    expect(screen.queryByTestId("share-independent-named-1")).toBeNull();
+    expect(screen.getByTestId("share-independent-named-2")).toBeTruthy();
+    expect(screen.getByTestId("share-link-row-link-1")).toBeTruthy();
   });
 
   it("keeps equal selectors as separate shares and creates a separate Comment link", async () => {
@@ -5446,7 +5474,7 @@ codex mcp login dohc-share`);
     const error = await screen.findByText("bounded refresh failure");
     expect(screen.getByTestId("share-dependent-dependent-1")).toBeTruthy();
     expect(screen.queryByTestId("share-independent-dependent-1")).toBeNull();
-    expect(screen.queryByTestId("share-independent-existing-1")).toBeNull();
+    expect(screen.getByTestId("share-independent-existing-1")).toBeTruthy();
     expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     await user.click(within(error.parentElement!).getByRole("button", { name: "Try again" }));
     expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
@@ -6448,6 +6476,39 @@ describe("people and links on one surface", () => {
     expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
     expect(shareRemovals.failed).not.toHaveBeenCalled();
     expect(screen.queryByTestId("share-invited-ana")).toBeNull();
+  });
+
+  it("keeps an invited person's row and its Try again when the people cannot be read again", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(
+        sharingAccess([invitedRow("ana", "ana@dohc.test"), invitedRow("ben", "ben@dohc.test")]),
+      )
+      .mockRejectedValue(new Error("offline"));
+    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({
+      grantId: "ben",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const ana = await screen.findByTestId("share-invited-ana");
+    await choosePersonOption(user, ana, "Remove access");
+    expect(await within(ana).findByTestId("share-remove-error-ana")).toBeTruthy();
+    await user.click(screen.getByTestId("share-person-access-ben"));
+    await user.click(await screen.findByTestId("share-person-access-ben-edit"));
+
+    expect(await screen.findByTestId("share-people-failed")).toBeTruthy();
+    const kept = screen.getByTestId("share-invited-ana");
+    expect(within(kept).getByTestId("share-remove-error-ana").textContent).toBe(
+      "dohc could not end ana@dohc.test's access to docs/plan.md. relay down",
+    );
+    expect(within(kept).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.getByTestId("share-person-access-ben").textContent).toBe("Can edit");
   });
 
   it("hands a removal refused after Share closed to the shell, with Try again", async () => {
@@ -7579,7 +7640,7 @@ describe("people and links on one surface", () => {
     );
   });
 
-  it("keeps a person on a link's share whose access changed when the links cannot be read again", async () => {
+  it("keeps the people on a link's share, one at the access just changed, when the links cannot be read again", async () => {
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({
         links: [readableLink("link-1", { shareId: "share-1" })],
@@ -7606,7 +7667,78 @@ describe("people and links on one surface", () => {
     expect(await screen.findByText("The sync relay is unavailable.")).toBeTruthy();
     expect(screen.getByTestId("share-independent-named-1")).toBeTruthy();
     expect(screen.getByTestId("share-person-access-named-1").textContent).toBe("Can edit");
+    expect(screen.getByTestId("share-person-access-named-2").textContent).toBe("Can comment");
   });
+
+  it.each([
+    {
+      name: "is still old",
+      linksFail: false,
+      listed: { access: "edit", generation: 3 },
+      shows: "Can edit",
+    },
+    {
+      name: "is still old, and the Sharing listing holds a later change",
+      linksFail: false,
+      listed: { access: "view", generation: 4 },
+      shows: "Can view",
+    },
+    {
+      name: "cannot be read",
+      linksFail: true,
+      listed: { access: "view", generation: 4 },
+      shows: "Can view",
+    },
+  ])(
+    "shows the newest role of a person on a link's share once the Sharing listing has it, while the link listing $name",
+    async ({ linksFail, listed, shows }) => {
+      const old = {
+        links: [readableLink("link-1", { shareId: "share-1" })],
+        independentGrants: [independentGrant("named-1", { recipientEmail: "friend@example.test" })],
+      };
+      const linksAgain = controllable<unknown>();
+      bridgeMock.listRelayShareLinks.mockResolvedValueOnce(old).mockReturnValue(linksAgain.promise);
+      const listingAgain = controllable<unknown>();
+      bridgeMock.listSharingAccess
+        .mockResolvedValueOnce(sharingAccess([onLinkShareRow("named-1", "friend@example.test")]))
+        .mockReturnValue(listingAgain.promise);
+      bridgeMock.retuneRelayShareGrant.mockResolvedValue({
+        grantId: "named-1",
+        access: "edit",
+        generation: 3,
+        status: "active",
+        revokedAtMs: null,
+        parentGrantId: null,
+      });
+      const user = userEvent.setup();
+      render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+      await user.click(await screen.findByTestId("share-person-access-named-1"));
+      await user.click(await screen.findByTestId("share-person-access-named-1-edit"));
+      await waitFor(() => {
+        expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+        expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(2);
+      });
+      expect(screen.getByTestId("share-person-access-named-1").textContent).toBe("Can edit");
+
+      await act(async () => {
+        if (linksFail) linksAgain.reject(new Error("The sync relay is unavailable."));
+        else linksAgain.resolve(old);
+      });
+      if (linksFail) expect(await screen.findByText("The sync relay is unavailable.")).toBeTruthy();
+      await act(async () =>
+        listingAgain.resolve(
+          sharingAccess([
+            onLinkShareRow("named-1", "friend@example.test", listed),
+            invitedRow("ana", "ana@dohc.test"),
+          ]),
+        ),
+      );
+      expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
+      await act(async () => {});
+      expect(screen.getByTestId("share-person-access-named-1").textContent).toBe(shows);
+    },
+  );
 
   it("asks which automations Edit stops for a person whose email is not known, and names them", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
@@ -7799,6 +7931,93 @@ describe("people and links on one surface", () => {
     await waitFor(() => expect(screen.queryByTestId("share-invited-grant-1")).toBeNull());
     expect(screen.getByTestId("share-invited-grant-2")).toBeTruthy();
   });
+
+  it("stops offering the invitation of the person invited last once a list that held them leaves them out", async () => {
+    bridgeMock.listSharingAccess
+      .mockResolvedValueOnce(sharingAccess([]))
+      .mockResolvedValueOnce(
+        sharingAccess([
+          invitedRow("ana", "ana@dohc.test"),
+          invitedRow("grant-1", "friend@dohc.test", { shareId: "share-1" }),
+        ]),
+      )
+      .mockResolvedValue(
+        sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit", generation: 2 })]),
+      );
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+    await waitFor(() => expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(1));
+
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+    expect(await screen.findByText(INVITED)).toBeTruthy();
+    expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
+    await act(async () => {});
+    expect(screen.getByTestId("share-invited-grant-1")).toBeTruthy();
+    expect(screen.getByTestId("share-invitation-copy")).toBeTruthy();
+
+    await user.click(screen.getByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    await waitFor(() => expect(screen.queryByTestId("share-invited-grant-1")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("share-invitation-copy")).toBeNull());
+    expect(screen.queryByText(INVITED)).toBeNull();
+    expect(screen.getByTestId("share-invited-ana")).toBeTruthy();
+  });
+
+  it.each([
+    {
+      name: "no Copy share code when the relay answered without a browser invitation",
+      browserInvitationUrl: undefined,
+      offers: ["Copy invitation", "Remove access"],
+    },
+    {
+      name: "Copy share code when the relay answered with a browser invitation",
+      browserInvitationUrl: "https://share.test/invite#grant-1",
+      offers: ["Copy invitation", "Copy share code", "Remove access"],
+    },
+  ])(
+    "offers $name, in the menu of a person invited here to edit",
+    async ({ browserInvitationUrl, offers }) => {
+      bridgeMock.createRelayShare.mockResolvedValue({
+        shareId: "share-1",
+        grantId: "grant-1",
+        shareCode: SHARE_CODE,
+        recipientEmail: "friend@dohc.test",
+        ...(browserInvitationUrl ? { browserInvitationUrl } : {}),
+      });
+      bridgeMock.listSharingAccess
+        .mockResolvedValueOnce(sharingAccess([]))
+        .mockResolvedValue(
+          sharingAccess([
+            invitedRow("grant-1", "friend@dohc.test", { shareId: "share-1", access: "edit" }),
+            invitedRow("ana", "ana@dohc.test"),
+          ]),
+        );
+      const user = userEvent.setup();
+      render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+      await waitFor(() => expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(1));
+
+      await chooseEmailAccess(user, "edit");
+      await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
+      expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
+      await act(async () => {});
+      expect(Boolean(screen.queryByTestId("share-code-copy"))).toBe(
+        browserInvitationUrl !== undefined,
+      );
+
+      await user.click(screen.getByTestId("share-person-access-grant-1"));
+      expect(
+        screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
+      ).toEqual(offers);
+    },
+  );
 
   it("stops offering an invitation on the invite line once its copy learns the share ended", async () => {
     bridgeMock.getShareCopyDetails.mockResolvedValue({ status: "ended" });
