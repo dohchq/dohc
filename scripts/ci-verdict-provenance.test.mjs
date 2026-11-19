@@ -417,9 +417,24 @@ test("downloads read each artifact from the attempt that produced it, not the cu
   assert.equal(steps[wait + 1].with.name, `\${{ steps.${steps[wait].id}.outputs.name }}`);
 });
 
+test("downloads list past a run's first 100 artifacts, where a later attempt finds earlier receipts", () => {
+  const { jobs } = load(workflow);
+  const actions = new Set(
+    Object.values(jobs).flatMap((job) =>
+      (job.steps ?? [])
+        .map((step) => step.uses)
+        .filter((uses) => uses?.startsWith("actions/download-artifact@")),
+    ),
+  );
+  assert.deepEqual(
+    [...actions],
+    ["actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"],
+  );
+});
+
 test("shared Rust archive downloads retry once under bounded step timeouts", () => {
   const { jobs } = load(workflow);
-  const action = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
+  const action = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
   const inputs = {
     name: "${{ steps.rust-archive.outputs.name }}",
     path: ".agent-artifacts/verification",
