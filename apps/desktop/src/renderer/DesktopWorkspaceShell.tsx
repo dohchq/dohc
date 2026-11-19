@@ -3748,6 +3748,36 @@ export function DesktopWorkspaceShell(props: {
   // for a workspace this window left paints nothing. One save per file runs
   // at a time, and asking again while it runs waits for it.
   const recoverySaves = useRef(new Map<string, Promise<void>>());
+  // Each package Save recovery copy kept with no readable copy keeps its row
+  // for as long as the file is there, after a restart or a switch back too.
+  const recoveryPackageReads = useRequestSequence([workspaceId]);
+  const listRecoveryPackages = useCallback(() => {
+    const request = recoveryPackageReads.next();
+    bridge()
+      .listOwnerLiveRecoveryPackages({ workspaceId })
+      .then(
+        ({ packages }) => {
+          if (!recoveryPackageReads.isCurrent(request)) return;
+          for (const kept of packages)
+            showWarningNotice(
+              `${kept.path === null ? "Kept edits" : `Kept edits for ${kept.path}`} have no readable copy. They are saved on this computer, in the file below.`,
+              [kept.packagePath],
+              `live-recovery-package:${kept.packagePath}`,
+            );
+        },
+        (error: unknown) => {
+          if (!recoveryPackageReads.isCurrent(request)) return;
+          reportShellError(
+            "dohc could not check for saved recovery packages.",
+            error,
+            listRecoveryPackages,
+          );
+        },
+      );
+  }, [recoveryPackageReads, reportShellError, showWarningNotice, workspaceId]);
+  useEffect(() => {
+    if (workspaceIsReady && !shareView) listRecoveryPackages();
+  }, [listRecoveryPackages, shareView, workspaceIsReady]);
   useEffect(() => {
     saveLiveRecoveryCopyRef.current = (id, path, incident) => {
       const key = `${id}\n${path}\n${incident ?? ""}`,

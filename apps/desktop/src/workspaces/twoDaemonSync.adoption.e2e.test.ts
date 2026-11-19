@@ -863,6 +863,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
           retryOwnerLiveQuarantine: unexpected,
           retryOwnerLiveRelease: unexpected,
           saveOwnerLiveRecoveryCopy: unexpected,
+          listOwnerLiveRecoveryPackages: unexpected,
           sendRendererActivity: () => {},
           sharesChanged: unexpected,
           reconcileReceivedShares: unexpected,

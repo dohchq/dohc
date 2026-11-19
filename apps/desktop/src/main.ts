@@ -9399,6 +9399,11 @@ function registerIpcHandlers(): void {
       desktopEngine.retryOwnerLiveQuarantine(workspace, objectId, incident),
     saveOwnerLiveRecoveryCopy: (workspace, path, incident) =>
       desktopEngine.saveOwnerLiveRecoveryCopy(workspace, path, incident),
+    listOwnerLiveRecoveryPackages: async (workspace) => ({
+      packages: await (
+        await import("./workspaces/ownerLiveRecoveryCopy")
+      ).listKeptRecoveryPackages(workspace),
+    }),
     sharesChanged: (workspaceId) => {
       receivedShareAcquisition.invalidate();
       invalidateHistoryLabels(workspaceId);

@@ -431,6 +431,13 @@ function makeBaseBridge(
         keptEdits: "kept",
       }),
     ),
+    listOwnerLiveRecoveryPackages: vi.fn(
+      async (_payload: {
+        workspaceId: string;
+      }): Promise<import("../ipc/bridgeContract").ListOwnerLiveRecoveryPackagesResult> => ({
+        packages: [],
+      }),
+    ),
     resumeOwnerLiveDocument: vi.fn(
       async (_payload: OwnerLiveDocumentActionPayload): Promise<void> => undefined,
     ),
