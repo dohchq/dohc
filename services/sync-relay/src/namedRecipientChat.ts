@@ -754,6 +754,7 @@ export function createNamedRecipientChat(options: {
             signal: controller.signal,
             maxResponseBytes: limits.maxResponseBytes,
             busyCode: "share_access_rate_limited",
+            personOf: accountNames(options.lookupUserDisplayName),
             project: (message) => message,
           }),
         );
@@ -779,6 +780,19 @@ export function createNamedRecipientChat(options: {
     return Promise.race([work, cancelled]);
   };
   return handle;
+}
+
+/** Each account's name, looked up once: "Unnamed" for one with none, as a post names it. */
+function accountNames(lookup: LogAuthorNameLookup | undefined) {
+  const names = new Map<string, Promise<string>>();
+  return (userId: string) => {
+    let name = names.get(userId);
+    if (!name) {
+      name = accountDisplayName(lookup, userId).then((found) => found ?? "Unnamed");
+      names.set(userId, name);
+    }
+    return name;
+  };
 }
 
 /** A current file's Comments: the threads whose first create binds this file and no other. */
@@ -837,6 +851,8 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   signal: AbortSignal;
   maxResponseBytes: number;
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
+  /** Names the account a personal agent posted for, which its post doesn't store. */
+  personOf?(userId: string): Promise<string>;
   project(message: PagedChatMessage): Message;
 }) {
   const { query, authorize, project } = input;
@@ -976,6 +992,21 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       if (caughtUp()) page = readPage();
       if (!caughtUp()) break;
     }
+  }
+  // A personal agent's post names its account but no person, so an agent's
+  // name alone can't pass for anyone's: the page names the account's person.
+  const { personOf } = input;
+  if (personOf) {
+    const messages = await Promise.all(
+      page.messages.map(async (message) =>
+        message.authorKind === "agent" &&
+        message.authorUserId !== null &&
+        message.authorOwnerDisplayName === null
+          ? { ...message, authorOwnerDisplayName: await personOf(message.authorUserId) }
+          : message,
+      ),
+    );
+    page = { ...page, messages };
   }
   authorize();
   // A delete can commit while the page waits. Read deletion again in the turn

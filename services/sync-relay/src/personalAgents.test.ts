@@ -54,6 +54,7 @@ import {
   reopenTestStorage,
   request,
   resolveTestAccountSession,
+  resolveTestActor,
   sequenced,
   SHARE_WEB_ORIGIN,
   storagePath,
@@ -2226,6 +2227,69 @@ describe("a personal agent in a workspace its person joined", () => {
     const ended = await beginRequest(f, clientId, COMMUNITY);
     await expectRefused(await consent(f, ended, session));
     await expectRefused(await allow(f, ended, { session, reach }));
+  });
+
+  it("names its person beside its post in another member's browser, whatever name the agent took", async () => {
+    const f = await fixture({
+      namedBrowserSessionLimits: {
+        maxSessions: 8,
+        retentionMs: 60_000,
+        maxPendingRequests: 8,
+        maxRequestBytes: 100_000,
+        maxResponseBytes: 200_000,
+        timeoutMs: 1000,
+      },
+      lookupUserDisplayName: (userId: string) =>
+        userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null,
+      // A browser's cookie names its person; a test request's bearer names its own.
+      resolveActor: (incoming, workspaceId) => {
+        const sessionId = /^session=([\w-]+)$/u.exec(incoming.headers.get("cookie") ?? "")?.[1];
+        if (sessionId === undefined) return resolveTestActor(incoming, workspaceId);
+        const userId = SESSIONS[sessionId];
+        if (!userId) throw new UnauthorizedError();
+        return { userId, workspaceId };
+      },
+    });
+    joinCommunity(f);
+    communityGroups(f);
+    expect(
+      f.storage.inviteWorkspaceMember({
+        workspaceId: COMMUNITY,
+        actorUserId: OTHER,
+        workspaceName: "Community",
+        email: "joiner@dohc.test",
+        recipientUserId: "joiner-account",
+        newMemberId: () => "member-joiner",
+        newGrantId: () => "grant-joiner",
+        newShareId: () => "share-community",
+        nowMs: 5,
+      }),
+    ).toMatchObject({ ok: true });
+    const agent = await signIn(f, { reach: [{ workspaceId: COMMUNITY, level: "comment" }] });
+    // Named after the workspace's owner, the post still names Ada.
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Olive" } }));
+    await ok(await post(f, agent, { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+
+    const read = await f.h(
+      new Request(
+        `http://relay.test/sync/named-chat/messages?shareId=share-community&channelWireId=wire-team`,
+        {
+          headers: {
+            cookie: "session=joiner-session",
+            origin: SHARE_WEB_ORIGIN,
+            "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY,
+          },
+        },
+      ),
+    );
+    expect((await ok(read)).messages).toEqual([
+      expect.objectContaining({
+        authorKind: "agent",
+        authorDisplayName: "Olive",
+        authorUserId: OWNER,
+        authorOwnerDisplayName: "Ada",
+      }),
+    ]);
   });
 
   it("takes a joined workspace into reach, never one its person isn't a member of, and appends no chat there", async () => {
