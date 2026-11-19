@@ -492,6 +492,142 @@ describe("deleting a message", () => {
   });
 });
 
+// 4c's Group rules and folder rules: a delete reads the actor's reach in that
+// Group, or on the file where it now is.
+describe("deleting where a rule limits members", () => {
+  function setGroupRule(h: SyncRelayHandler, as: string, level: "comment" | "view" | "none") {
+    return h(
+      request(as, `/sync/${WORKSPACE}/members/groups/${GROUP}/rule`, {
+        ...jsonBody({ level }),
+        method: "PUT",
+      }),
+    );
+  }
+
+  async function withAdmin(h: SyncRelayHandler) {
+    const ana = await member(h, "ana");
+    const ben = await member(h, "ben");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    return { ana, ben };
+  }
+
+  it("answers a member not-found in a Group its rule hides, as for a missing message, and lets an admin and the owner delete there", async () => {
+    const { storage, h } = await seed();
+    const { ana } = await withAdmin(h);
+    expect((await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana", "mine", 0))).status).toBe(
+      200,
+    );
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-early", "early", 1))).status,
+    ).toBe(200);
+    expect((await deleteMessage(h, "ana", "m-ana-early", "t-team")).status).toBe(200);
+    const hidden = await setGroupRule(h, OWNER, "none");
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+
+    const refused = await deleteMessage(h, "ana", "m-ana", "t-team");
+    const missing = await deleteMessage(h, "ana", "msg-missing", "t-team");
+    expect(refused.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await refused.text()).toBe(await missing.text());
+    // A repeat of her own earlier delete doesn't confirm it either.
+    expect((await deleteMessage(h, "ana", "m-ana-early", "t-team")).status).toBe(404);
+    expect(rowsOf(storage, "m-ana").map((row) => row.op_kind)).toEqual(["chat.message.append"]);
+
+    expect((await deleteMessage(h, "ben", "m-ana", "t-team")).status).toBe(200);
+    expect(deletedRows(storage, "m-ana")).toEqual([
+      expect.objectContaining({ deleted_by: "account:ben" }),
+    ]);
+    expect((await deleteMessage(h, OWNER, "msg-team", "t-team")).status).toBe(200);
+  });
+
+  it("lets a member delete their own message in a Group at View only, but not post there or delete another's", async () => {
+    const { h } = await seed();
+    const ana = await member(h, "ana");
+    expect((await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana", "mine", 0))).status).toBe(
+      200,
+    );
+    expect((await setGroupRule(h, OWNER, "view")).status).toBe(200);
+
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-2", "again", 1))).status,
+    ).toBe(403);
+    expect((await deleteMessage(h, "ana", "msg-team", "t-team")).status).toBe(404);
+    expect((await deleteMessage(h, "ana", "m-ana", "t-team")).status).toBe(200);
+  });
+
+  it("answers a member not-found for their Comment on a file in a folder a rule hides, and lets an admin delete it", async () => {
+    const { storage, h } = await seed();
+    const { ana } = await withAdmin(h);
+    await ownerAppend(h, [
+      logOp("moment.append", {
+        momentId: "m-budget",
+        versionId: "main",
+        objectId: "object-budget",
+        path: "plans/budget.md",
+        recordedAtMs: 903,
+        operation: "write",
+        payloadBeforeBlobSha256: null,
+        payloadBeforePath: null,
+        payloadAfterBlobSha256: await putBlob(h, OWNER, WORKSPACE, "totals"),
+        payloadAfterPath: "plans/budget.md",
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      }),
+      logOp("chat.thread.create", {
+        threadId: "t-budget",
+        title: "",
+        createdAtMs: 6,
+        linkedAtMs: 6,
+        linkedObjectId: "object-budget",
+      }),
+    ]);
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-a", "first", 0, "t-budget")))
+        .status,
+    ).toBe(200);
+    expect(
+      (await push(h, "ana", ana.shareId, memberBatch("ana", "m-ana-b", "second", 1, "t-budget")))
+        .status,
+    ).toBe(200);
+    // The control: while the folder is visible, she deletes her own Comment.
+    expect((await deleteMessage(h, "ana", "m-ana-a", "t-budget")).status).toBe(200);
+    // An empty rule hides the folder from members.
+    const emptyRule = await putBlob(h, OWNER, WORKSPACE, "");
+    await ownerAppend(
+      h,
+      [
+        {
+          originSeq: 0,
+          recordedAtMs: 904,
+          opKind: "moment.append",
+          payload: {
+            momentId: "m-plans-rule",
+            versionId: "main",
+            objectId: "object-plans-rule",
+            path: "plans/access.yaml",
+            recordedAtMs: 904,
+            operation: "write",
+            payloadBeforeBlobSha256: null,
+            payloadBeforePath: null,
+            payloadAfterBlobSha256: emptyRule,
+            payloadAfterPath: "plans/access.yaml",
+            metadata: { origin: "user" },
+            beforePresent: "null",
+          },
+        },
+      ],
+      "origin-owner-rule",
+    );
+
+    expect((await deleteMessage(h, "ana", "m-ana-b", "t-budget")).status).toBe(404);
+    expect(rowsOf(storage, "m-ana-b").map((row) => row.op_kind)).toEqual(["chat.message.append"]);
+    expect((await deleteMessage(h, "ben", "m-ana-b", "t-budget")).status).toBe(200);
+  });
+});
+
 describe("retries after a delete", () => {
   it("holds an exact retry, refuses a changed one, and stores a later append of the message as a tombstone", async () => {
     const { storage, h } = await seed();

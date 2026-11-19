@@ -1,14 +1,13 @@
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
-import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { stableJsonStringify } from "../canonicalJson";
+import { chatNoticeReached } from "../chatMessageInterest";
 import {
   MESSAGE_DELETE_OP_KIND,
   MESSAGE_DELETE_ORIGIN,
   MESSAGE_TOMBSTONE_OP_KIND,
   personalAgentOrigin,
 } from "../relayLogInputs";
-import { workspaceFileReach } from "../workspaceReach";
 import type { StorageContext } from "./context";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import { removeChatMessageNotices } from "./notices";
@@ -17,11 +16,11 @@ import {
   findThreadCreateChannelWireId,
   firstLiveAppendInThread,
 } from "./objectIndex";
-import { commentFileOf, type CommentFile, type PersonalCredential } from "./personalAgentChat";
+import { commentFileOf, type PersonalCredential } from "./personalAgentChat";
 import { personalReachIn, readPersonalAuthority } from "./personalAgents";
 import { rowToLogRow } from "./rows";
 import type { SqliteDb, SyncRelayLogRow } from "./types";
-import { workspaceRoleOf } from "./workspaceMembers";
+import { getWorkspaceMembership, workspaceRoleOf } from "./workspaceMembers";
 
 // Deleted chat messages (docs/engineering/plans/workspace-members.md, "Moderation").
 //
@@ -294,32 +293,31 @@ export type DeleteWorkspaceMessageResult =
     }
   | { ok: false; reason: "not-found" };
 
-type MessagePlace = { kind: "group" } | { kind: "comment"; file: CommentFile };
-
-// A Group or a file's Comment thread. General, direct messages, agent chats
-// and threads on no file are not places a delete reaches.
-function placeOf(storage: StorageContext, workspaceId: string, threadId: string) {
+// Whether the thread is a Group's or a file's Comment thread. General, direct
+// messages, agent chats and threads on no file are not places a delete reaches.
+function deletablePlace(storage: StorageContext, workspaceId: string, threadId: string): boolean {
   const channelWireId = findThreadCreateChannelWireId(storage, workspaceId, threadId);
   if (typeof channelWireId === "string")
     return isWorkspaceGroup(
       channelWireId,
       findChannelCreateKind(storage, workspaceId, channelWireId),
-    )
-      ? ({ kind: "group" } satisfies MessagePlace)
-      : null;
-  const file = commentFileOf(storage, workspaceId, threadId);
-  return file ? ({ kind: "comment", file } satisfies MessagePlace) : null;
+    );
+  return commentFileOf(storage, workspaceId, threadId) !== null;
 }
 
-// What a member reads through the workspace share: every Group, and the
-// Comments of each current file its file reach shows. On the restack onto
-// per-target access, this reads the member's reach for this Group or file.
-function memberReads(storage: StorageContext, workspaceId: string, place: MessagePlace): boolean {
-  if (place.kind === "group") return true;
-  const path = storage.objectCurrentPath(workspaceId, place.file.objectId);
+// Whether an admin or member reads the thread through the workspace share:
+// the Group at the level its rule gives them, or the file where it now is.
+// Reading is enough, so a member at View only still deletes their own message.
+function memberReadsThread(
+  storage: StorageContext,
+  workspaceId: string,
+  userId: string,
+  threadId: string,
+): boolean {
+  const membership = getWorkspaceMembership(storage, workspaceId);
   return (
-    typeof path === "string" &&
-    visibleSharePath(workspaceFileReach({ kind: "workspace", access: "view" }), path) === path
+    membership !== null &&
+    chatNoticeReached(storage, userId, membership.shareId, workspaceId, threadId)
   );
 }
 
@@ -330,14 +328,14 @@ function admittedActor(
   workspaceId: string,
   actor: MessageDeleteActor,
   first: SyncRelayLogRow,
-  place: MessagePlace,
+  threadId: string,
   nowMs: number,
 ): string | null {
   if (actor.kind === "personal-agent") {
     const { check, fenceEpoch, connectionId } = actor.credential;
     const connection = readPersonalAuthority(storage, check, fenceEpoch, nowMs);
     if (!connection || connection.connectionId !== connectionId) return null;
-    // On the restack onto per-target access, this also reads the agent's reach for this place.
+    // A personal agent reaches only its account's own workspaces, whole.
     if (!personalReachIn(storage, connection, workspaceId)) return null;
     // An agent deletes only its own messages, whatever its person's role.
     return first.originId === personalAgentOrigin(connection.agentId)
@@ -348,7 +346,7 @@ function admittedActor(
   if (!role) return null;
   const key = `account:${actor.userId}`;
   if (role.role === "owner") return key;
-  if (!memberReads(storage, workspaceId, place)) return null;
+  if (!memberReadsThread(storage, workspaceId, actor.userId, threadId)) return null;
   if (role.role === "admin") return key;
   // Own means the relay admitted the row for this account, never a payload field.
   return first.admittedAuthorSnapshot?.some(
@@ -413,8 +411,9 @@ export function deleteWorkspaceMessage(
           );
     const first = rows[0];
     if (!first) return { ok: false, reason: "not-found" };
-    const place = placeOf(storage, workspaceId, threadId);
-    const actorKey = place && admittedActor(storage, workspaceId, input.actor, first, place, nowMs);
+    const actorKey =
+      deletablePlace(storage, workspaceId, threadId) &&
+      admittedActor(storage, workspaceId, input.actor, first, threadId, nowMs);
     if (!actorKey) return { ok: false, reason: "not-found" };
     if (tombstones.length > 0)
       return {
