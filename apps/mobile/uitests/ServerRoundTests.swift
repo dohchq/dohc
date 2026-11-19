@@ -180,7 +180,7 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(app.buttons[name].waitForExistence(timeout: 10), "Offline, the switcher should list \(name) from the cache")
   }
 
-  // Signing out deletes the token, then ends its session with the server. The round waits for the session count
+  // Signing out ends its session with the server, then deletes the token. The round waits for the session count
   // before it runs test7, which relaunches the app.
   @MainActor
   func test6_signOut() {

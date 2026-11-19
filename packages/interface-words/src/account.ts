@@ -86,6 +86,18 @@ export const accountWords = {
    */
   signOutDeleteFailed:
     "dohc could not delete the messages waiting on this phone. They may send if you close dohc and sign in again.",
+  /** On Connect: Sign out waits for the server to end this phone's session, and with Try again once it couldn't. */
+  signingOut: "Signing out…",
+  signOutUnfinished: (server: string) =>
+    `dohc could not end this phone's session on ${server}, so Sign out hasn't finished.`,
+
+  alerts: "Alerts",
+  alertsDetail:
+    "For mentions, direct messages, replies, and agent answers. Each shows the message text.",
+  alertsUnavailable: (server: string) =>
+    `${server} isn't set up to send alerts. Contact its administrator.`,
+  alertsDenied: "dohc can't show alerts. Allow them in Settings.",
+  alertsNotSaved: "dohc could not change alerts on this phone.",
 
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,

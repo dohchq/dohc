@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAccount, type StoredSignIn } from "./account";
 import { createServerClient } from "./client";
-import { deferred, memoryStore, testServer, type Answer } from "./testServer";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
   cacheScope,
   createReadCache,
@@ -748,6 +748,7 @@ describe("the read cache and the sign-in", () => {
 
   async function signedIn() {
     const server = testServer();
+    serveSessionEnd(server);
     const account = createAccount({
       store: memoryStore(SAVED).store,
       fetch: server.fetch,

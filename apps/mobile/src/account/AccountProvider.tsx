@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { AppState, View } from "react-native";
+import { AppState, Platform, View } from "react-native";
 import {
   appTeardown,
   createAppRunner,
@@ -34,6 +34,9 @@ import {
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createOutbox, type Outbox, type OutboxState } from "../server/outbox";
 import { phoneWrites } from "../server/phoneWrites";
+import { pendingSignOuts } from "../server/pushRegistration";
+import { createAlerts, type Alerts } from "../push/alerts";
+import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -67,6 +70,8 @@ interface AccountValue {
   readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
   readonly livePages: ScopedEnds;
+  /** The sign-in's alerts on an iPhone, or null. */
+  readonly alerts: Alerts | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -117,6 +122,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       store: secureSignInStore,
       fetch,
       onSignOut: teardown.signOut((leave) => outbox.signOut(leave)),
+      pendingSignOuts: pendingSignOuts(kept),
     }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -242,6 +248,31 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     };
   }, [wakes]);
 
+  const alerts = useMemo(
+    () =>
+      signIn && Platform.OS === "ios"
+        ? createAlerts({
+            signIn,
+            store: kept,
+            native: nativeAlerts,
+            environment: __DEV__ ? "sandbox" : "production",
+          })
+        : null,
+    [signIn, kept],
+  );
+  useEffect(() => {
+    if (!alerts) return;
+    void alerts.sync();
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") void alerts.sync();
+    });
+    return () => {
+      subscription.remove();
+      alerts.stop();
+    };
+  }, [alerts]);
+  useEffect(() => (Platform.OS === "ios" ? clearAlertsAtSignOut(account) : undefined), [account]);
+
   const value = useMemo<AccountValue>(
     () => ({
       account,
@@ -257,6 +288,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       apps,
       collections,
       livePages,
+      alerts,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {
@@ -279,6 +311,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       apps,
       collections,
       livePages,
+      alerts,
       list,
       open,
     ],

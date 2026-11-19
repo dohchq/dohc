@@ -18,7 +18,7 @@ import { StoreError, type KeptStore } from "./keptStore";
 import { clearNoticeListsOnSignInChange } from "./noticeStore";
 import { createOutbox, OutboxError, type Outbox } from "./outbox";
 import { keptDisk, type KeptDisk as Disk } from "./testKeptDisk";
-import { deferred, memoryStore, testServer, type Answer } from "./testServer";
+import { deferred, memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import { createReadCache } from "./workspaceData";
 import type { ChatMessage } from "./workspaceReads";
 
@@ -155,7 +155,13 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
           onSignedOut: () => {
             if (id !== generation) return;
             advance();
-            set({ status: "signed-out", origin: server.origin, ended: true, forgetFailed: false });
+            set({
+              status: "signed-out",
+              origin: server.origin,
+              ended: true,
+              forgetFailed: false,
+              pendingSignOut: null,
+            });
           },
         }),
       };
@@ -166,7 +172,13 @@ function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
     signOut() {
       return onSignOut(async () => {
         advance();
-        set({ status: "signed-out", origin: null, ended: false, forgetFailed: false });
+        set({
+          status: "signed-out",
+          origin: null,
+          ended: false,
+          forgetFailed: false,
+          pendingSignOut: null,
+        });
       });
     },
   };
@@ -2558,6 +2570,7 @@ describe("signing out with the account's token store", () => {
   /** A signed-in run with one queued record whose request the server holds. */
   async function signedInWithRecord(disk: Disk, server: Server, store: SignInStore) {
     server.on("POST", path("post"), held);
+    serveSessionEnd(server);
     const run = launchReal(disk, server, store);
     await run.account.restore();
     await ready(run.outbox);
@@ -2700,6 +2713,7 @@ describe("signing out with the account's token store", () => {
         origin: ORIGIN,
         ended: true,
         forgetFailed: false,
+        pendingSignOut: null,
       });
       await vi.waitFor(() => expect(tokens.current()).toBeNull());
       expect(records(disk)).toEqual([1]);

@@ -1075,6 +1075,7 @@ const signedOut: AccountState = {
   origin: ORIGIN,
   ended: false,
   forgetFailed: false,
+  pendingSignOut: null,
 };
 
 describe("the account's Notices across sign-out and failure", () => {
