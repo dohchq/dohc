@@ -1165,4 +1165,17 @@ Run `make` and see [`npm install`](https://docs.example/install).
         let prose = format!("{}end", "plain words and *one* more ".repeat(5_000));
         assert!(read_inline(&prose, true).is_some());
     }
+
+    #[test]
+    fn unmatched_backtick_runs_stop_the_reading_early() {
+        let runs: String = (1..=1_000)
+            .map(|width| format!("{} x ", "`".repeat(width)))
+            .collect();
+        assert!(read_inline(&format!("{runs}end"), true).is_none());
+        let pieces = read_inline("a `code` span", true).expect("matched span");
+        assert!(pieces.iter().any(|piece| matches!(
+            piece,
+            InlinePiece::Text(run) if run.text == "code" && run.marks.iter().any(|mark| mark.kind == MarkKind::Code)
+        )));
+    }
 }
