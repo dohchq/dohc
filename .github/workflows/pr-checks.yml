@@ -788,7 +788,7 @@ jobs:
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'android')) || needs.changes.outputs.android == 'true'
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       EXPO_NO_TELEMETRY: '1'
     steps:
