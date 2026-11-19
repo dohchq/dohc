@@ -2342,7 +2342,6 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
             let (updates,authors):(i64,String)=conn.query_row("SELECT (SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update'),(SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
             assert!(updates>=2);assert!(authors.contains("local-person"));
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outboxes",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-            // Nothing hosts the note now, so the owner's save is published for links to show.
             let published:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM replication_log r JOIN moments m ON m.moment_id=json_extract(r.payload_json,'$.momentId') WHERE r.op_kind='moment.append' AND r.imported=0 AND m.moment_order=(SELECT MAX(moment_order) FROM moments) AND json_extract(r.payload_json,'$.payloadAfterBlobSha256')=(SELECT last_settled_sha FROM ydoc_docs WHERE object_id='object'))",[],|r|r.get(0)).unwrap();
             assert!(published);
             Ok::<_,rusqlite::Error>(())

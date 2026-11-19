@@ -67,9 +67,6 @@ pub fn blocked_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxEr
     conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
 }
 
-/// The note's Stop is released, so the relay hosts it no longer and only this
-/// computer's saves can move it on. A paused note waits for Resume, and a
-/// deferred Stop never released its edits.
 pub fn owner_saves_publish_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
     conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released' AND json_extract(binding_json,'$.deferred') IS NULL AND json_extract(binding_json,'$.paused') IS NULL)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
 }

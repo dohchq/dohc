@@ -4049,8 +4049,6 @@ fn ydoc_settle_attempt_on_store(
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.
-        // A hosted note's host publishes its settlements, but after a Stop
-        // nothing hosts it, so its owner's saves publish here.
         if live_audit.is_none()
             && (kind == SettlementKind::CollectionAdoption
                 || dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, key)

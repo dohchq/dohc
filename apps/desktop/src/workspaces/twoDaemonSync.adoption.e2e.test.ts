@@ -977,7 +977,6 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
             .toContain(`Name: ${value}`);
         };
         await editOrdinary("Local after stop", "after-stop");
-        // Nothing hosts the note while it is stopped, so a link shows the owner's save.
         const ownerSaved = createHash("sha256")
           .update(await readFile(join(rootA, path)))
           .digest("hex");
