@@ -186,6 +186,9 @@ it.each([
   expect(document.querySelector('[data-download-asset="linux-appimage"]').textContent).toBe(
     "No Linux AppImage yet",
   );
+  expect(document.querySelector('[data-download-asset="linux-rpm"]').textContent).toBe(
+    "No Linux .rpm yet",
+  );
   expect(
     document.querySelector('[data-download-card="mac"] .download-card-action').textContent.trim(),
   ).toBe("No build yet");

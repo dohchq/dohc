@@ -63,8 +63,14 @@ const downloadBuilds = {
     icon: "linux",
     matches: matchesBuild(".deb", "amd64"),
   },
-  // Ubuntu 24.04 and later refuse to start the AppImage, so it is the
-  // secondary Linux download, for other distributions.
+  "linux-rpm": {
+    platform: "linux",
+    label: "Linux",
+    detail: "x64, .rpm",
+    icon: "linux",
+    matches: matchesBuild(".rpm", "x86_64"),
+  },
+  // The portable Linux download. Ubuntu 24.04 and later refuse to start it.
   "linux-appimage": {
     platform: "linux",
     label: "Linux",

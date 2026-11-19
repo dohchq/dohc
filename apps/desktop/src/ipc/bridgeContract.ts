@@ -7126,7 +7126,7 @@ export const UpdateStateEvent = z.object({
   canInstall: z.boolean().optional(),
   version: z.string().min(1).max(200).optional(),
   percent: z.number().finite().min(0).max(100).optional(),
-  // A Linux .deb that did not install: the terminal command that installs it. Its
+  // A Linux .deb or .rpm that did not install: the terminal command that installs it. Its
   // path is at most 4,096 bytes, and shell quoting turns each ' into four characters.
   installCommand: z
     .string()

@@ -10,7 +10,7 @@ targets and deployment requirements.
 | --- | --- | --- | --- |
 | Windows | x64 | NSIS `.exe` | `.exe` |
 | macOS | arm64 (Apple silicon) | `.dmg` | `.zip` |
-| Linux | x64 | AppImage and `.deb` | `.AppImage` and `.deb` |
+| Linux | x64 | `.deb`, `.rpm`, and AppImage | `.deb`, `.rpm`, and `.AppImage` |
 
 The Desktop Release workflow builds Windows and Linux, each from the matching
 Rust engine target. The release owner builds macOS on an Apple silicon Mac with
@@ -19,15 +19,21 @@ Stable releases require signing credentials for Windows and macOS.
 Nightly Windows builds may be unsigned for testing. The macOS command always
 signs and notarizes a release. An unsigned build is not a stable release.
 
+The `.deb` is the Linux download for Ubuntu and Debian, and the `.rpm` for
+Fedora and similar systems. Both add dohc to the launcher, Open With, and
+`dohc://` links. The AppImage is the portable download. It adds none of these,
+and it needs `libfuse2`.
+
 Ubuntu 24.04 and later block the unprivileged user namespaces that Chromium's
 sandbox needs, so the AppImage refuses to start there and says why. The `.deb`
-installs an AppArmor profile that allows them. The profile covers every process
-the desktop app starts, including the engine, chat runners, and the commands
-agents run, so each of them can also create user namespaces. Point Ubuntu and
-Debian users to the `.deb`.
+and `.rpm` install an AppArmor profile that allows them where AppArmor runs. The
+profile covers every process the desktop app starts, including the engine, chat
+runners, and the commands agents run, so each of them can also create user
+namespaces. Point Ubuntu and Debian users to the `.deb`, and Fedora users to the
+`.rpm`.
 
-On Linux the app's executable is `dohc-desktop`, and the `.deb` links it into
-`/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
+On Linux the app's executable is `dohc-desktop`, and the `.deb` and `.rpm` link
+it into `/usr/bin`. The `dohc` command belongs to the chat CLI that agents use
 ([reference](../reference/cli-mcp-sdk.md)).
 
 ## Keep signing credentials on reviewed code
@@ -171,7 +177,7 @@ A dry run builds and checks the packages and publishes nothing.
 3. [Verify the files](#verify-a-downloaded-artifact) of each artifact. Pass `--platform win` or `--platform linux`, `--arch x64`, `--channel nightly`, and the run's generated version.
 
 Each dispatch generates a new nightly version.
-The Linux artifact contains the AppImage, the `.deb`, and the nightly Linux update manifest, which lists both.
+The Linux artifact contains the AppImage, the `.deb`, the `.rpm`, and the nightly Linux update manifest, which lists all three.
 `windows-linux` prepares both packages from one commit and generated version.
 A nightly dispatch with one platform cannot publish. [Publish a nightly](#publish-a-nightly) with `platforms=windows-linux`.
 
@@ -459,12 +465,14 @@ offers the update instead, and the download starts only when the person selects
 Download. On Windows and macOS a downloaded update also installs on quit.
 On Linux an update installs only when the person selects Restart to update: the
 AppImage replaces itself, and the `.deb` installs with `dpkg` after the system
-asks once for an administrator password. If `dpkg` reports missing dependencies,
+asks once for an administrator password. The `.rpm` installs the same way with
+the first of `zypper`, `dnf`, `yum`, and `rpm` that the system has. If `dpkg` reports missing dependencies,
 `apt-get` adds them under the same password but never removes a package, then
 `dpkg` installs again (`patches/electron-updater@6.8.9.patch`). A cancelled
 prompt or any other failed install fails the update. Restart tries again.
 When the password prompt was not cancelled, the failure also shows the
-`sudo apt install` command for the downloaded `.deb`, with a copy control. That
+`sudo apt install` command for the downloaded `.deb`, or `sudo dnf install` for
+the `.rpm`, with a copy control. That
 covers a desktop where no authentication agent can ask for the password.
 Controlling the feed controls update metadata and the artifacts offered to the app.
 Download hashes alone do not authenticate a feed whose metadata an attacker controls.
@@ -476,8 +484,8 @@ Before launch, test tampered updates against signed Windows and macOS release ar
 Linux updates have no signature. The app checks only the SHA-512 that the same
 release's manifest lists, when the download finishes, as T3 Code does. Whoever can
 publish a GitHub release or set `DOHC_UPDATE_URL` can offer an AppImage that runs
-as the person, or a package that the `.deb` installs as root. A signed apt
-repository would add a signature for the `.deb`.
+as the person, or a package that the `.deb` or `.rpm` installs as root. A
+signed apt or dnf repository would add a signature for its package.
 
 ## Configure usage and error reports
 
@@ -706,10 +714,10 @@ node scripts/verify-desktop-release-artifacts.mjs `
 ```
 
 Use `mac` with `arm64` for a macOS release. Use `linux` with `x64`
-for an AppImage and `.deb` release. The command checks artifact bytes only.
+for an AppImage, `.deb`, and `.rpm` release. The command checks artifact bytes only.
 For Windows and macOS stable releases, confirm the signature with the platform
 tools before opening the installer. This workflow has no equivalent signing
-requirement for the AppImage or the `.deb`.
+requirement for the AppImage, the `.deb`, or the `.rpm`.
 
 ## Installer rehearsal before launch
 

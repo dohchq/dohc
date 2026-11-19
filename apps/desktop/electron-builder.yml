@@ -169,16 +169,19 @@ win:
 nsis:
   include: build/installer.nsh
 linux:
-  # The .deb links /usr/bin/<executableName>. `dohc` is the chat command agents
-  # use (docs/reference/cli-mcp-sdk.md), so the app takes another name, as
-  # signal-desktop and github-desktop do.
+  # A package names who answers for it. The homepage is package.json's.
+  maintainer: dohc <sup@dohc.computer>
+  # The .deb and .rpm link /usr/bin/<executableName>. `dohc` is the chat
+  # command agents use (docs/reference/cli-mcp-sdk.md), so the app takes
+  # another name, as signal-desktop and github-desktop do.
   executableName: dohc-desktop
   # Without its own icon, the Linux target falls back to mac.icon.
   icon: build/icon.png
   # The AppImage cannot carry Chromium's sandbox helper, so where unprivileged
   # user namespaces are blocked, as on Ubuntu 24.04, it refuses to start. The
-  # .deb installs an AppArmor profile that allows them.
-  target: [AppImage, deb]
+  # .deb and .rpm make the helper setuid where namespaces are missing, and
+  # install an AppArmor profile that allows them where AppArmor runs.
+  target: [AppImage, deb, rpm]
   category: Office
   # A Linux desktop offers dohc under Open With only for the types its desktop
   # entry names. These are the types dohc opens on macOS and Windows.
@@ -198,8 +201,6 @@ appImage:
   # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
   executableArgs: []
 deb:
-  # A package names who answers for it. The homepage is package.json's.
-  maintainer: dohc <sup@dohc.computer>
   # Setting depends replaces electron-builder's default list, so this repeats
   # it and adds two libraries Electron links that the list does not bring:
   # libasound.so.2, which a minimal or server Ubuntu lacks, and libgbm.so.1,
@@ -217,6 +218,21 @@ deb:
     - libsecret-1-0
     - libasound2t64 | libasound2
     - libgbm1
+rpm:
+  # As with the .deb, this repeats electron-builder's default list and adds
+  # the libraries Electron links that it does not bring, in Fedora's names.
+  depends:
+    - gtk3
+    - libnotify
+    - nss
+    - libXScrnSaver
+    - (libXtst or libXtst6)
+    - xdg-utils
+    - at-spi2-core
+    - (libuuid or libuuid1)
+    - libsecret
+    - alsa-lib
+    - mesa-libgbm
 
 protocols:
   - name: dohc share link

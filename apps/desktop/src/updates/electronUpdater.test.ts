@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
-  debInstallFailure,
+  linuxPackageInstallFailure,
   startAutoUpdates,
   updateFeedOverride,
   type AutoUpdateController,
@@ -466,54 +466,71 @@ describe("electron updater actions", () => {
     });
   });
 
-  it("on Linux says why a .deb did not install and gives the command that installs it", async () => {
-    const deb = "/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb";
-    const install = `sudo apt install '${deb}'`;
-    // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
-    for (const [error, message, installCommand] of [
-      ["Command pkexec exited with code 126", "The update needs your password.", undefined],
-      [
-        "Command pkexec exited with code 127",
-        "dohc did not get permission. Run this command in a terminal to install it.",
-        install,
-      ],
-      ["Command sudo exited with code 1", "Run this command in a terminal to install it.", install],
-      [
-        "Command pkexec exited with code 1",
-        "Run this command in a terminal to install it.",
-        install,
-      ],
-    ] as const) {
-      const updater = fakeUpdater();
-      updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error(error)));
-      const controller = await startWith(updater, { platform: "linux" });
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4", downloadedFile: deb });
-      controller!.downloadUpdate();
-      updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: deb });
+  it.each([
+    ["/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb", "sudo apt install"],
+    ["/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-x86_64.rpm", "sudo dnf install"],
+  ])(
+    "on Linux says why %s did not install and gives the command that installs it",
+    async (file, command) => {
+      const install = `${command} '${file}'`;
+      // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
+      for (const [error, message, installCommand] of [
+        ["Command pkexec exited with code 126", "The update needs your password.", undefined],
+        [
+          "Command pkexec exited with code 127",
+          "dohc did not get permission. Run this command in a terminal to install it.",
+          install,
+        ],
+        [
+          "Command sudo exited with code 1",
+          "Run this command in a terminal to install it.",
+          install,
+        ],
+        [
+          "Command pkexec exited with code 1",
+          "Run this command in a terminal to install it.",
+          install,
+        ],
+      ] as const) {
+        const updater = fakeUpdater();
+        updater.quitAndInstall.mockImplementationOnce(() =>
+          updater.emit("error", new Error(error)),
+        );
+        const controller = await startWith(updater, { platform: "linux" });
+        updater.emit("checking-for-update");
+        updater.emit("update-available", { version: "1.2.4", downloadedFile: file });
+        controller!.downloadUpdate();
+        updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: file });
 
-      const result = await controller!.installUpdate();
-      expect(result, error).toMatchObject({
-        accepted: false,
-        reason: message,
-        state: { status: "ready", canInstall: true, message },
-      });
-      expect(result.state.installCommand, error).toBe(installCommand);
-      // electron-updater clears its one-shot latch after a failed install, so Restart tries again.
-      await expect(controller!.installUpdate()).resolves.toMatchObject({ accepted: true });
-      expect(updater.quitAndInstall).toHaveBeenCalledTimes(2);
-    }
-  });
+        const result = await controller!.installUpdate();
+        expect(result, error).toMatchObject({
+          accepted: false,
+          reason: message,
+          state: { status: "ready", canInstall: true, message },
+        });
+        expect(result.state.installCommand, error).toBe(installCommand);
+        // electron-updater clears its one-shot latch after a failed install, so Restart tries again.
+        await expect(controller!.installUpdate()).resolves.toMatchObject({ accepted: true });
+        expect(updater.quitAndInstall).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
 
-  it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
+  it("quotes the package's path for the shell in the install command, and the update state carries the longest one", () => {
     expect(
-      debInstallFailure(
+      linuxPackageInstallFailure(
         new Error("Command sudo exited with code 1"),
         "/home/o'brien/dohc 1.2.4.deb",
       ).installCommand,
     ).toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
+    expect(
+      linuxPackageInstallFailure(
+        new Error("Command sudo exited with code 1"),
+        "/home/o'brien/dohc 1.2.4.rpm",
+      ).installCommand,
+    ).toBe("sudo dnf install '/home/o'\\''brien/dohc 1.2.4.rpm'");
     // A Linux path is at most 4,096 bytes; quoting makes each ' four characters.
-    const longest = debInstallFailure(
+    const longest = linuxPackageInstallFailure(
       new Error("Command sudo exited with code 1"),
       `/${"'".repeat(4095)}`,
     ).installCommand;
