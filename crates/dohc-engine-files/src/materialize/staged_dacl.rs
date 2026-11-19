@@ -47,10 +47,11 @@ fn left(reason: LeftReason) -> StagedDacl {
 }
 
 /// The staging folder `dir` as what was saved for its files names it, the
-/// same however the path to it is spelled.
+/// same with either slash and with or without the `\\?\` prefix. Case is
+/// kept, so two folders whose names differ only in case stay apart.
 fn folder(dir: &Path) -> String {
     let text = dir.to_string_lossy().replace('/', "\\");
-    text.strip_prefix(r"\\?\").unwrap_or(&text).to_lowercase()
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
 
 /// Save the DACL of the file staged at `path` while it has its own, then
@@ -215,4 +216,18 @@ pub(super) fn leave(
         try_keep_private(store, staged, now_ms)?;
     }
     left
+}
+
+#[cfg(test)]
+#[test]
+fn folders_whose_names_differ_only_in_case_stay_apart() {
+    assert_ne!(
+        folder(Path::new("C:/w/\u{130}/.dohc-write-displaced")),
+        folder(Path::new("C:/w/i\u{307}/.dohc-write-displaced"))
+    );
+    assert_ne!(folder(Path::new("C:/w/A")), folder(Path::new("C:/w/a")));
+    assert_eq!(
+        folder(Path::new(r"\\?\C:\w\A")),
+        folder(Path::new("C:/w/A"))
+    );
 }

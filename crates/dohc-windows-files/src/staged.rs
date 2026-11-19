@@ -111,7 +111,7 @@ fn read_staged_in(path: &Path, system: &System) -> io::Result<Option<StagedFile>
     if !keeps_dacl(&file)? {
         return Ok(None);
     }
-    let Some(identity) = identity(&file, system)? else {
+    let Some(identity) = identity(&file, system).map_err(io::Error::other)? else {
         return Ok(None);
     };
     let security = match Security::read(&file, system) {
@@ -553,8 +553,14 @@ mod tests {
         let file = shared_file(&scratch);
         let no_ids = System::identities_fail(windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED);
         assert_eq!(read_staged_in(&file, &no_ids).expect("no IDs"), None);
-        let failing = System::identities_fail(windows_sys::Win32::Foundation::ERROR_IO_DEVICE);
-        read_staged_in(&file, &failing).expect_err("failing");
+        for code in [
+            windows_sys::Win32::Foundation::ERROR_IO_DEVICE,
+            windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
+        ] {
+            let failing = System::identities_fail(code);
+            let refused = read_staged_in(&file, &failing).expect_err("failing");
+            assert_eq!(refused.kind(), io::ErrorKind::Other, "{refused}");
+        }
     }
 
     /// A saved DACL Windows can no longer read is told apart from other
