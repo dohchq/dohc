@@ -228,6 +228,8 @@ import {
   SharingPanel,
   endConfirmKey,
   endedGroupKey,
+  leaveConfirmKey,
+  removeConfirmKey,
   sharedItemKey,
   type ShareMount,
   type SharingActions,
@@ -2373,6 +2375,73 @@ const SHARING_DAMAGED: AccessAnswer = {
     }),
   ],
 };
+// A long address, an invitation nobody has used, a person who joined through
+// the link, and the link.
+const SHARING_CROWDED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [
+    aboutGrant({
+      shareId: "share-venue",
+      grantId: "grant-venue-long",
+      recipientUserId: "alex",
+      recipientEmail: "alexandria.montgomery@hollis-studio.example",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+    }),
+    aboutGrant({
+      shareId: "share-venue",
+      grantId: "grant-venue-new",
+      recipientUserId: null,
+      recipientEmail: "nova@example.com",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-venue-link",
+      grantId: "grant-venue-link",
+      via: "link",
+      recipientUserId: null,
+      recipientEmail: null,
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-venue-link",
+      grantId: "grant-venue-joined",
+      via: "dependent",
+      recipientUserId: "tea",
+      recipientEmail: "tea@example.com",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-solo",
+      grantId: "grant-solo",
+      recipientUserId: "alex",
+      recipientEmail: "alexandria.montgomery@hollis-studio.example",
+      selector: { paths: ["venue/seating.md"], versionId: null },
+      access: "view",
+    }),
+  ],
+};
+const SHARING_CROWDED_GRANT = SHARING_CROWDED.rows[0] as AccessShareRow;
+// More shares can load, and the last one listed has shown no live grant yet.
+const SHARING_HELD: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [SHARING_GRANTED.rows[0]!, SHARING_GRANTED.rows.at(-1)!],
+  nextCursor: "page-2",
+};
 const SHARING_TRIP = SHARING_GRANTED.rows[1] as AccessShareRow;
 const SHARING_LINK_ABOVE_GRANT = SHARING_LINK_ABOVE.rows[0] as AccessShareRow;
 const SHARING_WAITING = new Map([
@@ -2420,9 +2489,13 @@ function SharingSpecimen(props: {
   skipView?: SkipView;
   lane?: SharingLane;
   open?: readonly string[];
+  width?: number;
 }) {
   return (
-    <div className="flex w-[280px] flex-col rounded-lg border border-line bg-panel">
+    <div
+      className="flex flex-col rounded-lg border border-line bg-panel"
+      style={{ width: props.width ?? SIDEBAR_DEFAULT_WIDTH }}
+    >
       <SharingPanel
         granted={props.granted}
         received={props.received}
@@ -4566,6 +4639,44 @@ function Pane(props: { theme: "light" | "dark" }) {
             open={[sharedItemKey(SHARING_LINK_ABOVE_GRANT)]}
           />
         </Specimen>
+        <Specimen label="Shared by me: a long name and address, an unused invitation, a joined person">
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: removing a person asks first">
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+            confirmKey={removeConfirmKey("grant-venue-joined")}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: more to load, and a share held until it does">
+          <SharingSpecimen
+            granted={ready(SHARING_HELD)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+          />
+        </Specimen>
+        <Specimen label={`the narrowest panel, ${SIDEBAR_MIN_WIDTH}px`}>
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready(SHARING_RECEIVED)}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+            width={SIDEBAR_MIN_WIDTH}
+          />
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            lane="received"
+            width={SIDEBAR_MIN_WIDTH}
+          />
+        </Specimen>
         <Specimen label="Shared by me: only a link, which ends in Share">
           <SharingSpecimen
             granted={ready({ ...SHARING_LINK_ABOVE, rows: [SHARING_LINK_ABOVE_GRANT] })}
@@ -4609,6 +4720,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             granted={ready(SHARING_GRANTED)}
             received={ready(SHARING_RECEIVED)}
             lane="received"
+          />
+        </Specimen>
+        <Specimen label="Shared with me: leaving a share asks first">
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            lane="received"
+            confirmKey={leaveConfirmKey("in-itinerary")}
           />
         </Specimen>
         <Specimen label="Shared with me: the Ended group open, and skipped changes">
