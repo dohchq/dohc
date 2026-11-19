@@ -44,6 +44,13 @@ type InvitedPerson = {
 
 type ChangedAccess = { access: ShareAccess; generation: number };
 
+const listedSince = (person: InvitedPerson, changed: ChangedAccess) =>
+  person.generation !== null && person.generation >= changed.generation;
+
+function shownAccess(person: InvitedPerson, changed: ChangedAccess | undefined) {
+  return changed && !listedSince(person, changed) ? changed.access : person.access;
+}
+
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
 
@@ -250,12 +257,7 @@ export function RelayShareDialog(props: {
     setChangedAccess((current) => {
       const kept = Object.entries(current.byGrant).filter(
         ([grantId, changed]) =>
-          !listedNow.some(
-            (person) =>
-              person.grantId === grantId &&
-              person.generation !== null &&
-              person.generation >= changed.generation,
-          ),
+          !listedNow.some((person) => person.grantId === grantId && listedSince(person, changed)),
       );
       return kept.length === Object.keys(current.byGrant).length
         ? current
@@ -381,7 +383,7 @@ export function RelayShareDialog(props: {
                     target={props.target}
                     person={{
                       ...person,
-                      access: accessNow[person.grantId]?.access ?? person.access,
+                      access: shownAccess(person, accessNow[person.grantId]),
                     }}
                     reload={loadInvited}
                     onAccessChanged={(changed) => {
