@@ -91,6 +91,30 @@ export function chatAuthorLabel(
   return author.authorDisplayName;
 }
 
+// A personal agent can take any name, even its person's or someone else's, so
+// its post names whose agent it is beside that name, as a member's browser
+// does. The relay writes the person's name onto the post.
+export function AgentPerson(props: {
+  author: Pick<ChatMessageRecord, "authorKind"> &
+    Partial<Pick<ChatMessageRecord, "authorAgentId" | "presentation" | "authorOwnerDisplayName">>;
+  testId: string;
+}) {
+  const { author } = props;
+  const agentId = author.presentation?.agentId ?? author.authorAgentId;
+  if (
+    author.authorKind !== "agent" ||
+    agentId === undefined ||
+    !isPersonalAgentId(agentId) ||
+    !author.authorOwnerDisplayName
+  )
+    return null;
+  return (
+    <span data-testid={props.testId} className="min-w-0 truncate text-[12px] text-muted">
+      {author.authorOwnerDisplayName}'s agent
+    </span>
+  );
+}
+
 // Renders again when a personal agent's name or color changes. Returns a
 // number that changes with them, for a callback's dependencies.
 export function usePersonalAgentNames(): number {
@@ -1145,6 +1169,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                         <AgentColorName>{chatAuthorLabel(message)}</AgentColorName>
                       </AgentName>
                     </span>
+                    <AgentPerson author={message} testId={`${props.testIdPrefix}-message-person`} />
                     {message.authorKind === "link" ? (
                       <LinkHolderMark testId={`${props.testIdPrefix}-message-link-holder`} />
                     ) : null}

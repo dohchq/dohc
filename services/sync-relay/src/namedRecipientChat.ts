@@ -123,6 +123,7 @@ const linkId = (value: unknown): value is string =>
 function linkProvenanceHolds(p: Record<string, unknown>, originId: string): boolean {
   // A personal agent's post names the account, the agent, and the connection
   // it signed in with, from that agent's own origin, as every desktop checks.
+  // It may also name the person, which the relay writes.
   if (originId.startsWith(PERSONAL_AGENT_ORIGIN_PREFIX)) {
     return (
       p.authorKind === "agent" &&
@@ -132,15 +133,10 @@ function linkProvenanceHolds(p: Record<string, unknown>, originId: string): bool
       p.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX) &&
       originId === personalAgentOrigin(p.authorAgentId) &&
       String(p.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX) &&
-      ![
-        "linkGrantId",
-        "linkPrincipalId",
-        "authorOwnerDisplayName",
-        "chainDepth",
-        "authorReported",
-        "work",
-        "origin",
-      ].some((key) => Object.hasOwn(p, key))
+      (!Object.hasOwn(p, "authorOwnerDisplayName") || linkId(p.authorOwnerDisplayName)) &&
+      !["linkGrantId", "linkPrincipalId", "chainDepth", "authorReported", "work", "origin"].some(
+        (key) => Object.hasOwn(p, key),
+      )
     );
   }
   if (p.authorKind !== "link") {
@@ -851,7 +847,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   signal: AbortSignal;
   maxResponseBytes: number;
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
-  /** Names the account a personal agent posted for, which its post doesn't store. */
+  /** Names the person on a personal agent's post written while the relay found no name. */
   personOf?(userId: string): Promise<string>;
   project(message: PagedChatMessage): Message;
 }) {
@@ -995,8 +991,9 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       if (!caughtUp()) break;
     }
   }
-  // A personal agent's post names its account but no person, so an agent's
-  // name alone can't pass for anyone's: the page names the account's person.
+  // A personal agent's post written while the relay found no name for its
+  // person names only its account, so an agent's name alone could pass for
+  // anyone's: the page names the account's person.
   // A rule can change while the names are looked up, so the page is read again
   // from the same cursor under the reader's current reach, with no wait
   // between that read and the answer. Each pass names at least one more

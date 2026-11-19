@@ -2233,9 +2233,10 @@ describe("a personal agent in a workspace its person joined", () => {
     await expectRefused(await allow(f, ended, { session, reach }));
   });
 
-  it("names its person beside its post in another member's browser, whatever name the agent took, and serves the page under the rule in force once the name is found", async () => {
+  it("names its person on its post and in another member's browser, whatever name the agent took, and serves the page under the rule in force once a missing name is found", async () => {
     let held: Promise<void> | null = null;
     let looking!: () => void;
+    let found = true;
     const f = await fixture({
       namedBrowserSessionLimits: {
         maxSessions: 8,
@@ -2250,6 +2251,7 @@ describe("a personal agent in a workspace its person joined", () => {
           looking();
           await held;
         }
+        if (!found) return null;
         return userId === OWNER ? "Ada" : userId === OTHER ? "Olive" : null;
       },
       // A browser's cookie names its person; a test request's bearer names its own.
@@ -2280,6 +2282,12 @@ describe("a personal agent in a workspace its person joined", () => {
     // Named after the workspace's owner, the post still names Ada.
     await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Olive" } }));
     await ok(await post(f, agent, { workspaceId: COMMUNITY, channelWireId: "wire-team" }));
+    // The relay writes the person's name on the post, so every desktop can show it.
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).toMatchObject({
+      authorKind: "agent",
+      authorDisplayName: "Olive",
+      authorOwnerDisplayName: "Ada",
+    });
 
     const read = () =>
       f.h(
@@ -2303,8 +2311,10 @@ describe("a personal agent in a workspace its person joined", () => {
       }),
     ]);
 
-    // A folder hidden while the person's name is looked up is withheld in that answer.
+    // A post written while no name was found is named when read. A folder
+    // hidden during that lookup is withheld in the answer.
     await communityWrite(f, "later/c.md", "for now");
+    found = false;
     await ok(
       await post(f, agent, {
         workspaceId: COMMUNITY,
@@ -2313,6 +2323,8 @@ describe("a personal agent in a workspace its person joined", () => {
         idempotencyKey: "post-2",
       }),
     );
+    expect(payloadOf(logOf(f, COMMUNITY).at(-1)!)).not.toHaveProperty("authorOwnerDisplayName");
+    found = true;
     let release!: () => void;
     held = new Promise<void>((resolve) => (release = resolve));
     const entered = new Promise<void>((resolve) => (looking = resolve));

@@ -338,6 +338,46 @@ describe("chat authorship display", () => {
     expect(chatAuthorLabel({ ...agent, linkAgent: true })).toBe("Agent");
   });
 
+  it("names whose agent a personal agent is beside the name it took, as a member's browser does", () => {
+    const post = (id: string, fields: Partial<ChatMessageRecord>): ChatMessageRecord => ({
+      presentation: { group: "agent-share", hue: null, self: false },
+      id,
+      threadId: "thread-1",
+      authorKind: "agent",
+      authorDisplayName: "Olive",
+      authorAgentId: "p-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      body: "Report ready.",
+      createdAtMs: 1_700_000_000_000,
+      ...fields,
+    });
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          post("named", { authorOwnerDisplayName: "Ada" }),
+          // A desktop agent's owner shows in its badge, as before.
+          post("desktop", {
+            authorDisplayName: "Nova",
+            authorAgentId: "agent-desktop",
+            authorOwnerDisplayName: "Sam",
+            authorUserId: "sam",
+            createdAtMs: 1_700_000_600_000,
+          }),
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    expect(screen.getAllByTestId("test-chat-message-author").map((n) => n.textContent)).toEqual([
+      "Olive",
+      "Nova",
+    ]);
+    expect(screen.getAllByTestId("test-chat-message-person").map((n) => n.textContent)).toEqual([
+      "Ada's agent",
+    ]);
+  });
+
   it('renders agent messages as "their stored name" and humans by name', () => {
     expect(chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam" })).toBe("Sam");
     expect(chatAuthorLabel({ authorKind: "human", authorDisplayName: "Sam" })).toBe("Sam");

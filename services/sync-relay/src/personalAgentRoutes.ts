@@ -16,6 +16,7 @@ import {
   ownerLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { badRequest, notFound, relayError, type RelayError } from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import { linkChatMessage, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
@@ -230,6 +231,8 @@ export function createPersonalAgentToolRoutes(input: {
   admitBlobBytes: (key: string, byteLength: number) => (() => void) | null;
   maxFiles: number;
   maxResponseBytes?: number;
+  /** Names the person on each of their agent's posts. */
+  lookupUserDisplayName?: LookupUserDisplayName;
   /** A Collection write at Edit, which reads its own body. */
   collectionWrites: (
     request: Request,
@@ -329,7 +332,11 @@ export function createPersonalAgentToolRoutes(input: {
 
   // The relay writes the post from the agent's origin. The storage write reads
   // the agent's authority, reach, and ownership again inside its transaction.
-  function post(authority: PersonalAuthority, body: Record<string, unknown>): Response {
+  function post(
+    authority: PersonalAuthority,
+    body: Record<string, unknown>,
+    person: string | null,
+  ): Response {
     fields(
       body,
       ["workspaceId", "body", "idempotencyKey"],
@@ -354,6 +361,7 @@ export function createPersonalAgentToolRoutes(input: {
       target,
       body: body.body,
       idempotencyKey: body.idempotencyKey,
+      person,
     });
     if (!result.ok) throw postRefusal(result.reason);
     if (!result.replayed) activity.wakeLog(workspaceId);
@@ -958,8 +966,11 @@ export function createPersonalAgentToolRoutes(input: {
         return workspaces(await linkAuthority.freshPersonal(authority), body);
       case "groups":
         return groups(await linkAuthority.freshPersonal(authority), body);
-      case "post":
-        return post(await linkAuthority.freshPersonal(authority), body);
+      case "post": {
+        // The name is read first, so no wait falls between the fresh check and the write.
+        const person = await accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId);
+        return post(await linkAuthority.freshPersonal(authority), body, person);
+      }
       case "delete":
         return deleteMessage(await linkAuthority.freshPersonal(authority), body);
       case "wait":

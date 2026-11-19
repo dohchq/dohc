@@ -146,6 +146,8 @@ export type RelayPostAuthor =
       authorUserId: string;
       authorAgentId: string;
       agentConnectionId: string;
+      /** The person's display name when the relay found one, so every reader names them. */
+      authorOwnerDisplayName?: string;
     };
 
 /** Where a new thread goes: a channel, or a file by its object, with the file's current path to show. */

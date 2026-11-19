@@ -338,6 +338,8 @@ export function appendPersonalChatPost(
     target: PersonalChatTarget;
     body: string;
     idempotencyKey: string;
+    /** The person's display name, or null when the relay found none. */
+    person: string | null;
   },
 ): AppendPersonalChatPostResult {
   const body = linkChatBody(input.body);
@@ -411,6 +413,7 @@ export function appendPersonalChatPost(
         authorUserId: connection.ownerUserId,
         authorAgentId: connection.agentId,
         agentConnectionId: connection.connectionId,
+        ...(input.person === null ? {} : { authorOwnerDisplayName: input.person }),
       },
     });
     const addedBytes = ops.reduce((bytes, op) => bytes + Buffer.byteLength(op.payloadJson), 0);

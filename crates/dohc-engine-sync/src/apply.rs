@@ -1794,8 +1794,8 @@ fn apply_message(
         payload.agent_connection_id.as_deref(),
         author_user_id.as_deref(),
         payload.author_agent_id.as_deref(),
-        owner_name.is_some()
-            || payload.origin.is_some()
+        owner_name.is_some(),
+        payload.origin.is_some()
             || payload.chain_depth.is_some()
             || author_reported.is_some()
             || work.is_some(),
