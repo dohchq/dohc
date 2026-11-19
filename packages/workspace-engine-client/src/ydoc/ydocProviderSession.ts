@@ -152,13 +152,15 @@ export interface EngineYdocProviderSession {
   readonly unsettled: boolean;
   // `armSettle: false` journals the update without scheduling a settle, for
   // a replay the file must not receive until the person edits again.
+  // `settleDelayMs` replaces the settle debounce from this edit until an edit
+  // names none, for retries and remote changes too.
   applyLocalUpdate(
     update: Uint8Array,
-    options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
+    options?: ApplyLocalUpdateOptions & { armSettle?: boolean; settleDelayMs?: number },
   ): Promise<void>;
   replayLocalUpdate?(
     update: Uint8Array,
-    options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
+    options?: ApplyLocalUpdateOptions & { armSettle?: boolean; settleDelayMs?: number },
   ): Promise<void>;
   reestablishAcknowledgedState?(update: Uint8Array): Promise<void>;
   // Resolves once the engine's current state has landed. When the engine
@@ -335,6 +337,10 @@ export async function openEngineYdocProviderSession(
   }
 
   let transientRetryMs = settleDebounceMs;
+  // The settle delay the latest edit named, as the least wait for any
+  // automatic settle. A settle holds the engine, so one that starts between a
+  // paused note's gathered updates would hold back the typing that follows.
+  let namedSettleDelayMs: number | undefined;
 
   function armSettleTimer(ms: number): void {
     cancelSettle = scheduleSettle(() => {
@@ -351,17 +357,21 @@ export async function openEngineYdocProviderSession(
     if (closed || cancelSettle !== null || capMs === null) return;
     // The cap belongs to this failure, so a ladder that walked out behind a
     // file lock cannot make the next busy-database wait ten seconds.
-    const delay = Math.min(transientRetryMs, capMs);
+    const delay = Math.max(Math.min(transientRetryMs, capMs), namedSettleDelayMs ?? 0);
     transientRetryMs = Math.min(delay * 2, capMs);
     armSettleTimer(delay);
   }
 
   function requestSettle(): void {
     cancelSettle?.();
-    armSettleTimer(settleDebounceMs);
+    armSettleTimer(namedSettleDelayMs ?? settleDebounceMs);
   }
 
-  function trackLocalOperation(operation: Promise<unknown>, armSettle: boolean): Promise<void> {
+  function trackLocalOperation(
+    operation: Promise<unknown>,
+    armSettle: boolean,
+    settleDelayMs?: number,
+  ): Promise<void> {
     // The caller receives its refusal while the chain keeps later writes usable.
     const journaled = journalChain.then(() => operation).then(() => undefined);
     journalChain = journaled.catch((error: unknown) => {
@@ -371,7 +381,10 @@ export async function openEngineYdocProviderSession(
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
     });
     void journalChain.catch(() => undefined);
-    if (armSettle) requestSettle();
+    if (armSettle) {
+      namedSettleDelayMs = settleDelayMs;
+      requestSettle();
+    }
     return journaled;
   }
 
@@ -493,7 +506,7 @@ export async function openEngineYdocProviderSession(
             ),
         );
       }
-      const { armSettle = true, ...recordOptions } = applyOptions ?? {};
+      const { armSettle = true, settleDelayMs, ...recordOptions } = applyOptions ?? {};
       let operation: Promise<unknown>;
       try {
         operation = session.applyLocalUpdate(update, {
@@ -504,18 +517,19 @@ export async function openEngineYdocProviderSession(
         if (!isLineageChange(error)) rememberLocalEditError(error);
         throw error;
       }
-      return trackLocalOperation(operation, armSettle);
+      return trackLocalOperation(operation, armSettle, settleDelayMs);
     },
 
     async replayLocalUpdate(update, applyOptions) {
       if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
-      const { armSettle = false, ...recordOptions } = applyOptions ?? {};
+      const { armSettle = false, settleDelayMs, ...recordOptions } = applyOptions ?? {};
       return trackLocalOperation(
         session.replayLocalUpdate(update, {
           ...recordOptions,
           ...(options.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
         }),
         armSettle,
+        settleDelayMs,
       );
     },
 

@@ -34,6 +34,14 @@ export interface OwnerLivePause {
   readonly leftOut: boolean;
 }
 
+/**
+ * The relay holds this note's edits until its owner resumes it, so each row
+ * recorded meanwhile becomes a delivery at Resume. An ended pause holds none.
+ */
+export function holdsDeliveries(pauses: readonly OwnerLivePause[], objectId: string): boolean {
+  return pauses.some((pause) => pause.objectId === objectId && pause.cause !== "ended");
+}
+
 export interface OwnerLivePauseRelay {
   copy(pause: RelayLivePause, signal: AbortSignal): Promise<Uint8Array>;
   copyWritten(pauseId: string, sha256: string, signal: AbortSignal): Promise<void>;

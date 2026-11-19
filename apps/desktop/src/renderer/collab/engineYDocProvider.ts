@@ -108,13 +108,14 @@ export interface EngineYDocTransport {
   // Resolution acknowledges that main accepted the batch. A refusal main
   // returns as data must surface as EngineYDocDeliveryRefusedError — the one
   // permanent delivery failure — while a transport fault rejects with its own
-  // error and is retried at the head of the queue.
+  // error and is retried at the head of the queue. It may resolve with how
+  // long to gather later edits before the next batch.
   applyLocalUpdate(
     update: Uint8Array,
     sequence: number,
     lineageGeneration: number,
     requestId: string,
-  ): void | Promise<void>;
+  ): void | Promise<number | undefined | void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine), with the head their state was read with when main
   // has one. Returns an unsubscribe function.
@@ -392,6 +393,7 @@ export async function bindEngineYDoc(
     sequence: number;
   }> = [];
   let sendChain = Promise.resolve();
+  let batchDelayMs = 0;
   let unacknowledgedBatches = 0;
   let retainedBytes = 0;
   let retainedRecords = 0;
@@ -489,12 +491,13 @@ export async function bindEngineYDoc(
       if (localUpdatesRefused) return;
       if (replacementInProgress || batchGeneration !== lineageGeneration) return;
       try {
-        await transport.applyLocalUpdate(
+        const delay = await transport.applyLocalUpdate(
           new Uint8Array(batch.update),
           batch.sequence,
           batchGeneration,
           batch.requestId,
         );
+        batchDelayMs = typeof delay === "number" ? delay : 0;
         return;
       } catch (error) {
         if (isPermanentDeliveryError(error)) {
@@ -584,7 +587,10 @@ export async function bindEngineYDoc(
         scheduledFlush = null;
         void flushPendingLocalUpdates();
       },
-      doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions) ? SCENE_UPDATE_FLUSH_DELAY_MS : 0,
+      Math.max(
+        batchDelayMs,
+        doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions) ? SCENE_UPDATE_FLUSH_DELAY_MS : 0,
+      ),
     );
   };
 

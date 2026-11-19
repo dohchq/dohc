@@ -602,6 +602,38 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("gathers typing for as long as main asks before the next update", async () => {
+    const mock = mockTransport();
+    const batches = manualBatchScheduler();
+    let answer: number | undefined = 1_000;
+    const binding = await bindEngineYDoc(
+      {
+        ...mock.transport,
+        async applyLocalUpdate(...args) {
+          await mock.transport.applyLocalUpdate(...args);
+          return answer;
+        },
+      },
+      batches.scheduler,
+    );
+    const doc = binding.doc!;
+
+    typeIntoBody(doc, "First.");
+    await binding.flushPendingLocalUpdates();
+    typeIntoBody(doc, "Second.");
+    typeIntoBody(doc, "Third.");
+    expect(batches.delays).toEqual([0, 1_000]);
+    answer = undefined;
+    await binding.flushPendingLocalUpdates();
+    expect(mock.shippedSequences).toEqual([1, 3]);
+
+    typeIntoBody(doc, "Fourth.");
+    expect(batches.delays).toEqual([0, 1_000, 0]);
+    await binding.destroy();
+    expect(mock.shippedSequences).toEqual([1, 3, 4]);
+    expect(bodyText(mock.mainDoc)).toContain("Fourth.");
+  });
+
   it("merges same-owner transactions at flush using the newest staged sequence", async () => {
     const mock = mockTransport();
     const batches = manualBatchScheduler();

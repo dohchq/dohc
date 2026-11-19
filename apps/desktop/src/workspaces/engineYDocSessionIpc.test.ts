@@ -156,6 +156,7 @@ interface TestHarnessOptions {
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
   onOwnerOpened?: (workspaceId: string, path: string) => void;
+  livePaused?: (workspaceId: string, objectId: string) => boolean;
 }
 
 function rendererSession(
@@ -216,6 +217,7 @@ function harness(session = providerSession(), options: TestHarnessOptions = {}) 
     ownerDraftState: options.ownerDraftState,
     onPendingShareMayChange: options.onPendingShareMayChange,
     onOwnerOpened: options.onOwnerOpened,
+    livePaused: options.livePaused,
     resolveDocumentPath,
     onError,
   });
@@ -304,6 +306,38 @@ describe("engine Y.Doc IPC adapter", () => {
         });
         expect(onOwnerOpened.mock.calls).toEqual(
           ownerBound ? [[DOCUMENT.workspaceId, DOCUMENT.path]] : [],
+        );
+      } finally {
+        await h.ipc.shutdown();
+      }
+    }
+  });
+
+  it("asks the editor to gather typing only while the server has paused the note", async () => {
+    const pausedObjects = new Set(["object-paused"]);
+    for (const objectId of ["object-paused", "object-other"]) {
+      const h = harness(providerSession({ objectId }), {
+        livePaused: (workspaceId, id) =>
+          workspaceId === openPayload.workspaceId && pausedObjects.has(id),
+      });
+      try {
+        const sender = new FakeSender(7);
+        await h.ipc.open(sender, openPayload);
+        expect(
+          h.ipc.applyUpdate(sender, {
+            sessionId: openPayload.sessionId,
+            update: new Uint8Array([0, 0]),
+            seq: 1,
+            lineageGeneration: 1,
+            requestId: "11111111-1111-4111-8111-111111111111",
+          }),
+        ).toEqual(
+          objectId === "object-paused"
+            ? { accepted: true, batchDelayMs: 1_000 }
+            : { accepted: true },
+        );
+        expect(vi.mocked(h.session.applyLocalUpdate).mock.calls[0]?.[2]?.settleDelayMs).toBe(
+          objectId === "object-paused" ? 2_000 : undefined,
         );
       } finally {
         await h.ipc.shutdown();
