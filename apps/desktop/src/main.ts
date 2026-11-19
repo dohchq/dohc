@@ -781,7 +781,7 @@ import type { SitePreviewResultBody } from "./ipc/sitePreviewIpc";
 
 import {
   readWorkspaceText,
-  resolveWorkspaceFile,
+  resolveWorkspaceDocument,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceText,
@@ -7322,15 +7322,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       },
     });
   },
-  resolveDocumentPath: async (workspace, path) => {
-    try {
-      return (await resolveWorkspaceFile(workspace.rootPath, path, "write")).resolvedPath;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOENT" || code === "ENOTDIR") return null;
-      throw error;
-    }
-  },
+  resolveDocumentPath: (workspace, path, access) =>
+    resolveWorkspaceDocument(workspace.rootPath, path, access),
   onError: (message, error) => {
     if (error === undefined) console.error(message);
     else console.error(message, error);
