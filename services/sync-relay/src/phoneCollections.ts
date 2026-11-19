@@ -19,14 +19,22 @@ import { accountIsFenced } from "./storage/accountDeletion";
 import { collectionFilePaths } from "./storage/collectionFilePresence";
 import type { StorageContext } from "./storage/context";
 
-// The phone reads its account's transactional Collections through each table's own read operation, and changes one
-// field of a record through the field's edit operation, as the desktop does. The account route has checked the
-// sign-in, its fence, the owner and Show on phone. A Collection that is archived, still importing, or whose
-// dataset.json is missing or under a hidden path answers as one that doesn't exist.
+// The phone reads its account's transactional Collections through each table's own read operation, changes one
+// field of a record through the field's edit operation, and adds and deletes records through the table's create and
+// delete operations, as the desktop does. The account route has checked the sign-in, its fence, the owner and Show on
+// phone. A Collection that is archived, still importing, or whose dataset.json is missing or under a hidden path
+// answers as one that doesn't exist.
 
 export const PHONE_COLLECTION_PAGE = 50;
 
-const OPERATIONS = new Set(["collections", "collection", "collectionRecords", "collectionEdit"]);
+const OPERATIONS = new Set([
+  "collections",
+  "collection",
+  "collectionRecords",
+  "collectionEdit",
+  "collectionCreate",
+  "collectionDelete",
+]);
 
 /** They reach the relay's dataset host, so they need no server copy. */
 export function isPhoneCollectionOperation(name: string): boolean {
@@ -51,6 +59,16 @@ const isCount = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 
 type DescribedField = DatasetDescription["tables"][number]["fields"][number];
+
+const initialValue = (field: DescribedField): AppBackendJson =>
+  field.type === "button"
+    ? null
+    : (field.default ??
+      (field.type === "checkbox"
+        ? false
+        : field.type === "multi-select" || field.relation?.many
+          ? []
+          : null));
 
 function args(value: unknown, required: string[], optional: string[] = []) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -140,6 +158,36 @@ export function createPhoneCollections(options: {
             operation.fieldIds.includes(field.fieldId),
         )
       : undefined;
+  const writeOperation = (
+    description: DatasetDescription,
+    tableId: string,
+    kind: "create" | "delete",
+  ) =>
+    readOperation(description, tableId)
+      ? description.operations.find(
+          (operation) =>
+            operation.tableId === tableId && operation.kind === kind && !operation.readOnly,
+        )
+      : undefined;
+  // A new record's values, as the desktop sends them, or undefined when a required field would be empty: the desktop
+  // asks for that field first, and the phone has nowhere to ask. The phone then reads the record by its key.
+  function createValues(description: DatasetDescription, tableId: string) {
+    const create = writeOperation(description, tableId, "create");
+    const table = description.tables.find((table) => table.tableId === tableId);
+    const key = table?.primaryKeyFieldId;
+    if (!create || !table || !key || !readOperation(description, tableId)?.fieldIds.includes(key))
+      return undefined;
+    const values: Record<string, AppBackendJson> = {};
+    for (const fieldId of create.fieldIds) {
+      const field = table.fields.find((field) => field.fieldId === fieldId);
+      if (!field) return undefined;
+      const value = initialValue(field);
+      if ("required" in field && field.required && (value === null || value === ""))
+        return undefined;
+      values[fieldId] = value;
+    }
+    return { create, values };
+  }
   // A file still waiting to attach has no name.
   function fileNames(workspaceId: string, datasetId: string, fileIds: ReadonlySet<string>) {
     const names: Record<string, string> = {};
@@ -228,6 +276,8 @@ export function createPhoneCollections(options: {
               ? table.primaryKeyFieldId!
               : null,
             fields,
+            canCreate: createValues(description, table.tableId) !== undefined,
+            canDelete: writeOperation(description, table.tableId, "delete") !== undefined,
           };
         }),
       };
@@ -238,6 +288,120 @@ export function createPhoneCollections(options: {
       holds(userId, workspaceId);
       describe(host, auth, workspaceId, datasetId);
     };
+    // A write's key and rules stamp. The key is the phone's own, kept for a retry; the owner's keys are shared with the
+    // desktop's, so only a random one.
+    const stamped = (body: Record<string, unknown>) => {
+      const { revision, revisionSha256, idempotencyKey } = body;
+      if (
+        typeof idempotencyKey !== "string" ||
+        !ID.test(idempotencyKey) ||
+        !isCount(revision) ||
+        typeof revisionSha256 !== "string" ||
+        !SHA256.test(revisionSha256)
+      )
+        throw badRequest("Invalid Collection arguments.");
+      return { revision, revisionSha256, idempotencyKey };
+    };
+    const refusedHere = { refused: { code: "forbidden", message: RULES_DISALLOW } };
+    const commit = async (
+      datasetId: string,
+      stamp: ReturnType<typeof stamped>,
+      operationId: string,
+      operationInput: AppBackendJson,
+    ): Promise<{ receipt: Record<string, AppBackendJson> | null } | { answer: object }> => {
+      let result: AppBackendJson;
+      try {
+        // The phone's stamp, not the description's: a retry sends what its first try sent. The operation checks the
+        // values, which the route read as JSON.
+        ({ result } = await host.invoke(
+          guarded(() => {
+            holds(userId, workspaceId);
+            if (!visible(workspaceId, datasetId)) throw notFound();
+          }),
+          {
+            workspaceId,
+            datasetId,
+            ...stamp,
+            operationId,
+            input: operationInput,
+            signal: input.signal,
+          },
+        ));
+      } catch (error) {
+        if (isAppBackendRuntimeError(error)) {
+          await answers(datasetId);
+          return {
+            answer: { refused: { code: error.refusal.code, message: error.refusal.message } },
+          };
+        }
+        // A key used before for another payload: the phone resends a write unchanged, so its operation or rules
+        // changed between tries, and the first try may have saved.
+        if (
+          (error instanceof DatasetHostError &&
+            error.code === "conflict" &&
+            error.message === RULES_REPLACED) ||
+          (error instanceof JournalError && error.code === "conflict" && error.message === KEY_USED)
+        ) {
+          await answers(datasetId);
+          return { answer: { rulesChanged: true } };
+        }
+        throw error;
+      }
+      await answers(datasetId);
+      return {
+        receipt: result && typeof result === "object" && !Array.isArray(result) ? result : null,
+      };
+    };
+    if (operation === "collectionCreate") {
+      const body = args(input.args, [
+        "datasetId",
+        "tableId",
+        "revision",
+        "revisionSha256",
+        "idempotencyKey",
+      ]);
+      const datasetId = id(body.datasetId),
+        tableId = id(body.tableId),
+        stamp = stamped(body);
+      const description = describe(host, auth, workspaceId, datasetId);
+      if (!description.tables.some((table) => table.tableId === tableId)) throw notFound();
+      const create = createValues(description, tableId);
+      if (!create) return refusedHere;
+      const done = await commit(datasetId, stamp, create.create.operationId, {
+        values: create.values,
+      });
+      if ("answer" in done) return done.answer;
+      const { receipt } = done;
+      if (!receipt || !isRecordId(receipt.id) || !isCount(receipt.version))
+        throw relayError("conflict", "This Collection's create gave an answer dohc can't show.");
+      return { saved: { id: receipt.id, version: receipt.version } };
+    }
+    if (operation === "collectionDelete") {
+      const body = args(input.args, [
+        "datasetId",
+        "tableId",
+        "recordId",
+        "expectedVersion",
+        "revision",
+        "revisionSha256",
+        "idempotencyKey",
+      ]);
+      const datasetId = id(body.datasetId),
+        tableId = id(body.tableId),
+        stamp = stamped(body);
+      const { recordId, expectedVersion } = body;
+      if (!isRecordId(recordId) || !isCount(expectedVersion))
+        throw badRequest("Invalid Collection arguments.");
+      const description = describe(host, auth, workspaceId, datasetId);
+      if (!description.tables.some((table) => table.tableId === tableId)) throw notFound();
+      const remove = writeOperation(description, tableId, "delete");
+      if (!remove) return refusedHere;
+      const done = await commit(datasetId, stamp, remove.operationId, {
+        id: recordId,
+        expectedVersion,
+      });
+      return "answer" in done ? done.answer : { saved: {} };
+    }
     if (operation === "collectionEdit") {
       const body = args(input.args, [
         "datasetId",
@@ -252,18 +416,10 @@ export function createPhoneCollections(options: {
       ]);
       const datasetId = id(body.datasetId),
         tableId = id(body.tableId),
-        fieldId = id(body.fieldId);
-      const { recordId, value, expectedVersion, revision, revisionSha256, idempotencyKey } = body;
-      // The key is the phone's own, kept for a retry; the owner's keys are shared with the desktop's, so only a random one.
-      if (
-        typeof idempotencyKey !== "string" ||
-        !ID.test(idempotencyKey) ||
-        !isRecordId(recordId) ||
-        !isCount(expectedVersion) ||
-        !isCount(revision) ||
-        typeof revisionSha256 !== "string" ||
-        !SHA256.test(revisionSha256)
-      )
+        fieldId = id(body.fieldId),
+        stamp = stamped(body);
+      const { recordId, value, expectedVersion } = body;
+      if (!isRecordId(recordId) || !isCount(expectedVersion))
         throw badRequest("Invalid Collection arguments.");
       const description = describe(host, auth, workspaceId, datasetId);
       const field = description.tables
@@ -271,52 +427,14 @@ export function createPhoneCollections(options: {
         ?.fields.find((field) => field.fieldId === fieldId);
       if (!field) throw notFound();
       const edit = editOperation(description, tableId, field);
-      if (!edit) return { refused: { code: "forbidden", message: RULES_DISALLOW } };
-      let result: AppBackendJson;
-      try {
-        // The phone's stamp, not the description's: a retry sends what its first try sent. The operation checks the
-        // value, which the route read as JSON.
-        ({ result } = await host.invoke(
-          guarded(() => {
-            holds(userId, workspaceId);
-            if (!visible(workspaceId, datasetId)) throw notFound();
-          }),
-          {
-            workspaceId,
-            datasetId,
-            revision,
-            revisionSha256,
-            operationId: edit.operationId,
-            input: {
-              id: recordId,
-              expectedVersion,
-              values: { [fieldId]: value as AppBackendJson },
-            },
-            idempotencyKey,
-            signal: input.signal,
-          },
-        ));
-      } catch (error) {
-        if (isAppBackendRuntimeError(error)) {
-          await answers(datasetId);
-          return { refused: { code: error.refusal.code, message: error.refusal.message } };
-        }
-        // A key used before for another payload: the phone resends a change unchanged, so its operation or rules
-        // changed between tries, and the first try may have saved.
-        if (
-          (error instanceof DatasetHostError &&
-            error.code === "conflict" &&
-            error.message === RULES_REPLACED) ||
-          (error instanceof JournalError && error.code === "conflict" && error.message === KEY_USED)
-        ) {
-          await answers(datasetId);
-          return { rulesChanged: true };
-        }
-        throw error;
-      }
-      await answers(datasetId);
-      const receipt =
-        result && typeof result === "object" && !Array.isArray(result) ? result : null;
+      if (!edit) return refusedHere;
+      const done = await commit(datasetId, stamp, edit.operationId, {
+        id: recordId,
+        expectedVersion,
+        values: { [fieldId]: value as AppBackendJson },
+      });
+      if ("answer" in done) return done.answer;
+      const { receipt } = done;
       const prior = receipt?.priorValues;
       if (
         !receipt ||

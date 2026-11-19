@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountOperationRoute } from "./accountOperationRoutes";
@@ -40,7 +40,16 @@ const DATASET = id(1),
   EMAIL = id(13),
   RECEIPT = id(14),
   OTHER = id(15),
-  EDIT = id(16);
+  EDIT = id(16),
+  REMOVE = id(17),
+  GUESTS = id(18),
+  GUEST_KEY = id(19),
+  GUEST_NAME = id(20),
+  GUEST_PAID = id(21),
+  GUEST_STATUS = id(22),
+  GUEST_READ = id(23),
+  GUEST_CREATE = id(24),
+  GUEST_REMOVE = id(25);
 const definition: DatasetDefinition = {
   formatVersion: 1,
   datasetId: DATASET,
@@ -115,6 +124,50 @@ const definition: DatasetDefinition = {
         },
       ],
     },
+    // As the desktop makes a table: the host gives each record its key, so a new record can start with defaults.
+    {
+      tableId: GUESTS,
+      name: "Guests",
+      sqlName: "guests",
+      primaryKey: "id",
+      fields: [
+        {
+          fieldId: GUEST_KEY,
+          name: "Record ID",
+          sqlColumn: "id",
+          type: "text",
+          required: true,
+          unique: true,
+          generated: "record-id",
+        },
+        {
+          fieldId: GUEST_NAME,
+          name: "Name",
+          sqlColumn: "name",
+          type: "text",
+          required: false,
+          unique: false,
+        },
+        {
+          fieldId: GUEST_PAID,
+          name: "Paid",
+          sqlColumn: "paid",
+          type: "checkbox",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: GUEST_STATUS,
+          name: "Status",
+          sqlColumn: "status",
+          type: "select",
+          required: true,
+          unique: false,
+          default: "Unpaid",
+          options: ["Unpaid", "Paid"],
+        },
+      ],
+    },
   ],
   operations: [
     {
@@ -149,6 +202,16 @@ const definition: DatasetDefinition = {
       fieldIds: [NAME, PAID],
       reversible: true,
     },
+    {
+      operationId: REMOVE,
+      name: "remove",
+      label: "Delete",
+      tableId: PEOPLE,
+      kind: "delete",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [],
+    },
     // Notes take records but have no read.
     {
       operationId: ADD_NOTE,
@@ -160,10 +223,41 @@ const definition: DatasetDefinition = {
       readOnly: false,
       fieldIds: [NOTE_KEY, TEXT],
     },
+    {
+      operationId: GUEST_READ,
+      name: "readGuests",
+      label: "Read guests",
+      tableId: GUESTS,
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [GUEST_KEY, GUEST_NAME, GUEST_PAID, GUEST_STATUS],
+    },
+    {
+      operationId: GUEST_CREATE,
+      name: "addGuest",
+      label: "Add guest",
+      tableId: GUESTS,
+      kind: "create",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [GUEST_NAME, GUEST_PAID, GUEST_STATUS],
+    },
+    {
+      operationId: GUEST_REMOVE,
+      name: "removeGuest",
+      label: "Delete guest",
+      tableId: GUESTS,
+      kind: "delete",
+      access: "owner",
+      readOnly: false,
+      fieldIds: [],
+    },
   ],
 };
 const schemaSql = `CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,paid INTEGER,email TEXT,receipt TEXT,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
-CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,text TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
+CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,text TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;
+CREATE TABLE guests(id TEXT PRIMARY KEY NOT NULL,name TEXT,paid INTEGER NOT NULL,status TEXT NOT NULL,"_record_version" INTEGER NOT NULL DEFAULT 1) STRICT;`;
 const operationSource = generateDatasetOperations(definition);
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
 const scope = { workspaceId: "w", datasetId: DATASET };
@@ -235,11 +329,12 @@ async function phone() {
       idempotencyKey: key,
     });
   const storage = base.storage as SyncRelayStorage;
-  // What the host does when it reads, which a test can add to.
+  // What the host does when it reads, which a test can add to, and how a test changes what it describes.
   let during: () => void = () => undefined;
+  let describing = (description: DatasetDescription) => description;
   const reading: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> = {
     list: host.list,
-    describe: host.describe,
+    describe: (auth, input) => describing(host.describe(auth, input)),
     invoke: async (auth, input) => {
       during();
       const answer = await host.invoke(auth, input);
@@ -285,7 +380,30 @@ async function phone() {
     during: (run: () => void) => {
       during = run;
     },
+    describing: (alter: typeof describing) => {
+      describing = alter;
+    },
   };
+}
+
+/** Moves the Collection's folder under a hidden path, as a reader on this platform classifies it. */
+function hide(f: Awaited<ReturnType<typeof phone>>) {
+  const db = f.storage.db;
+  const sha = createHash("sha256").update(collectionFile.text).digest("hex");
+  const seq = Number(db.prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log").get()!.seq) + 1;
+  db.prepare(
+    "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES ('w','test',1,'ydoc.update','{}',2,?)",
+  ).run(seq);
+  db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w' AND path=?").run(
+    collectionFile.path,
+  );
+  db.prepare(
+    "INSERT INTO sync_relay_current_files VALUES ('w','main','a/.env/dataset.json',?,'text',?)",
+  ).run(sha, seq);
+  db.prepare(
+    `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+     VALUES ('w','dataset',?,'moment-hidden','main','a/.env/dataset.json',?,'text',?,1)`,
+  ).run(seq, sha, Buffer.byteLength(collectionFile.text));
 }
 
 const ok = (result: unknown) => ({ status: 200, body: { ok: true, result } });
@@ -324,8 +442,31 @@ it("lists, describes, and reads a Collection's records a page at a time", async 
             field(PAID, "Paid", "checkbox", true),
             field(RECEIPT, "Receipt", "attachment"),
           ],
+          // A new person needs an ID and a name, which have no defaults.
+          canCreate: false,
+          canDelete: true,
         },
-        { tableId: NOTES, name: "Notes", primaryFieldId: null, fields: [] },
+        {
+          tableId: NOTES,
+          name: "Notes",
+          primaryFieldId: null,
+          fields: [],
+          canCreate: false,
+          canDelete: false,
+        },
+        // The host's own record key isn't shown.
+        {
+          tableId: GUESTS,
+          name: "Guests",
+          primaryFieldId: null,
+          fields: [
+            field(GUEST_NAME, "Name", "text"),
+            field(GUEST_PAID, "Paid", "checkbox"),
+            { ...field(GUEST_STATUS, "Status", "select"), options: ["Unpaid", "Paid"] },
+          ],
+          canCreate: true,
+          canDelete: true,
+        },
       ],
     }),
   );
@@ -401,24 +542,8 @@ it("leaves out an archived Collection, and one whose dataset.json is hidden or g
   archived.host.archiveDataset(owner, scope);
   await absent(archived);
 
-  // Its folder moved under a hidden path, as a reader on this platform classifies it.
   const hidden = await phone();
-  const db = hidden.storage.db;
-  const sha = createHash("sha256").update(collectionFile.text).digest("hex");
-  const seq = Number(db.prepare("SELECT MAX(relay_seq) AS seq FROM sync_relay_log").get()!.seq) + 1;
-  db.prepare(
-    "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES ('w','test',1,'ydoc.update','{}',2,?)",
-  ).run(seq);
-  db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w' AND path=?").run(
-    collectionFile.path,
-  );
-  db.prepare(
-    "INSERT INTO sync_relay_current_files VALUES ('w','main','a/.env/dataset.json',?,'text',?)",
-  ).run(sha, seq);
-  db.prepare(
-    `INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
-     VALUES ('w','dataset',?,'moment-hidden','main','a/.env/dataset.json',?,'text',?,1)`,
-  ).run(seq, sha, Buffer.byteLength(collectionFile.text));
+  hide(hidden);
   await absent(hidden);
   // A file naming no Collection, left where the moved one was, doesn't stand in for it.
   pushFile(hidden.storage, "stub", null, { path: collectionFile.path, text: "{}" });
@@ -677,4 +802,214 @@ it("refuses a change when Show on phone turns off or its dataset.json goes as it
   const answer = await edit(after);
   expect(answer).toEqual(notFound);
   expect(JSON.stringify(answer.body)).not.toContain("Person");
+});
+
+/** A new guest, as the phone asks for one. */
+const create = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionCreate",
+    {
+      datasetId: DATASET,
+      tableId: GUESTS,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(200),
+      ...change,
+    },
+    as,
+  );
+/** Record `r01`'s deletion, as the phone asks for it. */
+const remove = (
+  f: Awaited<ReturnType<typeof phone>>,
+  change: Record<string, unknown> = {},
+  as?: string,
+) =>
+  f.op(
+    "collectionDelete",
+    {
+      datasetId: DATASET,
+      tableId: PEOPLE,
+      recordId: "r01",
+      expectedVersion: 1,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      idempotencyKey: id(300),
+      ...change,
+    },
+    as,
+  );
+const guests = async (f: Awaited<ReturnType<typeof phone>>) =>
+  rowKeys(await f.op("collectionRecords", { datasetId: DATASET, tableId: GUESTS }));
+const hasR01 = async (f: Awaited<ReturnType<typeof phone>>) =>
+  rowKeys(await f.op("collectionRecords", { datasetId: DATASET, tableId: PEOPLE, recordId: "r01" }))
+    .length === 1;
+
+it("adds a record with the desktop's starting values, replays its retry, and answers a reused key as rules changed", async () => {
+  const f = await phone();
+  const first = await create(f);
+  // Its key, which the phone reads it by, and never values the relay only sent.
+  expect(first).toEqual(ok({ saved: { id: expect.any(String), version: 1 } }));
+  const key = (first.body.result as { saved: { id: string } }).saved.id;
+  expect(await guests(f)).toEqual([key]);
+  // Each field's default, or its empty value.
+  const read = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: GUESTS,
+    recordId: key,
+  });
+  expect((read.body.result as { rows: unknown[] }).rows).toEqual([
+    expect.objectContaining({
+      id: key,
+      version: 1,
+      values: expect.objectContaining({
+        [GUEST_NAME]: null,
+        [GUEST_PAID]: false,
+        [GUEST_STATUS]: "Unpaid",
+      }),
+    }),
+  ]);
+  // The same key and stamp answer the same receipt, with no second record.
+  expect(await create(f)).toEqual(first);
+  expect(await guests(f)).toEqual([key]);
+  // The key a deletion used before: the phone never changes what it resends, so the rules changed between tries.
+  expect(await remove(f, { idempotencyKey: id(200) })).toEqual(ok({ rulesChanged: true }));
+  expect(await hasR01(f)).toBe(true);
+});
+
+it("deletes a record, replays its retry, and refuses a stale version", async () => {
+  const f = await phone();
+  await edit(f);
+  // r01 is at version 2 now.
+  expect(await remove(f)).toEqual(
+    ok({
+      refused: {
+        code: "stale_record",
+        message: "This record changed. Refresh the table before editing it.",
+      },
+    }),
+  );
+  expect(await hasR01(f)).toBe(true);
+  expect(await remove(f, { expectedVersion: 2, idempotencyKey: id(301) })).toEqual(
+    ok({ saved: {} }),
+  );
+  expect(await hasR01(f)).toBe(false);
+  expect(await remove(f, { expectedVersion: 2, idempotencyKey: id(301) })).toEqual(
+    ok({ saved: {} }),
+  );
+  // A new guest, deleted.
+  const added = await create(f);
+  const key = (added.body.result as { saved: { id: string } }).saved.id;
+  expect(await remove(f, { tableId: GUESTS, recordId: key, idempotencyKey: id(302) })).toEqual(
+    ok({ saved: {} }),
+  );
+  expect(await guests(f)).toEqual([]);
+});
+
+it("refuses a new record or deletion that a table's operations don't allow, before any invoke", async () => {
+  const f = await phone();
+  let invoked = 0;
+  f.during(() => void invoked++);
+  const refused = ok({
+    refused: {
+      code: "forbidden",
+      message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+    },
+  });
+  // A new person needs an ID and a name, which have no defaults. Nothing reads Notes, so the phone can't show what it
+  // would add or delete there.
+  expect(await create(f, { tableId: PEOPLE })).toEqual(refused);
+  expect(await create(f, { tableId: NOTES })).toEqual(refused);
+  expect(await remove(f, { tableId: NOTES })).toEqual(refused);
+  expect(await create(f, { tableId: OTHER })).toEqual(notFound);
+  // Nor does a key that isn't random, a version that isn't one, or values from the phone.
+  expect((await create(f, { idempotencyKey: "new-guest" })).status).toBe(400);
+  expect((await create(f, { values: { [GUEST_NAME]: "Ada" } })).status).toBe(400);
+  expect((await remove(f, { expectedVersion: 0 })).status).toBe(400);
+  expect(invoked).toBe(0);
+});
+
+it("refuses a new record or deletion from another account, with Show on phone off, a revoked sign-in, a fenced account, an archived Collection, or a hidden dataset.json", async () => {
+  for (const write of [create, remove]) {
+    const f = await phone();
+    expect(await write(f, {}, "intruder:phone-2:phone")).toEqual(notFound);
+    f.showOnPhone(false);
+    expect(await write(f)).toEqual(notFound);
+    f.showOnPhone(true);
+    revoked.add("phone-1");
+    expect((await write(f)).status).toBe(401);
+    revoked.clear();
+    expect(await guests(f)).toEqual([]);
+    expect(await hasR01(f)).toBe(true);
+    initializeAccountDeletion(f.storage, "k".repeat(32));
+    fenceAccount(f.storage, "k".repeat(32), "owner", "owner@dohc.test");
+    expect(await write(f)).toEqual(notFound);
+
+    const archived = await phone();
+    archived.host.archiveDataset(owner, scope);
+    expect(await write(archived)).toEqual(notFound);
+
+    const hidden = await phone();
+    hide(hidden);
+    expect(await write(hidden)).toEqual(notFound);
+  }
+});
+
+it("refuses a new record or deletion when Show on phone turns off or its dataset.json goes as it starts, and its answer when Show on phone turns off after it ran", async () => {
+  for (const write of [create, remove]) {
+    const before = await phone();
+    before.during(() => before.showOnPhone(false));
+    expect(await write(before)).toEqual(notFound);
+    before.during(() => undefined);
+    before.showOnPhone(true);
+    expect(await guests(before)).toEqual([]);
+    expect(await hasR01(before)).toBe(true);
+
+    const gone = await phone();
+    gone.during(() => pushFile(gone.storage, "dataset", collectionFile, null));
+    expect(await write(gone)).toEqual(notFound);
+    gone.during(() => undefined);
+    pushFile(gone.storage, "dataset-again", null, collectionFile);
+    expect(await guests(gone)).toEqual([]);
+    expect(await hasR01(gone)).toBe(true);
+
+    const after = await phone();
+    let calls = 0;
+    after.during(() => {
+      if (++calls === 2) after.showOnPhone(false);
+    });
+    expect(await write(after)).toEqual(notFound);
+  }
+});
+
+it("adds no record where the phone couldn't read it back by its key", async () => {
+  const f = await phone();
+  let invoked = 0;
+  f.during(() => void invoked++);
+  f.describing((description) => ({
+    ...description,
+    operations: description.operations.map((operation) =>
+      operation.operationId === GUEST_READ
+        ? { ...operation, fieldIds: operation.fieldIds.filter((field) => field !== GUEST_KEY) }
+        : operation,
+    ),
+  }));
+  const described = await f.op("collection", { datasetId: DATASET });
+  expect(
+    (described.body.result as { tables: { tableId: string; canCreate: boolean }[] }).tables.find(
+      (table) => table.tableId === GUESTS,
+    )?.canCreate,
+  ).toBe(false);
+  expect(await create(f)).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
 });
