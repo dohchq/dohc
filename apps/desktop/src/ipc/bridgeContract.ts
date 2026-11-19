@@ -8594,11 +8594,14 @@ export type PersonalAgent = z.infer<typeof PersonalAgent>;
 export const PersonalAgentRoster = z.strictObject({
   revision: z.number().int().nonnegative(),
   agents: z.array(PersonalAgent),
-  // The workspaces the account owns on the server, which a reach can name.
+  // The workspaces a reach can name: those the account owns on the server,
+  // then those it joined as a member or admin. Last come workspaces an agent
+  // still reaches whose membership ended, which a reach can only drop.
   workspaces: z.array(
     z.strictObject({
       workspaceId: RelayWorkspaceId,
       name: z.string().min(1).max(1_024).nullable(),
+      role: z.enum(["owner", "admin", "member", "ended"]),
     }),
   ),
 });

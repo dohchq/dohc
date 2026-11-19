@@ -22,6 +22,7 @@ import {
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList } from "./AgentList";
+import { JOINED_NOTE } from "./PersonalAgentPage";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let _listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
@@ -600,11 +601,36 @@ function account(
       revision: 3,
       agents: [...agents],
       workspaces: [
-        { workspaceId: "ws-1", name: "Trip" },
-        { workspaceId: "ws-2", name: "Budget" },
+        { workspaceId: "ws-1", name: "Trip", role: "owner" },
+        { workspaceId: "ws-2", name: "Budget", role: "owner" },
       ],
     },
     failure: null,
+  };
+}
+
+// Grok Bot also reaches Community, which its person joined, at Edit, and Old club, whose membership ended.
+function joinedAccount(): PersonalAgentsAccount {
+  const grok: PersonalAgent = {
+    ...GROK,
+    reach: [
+      ...GROK.reach,
+      { workspaceId: "ws-3", level: "edit" },
+      { workspaceId: "ws-5", level: "comment" },
+    ],
+  };
+  const base = account([grok, NOVA]);
+  return {
+    ...base,
+    roster: {
+      ...base.roster!,
+      workspaces: [
+        { workspaceId: "ws-3", name: "Community", role: "member" },
+        ...base.roster!.workspaces,
+        { workspaceId: "ws-4", name: "Club", role: "admin" },
+        { workspaceId: "ws-5", name: "Old club", role: "ended" },
+      ],
+    },
   };
 }
 const personalIds = () =>
@@ -655,6 +681,110 @@ it("changes what an agent can reach from its sheet", async () => {
     change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }] },
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it("lists joined workspaces after owned ones, marked Member or Admin, with no Edit there", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  renderList();
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+  await openAgent("Grok Bot");
+  // Edit acts as Comment in a joined workspace, so the page says Comment.
+  expect(
+    page()
+      .getAllByTestId("personal-agent-reach-entry")
+      .map((row) => row.textContent),
+  ).toEqual(["TripComment", "BudgetView", "CommunityMemberComment", "ClubAdminNone"]);
+  expect(page().getAllByTestId("personal-agent-role")[0]!.title).toBe(JOINED_NOTE);
+  expect(page().getByTestId("personal-agent-joined-note").textContent).toBe(JOINED_NOTE);
+
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  expect(dialog.getAllByTestId("personal-agent-reach-row").map((row) => row.dataset.role)).toEqual([
+    "owner",
+    "owner",
+    "member",
+    "admin",
+  ]);
+  expect(dialog.getByTestId("personal-agent-joined-note").textContent).toBe(JOINED_NOTE);
+  const community = dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Community" });
+  expect(
+    within(community)
+      .getAllByRole("radio")
+      .map((radio) => radio.textContent),
+  ).toEqual(["None", "View", "Comment"]);
+  expect(community.querySelector("[aria-checked='true']")!.textContent).toBe("Comment");
+  expect(
+    within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" }))
+      .getAllByRole("radio")
+      .map((radio) => radio.textContent),
+  ).toEqual(["None", "View", "Comment", "Edit"]);
+  await userEvent.click(
+    within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Club" })).getByRole(
+      "radio",
+      { name: "View" },
+    ),
+  );
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  // The ended workspace stays as it was: only its own Remove drops it.
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: {
+      kind: "reach",
+      reach: [
+        { workspaceId: "ws-1", level: "comment" },
+        { workspaceId: "ws-2", level: "view" },
+        { workspaceId: "ws-3", level: "comment" },
+        { workspaceId: "ws-4", level: "view" },
+        { workspaceId: "ws-5", level: "comment" },
+      ],
+    },
+  });
+});
+
+it("shows a workspace whose membership ended with Remove, and says why in a toast when Remove fails", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  const { onError } = renderList();
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+  await openAgent("Grok Bot");
+  const ended = page().getByTestId("personal-agent-reach-ended");
+  expect(ended.textContent).toBe("Old clubMembership endedRemove");
+  let answer: (result: { ok: false; error: string }) => void = () => {};
+  bridgeMock.changePersonalAgent.mockReturnValueOnce(
+    new Promise((resolve) => {
+      answer = resolve;
+    }),
+  );
+  const remove = within(ended).getByRole<HTMLButtonElement>("button", {
+    name: "Remove Old club from what Grok Bot can reach",
+  });
+  await userEvent.click(remove);
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: {
+      kind: "reach",
+      reach: [
+        { workspaceId: "ws-2", level: "view" },
+        { workspaceId: "ws-1", level: "comment" },
+        { workspaceId: "ws-3", level: "edit" },
+      ],
+    },
+  });
+  expect(remove.textContent).toBe("Removing…");
+  expect(remove.disabled).toBe(true);
+  act(() => answer({ ok: false, error: "relay.test could not change Grok Bot." }));
+  await waitFor(() => expect(remove.disabled).toBe(false));
+  expect(remove.textContent).toBe("Remove");
+  expect(onError).toHaveBeenCalledWith(
+    "relay.test could not change Grok Bot.",
+    undefined,
+    expect.any(Function),
+  );
+  // Once the relay drops it, the row goes.
+  act(() => personalListener!({ accounts: [account()] }));
+  expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
+  expect(page().queryByTestId("personal-agent-joined-note")).toBeNull();
 });
 
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {

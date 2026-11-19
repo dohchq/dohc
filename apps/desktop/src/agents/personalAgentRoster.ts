@@ -214,6 +214,7 @@ export function createPersonalAgentRoster(deps: {
           workspaces: answer.workspaces.map((workspace) => ({
             workspaceId: workspace.workspaceId,
             name: workspace.name,
+            role: workspace.role,
           })),
         },
         failure: null,

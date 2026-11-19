@@ -68,7 +68,7 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
           ok: true,
           revision: relay.revision,
           agents: relay.agents.map((agent) => ({ ...agent })),
-          workspaces: [{ workspaceId: "ws-1", name: "Trip" }],
+          workspaces: [{ workspaceId: "ws-1", name: "Trip", role: "owner" }],
         };
         if (relay.holdReads) await new Promise<void>((resolve) => relay.held.push(resolve));
         return Response.json(answer);
