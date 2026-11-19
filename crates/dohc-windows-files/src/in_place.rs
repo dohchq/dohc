@@ -1,7 +1,8 @@
 //! Folders and files opened by path and refused unless the handle is still at
-//! that path, so a link anywhere along it can't lead outside. No handle is
-//! held between opens: a held handle on a folder stops every ancestor of it
-//! from being renamed.
+//! that path, so a link anywhere along it can't lead outside. The open itself
+//! still follows the link before the refusal, so a link to a network share
+//! still reaches that share. No handle is held between opens: a held handle on
+//! a folder stops every ancestor of it from being renamed.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -232,6 +233,13 @@ impl Listing {
         if name == [u16::from(b'.')] || name == [u16::from(b'.'); 2] {
             return Ok(None);
         }
+        if name.is_empty()
+            || name
+                .iter()
+                .any(|&unit| [b'\\', b'/', b':'].map(u16::from).contains(&unit))
+        {
+            return Err(malformed());
+        }
         let link = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0;
         Ok(Some(Entry {
             name: OsString::from_wide(&name),
@@ -342,5 +350,34 @@ mod tests {
             open_file(&at(&["OUTSIDE", "deeper", "secret.md"])).unwrap_err()
         ));
         assert!(open_file(&at(&["outside", "deeper", "secret.md"])).is_ok());
+    }
+
+    #[test]
+    fn a_listed_name_that_is_not_one_name_is_refused() {
+        use std::mem::offset_of;
+        let scratch = ScratchDir::new_named("in-place-name").unwrap();
+        let parse = |name: &str| {
+            let mut bytes = vec![0u8; 1024];
+            let units: Vec<u16> = name.encode_utf16().collect();
+            let length = offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength);
+            bytes[length..length + 4].copy_from_slice(&(units.len() as u32 * 2).to_ne_bytes());
+            let at = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            for (i, unit) in units.iter().enumerate() {
+                bytes[at + i * 2..at + i * 2 + 2].copy_from_slice(&unit.to_ne_bytes());
+            }
+            let mut listing = list(&root(scratch.path()).unwrap()).unwrap();
+            listing.buffer = bytes
+                .chunks_exact(8)
+                .map(|chunk| u64::from_ne_bytes(chunk.try_into().unwrap()))
+                .collect();
+            listing
+                .entry_at(0)
+                .map(|entry| entry.map(|entry| entry.name))
+        };
+        assert_eq!(parse("note.md").unwrap(), Some("note.md".into()));
+        for name in ["C:\\outside", "..\\outside", "a/b", "file.md:stream", ""] {
+            let error = parse(name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name:?}");
+        }
     }
 }
