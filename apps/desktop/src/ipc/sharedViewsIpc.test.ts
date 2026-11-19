@@ -1067,6 +1067,22 @@ describe("registered received-view handlers", () => {
       expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
     });
 
+    it("does not take an upgrade from a reply that an access answer overtook", async () => {
+      const { h } = await pinnedAt("view");
+      const response = deferred<ShareViewInfo>();
+      h.fetchInfo.mockReturnValueOnce(response.promise);
+      const refreshed = refresh(h);
+      await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
+      h.fetchAccess.mockResolvedValueOnce("view");
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      });
+      response.resolve({ ...info, selector: edit });
+      await refreshed;
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      expect(() => requireShareViewProposalScope(h.workspace.shareView)).toThrow();
+    });
+
     it("still says a collision record was set aside when editing could not be turned on", async () => {
       vi.spyOn(console, "error").mockImplementation(() => undefined);
       const { h } = await pinnedAt("view");
