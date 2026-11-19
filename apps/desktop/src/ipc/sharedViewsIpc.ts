@@ -174,6 +174,9 @@ export function registerSharedViewsIpcHandlers<
   // Give a received share the sync identity used by its Edit proposal lane.
   // Run at open and on refresh so an older received share gains the identity
   // before it submits document changes.
+  const accessStatements = new Map<string, number>();
+  const accessStatementsFor = (workspaceId: string) => accessStatements.get(workspaceId) ?? 0;
+
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
   ): Promise<boolean> {
@@ -697,6 +700,7 @@ export function registerSharedViewsIpcHandlers<
                   shareAccessRank(statedPin.access) > shareAccessRank(levelAfterRead);
                 let widenedPin = widening && statedPin.access !== "edit" ? statedPin : null;
                 if (widening && statedPin.access === "edit") {
+                  const statementsBefore = accessStatementsFor(workspace.workspaceId);
                   try {
                     identityRecorded = await recordShareViewIdentity({
                       ...current,
@@ -713,7 +717,8 @@ export function registerSharedViewsIpcHandlers<
                   if (
                     identityRecorded &&
                     !current.shareView.ended &&
-                    pinnedLevel(current.shareView) === levelBeforeRead
+                    pinnedLevel(current.shareView) === levelBeforeRead &&
+                    accessStatementsFor(workspace.workspaceId) === statementsBefore
                   )
                     widenedPin = statedPin;
                 }
@@ -843,6 +848,7 @@ export function registerSharedViewsIpcHandlers<
               errorKind: "transient",
               changedPaths: outcome.changedPaths,
               errorMessage: "dohc could not turn on editing for this share.",
+              ...(outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
             });
           return RefreshSharedViewResult.parse(outcome);
         }),
@@ -977,6 +983,10 @@ export function registerSharedViewsIpcHandlers<
               }
               scoped.assertCurrent();
               clearTimeout(timeout);
+              accessStatements.set(
+                workspace.workspaceId,
+                accessStatementsFor(workspace.workspaceId) + 1,
+              );
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
               const currentView = operation.workspace.shareView;
