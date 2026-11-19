@@ -1778,6 +1778,11 @@ export interface SyncRelayStorage {
     objectId: string;
     epochLogFloor: number;
   }): CurrentFileStateRow | null | "reset";
+  currentFileBlobSha256(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined;
   currentFileObjectId(input: {
     workspaceId: string;
     versionId: string;

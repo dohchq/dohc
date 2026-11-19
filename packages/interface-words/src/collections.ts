@@ -22,6 +22,11 @@ export const collectionWords = {
   undoLastEdit: "Undo last edit",
   // TransactionalCollectionPage.tsx
   clearValue: "Clear value",
+  newRecord: "New record",
+  // DeleteCollectionRecordDialog.tsx's button; its title and body are the phone's.
+  deleteRecord: "Delete record",
+  deleteRecordTitle: "Delete this record?",
+  deleteRecordBody: "This can't be undone.",
 
   // The phone's.
   /** A table whose Collection has no operation that reads it. */

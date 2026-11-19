@@ -2294,6 +2294,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return currentFilesStorage.currentObjectFile(this, input);
   }
 
+  currentFileBlobSha256(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined {
+    return currentFilesStorage.currentFileBlobSha256(this, input);
+  }
+
   currentFileObjectId(input: {
     workspaceId: string;
     versionId: string;

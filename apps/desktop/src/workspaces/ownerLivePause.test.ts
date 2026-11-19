@@ -89,10 +89,14 @@ function fixture() {
     leftOut: false,
   }));
   const leaveLiveEditing = vi.fn(
-    (_path: string, pause: (unsent: Uint8Array[]) => Promise<unknown>) => pause([]),
+    (
+      _path: string,
+      pause: (unsent: Uint8Array[]) => Promise<unknown>,
+      _late: (edits: Uint8Array) => void,
+    ) => pause([]),
   );
   const errors: unknown[] = [];
-  const tried = new Set<string>();
+  const tried = new Map<string, { objectId: string; state: Uint8Array | null }>();
   const settle = (
     pauses = [pause],
     options: { listed?: boolean; previous?: OwnerLivePause[] } = {},
@@ -107,8 +111,11 @@ function fixture() {
       relay,
       writes,
       render,
-      leaveLiveEditing: <T>(path: string, pause: (unsent: Uint8Array[]) => Promise<T>) =>
-        leaveLiveEditing(path, pause) as Promise<T>,
+      leaveLiveEditing: <T>(
+        path: string,
+        pause: (unsent: Uint8Array[]) => Promise<T>,
+        late: (edits: Uint8Array) => void,
+      ) => leaveLiveEditing(path, pause, late) as Promise<T>,
       signal: new AbortController().signal,
       onError: (_pause, error) => errors.push(error),
     });
@@ -191,11 +198,116 @@ describe("settleOwnerLivePauses", () => {
       return run([unsent]);
     });
     await f.settle();
-    expect(f.leaveLiveEditing).toHaveBeenCalledWith("notes/plan.md", expect.any(Function));
+    expect(f.leaveLiveEditing).toHaveBeenCalledWith(
+      "notes/plan.md",
+      expect.any(Function),
+      expect.any(Function),
+    );
     const [, input] = f.client.ownerYDocPause.mock.calls[0]!;
     const copy = new Y.Doc();
     Y.applyUpdate(copy, input.roomCopy!);
     expect(copy.getText("t").toString()).toBe("Ana and the owner");
+    expect(f.render).not.toHaveBeenCalled();
+  });
+
+  it("puts the owner's typing during the pause into the copy", async () => {
+    const f = fixture();
+    const editor = new Y.Doc();
+    Y.applyUpdate(editor, roomCopy);
+    editor.getText("t").insert(3, " and the owner");
+    const unsent = Y.encodeStateAsUpdate(editor, Y.encodeStateVectorFromUpdate(roomCopy));
+    f.leaveLiveEditing.mockImplementationOnce(async (_path, run, late) => {
+      const left = await run([unsent]);
+      editor.getText("t").insert(17, ", still typing");
+      late(Y.encodeStateAsUpdate(editor));
+      return left;
+    });
+    f.render.mockImplementationOnce(async (state) => {
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, state);
+      return { markdown: doc.getText("t").toString(), leftOut: false };
+    });
+    const [settled] = await f.settle();
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana and the owner, still typing");
+    expect(settled).toMatchObject({ copyPath: "notes/plan (unsaved edits 2).md", leftOut: true });
+    expect(f.relay.copyWritten).toHaveBeenCalledWith("pause", sha256, expect.anything());
+    expect(f.errors).toEqual([]);
+  });
+
+  /** The owner types ", still typing" while the note pauses, and the copy shows its text. */
+  const typeDuringPause = (f: ReturnType<typeof fixture>) => {
+    f.leaveLiveEditing.mockImplementationOnce(async (_path, run, late) => {
+      const left = await run([]);
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, roomCopy);
+      editor.getText("t").insert(3, ", still typing");
+      late(Y.encodeStateAsUpdate(editor));
+      return left;
+    });
+    f.render.mockImplementation(async (state: Uint8Array) => {
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, state);
+      return { markdown: doc.getText("t").toString(), leftOut: false };
+    });
+  };
+
+  it("keeps the owner's typing during the pause for the next pass when the copy can't be written", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    // The projection worker takes the state's buffer, then fails.
+    f.render.mockImplementationOnce(async (state) => {
+      structuredClone(state, { transfer: [state.buffer as ArrayBuffer] });
+      throw new Error("render failed");
+    });
+    expect(await f.settle()).toEqual([]);
+    expect(f.errors).toHaveLength(1);
+    expect(f.relay.copyWritten).not.toHaveBeenCalled();
+    await f.settle();
+    expect(f.client.ownerYDocPause).toHaveBeenCalledOnce();
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
+    expect(f.relay.copyWritten).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the owner's typing during the pause for the next pass when the engine fails after pausing", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    f.client.ownerYDocPausedCopy
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("engine busy"));
+    expect(await f.settle()).toEqual([]);
+    expect(f.errors).toHaveLength(1);
+    await f.settle();
+    expect(f.client.ownerYDocPause).toHaveBeenCalledOnce();
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
+    expect(f.relay.copyWritten).toHaveBeenCalledOnce();
+  });
+
+  it("keeps typing from an attempt the engine never paused out of a later pause's copy", async () => {
+    const f = fixture();
+    f.client.ownerYDocPause.mockRejectedValueOnce(new Error("engine busy"));
+    f.leaveLiveEditing.mockImplementationOnce(async (_path, run, late) => {
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, roomCopy);
+      editor.getText("t").insert(3, ", typed then");
+      late(Y.encodeStateAsUpdate(editor));
+      return run([]);
+    });
+    expect(await f.settle()).toEqual([]);
+    await f.settle([{ ...pause, pauseId: "pause-2" }]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana's words and the owner's");
+  });
+
+  it("writes the owner's typing during the pause into the copy when the pause then ended elsewhere", async () => {
+    const f = fixture();
+    typeDuringPause(f);
+    f.client.ownerYDocPausedCopy
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("engine busy"));
+    await f.settle();
+    // Another computer resumed the note before this one wrote the copy.
+    expect(await f.settle([])).toEqual([]);
+    expect(f.files.get("notes/plan (unsaved edits 2).md")).toBe("Ana, still typing");
+    expect(f.client.ownerYDocStopClear).toHaveBeenCalledOnce();
   });
 
   it("writes one copy when the pause was made but its answer failed", async () => {

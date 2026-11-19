@@ -128,9 +128,16 @@ export function mountLiveBodyEditor(
       },
     },
   });
+  let refocus = false;
   return {
     refresh() {
+      const editable = input.canEdit();
+      if (!editable && view.hasFocus()) refocus = true;
       view.setProps({ editable: input.canEdit });
+      if (!editable || !refocus) return;
+      refocus = false;
+      const active = element.ownerDocument.activeElement;
+      if (active === null || active === element.ownerDocument.body) view.focus();
     },
     destroy() {
       view.destroy();

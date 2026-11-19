@@ -121,30 +121,55 @@ export async function settleOwnerLivePauses(input: {
   workspaceHandle: string;
   relay: OwnerLivePauseRelay;
   writes: OwnerLivePauseWrites;
-  /** The pauses this desktop has asked the engine to make and not yet settled. */
-  tried: Set<string>;
+  /**
+   * The pauses this desktop has asked the engine to make and not yet settled,
+   * each with its note and, when the owner typed during it and its copy is
+   * not yet written, the state to write the copy from.
+   */
+  tried: Map<string, { objectId: string; state: Uint8Array | null }>;
   /**
    * Runs `pause` between the edits of the editors open on the note at `path`,
    * given the edits they have not sent. Once it succeeds, they show the note.
+   * `late` gets the edits they made while `pause` ran, with the state they
+   * build on.
    */
-  leaveLiveEditing<T>(path: string, pause: (unsent: Uint8Array[]) => Promise<T>): Promise<T>;
+  leaveLiveEditing<T>(
+    path: string,
+    pause: (unsent: Uint8Array[]) => Promise<T>,
+    late: (edits: Uint8Array) => void,
+  ): Promise<T>;
   /** The note's file text from its whole state, and whether it leaves some out. */
   render(state: Uint8Array): Promise<{ markdown: string; leftOut: boolean }>;
   signal: AbortSignal;
   onError(pause: RelayLivePause, error: unknown): void;
 }): Promise<OwnerLivePause[]> {
   const request = () => ({ id: 0, workspace: input.workspaceHandle, deadlineMs: 30_000 });
-  /** Writes a held Stop's copy next to `near` and records it. */
+  /**
+   * Writes a held Stop's copy next to `near` and records it. The owner's typing
+   * during its pause never reached the engine, so it joins the copy here.
+   */
   const writeHeld = async (
     held: NonNullable<Awaited<ReturnType<EngineClient["ownerYDocPausedCopy"]>>>,
     near: string,
   ) => {
+    const objectId = held.stop.document.objectId;
+    const late = [...input.tried.values()].find((t) => t.objectId === objectId && t.state)?.state;
+    // Rendering may take the bytes it gets, and a retry needs these.
+    const withLate = late ? await input.render(late.slice()) : null;
     const path = (await input.writes.exists(held.stop.paused.copyPath))
       ? await freeName(near, input.writes)
       : held.stop.paused.copyPath;
-    const written = await input.writes.create(path, held.bytes?.toString("utf8") ?? "");
-    return (await input.client.ownerYDocPausedCopyWritten(request(), held.stop.document, written))
-      .paused;
+    const written = await input.writes.create(
+      path,
+      withLate?.markdown ?? held.bytes?.toString("utf8") ?? "",
+    );
+    const { paused } = await input.client.ownerYDocPausedCopyWritten(
+      request(),
+      held.stop.document,
+      written,
+    );
+    for (const t of input.tried.values()) if (t.objectId === objectId) t.state = null;
+    return withLate?.leftOut ? { ...paused, leftOut: true } : paused;
   };
   const settled: OwnerLivePause[] = [];
   for (const pause of input.pauses) {
@@ -164,21 +189,36 @@ export async function settleOwnerLivePauses(input: {
       if (!held && listed && pause.copy) {
         const roomCopy = await relayCopy(input.relay, pause, input.signal);
         const copyPath = await freeName(pause.path, input.writes);
-        input.tried.add(pause.pauseId);
+        // No copy of this note is held, so typing kept for an earlier attempt has none to join.
+        for (const [id, t] of input.tried)
+          if (t.objectId === pause.objectId) input.tried.delete(id);
+        const tried = { objectId: pause.objectId, state: null as Uint8Array | null };
+        input.tried.set(pause.pauseId, tried);
+        let paused = roomCopy;
+        const late: Uint8Array[] = [];
         // The owner's open editor waits while the note pauses, so the copy takes
         // what it shows, and then it shows the note.
-        await input.leaveLiveEditing(listed.binding.currentPath, (unsent) =>
-          input.client.ownerYDocPause(
-            request(),
-            {
-              binding: listed.binding,
-              appliedCursor: pause.savedCursor,
-              rowCursor: pause.savedCursor,
-              copyPath,
-              roomCopy: unsent.length === 0 ? roomCopy : Y.mergeUpdates([roomCopy, ...unsent]),
-            },
-            input.signal,
-          ),
+        await input.leaveLiveEditing(
+          listed.binding.currentPath,
+          (unsent) => {
+            if (unsent.length > 0) paused = Y.mergeUpdates([roomCopy, ...unsent]);
+            return input.client.ownerYDocPause(
+              request(),
+              {
+                binding: listed.binding,
+                appliedCursor: pause.savedCursor,
+                rowCursor: pause.savedCursor,
+                copyPath,
+                roomCopy: paused,
+              },
+              input.signal,
+            );
+          },
+          // Kept until the copy is written, on this pass or a later one.
+          (edits) => {
+            late.push(edits);
+            tried.state = Y.mergeUpdates([paused, ...late]);
+          },
         );
         held = await input.client.ownerYDocPausedCopy(request(), document, input.signal);
         if (!held) throw new Error("The paused note's copy is missing.");

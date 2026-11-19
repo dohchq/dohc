@@ -489,6 +489,23 @@ export function createServiceHostFeed(
         admit(ops) {
           const scope = currentScope(workspaceId),
             known = blobReach.known(scope);
+          const files = new Map<string, string | undefined>();
+          const fileAt = (path: string) =>
+            files.has(path)
+              ? files.get(path)
+              : storage.currentFileBlobSha256({ workspaceId, versionId: "main", path });
+          const fileMovedSince = (op: SyncRelayLogInput) => {
+            if (op.opKind !== "moment.append") return false;
+            const save = asRecord(JSON.parse(op.payloadJson));
+            const path = save?.path,
+              before = save?.payloadBeforeBlobSha256,
+              after = save?.payloadAfterBlobSha256;
+            if (typeof path !== "string" || typeof before !== "string") return false;
+            const current = fileAt(path);
+            if (current !== undefined && current !== before) return true;
+            files.set(path, typeof after === "string" ? after : undefined);
+            return false;
+          };
           const batch = {
             originId: pushOrigin,
             ops: new Map(ops.map((op) => [op.originSeq, op])),
@@ -501,7 +518,7 @@ export function createServiceHostFeed(
             else if (decision.kind === "retiring") {
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
-              else if (staysInPlace(decision.retirement)) staying.add(op);
+              else if (staysInPlace(decision.retirement) && !fileMovedSince(op)) staying.add(op);
               else op.relayAdmission = "departed";
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }
