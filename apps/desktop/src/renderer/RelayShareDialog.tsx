@@ -1,7 +1,6 @@
 import { CloudOff, CloudUpload, LogIn, Share2, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
-import type { ShareCopyResult } from "../ipc/shareCopyOperations";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
@@ -36,7 +35,10 @@ type InvitedPerson = { shareId: string; grantId: string; name: string; access: S
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
 
-type InvitationAnswer = { value: ShareCopyResult | undefined; error: unknown };
+type InvitationClick = {
+  resolve: (text: string | null) => void;
+  reject: (error: unknown) => void;
+};
 
 let newestInvitationCopy = 0;
 
@@ -45,33 +47,43 @@ function useInvitation(
   reload: () => Promise<unknown>,
 ): () => Promise<string | null> {
   const { shareId, grantId } = person;
-  const query = useWorkspaceQuery(useWorkspaceSession(), {
+  const asked = useRef<InvitationClick | null>(null);
+  const { retry } = useWorkspaceQuery(useWorkspaceSession(), {
     key: `${shareId}\0${grantId}`,
     manual: true,
-    load: () => bridge().getShareCopyDetails({ shareId, grantId }),
+    load: async (signal) => {
+      const click = asked.current;
+      asked.current = null;
+      signal.addEventListener("abort", () => click?.resolve(null), { once: true });
+      try {
+        const details = await bridge().getShareCopyDetails({ shareId, grantId });
+        if (signal.aborted) return details.status;
+        if (details.status === "ended") {
+          void reload();
+          click?.resolve(null);
+        } else click?.resolve(details.browserInvitationUrl ?? details.shareCode);
+        return details.status;
+      } catch (error) {
+        if (!signal.aborted) click?.reject(error);
+        throw error;
+      }
+    },
   });
-  const waiting = useRef<((answer: InvitationAnswer) => void) | null>(null);
-  useEffect(() => {
-    if (query.pending || !waiting.current) return;
-    const settle = waiting.current;
-    waiting.current = null;
-    settle({ value: query.value, error: query.error });
-  });
-  const { retry } = query;
   return () =>
     new Promise<string | null>((resolve, reject) => {
       const copy = ++newestInvitationCopy;
-      waiting.current?.({ value: undefined, error: null });
-      waiting.current = ({ value, error }) => {
-        if (copy !== newestInvitationCopy) resolve(null);
-        else if (error !== null) reject(error);
-        else if (!value) resolve(null);
-        else if (value.status === "ended") {
-          void reload();
-          resolve(null);
-        } else resolve(value.browserInvitationUrl ?? value.shareCode);
+      const newest = () => copy === newestInvitationCopy;
+      const click: InvitationClick = {
+        resolve: (text) => resolve(newest() ? text : null),
+        reject: (error) => (newest() ? reject(error) : resolve(null)),
       };
+      asked.current?.resolve(null);
+      asked.current = click;
       void retry();
+      if (asked.current === click) {
+        asked.current = null;
+        resolve(null);
+      }
     });
 }
 
