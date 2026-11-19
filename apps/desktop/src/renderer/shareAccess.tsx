@@ -145,3 +145,6 @@ export function ShareLinkRow(props: { children: ReactNode; linkUrlFor?: string; 
     </div>
   );
 }
+
+export const invitedByEmailWords = (signedIn: boolean | undefined) =>
+  signedIn === false ? "Invited, not signed in yet" : "Invited by email";

@@ -6,6 +6,7 @@ import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
 import { invitationCanBeBrowserLink, nextInvitationCopy } from "./invitationCopy";
 import { notSentWords } from "./notSentWords";
+import { invitedByEmailWords } from "./shareAccess";
 import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import {
   isShareAccess,
@@ -176,6 +177,7 @@ function useSharedPeople(input: {
             email: row.recipientEmail,
             access: isShareAccess(row.access) ? row.access : null,
             generation: row.generation,
+            signedIn: row.recipientUserId !== null,
           });
         }
         if (answer.nextCursor === null) break;
@@ -477,7 +479,7 @@ function InvitedPersonRow(props: {
       detail={
         <>
           {copied.feedback === null ? (
-            "Invited by email"
+            invitedByEmailWords(person.signedIn)
           ) : (
             <span className={copied.feedback === "failed" ? "text-danger" : undefined}>
               {copied.words[copied.feedback]}

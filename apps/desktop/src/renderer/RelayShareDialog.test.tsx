@@ -309,7 +309,7 @@ function invitedRow(
     via: "named",
     granterUserId: "owner-1",
     granterEmail: "owner@dohc.test",
-    recipientUserId: null,
+    recipientUserId: `user-${grantId}`,
     recipientEmail,
     subjectName: null,
     sharerName: null,
@@ -6683,6 +6683,24 @@ describe("people and links on one surface", () => {
     await copyInvitation(user, "ben");
     await waitFor(() =>
       expect(writeText).toHaveBeenLastCalledWith("https://share.test/invite#ben"),
+    );
+  });
+
+  it("says an invited person has not signed in yet while their invitation is pending", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([
+        invitedRow("ana", "ana@dohc.test"),
+        invitedRow("new", "new@dohc.test", { recipientUserId: null }),
+      ]),
+    );
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const people = await screen.findByTestId("share-people");
+    expect((await within(people).findByTestId("share-invited-new")).textContent).toContain(
+      "new@dohc.testInvited, not signed in yet",
+    );
+    expect(within(people).getByTestId("share-invited-ana").textContent).toContain(
+      "ana@dohc.testInvited by email",
     );
   });
 

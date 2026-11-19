@@ -1199,6 +1199,21 @@ describe("Shared by me, by what is shared", () => {
     }),
   ];
 
+  it("says an invited person has not signed in yet while their invitation is pending", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [granted({ recipientUserId: null, recipientEmail: "new@example.com" })],
+      }),
+    });
+    render(<View />);
+    const item = await screen.findByTestId("sharing-granted-row");
+    await userEvent.click(within(item).getByTestId("sharing-item-toggle"));
+
+    expect(within(item).getByTestId("sharing-person").textContent).toBe(
+      "Nnew@example.comInvited, not signed in yetCan edit",
+    );
+  });
+
   it("shows several shares of one file as one item with all its people and its link", async () => {
     answerWith({ granted: answer("granted", { rows: SEPARATE }) });
     render(<View />);

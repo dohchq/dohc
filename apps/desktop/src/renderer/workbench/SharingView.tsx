@@ -26,7 +26,7 @@ import { accessOptions } from "../EmailShareForm";
 import { ipcErrorMessage } from "../ipcError";
 import { opensForLiveEditing } from "../OpenSharedView";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { SHARE_ACCESS_WORDS, ShareAccessMenu } from "../shareAccess";
+import { invitedByEmailWords, SHARE_ACCESS_WORDS, ShareAccessMenu } from "../shareAccess";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
@@ -901,7 +901,7 @@ function PersonRow(props: {
     filesOf(grant) === null
       ? ""
       : grant.via === "named"
-        ? "Invited by email"
+        ? invitedByEmailWords(grant.recipientUserId !== null)
         : grant.via === "dependent"
           ? "Joined through a link"
           : "";

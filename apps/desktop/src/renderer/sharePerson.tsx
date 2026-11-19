@@ -23,6 +23,7 @@ export type SharedPerson = {
   name: string;
   email: string | null;
   access: ShareAccess | null;
+  signedIn?: boolean;
 };
 
 export type ChangedAccess = { access: ShareAccess; generation: number };
