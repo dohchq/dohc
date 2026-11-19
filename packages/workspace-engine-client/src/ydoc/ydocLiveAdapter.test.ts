@@ -3013,6 +3013,34 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("rejects a split masked behind deleted U+FFFD format markers", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    session.doc.transact(() => {
+      const text = session.doc.getText("plainText");
+      text.insert(0, "a😀");
+      text.format(0, 1, { "�": true });
+    }, ENGINE_DELIVERED_ORIGIN);
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 1);
+        text.insert(1, "X");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(0);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("rejects a new U+FFFD in a map value and allows replacing one", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);

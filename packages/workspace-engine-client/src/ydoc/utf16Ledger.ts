@@ -146,16 +146,13 @@ export class Utf16Ledger {
       if (left instanceof Y.Item && left.content instanceof Y.ContentString)
         if (left.content.str.endsWith(REPLACEMENT)) recount.add(right.parent as SharedType);
     }
+    let newReplacement = added > 0;
     for (const type of recount) {
       const after = liveTextReplacements(type);
-      tally(
-        net,
-        type,
-        after - (this.textReplacements.get(type) ?? 0) + (deletedText.get(type) ?? 0),
-      );
+      const before = this.textReplacements.get(type) ?? 0;
+      if (after - before + (deletedText.get(type) ?? 0) > 0) newReplacement = true;
       this.textReplacements.set(type, after);
     }
-    let newReplacement = added > 0;
     for (const count of net.values()) if (count > 0) newReplacement = true;
     this.verdicts.set(transaction, { illFormed, newReplacement });
   };
