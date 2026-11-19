@@ -1248,7 +1248,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(job.steps[downloadIndex].if, "needs.javascript.result == 'success'");
   assert.deepEqual(job.steps[downloadIndex].with, {
     pattern: "verification-js-[0-9]*",
-    path: ".agent-artifacts/verification/aggregate",
+    path: ".agent-artifacts/verification/aggregate/published",
     "run-id": "${{ github.run_id }}",
     "github-token": "${{ github.token }}",
   });
@@ -1286,9 +1286,9 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     completed_at: new Date(started + 100_000).toISOString(),
   }));
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => {
-    mkdirSync(join(directory, "verification-js-1"), { recursive: true });
+    mkdirSync(join(directory, "published"), { recursive: true });
     writeFileSync(
-      join(directory, "verification-js-1", "js-result.json"),
+      join(directory, "published", "js-result.json"),
       JSON.stringify({ verdict: "PASS", commit: checkout, flaky: [] }),
     );
     const checkedSource = source.replace(

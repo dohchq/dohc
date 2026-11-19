@@ -1,5 +1,12 @@
-import { appendFileSync, globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import {
+  appendFileSync,
+  existsSync,
+  globSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { carriedOver, cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { reportFlaky } from "./flaky.mjs";
@@ -13,6 +20,8 @@ import {
 } from "./cloud-rust.mjs";
 
 export function newestAttemptFiles(directory, file) {
+  // download-artifact unpacks a pattern's only match straight into the folder, without its name.
+  if (existsSync(join(directory, file))) return [join(directory, file)];
   const newest = new Map();
   for (const path of globSync(`${directory}/*/**/${file}`)) {
     const [artifact] = relative(directory, path).split(sep);
@@ -375,7 +384,7 @@ export async function verifyCompletedCloud(
   };
   try {
     if (scope === "js") {
-      const results = newestAttemptFiles(outputDirectory, "js-result.json");
+      const results = newestAttemptFiles(join(outputDirectory, "published"), "js-result.json");
       if (results.length !== 1)
         throw new Error(`Expected one JavaScript aggregate, found ${results.length}.`);
       const aggregate = JSON.parse(readFileSync(results[0], "utf8"));

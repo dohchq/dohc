@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, open } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, open, readFile, readdir } from "node:fs/promises";
+import { dirname, extname, join, relative } from "node:path";
 import { z } from "zod";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { atomicCreateFile, syncAndClose, type DurableFileOperations } from "../atomicReplaceFile";
@@ -53,6 +53,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const base64 = (bytes: Uint8Array) =>
   Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
 const KEPT_FOLDER = "live-recovery";
+const PACKAGE_EXTENSION = ".dohc-recovery.json";
 
 /** A path Save recovery copy writes to, validated like any path dohc writes to disk. */
 function validatedPath(path: string, platform: NodeJS.Platform): string {
@@ -105,6 +106,40 @@ export function keepOnThisComputer(
       }
     return `.dohc/local/${KEPT_FOLDER}/${relativePath}`;
   };
+}
+
+/**
+ * The packages Save recovery copy kept on this computer whose readable copy
+ * is not in the workspace, with the note each holds kept edits for. `path`
+ * is null when the package can't be read.
+ */
+export async function listKeptRecoveryPackages(workspace: {
+  rootPath: string;
+}): Promise<Array<{ path: string | null; packagePath: string }>> {
+  const folder = join(workspace.rootPath, ".dohc", "local", KEPT_FOLDER);
+  const stats = await lstat(folder).catch(() => null);
+  if (stats === null || !stats.isDirectory()) return [];
+  const listed: Array<{ path: string | null; packagePath: string }> = [];
+  for (const entry of await readdir(folder, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(PACKAGE_EXTENSION)) continue;
+    const file = join(entry.parentPath, entry.name);
+    const relativePath = relative(folder, file).replaceAll("\\", "/");
+    const path = await readFile(file, "utf8")
+      .then((text) => z.object({ path: z.string().min(1) }).parse(JSON.parse(text)).path)
+      .catch(() => null);
+    if (path !== null) {
+      const copy = `${relativePath.slice(0, -PACKAGE_EXTENSION.length)}${extname(path)}`;
+      if (
+        await lstat(join(workspace.rootPath, copy)).then(
+          () => true,
+          () => false,
+        )
+      )
+        continue;
+    }
+    listed.push({ path, packagePath: `.dohc/local/${KEPT_FOLDER}/${relativePath}` });
+  }
+  return listed.sort((a, b) => a.packagePath.localeCompare(b.packagePath));
 }
 
 const Bytes = z
@@ -263,7 +298,7 @@ export async function saveLiveRecoveryCopy(
     const copyName = recoveredName(recovery.path, attempt);
     if (await writes.exists(copyName)) continue;
     const packagePath = await writes.keep(
-      recoveredName(recovery.path, attempt, ".dohc-recovery.json"),
+      recoveredName(recovery.path, attempt, PACKAGE_EXTENSION),
       text,
     );
     if (packagePath === null) continue;

@@ -21,6 +21,7 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import { SyncStatusResult, type AgentRunStateEvent } from "../ipc/bridgeContract";
 
@@ -259,6 +260,41 @@ describe("workspaceActivity capture hooks", () => {
       );
     },
   );
+
+  it("closes a workspace whose data store the engine refuses", async () => {
+    const steps: string[] = [];
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: () => ({
+        ...idleObservation(workspace(), {} as never),
+        stop: async () => {
+          steps.push("drain");
+          throw new DaemonRefusalError(
+            { code: "INTERNAL", message: "state-corrupt", retry: "no" },
+            null,
+          );
+        },
+      }),
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start: () => {},
+          observationDrainFailed: () => steps.push("unconfirmed"),
+          resyncFileObservation: async () => {
+            steps.push("resync");
+          },
+          settleAndCloseAllLiveSessions: async () => {
+            steps.push("sessions");
+          },
+          stop: async () => {
+            steps.push("capture");
+          },
+        } as never,
+      }),
+    });
+    await activity.open(workspace());
+    await activity.close("activity-test");
+    expect(steps).toEqual(["drain", "sessions", "capture"]);
+  });
 
   it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();

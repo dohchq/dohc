@@ -841,6 +841,13 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
+        if let Some(write) = result.write.as_ref() {
+            crate::events::emit_automation_claimed(
+                &self.events,
+                &open.workspace_id,
+                &write.automation_claims,
+            );
+        }
         self.collections_changed(ctx, &open).await;
         let mut answer = resolve_answer_json(&result, false);
         // One frame carries the whole answer, and this one reports a mutation

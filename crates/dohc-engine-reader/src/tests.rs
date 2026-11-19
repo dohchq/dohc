@@ -601,7 +601,7 @@ fn drop_reaps_active_child() {
 fn timeouts_queue_replacement_and_shutdown() {
     let (_dir, c) = fixture("ok");
     let d = Deadlines {
-        request: Duration::from_secs(2),
+        request_floor: Duration::from_secs(2),
         queue: Duration::from_millis(200),
         ..Deadlines::default()
     };
@@ -629,6 +629,35 @@ fn timeouts_queue_replacement_and_shutdown() {
     finish(&mut reader);
     fail(run(active), Failure::Unavailable);
     fail(run(queued), Failure::Unavailable);
+}
+#[test]
+fn a_larger_note_gets_longer_to_answer_up_to_the_cap() {
+    let (_dir, c) = fixture("ok");
+    let d = Deadlines {
+        request_floor: Duration::from_millis(200),
+        ..Deadlines::default()
+    };
+    let mut reader = Reader::with_deadlines(Some(c), d);
+    assert!(run(reader.request(request("ok"))).is_ok());
+    fail(run(reader.request(request("slow"))), Failure::TimedOut);
+    let mut large = request("slow");
+    large.source = vec![b'a'; 64 * 1024];
+    assert!(run(reader.request(large.clone())).is_ok());
+    assert_eq!(
+        Deadlines::default().request(2 * 1024 * 1024 + wire::UPDATE),
+        Duration::from_secs(60)
+    );
+    finish(&mut reader);
+    let (_dir, c) = fixture("ok");
+    let capped = Deadlines {
+        request_cap: Duration::from_millis(300),
+        ..d
+    };
+    let mut reader = Reader::with_deadlines(Some(c), capped);
+    assert!(run(reader.request(request("ok"))).is_ok());
+    fail(run(reader.request(large)), Failure::TooLarge);
+    fail(run(reader.request(request("slow"))), Failure::TimedOut);
+    finish(&mut reader);
 }
 #[test]
 fn startup_timeout_idle_and_cancel() {

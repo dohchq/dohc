@@ -342,6 +342,10 @@ const LISTED_CAPABILITIES = {
         "Only the original workspace keeps refused edits. Shared profiles omit this owner write; main admits the workspace and finds the edits by path.",
     },
   ),
+  "share.live.document.recovery.list": capability(
+    "List the recovery packages kept on this computer that have no readable copy.",
+    { ipc: ["listOwnerLiveRecoveryPackages"] },
+  ),
   "share.list": capability("List shares for the connected account.", { ipc: ["listRelayShares"] }),
   "share.received.read": capability("Read a received share.", { ipc: ["getRelayReceivedShare"] }),
   "share.revoke": capability("Remove a share.", { ipc: ["revokeRelayShare"] }),

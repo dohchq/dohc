@@ -564,6 +564,18 @@ export const SaveOwnerLiveRecoveryCopyResult = z
   })
   .strict();
 export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecoveryCopyResult>;
+// Packages Save recovery copy kept on this computer with no readable copy in
+// the workspace. `path` is the note, or null when the package can't be read.
+export const ListOwnerLiveRecoveryPackagesResult = z
+  .object({
+    packages: z.array(
+      z.object({ path: SAFE_RELATIVE_PATH.nullable(), packagePath: SAFE_RELATIVE_PATH }).strict(),
+    ),
+  })
+  .strict();
+export type ListOwnerLiveRecoveryPackagesResult = z.infer<
+  typeof ListOwnerLiveRecoveryPackagesResult
+>;
 
 export const OwnerLiveDocument = z
   .object({
@@ -1569,6 +1581,7 @@ export const databaseImportOperations = {
 const ENGINE_STORE_REFUSALS = [
   "unsupported-fingerprint",
   "foreign-database",
+  "state-corrupt",
   "migration-failed",
   "migrated-by-newer-build",
 ] as const satisfies readonly EngineStoreRefusal[];
@@ -1961,6 +1974,8 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
       return "This workspace's data store is not in the format this version of dohc uses.";
     case "foreign-database":
       return "dohc cannot read this workspace's data store.";
+    case "state-corrupt":
+      return "This workspace's data store is damaged.";
     case "migration-failed":
       return "dohc could not update this workspace's data store to this version.";
     case "migrated-by-newer-build":
@@ -1968,14 +1983,15 @@ export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
   }
 }
 
-// What the refusal needs. A store from another format, or a file that is not
-// a dohc database, is rebuilt from the workspace files. A store this build
+// What the refusal needs. A store from another format, a file that is not a
+// dohc database, or a damaged one, is rebuilt from the workspace files. A store this build
 // could not migrate, or one a newer build migrated, is intact and waits for a
 // build that can open it.
 export function engineStoreRefusalRecovery(cause: EngineStoreRefusal): "rebuild" | "update" {
   switch (cause) {
     case "unsupported-fingerprint":
     case "foreign-database":
+    case "state-corrupt":
       return "rebuild";
     case "migration-failed":
     case "migrated-by-newer-build":
@@ -6859,6 +6875,9 @@ export const ChatDispatchStateForThreadPayload = z
     threadId: OPAQUE_ID.nullable(),
     // An agent's chat's earlier posts, where a reply can wait for the agent too.
     postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
+    // The conversation's other threads, when two devices started it before
+    // they synced. A run there is the conversation's too.
+    laneThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
   })
   .strict();
 export type ChatDispatchStateForThreadPayload = z.infer<typeof ChatDispatchStateForThreadPayload>;
@@ -6924,6 +6943,11 @@ export const ChatDispatchStateForThreadResult = z
     liveRunId: OPAQUE_ID.nullable(),
     // The message the live run answers, so its working line sits under it.
     liveTriggerMessageId: OPAQUE_ID.nullable(),
+    // The agent at work in the live run, so a group's chat can name it.
+    liveAgent: z
+      .object({ agentId: AgentId, name: z.string().min(1).max(1_000) })
+      .strict()
+      .optional(),
     pendingCount: z.number().int().nonnegative(),
     paused: z.boolean(),
     // The messages here and in the earlier posts asked for that wait for the

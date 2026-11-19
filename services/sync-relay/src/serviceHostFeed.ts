@@ -6,7 +6,7 @@ import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
 import { serverLogLine } from "./serverLogWords";
-import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
+import { MAX_RAW_ROWS_PER_SHARE_PAGE, scanFilteredLog } from "./shareReadQueries";
 import type { LogAuthorNameLookup } from "./relayLogInputs";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
@@ -399,7 +399,7 @@ export function createServiceHostFeed(
       const since = Math.max(requestedSince, epochLogFloor);
       const page = scanFilteredLog(
         storage,
-        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_LINK_PAGE },
+        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_SHARE_PAGE },
         (row) => {
           const decision = hostedRowDecision(scope, row);
           if (!decision.allowed) return null;

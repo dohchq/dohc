@@ -1,8 +1,12 @@
 import { randomBytes } from "node:crypto";
 import {
   chatMessageInterest,
+  isOwnAgentMessage,
+  phoneCanShow,
+  pushMessageAccess,
   readPushMessage,
   type ChatMessageReason,
+  type PushMessage,
 } from "../chatMessageInterest";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
@@ -12,8 +16,11 @@ export const PUSH_DELIVERY_LEASE_MS = 30_000;
 export const PUSH_DELIVERY_ATTEMPTS = 5;
 export const PUSH_RECIPIENT_PENDING_LIMIT = 100;
 export const PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE = 30;
+// One sender's phone alerts to one recipient.
+export const PUSH_SENDER_ATTEMPTS_PER_MINUTE = 6;
 const TABLE = "sync_relay_push_deliveries";
 const MARKER = "push-deliveries-v1";
+const NATIVE_MARKER = "push-native-deliveries-v1";
 const schema = {
   sync_relay_push_rate: `CREATE TABLE sync_relay_push_rate (
     account_user_id TEXT NOT NULL, minute INTEGER NOT NULL, attempts INTEGER NOT NULL,
@@ -47,17 +54,61 @@ const schema = {
     WHERE op_kind = 'chat.message.append' AND json_valid(payload_json)`,
 } as const;
 
+// Phone rows: no installation, `relay_seq` null while a run Notice waits, one key per message.
+const nativeSchema = {
+  ...schema,
+  [TABLE]: `CREATE TABLE sync_relay_push_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL, message_id TEXT NOT NULL, relay_seq INTEGER,
+    account_user_id TEXT NOT NULL, installation_id TEXT,
+    generation INTEGER NOT NULL, reason TEXT NOT NULL CHECK (reason IN ('mention','dm','reply','agent')),
+    state TEXT NOT NULL CHECK (state IN ('pending','sent','dropped')),
+    attempts INTEGER NOT NULL CHECK (attempts BETWEEN 0 AND 5),
+    created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+    available_at_ms INTEGER NOT NULL, last_attempt_at_ms INTEGER,
+    lease_token TEXT, lease_until_ms INTEGER,
+    sender_key TEXT NOT NULL DEFAULT '', notice_id TEXT,
+    UNIQUE (workspace_id, thread_id, message_id, generation)
+  ) STRICT`,
+  sync_relay_push_sender_rate: `CREATE TABLE sync_relay_push_sender_rate (
+    account_user_id TEXT NOT NULL, sender_key TEXT NOT NULL, minute INTEGER NOT NULL, attempts INTEGER NOT NULL,
+    PRIMARY KEY (account_user_id, sender_key, minute)
+  ) STRICT`,
+  sync_relay_push_device_names: `CREATE TABLE sync_relay_push_device_names (
+    generation INTEGER PRIMARY KEY REFERENCES sync_relay_push_subscriptions(generation) ON DELETE CASCADE,
+    account_name TEXT NOT NULL CHECK (length(account_name) <= 1024)
+  ) STRICT`,
+  sync_relay_push_arrivals: `CREATE TABLE sync_relay_push_arrivals (
+    workspace_id TEXT NOT NULL, thread_id TEXT NOT NULL, message_id TEXT NOT NULL,
+    relay_seq INTEGER NOT NULL, arrived_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id, message_id)
+  ) STRICT`,
+  idx_push_arrivals_time: `CREATE INDEX idx_push_arrivals_time ON sync_relay_push_arrivals(arrived_at_ms)`,
+} as const;
+const V1_COLUMNS = `delivery_id, workspace_id, thread_id, message_id, relay_seq, account_user_id,
+  installation_id, generation, reason, state, attempts, created_at_ms, expires_at_ms, available_at_ms,
+  last_attempt_at_ms, lease_token, lease_until_ms`;
+
+const normalize = (sql: string) => sql.trim().replace(/\s+/gu, " ");
+const marked = (db: SqliteDb, marker: string) =>
+  Boolean(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker));
+function assertSchema(db: SqliteDb, expected: Record<string, string>): void {
+  for (const [name, sql] of Object.entries(expected)) {
+    const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name);
+    if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql))
+      throw Error("push delivery schema is missing or damaged");
+  }
+}
+const mark = (db: SqliteDb, marker: string) =>
+  db
+    .prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(marker, Date.now());
+
 export function initializePushDeliveries(db: SqliteDb): void {
-  const normalize = (sql: string) => sql.trim().replace(/\s+/gu, " ");
-  const assert = () => {
-    for (const [name, sql] of Object.entries(schema)) {
-      const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name);
-      if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql))
-        throw Error("push delivery schema is missing or damaged");
-    }
-  };
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
-    assert();
+  if (marked(db, MARKER)) {
+    // A store that took phone deliveries is checked against that schema instead.
+    if (!marked(db, NATIVE_MARKER)) assertSchema(db, schema);
     return;
   }
   for (const name of Object.keys(schema)) {
@@ -65,11 +116,126 @@ export function initializePushDeliveries(db: SqliteDb): void {
       throw Error("unmarked push delivery schema already exists");
   }
   for (const sql of Object.values(schema)) db.exec(sql);
-  assert();
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(
-    MARKER,
-    Date.now(),
+  assertSchema(db, schema);
+  mark(db, MARKER);
+}
+
+/** Rebuilds the deliveries for phone alerts, after the phone bindings' schema. Queued rows are kept. */
+export function initializeNativePushDeliveries(db: SqliteDb): void {
+  if (!marked(db, NATIVE_MARKER)) {
+    const added = Object.keys(nativeSchema).filter((name) => !(name in schema));
+    for (const name of added) {
+      if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
+        throw Error("unmarked push delivery schema already exists");
+    }
+    db.exec(`CREATE TEMP TABLE push_deliveries_previous AS SELECT * FROM main.${TABLE};
+      DROP TABLE main.${TABLE};`);
+    db.exec(nativeSchema[TABLE]);
+    db.exec(nativeSchema.idx_push_deliveries_due);
+    db.exec(nativeSchema.idx_push_deliveries_recipient);
+    db.exec(`INSERT INTO main.${TABLE} (${V1_COLUMNS})
+        SELECT ${V1_COLUMNS} FROM temp.push_deliveries_previous;
+      DROP TABLE temp.push_deliveries_previous;`);
+    for (const name of added) db.exec(nativeSchema[name as keyof typeof nativeSchema]);
+    mark(db, NATIVE_MARKER);
+  }
+  assertSchema(db, nativeSchema);
+}
+
+const firstAppendSeq = (
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+  messageId: string,
+) =>
+  storage.db
+    .prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?
+    AND op_kind = 'chat.message.append' AND json_valid(payload_json)
+    AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
+    AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
+    .get(workspaceId, threadId, messageId)?.relay_seq;
+
+// Every visitor of one link counts as one sender.
+function senderKey(storage: StorageContext, message: PushMessage): string {
+  if (message.authorUserId !== null) return `user:${message.authorUserId}`;
+  const grant = storage.db
+    .prepare("SELECT grant_id FROM sync_relay_link_principals WHERE principal_id = ?")
+    .get(message.linkPrincipalId)?.grant_id;
+  return `link:${String(grant ?? message.linkPrincipalId)}`;
+}
+
+// A phone keeps only the alert for a thread's newest live pending message. A superseded one keeps
+// its key until cleanup, so a replay can't revive it. One still waiting for its message stays.
+function supersede(
+  storage: StorageContext,
+  row: { generation: number; workspaceId: string; threadId: string },
+  nowMs: number,
+): void {
+  const thread = [row.generation, row.workspaceId, row.threadId] as const;
+  storage.db
+    .prepare(`UPDATE ${TABLE} SET state = 'dropped' WHERE generation = ? AND workspace_id = ?
+      AND thread_id = ? AND state = 'pending' AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+      AND relay_seq < (SELECT max(relay_seq) FROM ${TABLE} WHERE generation = ? AND workspace_id = ?
+        AND thread_id = ? AND state = 'pending' AND expires_at_ms > ?)`)
+    .run(...thread, nowMs, ...thread, nowMs);
+}
+
+interface DeliveryRow {
+  workspaceId: string;
+  threadId: string;
+  messageId: string;
+  relaySeq: number | null;
+  userId: string;
+  installationId: string | null;
+  generation: number;
+  reason: ChatMessageReason;
+  senderKey: string;
+  noticeId: string | null;
+  expiresAtMs: number;
+}
+
+function insertDelivery(storage: StorageContext, row: DeliveryRow, nowMs: number): void {
+  const db = storage.db;
+  db.prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
+    AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`).run(
+    row.userId,
+    nowMs - PUSH_DELIVERY_EXPIRY_MS,
+    nowMs,
   );
+  const count = db
+    .prepare(
+      `SELECT count(*) AS n FROM ${TABLE} WHERE account_user_id = ? AND state = 'pending' AND expires_at_ms > ?`,
+    )
+    .get(row.userId, nowMs);
+  if (Number(count?.n) >= PUSH_RECIPIENT_PENDING_LIMIT) return;
+  const key = [row.workspaceId, row.threadId, row.messageId, row.generation] as const;
+  const deliveryId = randomBytes(16).toString("base64url");
+  const inserted = db
+    .prepare(`INSERT OR IGNORE INTO ${TABLE} (delivery_id, workspace_id, thread_id, message_id, relay_seq,
+      account_user_id, installation_id, generation, reason, state, attempts, created_at_ms, expires_at_ms,
+      available_at_ms, sender_key, notice_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)`)
+    .run(
+      deliveryId,
+      ...key.slice(0, 3),
+      row.relaySeq,
+      row.userId,
+      row.installationId,
+      row.generation,
+      row.reason,
+      nowMs,
+      row.expiresAtMs,
+      nowMs,
+      row.senderKey,
+      row.noticeId,
+    ).changes;
+  if (!inserted) {
+    // The message and its run Notice share one delivery; the later one only names the Notice.
+    if (row.noticeId !== null)
+      db.prepare(`UPDATE ${TABLE} SET notice_id = ? WHERE workspace_id = ? AND thread_id = ?
+        AND message_id = ? AND generation = ? AND notice_id IS NULL`).run(row.noticeId, ...key);
+    return;
+  }
+  if (row.installationId === null && row.relaySeq !== null) supersede(storage, row, nowMs);
 }
 
 /** Runs inside the message append transaction. No network work may enter here. */
@@ -78,84 +244,192 @@ export function recordPushDeliveries(
   relaySeq: number,
   nowMs = Date.now(),
 ): void {
-  if (!storage.options.pushConfigured) return;
+  const { pushConfigured, apnsConfigured } = storage.options;
+  if (!pushConfigured && !apnsConfigured) return;
   const message = readPushMessage(storage, relaySeq);
   if (!message) return;
-  const first = storage.db
-    .prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?
-    AND op_kind = 'chat.message.append' AND json_valid(payload_json)
-    AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
-    AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
-    .get(message.workspaceId, message.threadId, message.messageId);
-  if (Number(first?.relay_seq) !== relaySeq) return;
+  const { workspaceId, threadId, messageId } = message;
+  if (Number(firstAppendSeq(storage, workspaceId, threadId, messageId)) !== relaySeq) return;
+  if (apnsConfigured) {
+    storage.db
+      .prepare("DELETE FROM sync_relay_push_arrivals WHERE arrived_at_ms <= ?")
+      .run(nowMs - PUSH_DELIVERY_EXPIRY_MS);
+    storage.db
+      .prepare(`INSERT OR IGNORE INTO sync_relay_push_arrivals
+        (workspace_id, thread_id, message_id, relay_seq, arrived_at_ms) VALUES (?, ?, ?, ?, ?)`)
+      .run(workspaceId, threadId, messageId, relaySeq, nowMs);
+    // A run Notice that came first waited for this reply; it alerts only while live and only if the
+    // reply is its agent's. Otherwise it gives way, so the reply's own alert can still queue.
+    for (const row of storage.db
+      .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms, state FROM ${TABLE}
+        WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL`)
+      .all(workspaceId, threadId, messageId)) {
+      const userId = String(row.account_user_id);
+      const deliveryId = String(row.delivery_id);
+      if (
+        row.state !== "pending" ||
+        Number(row.expires_at_ms) <= nowMs ||
+        !isOwnAgentMessage(message, userId) ||
+        !pushMessageAccess(storage, message, userId) ||
+        !phoneCanShow(storage, userId, workspaceId, threadId)
+      ) {
+        storage.db.prepare(`DELETE FROM ${TABLE} WHERE delivery_id = ?`).run(deliveryId);
+        continue;
+      }
+      storage.db
+        .prepare(`UPDATE ${TABLE} SET relay_seq = ?, expires_at_ms = ? WHERE delivery_id = ?`)
+        .run(relaySeq, nowMs + PUSH_DELIVERY_EXPIRY_MS, deliveryId);
+      supersede(storage, { generation: Number(row.generation), workspaceId, threadId }, nowMs);
+    }
+  }
+  // Browsers of the owner and of share grantees; phones of the owner alone.
   const recipients = storage.db
-    .prepare(`SELECT p.installation_id, p.account_user_id, p.generation, n.account_name
-    FROM sync_relay_push_subscriptions p LEFT JOIN sync_relay_push_installation_names n USING(installation_id)
-    WHERE p.kind = 'web' AND p.expires_at_ms > ? AND p.account_user_id IN (
+    .prepare(`SELECT p.kind, p.installation_id, p.account_user_id, p.generation,
+      coalesce(n.account_name, d.account_name) AS account_name
+    FROM sync_relay_push_subscriptions p
+    LEFT JOIN sync_relay_push_installation_names n ON n.installation_id = p.installation_id
+    LEFT JOIN sync_relay_push_device_names d ON d.generation = p.generation
+    WHERE p.expires_at_ms > ? AND ((? AND p.kind = 'web' AND p.account_user_id IN (
       SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ? UNION
       SELECT g.principal_user_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id)
-      WHERE s.workspace_id = ? AND g.status = 'active' AND g.principal_kind = 'user')`)
-    .all(nowMs, message.workspaceId, message.workspaceId);
+      WHERE s.workspace_id = ? AND g.status = 'active' AND g.principal_kind = 'user'))
+    OR (? AND p.kind = 'apns' AND p.account_user_id =
+      (SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?)))`)
+    .all(
+      nowMs,
+      pushConfigured ? 1 : 0,
+      workspaceId,
+      workspaceId,
+      apnsConfigured ? 1 : 0,
+      workspaceId,
+    );
   const interests = new Map<string, ChatMessageReason | null>();
+  const shown = new Map<string, boolean>();
+  const sender = senderKey(storage, message);
   for (const recipient of recipients) {
     const userId = String(recipient.account_user_id);
-    if (!interests.has(userId))
+    const native = recipient.kind === "apns";
+    // Phones and browsers store their own account name, so neither decides the other's mention.
+    const interestKey = `${String(recipient.kind)}\n${userId}`;
+    if (!interests.has(interestKey))
       interests.set(
-        userId,
+        interestKey,
         chatMessageInterest(storage, message, {
           userId,
           accountName: String(recipient.account_name ?? ""),
         }),
       );
-    const reason = interests.get(userId);
-    if (!reason) continue;
-    storage.db
-      .prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
-      AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
-      .run(userId, nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
-    const count = storage.db
-      .prepare(
-        `SELECT count(*) AS n FROM ${TABLE} WHERE account_user_id = ? AND state = 'pending' AND expires_at_ms > ?`,
-      )
-      .get(userId, nowMs);
-    if (Number(count?.n) >= PUSH_RECIPIENT_PENDING_LIMIT) continue;
-    storage.db
-      .prepare(`INSERT OR IGNORE INTO ${TABLE} (delivery_id, workspace_id, thread_id, message_id, relay_seq,
-      account_user_id, installation_id, generation, reason, state, attempts, created_at_ms, expires_at_ms, available_at_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-      .run(
-        randomBytes(16).toString("base64url"),
-        message.workspaceId,
-        message.threadId,
-        message.messageId,
+    const reason = interests.get(interestKey);
+    // Browsers alert on the reasons they always have.
+    if (!reason || (!native && reason === "agent")) continue;
+    if (native && !shown.has(userId))
+      shown.set(userId, phoneCanShow(storage, userId, workspaceId, threadId));
+    if (native && !shown.get(userId)) continue;
+    insertDelivery(
+      storage,
+      {
+        workspaceId,
+        threadId,
+        messageId,
         relaySeq,
         userId,
-        String(recipient.installation_id),
-        Number(recipient.generation),
+        installationId: native ? null : String(recipient.installation_id),
+        generation: Number(recipient.generation),
         reason,
-        nowMs,
-        nowMs + PUSH_DELIVERY_EXPIRY_MS,
-        nowMs,
-      );
+        senderKey: sender,
+        noticeId: null,
+        expiresAtMs: nowMs + PUSH_DELIVERY_EXPIRY_MS,
+      },
+      nowMs,
+    );
   }
+}
+
+/** In the Notice transaction: the owner's agent's fresh reply alerts, or one not yet appended is awaited. */
+export function recordNoticePushDeliveries(
+  storage: StorageContext,
+  input: {
+    userId: string;
+    workspaceId: string;
+    threadId: string;
+    messageId: string;
+    noticeId: string;
+    nowMs: number;
+  },
+): void {
+  const { userId, workspaceId, threadId, messageId, nowMs } = input;
+  if (!storage.options.apnsConfigured || !phoneCanShow(storage, userId, workspaceId, threadId))
+    return;
+  const bindings = storage.db
+    .prepare(`SELECT generation FROM sync_relay_push_subscriptions
+      WHERE kind = 'apns' AND account_user_id = ? AND expires_at_ms > ?`)
+    .all(userId, nowMs);
+  if (!bindings.length) return;
+  const arrival = storage.db
+    .prepare(`SELECT relay_seq, arrived_at_ms FROM sync_relay_push_arrivals
+      WHERE workspace_id = ? AND thread_id = ? AND message_id = ?`)
+    .get(workspaceId, threadId, messageId);
+  let relaySeq: number | null = null;
+  let expiresAtMs = nowMs + PUSH_DELIVERY_EXPIRY_MS;
+  if (arrival) {
+    expiresAtMs = Number(arrival.arrived_at_ms) + PUSH_DELIVERY_EXPIRY_MS;
+    const message = readPushMessage(storage, Number(arrival.relay_seq));
+    if (
+      expiresAtMs <= nowMs ||
+      !message ||
+      !isOwnAgentMessage(message, userId) ||
+      !pushMessageAccess(storage, message, userId)
+    )
+      return;
+    relaySeq = message.relaySeq;
+  } else if (firstAppendSeq(storage, workspaceId, threadId, messageId) !== undefined) {
+    // Appended before arrivals were kept, or since forgotten: too old to alert.
+    return;
+  }
+  for (const binding of bindings)
+    insertDelivery(
+      storage,
+      {
+        workspaceId,
+        threadId,
+        messageId,
+        relaySeq,
+        userId,
+        installationId: null,
+        generation: Number(binding.generation),
+        reason: "agent",
+        senderKey: `user:${userId}`,
+        noticeId: input.noticeId,
+        expiresAtMs,
+      },
+      nowMs,
+    );
 }
 
 export interface PushDelivery {
   deliveryId: string;
   relaySeq: number;
   userId: string;
-  installationId: string;
+  // Null for a phone's binding, which only its generation names.
+  installationId: string | null;
   generation: number;
   reason: ChatMessageReason;
+  noticeId: string | null;
   attempts: number;
   expiresAtMs: number;
   leaseToken: string;
 }
 
-export function claimPushDelivery(storage: StorageContext, nowMs: number): PushDelivery | null {
+/** Leases one due delivery per recipient, longest-waiting first; `native: false` holds phones back. */
+export function claimPushDelivery(
+  storage: StorageContext,
+  nowMs: number,
+  options: { native?: boolean } = {},
+): PushDelivery | null {
   return storage.quietTx(() => {
     const minute = Math.floor(nowMs / 60_000);
     storage.db.prepare("DELETE FROM sync_relay_push_rate WHERE minute < ?").run(minute - 1);
+    storage.db.prepare("DELETE FROM sync_relay_push_sender_rate WHERE minute < ?").run(minute - 1);
     storage.db
       .prepare(
         `DELETE FROM ${TABLE} WHERE expires_at_ms <= ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
@@ -166,16 +440,38 @@ export function claimPushDelivery(storage: StorageContext, nowMs: number): PushD
       WHERE state = 'pending' AND (expires_at_ms <= ? OR attempts >= ?) AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
       .run(nowMs, PUSH_DELIVERY_ATTEMPTS, nowMs);
     const row = storage.db
-      .prepare(`SELECT d.* FROM ${TABLE} d WHERE state = 'pending' AND available_at_ms <= ?
-      AND expires_at_ms > ? AND attempts < ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+      .prepare(`SELECT d.* FROM ${TABLE} d WHERE state = 'pending' AND relay_seq IS NOT NULL
+      AND available_at_ms <= ? AND expires_at_ms > ? AND attempts < ?
+      AND (lease_until_ms IS NULL OR lease_until_ms <= ?) AND (? OR installation_id IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM ${TABLE} o WHERE o.account_user_id = d.account_user_id
+        AND o.state = 'pending' AND o.lease_until_ms > ?)
       AND coalesce((SELECT attempts FROM sync_relay_push_rate r WHERE r.account_user_id = d.account_user_id AND r.minute = ?), 0) < ?
-      ORDER BY created_at_ms, rowid LIMIT 1`)
-      .get(nowMs, nowMs, PUSH_DELIVERY_ATTEMPTS, nowMs, minute, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE);
+      AND (installation_id IS NOT NULL OR coalesce((SELECT attempts FROM sync_relay_push_sender_rate s
+        WHERE s.account_user_id = d.account_user_id AND s.sender_key = d.sender_key AND s.minute = ?), 0) < ?)
+      ORDER BY coalesce((SELECT max(o.last_attempt_at_ms) FROM ${TABLE} o WHERE o.account_user_id = d.account_user_id), 0),
+        created_at_ms, rowid LIMIT 1`)
+      .get(
+        nowMs,
+        nowMs,
+        PUSH_DELIVERY_ATTEMPTS,
+        nowMs,
+        options.native === false ? 0 : 1,
+        nowMs,
+        minute,
+        PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE,
+        minute,
+        PUSH_SENDER_ATTEMPTS_PER_MINUTE,
+      );
     if (!row) return null;
     storage.db
       .prepare(`INSERT INTO sync_relay_push_rate (account_user_id, minute, attempts) VALUES (?, ?, 1)
       ON CONFLICT(account_user_id, minute) DO UPDATE SET attempts = attempts + 1`)
       .run(String(row.account_user_id), minute);
+    if (row.installation_id === null)
+      storage.db
+        .prepare(`INSERT INTO sync_relay_push_sender_rate (account_user_id, sender_key, minute, attempts)
+        VALUES (?, ?, ?, 1) ON CONFLICT(account_user_id, sender_key, minute) DO UPDATE SET attempts = attempts + 1`)
+        .run(String(row.account_user_id), String(row.sender_key), minute);
     const leaseToken = randomBytes(16).toString("base64url");
     storage.db
       .prepare(
@@ -186,9 +482,10 @@ export function claimPushDelivery(storage: StorageContext, nowMs: number): PushD
       deliveryId: String(row.delivery_id),
       relaySeq: Number(row.relay_seq),
       userId: String(row.account_user_id),
-      installationId: String(row.installation_id),
+      installationId: row.installation_id === null ? null : String(row.installation_id),
       generation: Number(row.generation),
       reason: row.reason as ChatMessageReason,
+      noticeId: row.notice_id === null ? null : String(row.notice_id),
       attempts: Number(row.attempts) + 1,
       expiresAtMs: Number(row.expires_at_ms),
       leaseToken,
@@ -219,22 +516,38 @@ export function finishPushDelivery(
   );
 }
 
-/** Includes leases and rate limits so an unavailable row cannot cause a busy loop. */
-export function nextPushDeliveryAt(storage: StorageContext, nowMs: number): number | null {
+/** Counts leases, busy recipients and rate limits so nothing busy-loops; phones wait for `nativeFromMs`. */
+export function nextPushDeliveryAt(
+  storage: StorageContext,
+  nowMs: number,
+  nativeFromMs = 0,
+): number | null {
   const minute = Math.floor(nowMs / 60_000);
+  const nextMinute = (minute + 1) * 60_000;
   const row = storage.db
     .prepare(`SELECT min(
     CASE WHEN state <> 'pending' THEN expires_at_ms + ?
+    WHEN relay_seq IS NULL THEN expires_at_ms
     ELSE max(coalesce(lease_until_ms, 0), min(expires_at_ms, max(available_at_ms,
+      CASE WHEN installation_id IS NULL THEN ? ELSE 0 END,
+      coalesce((SELECT max(o.lease_until_ms) FROM ${TABLE} o WHERE o.account_user_id = d.account_user_id
+        AND o.state = 'pending' AND o.lease_until_ms > ?), 0),
       CASE WHEN coalesce((SELECT attempts FROM sync_relay_push_rate r
-        WHERE r.account_user_id = d.account_user_id AND r.minute = ?), 0) >= ?
+        WHERE r.account_user_id = d.account_user_id AND r.minute = ?), 0) >= ? THEN ? ELSE 0 END,
+      CASE WHEN installation_id IS NULL AND coalesce((SELECT attempts FROM sync_relay_push_sender_rate s
+        WHERE s.account_user_id = d.account_user_id AND s.sender_key = d.sender_key AND s.minute = ?), 0) >= ?
         THEN ? ELSE 0 END))) END) AS next_at
     FROM ${TABLE} d`)
     .get(
       PUSH_DELIVERY_EXPIRY_MS,
+      nativeFromMs,
+      nowMs,
       minute,
       PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE,
-      (minute + 1) * 60_000,
+      nextMinute,
+      minute,
+      PUSH_SENDER_ATTEMPTS_PER_MINUTE,
+      nextMinute,
     );
   return row?.next_at == null ? null : Math.max(nowMs, Number(row.next_at));
 }

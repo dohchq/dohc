@@ -24,6 +24,7 @@ export {
   isYdocObjectChangedRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
+  YdocUpdateNotRecordedError,
   DAEMON_ERROR_CODES,
   type CompletedDaemonBlob,
   type DaemonErrorCode,
