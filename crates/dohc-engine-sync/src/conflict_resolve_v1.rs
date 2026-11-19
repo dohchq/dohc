@@ -2927,9 +2927,6 @@ fn close_imported_conflict(
     Ok(())
 }
 
-/// This machine's own open reviews of the two heads the decision settled. Each
-/// machine names an editor change with its own moment, so they match by
-/// object and content, in either order.
 fn local_reviews_of_same_heads(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
