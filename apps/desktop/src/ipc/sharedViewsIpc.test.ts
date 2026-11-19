@@ -749,13 +749,22 @@ describe("registered received-view handlers", () => {
       "create",
       "register",
       "pin",
-      "surfaces",
       "identity",
+      "pin",
+      "surfaces",
       "reconcile",
       "open",
       "notify",
     ]);
-    expect(h.setView).toHaveBeenCalledWith(
+    expect(h.setView).toHaveBeenNthCalledWith(
+      1,
+      expect.any(String),
+      expect.objectContaining({
+        grantedSelector: { ...info.selector, access: "view" },
+        relayUrl: credentials.relayUrl,
+      }),
+    );
+    expect(h.setView).toHaveBeenLastCalledWith(
       expect.any(String),
       expect.objectContaining({ grantedSelector: info.selector, relayUrl: credentials.relayUrl }),
     );
@@ -824,15 +833,113 @@ describe("registered received-view handlers", () => {
     expect(h.open).not.toHaveBeenCalled();
   });
 
-  it("allows the first refresh when edit identity recording fails", async () => {
-    const h = await harness();
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    h.recordIdentity.mockRejectedValue(new Error("identity unavailable"));
-    await expect(
-      h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
-    ).resolves.toMatchObject({ workspace: { shareView: { access: "edit" } } });
-    expect(h.reconcile).toHaveBeenCalledOnce();
-    expect(h.open).toHaveBeenCalledOnce();
+  describe("opening a share for the first time", () => {
+    const view = { paths: ["docs"], versionId: null, access: "view" as const };
+    const edit = { paths: ["docs"], versionId: null, access: "edit" as const };
+    type Opened = { workspace: { workspaceId: string; shareView?: { access?: string } } };
+    async function opening(selector: NonNullable<ShareViewInfo["selector"]>) {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue({ ...info, selector });
+      const opened = () =>
+        [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")?.shareView;
+      const pinnedAtPull: unknown[] = [];
+      h.reconcile.mockImplementation(async () => {
+        pinnedAtPull.push(opened()?.grantedSelector);
+        return { kind: "refresh", outcome };
+      });
+      const open = () =>
+        h.invoke(
+          sharedViewAccessOperations.openSharedView.channel,
+          h.openPayload,
+        ) as Promise<Opened>;
+      return { h, opened, pinnedAtPull, open };
+    }
+
+    it("records the identity of a share at Edit while the copy is at View, and pins Edit before the first pull", async () => {
+      const { h, opened, pinnedAtPull, open } = await opening(edit);
+      const pinnedAtIdentity: unknown[] = [];
+      h.recordIdentity.mockImplementation(async () => {
+        pinnedAtIdentity.push(opened()?.grantedSelector);
+        expect(() => requireShareViewProposalScope(opened())).toThrow();
+        return { identity: "recorded" };
+      });
+      await expect(open()).resolves.toMatchObject({ workspace: { shareView: { access: "edit" } } });
+      expect(pinnedAtIdentity).toEqual([view]);
+      expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({ grantedSelector: edit });
+      expect(pinnedAtPull).toEqual([edit]);
+      expect(opened()?.grantedSelector).toEqual(edit);
+      expect(() => requireShareViewProposalScope(opened())).not.toThrow();
+    });
+
+    it.each([
+      ["cannot be recorded", () => Promise.reject(new Error("identity unavailable"))],
+      ["is answered as not required", async () => ({ identity: "not-required" as const })],
+    ])(
+      "opens a share at Edit at View when the identity %s, and the refresh that records it turns editing on",
+      async (_name, answer) => {
+        vi.spyOn(console, "error").mockImplementation(() => undefined);
+        const { h, opened, pinnedAtPull, open } = await opening(edit);
+        h.recordIdentity.mockImplementation(answer);
+        await expect(open()).resolves.toMatchObject({
+          workspace: { shareView: { access: "view" } },
+        });
+        expect(opened()).toMatchObject({
+          grantedSelector: view,
+          relayUrl: credentials.relayUrl,
+          recipientUserId: credentials.userId,
+        });
+        expect(pinnedAtPull).toEqual([view]);
+        expect(h.recordIdentity).toHaveBeenCalledExactlyOnceWith({ grantedSelector: edit });
+        expect(h.open).toHaveBeenCalledOnce();
+        expect(() => requireShareViewProposalScope(opened())).toThrow();
+
+        h.workspace.shareView = { ...opened()! };
+        const refresh = () =>
+          h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+            workspaceId: "existing",
+            trigger: "manual",
+          });
+        h.reconcile.mockImplementation(async () => ({ kind: "refresh", outcome }));
+        h.recordIdentity.mockRejectedValueOnce(new Error("identity unavailable"));
+        await expect(refresh()).resolves.toEqual({
+          ok: false,
+          errorKind: "transient",
+          changedPaths: outcome.changedPaths,
+          errorMessage:
+            "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
+        });
+        expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+        expect(() => requireShareViewProposalScope(h.workspace.shareView)).toThrow();
+
+        h.recordIdentity.mockResolvedValue({ identity: "recorded" });
+        await expect(refresh()).resolves.toMatchObject({ ok: true });
+        expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
+        expect(() => requireShareViewProposalScope(h.workspace.shareView)).not.toThrow();
+      },
+    );
+
+    it.each([
+      ["View", view],
+      ["Comment", { ...view, access: "comment" as const }],
+    ])("opens a share at %s as before, with no identity", async (_name, selector) => {
+      const { h, opened, pinnedAtPull, open } = await opening(selector);
+      await expect(open()).resolves.toMatchObject({
+        workspace: { shareView: { access: selector.access } },
+      });
+      expect(h.recordIdentity).not.toHaveBeenCalled();
+      expect(h.setView).toHaveBeenCalledOnce();
+      expect(opened()?.grantedSelector).toEqual(selector);
+      expect(pinnedAtPull).toEqual([selector]);
+      expect(h.steps.filter((step) => step !== "preflight")).toEqual([
+        "mkdir",
+        "create",
+        "register",
+        "pin",
+        "surfaces",
+        "open",
+        "notify",
+      ]);
+    });
   });
 
   it("holds refresh behind daemon startup and capture readiness before relay identity or reconciliation", async () => {
@@ -1094,7 +1201,8 @@ describe("registered received-view handlers", () => {
       h.recordIdentity.mockRejectedValueOnce(new Error("store busy"));
       await expect(refresh(h)).resolves.toMatchObject({
         ok: false,
-        errorMessage: "dohc could not turn on editing for this share.",
+        errorMessage:
+          "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
         collisionRecordQuarantined: true,
       });
     });
@@ -1180,7 +1288,8 @@ describe("registered received-view handlers", () => {
           ok: false,
           errorKind: "transient",
           changedPaths: outcome.changedPaths,
-          errorMessage: "dohc could not turn on editing for this share.",
+          errorMessage:
+            "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
         });
         expect(h.workspace.shareView).toMatchObject({
           grantedSelector: view,
