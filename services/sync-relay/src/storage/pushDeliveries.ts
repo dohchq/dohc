@@ -541,10 +541,7 @@ export function pausePushDelivery(
   );
 }
 
-/**
- * Counts leases, busy recipients and rate limits so nothing busy-loops; phones wait for `nativeFromMs`.
- * A delivery still waiting for its message is due only to expire.
- */
+/** Counts leases, busy recipients and rate limits so nothing busy-loops; phones wait for `nativeFromMs`. */
 export function nextPushDeliveryAt(
   storage: StorageContext,
   nowMs: number,

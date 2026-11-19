@@ -171,22 +171,18 @@ export function readLivePushDevice(
   return row ? rowFrom(row) : null;
 }
 
-/**
- * Ends the phone binding Apple called unregistered, only while it is still
- * that generation and was last registered no later than Apple says the
- * token stopped working.
- */
+/** Ends a phone binding Apple called unregistered, unless it was registered again after Apple's time. */
 export function removeUnregisteredPushDevice(
   storage: StorageContext,
   generation: number,
-  unregisteredAtMs: number | null,
+  unregisteredAtMs: number,
 ): void {
   storage.tx(() =>
     endBindings(
       storage,
       "kind = 'apns' AND generation = ? AND updated_at_ms <= ?",
       generation,
-      unregisteredAtMs ?? Number.MAX_SAFE_INTEGER,
+      unregisteredAtMs,
     ),
   );
 }

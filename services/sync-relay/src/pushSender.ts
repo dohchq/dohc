@@ -263,9 +263,8 @@ export const noPushAlertLink: ResolvePushAlertLink = () => null;
 
 /** Who sent it and where: "Ana mentioned you in Trip". A sender's chosen name never reads as an account. */
 function alertLabel(
-  message: PushMessage,
+  { message, access }: { message: PushMessage; access: { place: string } },
   reason: ChatMessageReason,
-  place: string,
   accountName: string | null,
   markLinkVisitor: boolean,
 ): string {
@@ -282,10 +281,10 @@ function alertLabel(
   // A push names no share, so its words keep no file link.
   return withholdChatFileLinks(
     reason === "mention"
-      ? `${sender} mentioned you in ${place}`
+      ? `${sender} mentioned you in ${access.place}`
       : reason === "dm"
         ? `${sender} sent you a message`
-        : `${sender} replied in ${place}`,
+        : `${sender} replied in ${access.place}`,
     () => false,
   );
 }
@@ -409,9 +408,7 @@ export function createPushSender(options: {
       },
       apnsPayload({
         // A chosen name or chat name can hold a URL too.
-        title: apnsText(
-          alertLabel(message, delivery.reason, fresh.access.place, accountName, true),
-        ),
+        title: apnsText(alertLabel(fresh, delivery.reason, accountName, true)),
         body: apnsText(message.body),
         threadKey,
         data: {
@@ -432,14 +429,16 @@ export function createPushSender(options: {
       client.forgetToken();
       return pausePushDelivery(storage, delivery, pausedUntilMs);
     }
-    if (response.status === 410)
-      removeUnregisteredPushDevice(storage, binding.generation, response.timestampMs);
+    // Only a 410 that says when the token stopped working ends a binding; any other is a failed attempt.
+    const { status, timestampMs } = response;
+    const gone = status === 410 && timestampMs !== null;
+    if (gone) removeUnregisteredPushDevice(storage, binding.generation, timestampMs);
     finishPushDelivery(
       storage,
       delivery,
-      response.status === 200
+      status === 200
         ? "sent"
-        : response.status === 429 || response.status >= 500
+        : status === 429 || status >= 500 || (status === 410 && !gone)
           ? "retry"
           : "dropped",
       now(),
@@ -451,8 +450,7 @@ export function createPushSender(options: {
     const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     try {
       if (delivery.installationId === null) {
-        if (apns) await attemptNative(delivery, apns, controller.signal);
-        else drop(delivery);
+        await (apns ? attemptNative(delivery, apns, controller.signal) : drop(delivery));
         return true;
       }
       const before = storage.readTx(() => current(delivery));
@@ -487,13 +485,7 @@ export function createPushSender(options: {
         finishPushDelivery(storage, delivery, "dropped", now());
         return true;
       }
-      const label = alertLabel(
-        fresh.message,
-        delivery.reason,
-        fresh.access.place,
-        accountName,
-        false,
-      );
+      const label = alertLabel(fresh, delivery.reason, accountName, false);
       const prepared = preparePushRequest(
         config,
         fresh.subscription,

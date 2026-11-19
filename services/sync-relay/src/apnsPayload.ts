@@ -14,19 +14,28 @@ const BARE_URL =
 const BARE_LINK_PATH = /(?<![\w/])\/l\/[A-Za-z0-9_-]+\S*/gu;
 
 const urlHost = (url: string) => {
-  try {
-    const { hostname } = new URL(url);
-    return domainToUnicode(hostname) || hostname || "a link";
-  } catch {
-    return "a link";
-  }
+  const host = URL.parse(url)?.hostname ?? "";
+  return domainToUnicode(host) || host || "a link";
 };
 
+/** A Markdown link or image keeps its words; its whole target goes, to the closing parenthesis or the line's end. */
+function withholdTargets(text: string): string {
+  const opener = /!?\[([^[\]\r\n]*)\]\(/gu;
+  let kept = "";
+  let at = 0;
+  for (let found = opener.exec(text); found; found = opener.exec(text)) {
+    let end = opener.lastIndex;
+    for (let depth = 1; depth > 0 && end < text.length && !"\r\n".includes(text[end]!); end++)
+      depth += text[end] === "(" ? 1 : text[end] === ")" ? -1 : 0;
+    kept += text.slice(at, found.index) + found[1];
+    at = opener.lastIndex = end;
+  }
+  return kept + text.slice(at);
+}
+
 /**
- * Text as a lock screen may show it: plain text, a file link as its file's
- * name unless that file is hidden, no work-link reference, no Markdown
- * target, and every URL reduced to its host. Reads at most the first 4096
- * code points, more than an alert can show.
+ * Text as a lock screen may show it: a file link as its file's name unless hidden, no work-link
+ * reference or Markdown target, and every URL reduced to its host. Reads at most 4096 code points.
  */
 export function apnsText(message: string): string {
   // A lone surrogate becomes U+FFFD, which keeps every index the link scan returns.
@@ -46,11 +55,8 @@ export function apnsText(message: string): string {
     at = link.end;
   }
   text += body.slice(at);
-  const cleaned = text
-    // A malformed link the scan refused keeps nothing after its opener.
-    .replace(/@\[[^\]\r\n]*\]?/gu, "a file")
-    // Markdown images and links keep their words, never their targets, even one with parentheses.
-    .replace(/!?\[([^[\]\r\n]*)\]\((?:[^()[\]\s]|\([^()[\]\s]*\))*\)/gu, "$1")
+  // A malformed link the scan refused keeps nothing after its opener.
+  const cleaned = withholdTargets(text.replace(/@\[[^\]\r\n]*\]?/gu, "a file"))
     .replace(SCHEME_URL, urlHost)
     .replace(BARE_URL, (_match, host: string) => host)
     .replace(BARE_LINK_PATH, "a link")
@@ -63,12 +69,9 @@ export function apnsText(message: string): string {
   return points.length > APNS_PAYLOAD_MAX_BYTES ? `${cleaned}…` : cleaned;
 }
 
-const byteLength = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
-
 /**
- * The APNs JSON body: the alert and the identifiers the phone needs to open
- * the message. The body text is cut by code point until the whole JSON,
- * escaped, fits Apple's 4096 bytes.
+ * The APNs JSON body: the alert and the identifiers the phone needs to open the message. The body
+ * is cut by code point until the whole JSON, escaped, fits Apple's 4096 bytes.
  */
 export function apnsPayload(input: {
   title: string;
@@ -76,25 +79,22 @@ export function apnsPayload(input: {
   threadKey: string;
   data: Record<string, string | number>;
 }): string {
-  const build = (body: string) => ({
-    aps: { alert: { title: input.title, body }, sound: "default", "thread-id": input.threadKey },
-    ...input.data,
-  });
-  // Every code point takes at least one byte, so no more than the limit can fit.
-  const all = [...input.body];
-  const points = all.slice(0, APNS_PAYLOAD_MAX_BYTES);
-  const cut = (count: number) =>
-    count === all.length ? input.body : `${points.slice(0, count).join("")}…`;
-  if (byteLength(build(cut(points.length))) <= APNS_PAYLOAD_MAX_BYTES)
-    return JSON.stringify(build(cut(points.length)));
-  let low = 0;
-  let high = points.length - 1;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (byteLength(build(cut(middle))) <= APNS_PAYLOAD_MAX_BYTES) low = middle;
-    else high = middle - 1;
+  const build = (body: string) =>
+    JSON.stringify({
+      aps: { alert: { title: input.title, body }, sound: "default", "thread-id": input.threadKey },
+      ...input.data,
+    });
+  const whole = build(input.body);
+  if (Buffer.byteLength(whole) <= APNS_PAYLOAD_MAX_BYTES) return whole;
+  // JSON escapes each code point on its own, so their escaped sizes add up.
+  let room = APNS_PAYLOAD_MAX_BYTES - Buffer.byteLength(build("…"));
+  let body = "";
+  for (const point of input.body) {
+    room -= Buffer.byteLength(JSON.stringify(point)) - 2;
+    if (room < 0) break;
+    body += point;
   }
-  const payload = JSON.stringify(build(cut(low)));
+  const payload = build(`${body}…`);
   if (Buffer.byteLength(payload) > APNS_PAYLOAD_MAX_BYTES)
     throw new RangeError("APNs payload too large");
   return payload;

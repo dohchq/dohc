@@ -10,36 +10,13 @@ const APPLE_ORIGINS: Record<ApnsEnvironment, string> = {
 // Apple refuses a provider token older than an hour and one replaced sooner than every 20 minutes.
 const TOKEN_REUSE_MS = 40 * 60_000;
 
-export interface ApnsResponse {
-  status: number;
-  reason: string | null;
-  // When Apple found the token unregistered, on a 410.
-  timestampMs: number | null;
-}
-
-/** A connection and provider token, ready: `send` writes the stream before it returns. */
-export interface ApnsStream {
-  send(
-    deviceToken: string,
-    headers: Record<string, string>,
-    body: string,
-    signal: AbortSignal,
-  ): Promise<ApnsResponse>;
-}
-
-export interface ApnsClient {
-  readonly config: ApnsConfig;
-  open(environment: ApnsEnvironment, signal: AbortSignal): Promise<ApnsStream>;
-  /** Forgets the provider token, after Apple refused it. */
-  forgetToken(): void;
-  close(): Promise<void>;
-}
+export type ApnsClient = ReturnType<typeof createApnsClient>;
 
 /** One HTTP/2 connection per environment to Apple's fixed hosts. `origins` exists for tests. */
 export function createApnsClient(
   config: ApnsConfig,
   options: { now?: () => number; origins?: Partial<Record<ApnsEnvironment, string>> } = {},
-): ApnsClient {
+) {
   const now = options.now ?? Date.now;
   const sessions = new Map<
     ApnsEnvironment,
@@ -105,13 +82,19 @@ export function createApnsClient(
 
   return {
     config,
-    async open(environment, signal) {
+    async open(environment: ApnsEnvironment, signal: AbortSignal) {
       if (closed) throw Error("APNs client closed");
       const authorization = `bearer ${providerToken()}`;
       const connection = await session(environment, signal);
       signal.throwIfAborted();
+      // `send` writes the stream before it returns.
       return {
-        send(deviceToken, headers, body, sendSignal) {
+        send(
+          deviceToken: string,
+          headers: Record<string, string>,
+          body: string,
+          sendSignal: AbortSignal,
+        ) {
           const bytes = Buffer.from(body);
           const stream = connection.request(
             {
@@ -125,58 +108,49 @@ export function createApnsClient(
             { signal: sendSignal },
           );
           stream.end(bytes);
-          return new Promise<ApnsResponse>((resolve, reject) => {
+          // A 410's timestamp says when Apple found the token unregistered.
+          return new Promise<{ status: number; timestampMs: number | null }>((resolve, reject) => {
             let status = 0;
-            const chunks: Buffer[] = [];
-            let received = 0;
+            let text = "";
+            stream.setEncoding("utf8");
             stream.once("response", (response) => {
               status = Number(response[constants.HTTP2_HEADER_STATUS]);
             });
-            stream.on("data", (chunk: Buffer) => {
-              received += chunk.length;
-              if (received > 8192) stream.close(constants.NGHTTP2_CANCEL);
-              else chunks.push(chunk);
+            stream.on("data", (chunk: string) => {
+              text += chunk;
+              if (text.length > 8192) stream.close(constants.NGHTTP2_CANCEL);
             });
             stream.on("error", reject);
             stream.once("close", () => {
               // A reset after the headers leaves the status unconfirmed, so a 410 then ends nothing.
-              if (!status || received > 8192 || stream.rstCode !== constants.NGHTTP2_NO_ERROR)
+              if (!status || stream.rstCode !== constants.NGHTTP2_NO_ERROR)
                 return reject(Error("APNs response interrupted"));
-              let reason: string | null = null;
               let timestampMs: number | null = null;
               try {
-                const parsed = JSON.parse(Buffer.concat(chunks).toString()) as Record<
-                  string,
-                  unknown
-                >;
-                if (typeof parsed.reason === "string") reason = parsed.reason.slice(0, 64);
-                if (Number.isSafeInteger(parsed.timestamp)) timestampMs = Number(parsed.timestamp);
+                const { timestamp } = JSON.parse(text) as { timestamp?: unknown };
+                if (Number.isSafeInteger(timestamp)) timestampMs = Number(timestamp);
               } catch {
                 // A 200 has no body.
               }
-              resolve({ status, reason, timestampMs });
+              resolve({ status, timestampMs });
             });
           });
         },
       };
     },
+    /** Forgets the provider token, after Apple refused it. */
     forgetToken() {
       token = undefined;
     },
+    /** Every attempt has finished first, so the connections are destroyed, not drained. */
     async close() {
       closed = true;
-      const open = [...sessions.values()];
-      sessions.clear();
       await Promise.all(
-        open.map(
+        [...sessions.values()].map(
           ({ opened }) =>
-            new Promise<void>((resolve) => {
-              if (opened.closed || opened.destroyed) return resolve();
-              if (opened.connecting) {
-                opened.destroy();
-                return resolve();
-              }
-              opened.close(() => resolve());
+            new Promise((resolve) => {
+              if (opened.destroyed) resolve(null);
+              else opened.once("close", resolve).destroy();
             }),
         ),
       );

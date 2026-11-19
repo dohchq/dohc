@@ -607,6 +607,24 @@ it("keeps the binding when a 410's stream is reset before its body arrives", asy
   expect(f.rows()).toEqual([expect.objectContaining({ state: "pending", lease_token: null })]);
 });
 
+it("keeps a binding registered again during a 410 that carries no timestamp", async () => {
+  const f = await relay();
+  const generation = f.generations.get("owner");
+  f.say("alice", "owner", "message", "team-thread", "@Kim hi");
+  let rebound: number | undefined;
+  f.apple.answer(() => {
+    rebound = f.bind("owner", "Kim");
+    return { status: 410, body: { reason: "Unregistered" } };
+  });
+  const sender = f.sender();
+  await sender.runOnce();
+  await sender.close();
+  // The same token and sign-in keeps its generation, so only the missing timestamp can save it.
+  expect(rebound).toBe(generation);
+  expect(f.binding("owner")).toEqual({ generation });
+  expect(f.rows()).toEqual([expect.objectContaining({ state: "pending", lease_token: null })]);
+});
+
 it(`runs at most ${PUSH_STREAMS} streams at once, one per recipient`, async () => {
   const people: Array<[string, string]> = [
     ["ana", "Ana"],
@@ -727,6 +745,8 @@ it("cleans lock-screen text: file names unless hidden, hosts only, no Markdown t
 it.each([
   ["a target with parentheses", "[doc](https://files.example/report(2026)/invite/SECRET)", "doc"],
   ["a target with a query after parentheses", "[doc](https://example.com/a(b)?secret=4417)", "doc"],
+  ["a relative target with a title", '[doc](/private/SECRET "Document")', "doc"],
+  ["a target never closed", "[doc](https://x.example/(a)/SECRET\nnext", "doc next"],
   ["a host without a dot", "see https://intranet/private?code=SECRET now", "see intranet now"],
   ["a URL with no host", "open file:///Users/kim/SECRET.txt", "open a link"],
   ["a Unicode host", "https://例え.jp/l/SECRET", "例え.jp"],
