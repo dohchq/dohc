@@ -410,12 +410,13 @@ describe("CLI socket server", () => {
           return { id: request.id, result: { closed: true } };
         }
         const params = { ...(request.params as Record<string, unknown>) };
-        if (
-          request.method === CHATS_METHOD.channelCreate ||
+        if (request.method === CHATS_METHOD.channelCreate) {
+          params.channelId = `channel-${++idCounters.channel}`;
+          params.nowMs = storeNowMs += 1_000;
+        } else if (
           request.method === CHATS_METHOD.channelEnsureAgent ||
           request.method === CHATS_METHOD.channelEnsureGeneral
         ) {
-          params.channelId = `channel-${++idCounters.channel}`;
           params.nowMs = storeNowMs += 1_000;
         } else if (request.method === CHATS_METHOD.threadCreate) {
           params.threadId = `thread-${++idCounters.thread}`;
@@ -1387,7 +1388,7 @@ describe("CLI socket server", () => {
       ).kind,
     ).toBe("file");
     // The CLI names chats by short ids; links name them by their engine ids.
-    expect(general.id).toBe("ch_1");
+    expect(general.id).toBe("ch_general");
     expect(made).toEqual([
       { kind: "chat", channelId: expect.stringMatching(/^channel-/u) },
       { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },

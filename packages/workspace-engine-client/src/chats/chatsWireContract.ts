@@ -145,7 +145,6 @@ type ChatChannelCreateParams = ChatsJsonObject & {
   nowMs?: number;
 };
 type ChatChannelEnsureParams = ChatsJsonObject & {
-  channelId: string;
   nowMs?: number;
 };
 type ChatChannelEnsureAgentParams = ChatChannelEnsureParams & {
