@@ -261,12 +261,13 @@ export function recordPushDeliveries(
     // A run Notice that came first waited for this reply; it alerts only while live and only if the
     // reply is its agent's. Otherwise it gives way, so the reply's own alert can still queue.
     for (const row of storage.db
-      .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms FROM ${TABLE}
-        WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL AND state = 'pending'`)
+      .prepare(`SELECT delivery_id, account_user_id, generation, expires_at_ms, state FROM ${TABLE}
+        WHERE workspace_id = ? AND thread_id = ? AND message_id = ? AND relay_seq IS NULL`)
       .all(workspaceId, threadId, messageId)) {
       const userId = String(row.account_user_id);
       const deliveryId = String(row.delivery_id);
       if (
+        row.state !== "pending" ||
         Number(row.expires_at_ms) <= nowMs ||
         !isOwnAgentMessage(message, userId) ||
         !pushMessageAccess(storage, message, userId) ||

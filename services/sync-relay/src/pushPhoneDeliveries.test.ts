@@ -390,6 +390,25 @@ it.each([
   },
 );
 
+it("alerts for a message on its own after the sender swept its run Notice's expired wait", async () => {
+  const f = await fixture();
+  f.notice("answer", "team-thread");
+  f.storage.db
+    .prepare("UPDATE sync_relay_push_deliveries SET expires_at_ms = ? WHERE relay_seq IS NULL")
+    .run(Date.now() - 1);
+  // The sender marks the expired wait dropped; nothing is sendable yet.
+  expect(claimPushDelivery(f.storage, Date.now())).toBeNull();
+  f.say("alice", "answer", "team-thread", "@Kim the reply");
+  expect(f.rows()).toEqual([
+    expect.objectContaining({
+      message_id: "answer",
+      reason: "mention",
+      state: "pending",
+      notice_id: null,
+    }),
+  ]);
+});
+
 it("doesn't let a late run Notice for an older message replace a newer alert", async () => {
   const f = await fixture();
   f.agent("older", "team-thread");
