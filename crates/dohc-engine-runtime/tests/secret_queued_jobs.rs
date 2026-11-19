@@ -379,7 +379,7 @@ async fn a_respelling_after_a_cancelled_write_waits_for_the_old_spellings_delete
             "main",
             "foo.env",
             "TOKEN=edited",
-            "edited",
+            "1-edited",
             workspace.queue(),
         )
         .await
@@ -390,13 +390,13 @@ async fn a_respelling_after_a_cancelled_write_waits_for_the_old_spellings_delete
             "main",
             "Foo.env",
             "TOKEN=respelled",
-            "respell",
+            "2-respell",
             workspace.queue(),
         )
         .await
         .unwrap();
     workspace
-        .delete(&actor, "main", "foo.env", "old-spelling")
+        .delete(&actor, "main", "foo.env", "3-old-spelling")
         .await
         .unwrap();
     workspace.replay(&actor).await;
@@ -407,8 +407,8 @@ async fn a_respelling_after_a_cancelled_write_waits_for_the_old_spellings_delete
         workspace.file("Foo.env").as_deref(),
         Some("TOKEN=respelled")
     );
-    assert_eq!(workspace.job("respell").status, JobStatus::Complete);
-    assert_eq!(workspace.job("edited").status, JobStatus::Complete);
+    assert_eq!(workspace.job("2-respell").status, JobStatus::Complete);
+    assert_eq!(workspace.job("1-edited").status, JobStatus::Complete);
 }
 
 #[tokio::test]

@@ -777,7 +777,11 @@ fn secret_alias_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializat
                     .get(&dohc_engine_files::floor::path_collision_key(
                         &job.target_path,
                     ))
-                    .is_some_and(|spellings| !spellings.contains(job.target_path.as_str()))
+                    .is_some_and(|spellings| {
+                        spellings
+                            .iter()
+                            .any(|spelling| *spelling != job.target_path)
+                    })
         })
         .map(|job| job.job_id.clone())
         .collect();
