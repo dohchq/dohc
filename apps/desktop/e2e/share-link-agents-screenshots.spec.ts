@@ -78,12 +78,30 @@ async function expectFitsWindow(page: Page, dialog: Locator): Promise<void> {
   expect(fit.scrimScrolls).toBe(false);
 }
 
-async function shoot(page: Page, dialog: Locator, name: string): Promise<void> {
+async function shoot(page: Page, dialog: Locator, name: string, openMenu?: Locator): Promise<void> {
   await page.mouse.move(0, 0);
   await expectFitsWindow(page, dialog);
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
-    await dialog.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`) });
+    const path = join(SHOT_DIR, `${name}-${theme}.png`);
+    if (!openMenu) {
+      await dialog.screenshot({ path });
+      continue;
+    }
+    const frame = await dialog.boundingBox();
+    const menu = await openMenu.boundingBox();
+    if (!frame || !menu) throw new Error(`${name} has no dialog or no open menu to capture`);
+    const x = Math.min(frame.x, menu.x);
+    const y = Math.min(frame.y, menu.y);
+    await page.screenshot({
+      path,
+      clip: {
+        x,
+        y,
+        width: Math.max(frame.x + frame.width, menu.x + menu.width) - x,
+        height: Math.max(frame.y + frame.height, menu.y + menu.height) - y,
+      },
+    });
   }
   await setTheme(page, "light");
 }
@@ -181,7 +199,12 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     const agentCopy = dialog.getByTestId("share-link-agent-copy");
     await expect(agentCopy).toHaveText("Copy for an agent");
     await expect(dialog).not.toContainText(address);
-    await shoot(page, dialog, "share-link-a-copy-for-agent");
+    await shoot(
+      page,
+      dialog,
+      "share-link-a-copy-for-agent",
+      dialog.getByRole("menu", { name: "Link options" }),
+    );
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await agentCopy.click({ timeout: remainingMs() });
       await expect(dialog).toContainText("Copied for an agent", { timeout: remainingMs() });
