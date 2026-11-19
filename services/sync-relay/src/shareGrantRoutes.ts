@@ -43,6 +43,7 @@ export type ShareGrantTransitionRoute =
   | { route: "share-grant-promote"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-undo"; shareId: string }
+  | { route: "share-leave"; shareId: string }
   | { route: "share-revoke"; shareId: string };
 
 export type WorkspaceShareCreationRoute =
@@ -118,6 +119,8 @@ export function createShareGrantRoutes(
     | "removeShareAccess"
     | "serviceHostEnrollmentsCoveredByShare"
     | "undoShareRemoval"
+    | "leaveShare"
+    | "listActiveShareGrantsForRecipient"
     | "readLinkCreation"
     | "createFileLinkShare"
     | "createLinkGrant"
@@ -242,6 +245,22 @@ export function createShareGrantRoutes(
     route: ShareGrantTransitionRoute,
     actor: { userId: string },
   ): Promise<Response> {
+    if (route.route === "share-leave") {
+      if (request.method !== "POST") throw relayError("method_not_allowed");
+      const leavesEdit = storage
+        .listActiveShareGrantsForRecipient(route.shareId, actor.userId)
+        .some((grant) => grant.access === "edit");
+      const result = await endAccess(route.shareId, leavesEdit, () =>
+        storage.leaveShare({ shareId: route.shareId, userId: actor.userId, nowMs: nowMs() }),
+      );
+      if (!result.ok) throw notFound();
+      if (result.workspaceId !== null) {
+        discussionActivity.wake(route.shareId);
+        discussionActivity.wakeLog(result.workspaceId);
+      }
+      return jsonResponse({ ok: true });
+    }
+
     if (route.route === "share-undo") {
       if (request.method !== "POST") throw relayError("method_not_allowed");
       const input = await readJsonObject(request);

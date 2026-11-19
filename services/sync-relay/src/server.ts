@@ -1655,6 +1655,7 @@ export function createSyncRelayHandler({
         route.route === "share-grant-promote" ||
         route.route === "share-grant-revoke" ||
         route.route === "share-undo" ||
+        route.route === "share-leave" ||
         route.route === "share-revoke"
       ) {
         return await respondToShareGrantTransition(request, route, actor);

@@ -349,6 +349,9 @@ const LISTED_CAPABILITIES = {
   "share.list": capability("List shares for the connected account.", { ipc: ["listRelayShares"] }),
   "share.received.read": capability("Read a received share.", { ipc: ["getRelayReceivedShare"] }),
   "share.revoke": capability("Remove a share.", { ipc: ["revokeRelayShare"] }),
+  "share.leave": capability("Leave a share someone else made, or clear one they ended.", {
+    ipc: ["leaveRelayShare"],
+  }),
   "share.revoke.undo": capability("Undo a share removal.", { ipc: ["undoRelayShare"] }),
   "share.discussion.activity.wait": capability("Wait for share discussion activity.", {
     ipc: ["pollRelayShareDiscussionActivity"],

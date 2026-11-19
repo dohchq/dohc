@@ -4768,6 +4768,9 @@ export type CreateRelayShareResult = z.infer<typeof CreateRelayShareResult>;
 export const RevokeRelaySharePayload = z.object({
   shareId: OPAQUE_ID,
 });
+
+export const LeaveRelaySharePayload = z.object({ shareId: OPAQUE_ID }).strict();
+export type LeaveRelaySharePayload = z.infer<typeof LeaveRelaySharePayload>;
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
 // The relay's receipt for a removal it can put back. It restores the grants

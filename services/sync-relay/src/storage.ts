@@ -2021,6 +2021,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return shareRemovalStorage.listRemovedSharesForRecipient(this, userId, shareId);
   }
 
+  listRemovedSharesInRecipientList(userId: string, shareId?: string) {
+    return shareRemovalStorage.listRemovedSharesInRecipientList(this, userId, shareId);
+  }
+
+  leaveShare(input: Parameters<typeof shareRemovalStorage.leaveShare>[1]) {
+    const result = shareRemovalStorage.leaveShare(this, input);
+    if (result.ok && result.workspaceId !== null)
+      notifyDesktopReadiness(this, { shareId: input.shareId });
+    return result;
+  }
+
   revokeShare(shareId: string, revokedAtMs: number): boolean {
     try {
       return sharesStorage.revokeShare(this, shareId, revokedAtMs);

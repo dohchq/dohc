@@ -454,6 +454,9 @@ export type SharingActions = {
   end: (group: ShareGroup) => void;
   mount: (shareId: string) => void;
   unmount: (mount: ShareMount) => void;
+  startLeave: (shareId: string) => void;
+  leave: (shareId: string, mount: ShareMount | undefined) => void;
+  clear: (shareId: string) => void;
   // The text a copy hands out, read at the click; null when there is none.
   copy: (grant: AccessShareRow, what: CopyWhat) => Promise<string | null>;
   dismissSkips: (mount: ShareMount) => void;
@@ -653,10 +656,15 @@ function ReceivedRow(props: {
   // Whether the relay's listing was read, so a missing grant means removed.
   listed: boolean;
   skipsShown: boolean;
+  confirming: boolean;
   busy: boolean;
   actions: SharingActions;
 }) {
   const { row, mount, actions } = props;
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (props.confirming) cancelRef.current?.focus();
+  }, [props.confirming]);
   const shareId = row?.shareId ?? mount!.shareId;
   const removed = row ? row.status === "removed" : props.listed;
   const damaged = row ? row.status === "damaged" : mount?.damaged === true;
@@ -682,6 +690,17 @@ function ReceivedRow(props: {
   const access = mount ? (mount.damaged ? null : mount.access) : row?.access;
   const active = row?.status === "active";
   const skipped = mount?.skippedOps;
+  const leaves: MoreMenuItem[] =
+    files && active
+      ? [
+          {
+            label: "Leave share…",
+            onSelect: () => actions.startLeave(shareId),
+            disabled: props.busy,
+            danger: true,
+          },
+        ]
+      : [];
   const menu: MoreMenuItem[] = mount
     ? [
         {
@@ -692,6 +711,7 @@ function ReceivedRow(props: {
         ...(skipped && !props.skipsShown
           ? [{ label: "Show skipped changes", onSelect: () => actions.showSkips(mount.shareId) }]
           : []),
+        ...leaves,
       ]
     : files && active
       ? [
@@ -700,8 +720,17 @@ function ReceivedRow(props: {
             onSelect: () => actions.mount(shareId),
             disabled: props.busy,
           },
+          ...leaves,
         ]
-      : [];
+      : row && removed
+        ? [
+            {
+              label: "Remove from list",
+              onSelect: () => actions.clear(shareId),
+              disabled: props.busy,
+            },
+          ]
+        : [];
   const word: Word | null = damaged
     ? "damaged"
     : removed
@@ -748,6 +777,39 @@ function ReceivedRow(props: {
       }
     >
       {mount && props.skipsShown ? <SkippedChanges mount={mount} actions={actions} /> : null}
+      {props.confirming && files && active ? (
+        <div
+          data-testid="sharing-leave-confirm"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") actions.cancelEnd();
+          }}
+          className={CARD}
+        >
+          <p className="m-0 text-[12px] leading-4 text-ink">
+            Leave this share? You lose access to {subject.name}
+            {mount ? ", and its folder leaves this workspace" : ""}. {sender} can share it with you
+            again.
+          </p>
+          <div className="flex justify-end gap-2">
+            <SecondaryButton
+              ref={cancelRef}
+              size="compact"
+              data-testid="sharing-leave-cancel"
+              onClick={actions.cancelEnd}
+            >
+              Cancel
+            </SecondaryButton>
+            <DangerButton
+              size="compact"
+              data-testid="sharing-leave"
+              disabled={props.busy}
+              onClick={() => actions.leave(shareId, mount)}
+            >
+              {props.busy ? "Leaving…" : "Leave share"}
+            </DangerButton>
+          </div>
+        </div>
+      ) : null}
     </ShareRow>
   );
 }
@@ -934,6 +996,7 @@ export function SharingPanel(props: {
       repeated={receivedRepeated}
       listed={listed}
       skipsShown={skipsShown(mount, props.skipView)}
+      confirming={props.confirmShareId === (row?.shareId ?? mount!.shareId)}
       busy={props.busyShareId === (row?.shareId ?? mount!.shareId)}
       actions={actions}
     />
@@ -1263,6 +1326,27 @@ export function SharingView(props: {
     }
   }
 
+  async function leave(shareId: string, mounted: ShareMount | undefined) {
+    const token = epoch.current();
+    setBusyShareId(shareId);
+    try {
+      if (mounted) await props.onUnmount(`shared-with-me/${mounted.label}`);
+      await bridge().leaveRelayShare({ shareId });
+      if (epoch.isCurrent(token)) {
+        setConfirmShareId(null);
+        void loadReceived({ refreshed: refresh() });
+      }
+    } catch (cause) {
+      props.reportError(
+        "dohc could not take this share off your list.",
+        cause,
+        () => void leave(shareId, undefined),
+      );
+    } finally {
+      if (epoch.isCurrent(token)) setBusyShareId(null);
+    }
+  }
+
   // A share that ended since the list was read has nothing to copy. The row
   // is stale, not the person's to fix: read the list again, copy nothing.
   async function copy(grant: AccessShareRow, what: CopyWhat): Promise<string | null> {
@@ -1326,6 +1410,9 @@ export function SharingView(props: {
     end: (group) => void end(group),
     mount: (shareId) => void mount(shareId),
     unmount: (target) => void unmount(target),
+    startLeave: setConfirmShareId,
+    leave: (shareId, mounted) => void leave(shareId, mounted),
+    clear: (shareId) => void leave(shareId, undefined),
     copy,
     dismissSkips: (target) => void dismissSkips(target),
     showSkips: (shareId) => setSkip(shareId, "shown"),

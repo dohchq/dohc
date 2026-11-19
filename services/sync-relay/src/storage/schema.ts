@@ -150,6 +150,12 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_expiry ON sync_relay_share_removals(expires_at_ms);
+  CREATE TABLE IF NOT EXISTS sync_relay_share_departures (
+    share_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL,
+    left_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (share_id, recipient_user_id)
+  ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_removals_share ON sync_relay_share_removals(share_id, removed_grant_id, expires_at_ms);
 
   CREATE TABLE IF NOT EXISTS sync_relay_link_credentials (

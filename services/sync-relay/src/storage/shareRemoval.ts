@@ -5,6 +5,7 @@ import { notFound, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { LinkGrantTransitionResult, SyncRelayShareGrantRow } from "./types";
 import { revokeShareInTransaction, revokeShareGrantInTransaction } from "./shares";
+import { parseStoredAnyShareSelectorJson } from "../shareFilter";
 
 export const SHARE_REMOVAL_UNDO_MS = 10 * 60 * 1000;
 
@@ -289,6 +290,62 @@ export function undoShareRemoval(
       .prepare("UPDATE sync_relay_share_removals SET undone = 1 WHERE undo_id = ?")
       .run(input.undoId);
   });
+}
+
+export function leaveShare(
+  storage: StorageContext,
+  input: { shareId: string; userId: string; nowMs: number },
+): { ok: false } | { ok: true; workspaceId: string | null } {
+  return storage.tx(() => {
+    const share = storage.getShare(input.shareId);
+    const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
+    if (share && (!selector || "kind" in selector)) return { ok: false };
+    const held = share
+      ? (storage.db
+          .prepare(
+            `SELECT grant_id FROM sync_relay_share_grants
+               WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
+                 AND status = 'active' AND revoked_at_ms IS NULL`,
+          )
+          .all(input.shareId, input.userId) as { grant_id: string }[])
+      : [];
+    for (const { grant_id } of held) {
+      revokeShareGrantInTransaction(storage, {
+        shareId: input.shareId,
+        grantId: grant_id,
+        revokedAtMs: input.nowMs,
+      });
+    }
+    const [removed] = listRemovedSharesForRecipient(storage, input.userId, input.shareId);
+    if (!removed) return { ok: false };
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_share_departures (share_id, recipient_user_id, left_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT (share_id, recipient_user_id) DO UPDATE SET left_at_ms = excluded.left_at_ms`,
+      )
+      .run(input.shareId, input.userId, Math.max(Math.trunc(input.nowMs), removed.removedAtMs));
+    return { ok: true, workspaceId: held.length > 0 ? share!.workspaceId : null };
+  });
+}
+
+export function listRemovedSharesInRecipientList(
+  storage: StorageContext,
+  userId: string,
+  shareId?: string,
+) {
+  const leftAt = new Map(
+    (
+      storage.db
+        .prepare(
+          "SELECT share_id, left_at_ms FROM sync_relay_share_departures WHERE recipient_user_id = ?",
+        )
+        .all(userId) as { share_id: string; left_at_ms: number }[]
+    ).map((row) => [row.share_id, row.left_at_ms]),
+  );
+  return listRemovedSharesForRecipient(storage, userId, shareId).filter(
+    (row) => (leftAt.get(row.shareId) ?? -1) < row.removedAtMs,
+  );
 }
 
 export function listRemovedSharesForRecipient(

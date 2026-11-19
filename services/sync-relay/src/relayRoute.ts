@@ -278,6 +278,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     if (parts.length === 3) return { route: "share", shareId };
     if (parts.length === 4 && parts[3] === "access") return { route: "share-access", shareId };
     if (parts.length === 4 && parts[3] === "undo") return { route: "share-undo", shareId };
+    if (parts.length === 4 && parts[3] === "leave") return { route: "share-leave", shareId };
     if (parts.length === 4 && parts[3] === "revoke") return { route: "share-revoke", shareId };
     if (parts.length === 6 && parts[3] === "links" && parts[5] === "rotate") {
       return {

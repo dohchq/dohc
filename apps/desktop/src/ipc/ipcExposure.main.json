@@ -149,6 +149,7 @@
     "desktop:join-shared-channel",
     "desktop:keep-collections-here",
     "desktop:leave-dm",
+    "desktop:leave-relay-share",
     "desktop:leave-shared-channel",
     "desktop:links-edges",
     "desktop:links-in",

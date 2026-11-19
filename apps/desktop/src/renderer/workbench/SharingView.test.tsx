@@ -22,6 +22,7 @@ const bridgeMock = {
     >(),
   getRelayReceivedShare: vi.fn<(input: { shareId: string }) => Promise<unknown>>(),
   mountShare: vi.fn<(input: { workspaceId: string; shareCode: string }) => Promise<unknown>>(),
+  leaveRelayShare: vi.fn<(input: { shareId: string }) => Promise<void>>(),
   getShareCopyDetails:
     vi.fn<(input: { shareId: string; grantId: string }) => Promise<ShareCopyResult>>(),
   dismissShareSkips:
@@ -486,6 +487,82 @@ describe("the actions Settings offers on a share", () => {
       "dohc could not add this share to the workspace.",
     );
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
+  it("leaves a share after a confirm, and reads the list again", async () => {
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    bridgeMock.leaveRelayShare.mockResolvedValue(undefined);
+    render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "Leave share…" }),
+    );
+    expect(bridgeMock.leaveRelayShare).not.toHaveBeenCalled();
+    const confirm = within(row).getByTestId("sharing-leave-confirm");
+    expect(confirm.textContent).toContain("You lose access to funnel.csv. Sam can share it");
+    expect(document.activeElement).toBe(within(confirm).getByTestId("sharing-leave-cancel"));
+
+    answerWith({ received: answer("received", { rows: [] }) });
+    await userEvent.click(within(confirm).getByTestId("sharing-leave"));
+
+    await waitFor(() => expect(screen.queryByTestId("sharing-received-row")).toBeNull());
+    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledExactlyOnceWith({ shareId: "in-1" });
+    expect(callbacks.onUnmount).not.toHaveBeenCalled();
+    expect(callbacks.reportError).not.toHaveBeenCalled();
+  });
+
+  it("takes the share's folder out of the workspace before it leaves", async () => {
+    answerWith({ received: answer("received", { rows: [received()] }) });
+    const order: string[] = [];
+    callbacks.onUnmount.mockImplementation(async () => {
+      order.push("unmount");
+    });
+    bridgeMock.leaveRelayShare.mockImplementation(async () => {
+      order.push("leave");
+    });
+    const mount: ShareMount = {
+      shareId: "in-1",
+      label: "funnel",
+      granterEmail: "sam@example.com",
+      access: "view",
+    };
+    render(<View mounts={[mount]} />);
+    const row = await screen.findByTestId("sharing-received-row");
+    await userEvent.click(
+      within(await openMenu(row)).getByRole("menuitem", { name: "Leave share…" }),
+    );
+    expect(within(row).getByTestId("sharing-leave-confirm").textContent).toContain(
+      "its folder leaves this workspace",
+    );
+    await userEvent.click(within(row).getByTestId("sharing-leave"));
+
+    await waitFor(() => expect(order).toEqual(["unmount", "leave"]));
+    expect(callbacks.onUnmount).toHaveBeenCalledWith("shared-with-me/funnel");
+  });
+
+  it("takes a share the owner ended off the list, and reports a failure with Try again", async () => {
+    answerWith({
+      received: answer("received", {
+        rows: [received({ status: "removed", selector: null, access: null })],
+      }),
+    });
+    bridgeMock.leaveRelayShare.mockRejectedValueOnce(new Error("offline"));
+    bridgeMock.leaveRelayShare.mockResolvedValue(undefined);
+    render(<View />);
+    const row = await screen.findByTestId("sharing-received-row");
+    expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Removed");
+    const menu = await openMenu(row);
+    expect(within(menu).queryByRole("menuitem", { name: "Leave share…" })).toBeNull();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Remove from list" }));
+
+    await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledOnce());
+    expect(callbacks.reportError.mock.calls[0]![0]).toBe(
+      "dohc could not take this share off your list.",
+    );
+    answerWith({ received: answer("received", { rows: [] }) });
+    await act(async () => callbacks.reportError.mock.calls[0]![2]());
+    await waitFor(() => expect(screen.queryByTestId("sharing-received-row")).toBeNull());
+    expect(bridgeMock.leaveRelayShare).toHaveBeenCalledTimes(2);
   });
 
   it("ends a share dohc cannot read, so its reverse path stays", async () => {

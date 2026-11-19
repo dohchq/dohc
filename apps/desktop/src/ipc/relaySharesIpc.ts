@@ -1414,6 +1414,13 @@ export function createRelaySharesIpcHandlers<
     return RevokeRelayShareResult.parse({ undo: parsed.data.undo });
   };
 
+  const leaveRelayShare: Handlers["leaveRelayShare"] = async (input) => {
+    await relayShareJson<unknown>(`/sync/shares/${encodeURIComponent(input.shareId)}/leave`, {
+      method: "POST",
+    });
+    sharesChanged(null);
+  };
+
   // Restores what a removal ended, from the receipt the removal returned.
   // The same account transport as the removal, so the Undo on a notice works
   // after the dialog that removed it has closed. Undo can restore Edit access,
@@ -2089,6 +2096,7 @@ export function createRelaySharesIpcHandlers<
     listRelayShares,
     getRelayReceivedShare,
     revokeRelayShare,
+    leaveRelayShare,
     undoRelayShare,
     createRelayShareLink,
     addRelayShareLink,

@@ -50,6 +50,7 @@ export const RELAY_ROUTE_PATTERNS = {
   share: "/sync/shares/:shareId",
   "share-access": "/sync/shares/:shareId/access",
   "share-undo": "/sync/shares/:shareId/undo",
+  "share-leave": "/sync/shares/:shareId/leave",
   "share-revoke": "/sync/shares/:shareId/revoke",
   "share-link-rotate": "/sync/shares/:shareId/links/:grantId/rotate",
   "share-link-retune": "/sync/shares/:shareId/links/:grantId/retune",
