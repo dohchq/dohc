@@ -667,6 +667,7 @@ export function registerSharedViewsIpcHandlers<
                 const levelBeforeRead = recordedShareSelector(
                   workspace.shareView.grantedSelector,
                 )?.access;
+                const statementsBefore = accessStatementsFor(workspace.workspaceId);
                 const info = await fetchShareViewInfo({
                   relay: {
                     baseUrl: credentials.relayUrl,
@@ -700,7 +701,6 @@ export function registerSharedViewsIpcHandlers<
                   shareAccessRank(statedPin.access) > shareAccessRank(levelAfterRead);
                 let widenedPin = widening && statedPin.access !== "edit" ? statedPin : null;
                 if (widening && statedPin.access === "edit") {
-                  const statementsBefore = accessStatementsFor(workspace.workspaceId);
                   try {
                     identityRecorded = await recordShareViewIdentity({
                       ...current,
