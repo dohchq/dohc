@@ -129,10 +129,12 @@ sign-in, its account fence, the workspace's owner, and Show on phone.
    - **A page with history.** The open enrolls it as the owner's open. It never
      resumes a Pause or Stop. A page enrolled before at another path answers
      `document-unavailable`. A phone's open creates no new enrollment once its
-     account has 16 enrolled for its owner's opens. Desktop opens, and pages
-     already enrolled through a share or an agent, don't count against this
-     limit. Until the live host activates the page, the open answers
-     `preparing`.
+     account has 16 pages enrolled by its owner's opens. A desktop open counts
+     toward those 16, but the limit never stops one, so after 16 desktop
+     opens a phone's open of a new page answers `live_host_full`. Pages
+     enrolled only through a share or an agent don't count, and neither does
+     the page being opened if it is already enrolled. Until the live host
+     activates the page, the open answers `preparing`.
    - **Checks.** The open checks access again after reading the body, and
      before and after minting.
 2. **Ticket and connection.** Once the page is ready, the open reads the
