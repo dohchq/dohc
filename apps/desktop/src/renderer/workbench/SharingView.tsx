@@ -14,7 +14,6 @@ import {
   useContext,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -26,12 +25,17 @@ import { accessOptions } from "../EmailShareForm";
 import { ipcErrorMessage } from "../ipcError";
 import { opensForLiveEditing } from "../OpenSharedView";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { invitedByEmailWords, SHARE_ACCESS_WORDS, ShareAccessMenu } from "../shareAccess";
+import {
+  invitedByEmailWords,
+  SHARE_ACCESS_WORDS,
+  ShareAccessMenu,
+  ShareOptionsMenu,
+} from "../shareAccess";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
-import { ShellErrorReporter, ShellNoticeClear } from "../shell/useShellError";
+import { ShellNoticeClear } from "../shell/useShellError";
 import {
   DangerButton,
   EmptyState,
@@ -40,9 +44,9 @@ import {
   RetryRow,
   SecondaryButton,
 } from "../ui/controls";
-import { COPY_WORDS, createCopy, type CopyFeedback, type CopySecret } from "../ui/CopyButton";
+import { useCopy } from "../ui/CopyButton";
 import { KindGlyph } from "../ui/KindGlyph";
-import { Menu } from "../ui/Menu";
+import type { MenuEntry } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { NameLine } from "../ui/NameLine";
 import { useRadioGroup } from "../ui/SegmentedControl";
@@ -100,6 +104,7 @@ export type RemovedEndedCopies = ReadonlyMap<string, number>;
 const LANE = {
   granted: {
     label: "Shared by me",
+    short: "By me",
     scope: "for this workspace",
     empty: "Nothing shared from this workspace yet.",
     unexplained:
@@ -112,6 +117,7 @@ const LANE = {
   // this workspace's sync, so signed out is the only cause it names.
   received: {
     label: "Shared with me",
+    short: "With me",
     scope: "for your account",
     empty: "Nothing shared with you yet.",
     unexplained:
@@ -204,8 +210,8 @@ export function sharedItemKey(row: AccessShareRow): string {
 
 export const endedGroupKey = (lane: SharingLane) => `ended\0${lane}`;
 export const endConfirmKey = (shareId: string) => `end\0${shareId}`;
-const removeConfirmKey = (grantId: string) => `remove\0${grantId}`;
-const leaveConfirmKey = (shareId: string) => `leave\0${shareId}`;
+export const removeConfirmKey = (grantId: string) => `remove\0${grantId}`;
+export const leaveConfirmKey = (shareId: string) => `leave\0${shareId}`;
 
 function shareTargetOf(row: AccessShareRow): RelayShareTarget | null {
   const files = filesOf(row);
@@ -216,7 +222,7 @@ function shareTargetOf(row: AccessShareRow): RelayShareTarget | null {
 }
 
 // Who can do what, as a row's second line says it, wrapped whole. The title names each.
-type Who = { text: string; title: string };
+type Who = { text: string; title: string; name?: string };
 
 // How many links have each level, widest first: "1 link lets anyone edit".
 function linkClauses(links: readonly LeveledRow[]): string[] {
@@ -242,11 +248,10 @@ function itemWho(people: readonly LeveledRow[], links: readonly LeveledRow[]): W
   const [widest] = people.toSorted(widestFirst);
   if (!link) {
     if (!widest) return null;
-    return {
-      text:
-        names.length === 1 ? `${names[0]} can ${verbOf(widest.access)}` : `${names.length} people`,
-      title,
-    };
+    const [only, ...others] = names;
+    return only !== undefined && others.length === 0
+      ? { text: `${only} can ${verbOf(widest.access)}`, title, name: only }
+      : { text: `${names.length} people`, title };
   }
   const article = links.length === 1 ? "the" : "a";
   if (names.length === 0)
@@ -660,22 +665,41 @@ function DamagedPill() {
 const CARD = "mb-1 flex flex-col gap-2 rounded-lg border border-line bg-bg p-3";
 const ROW_MENU_WIDTH = 200;
 const ROW =
-  "group relative flex w-full gap-2 rounded-md px-2 py-0.5 text-left text-[13px] text-muted transition-colors duration-75 keyboard:focus-within:bg-hover has-[[aria-haspopup=menu][aria-expanded=true]]:bg-hover";
+  "group relative flex w-full flex-col justify-center gap-1 rounded-md px-2 py-0.5 text-left text-[13px] text-muted transition-colors duration-75 keyboard:focus-within:bg-hover has-[[aria-haspopup=menu][aria-expanded=true]]:bg-hover";
+const LINE = "flex min-w-0 items-center gap-2";
 const MARK_COLUMN = "flex h-5 w-[18px] shrink-0 items-center justify-center";
 const CHEVRON_COLUMN = "flex h-5 w-3 shrink-0 items-center justify-center text-subtle";
 const QUIET_LEVEL = "shrink-0 text-[12px] text-muted";
+const SECOND_LINE = "text-[12px] leading-4";
+const ROW_MENU = "-mr-2 flex h-5 shrink-0 items-center";
 
-// Over the end of the row's last line, on a 16px fade into the row's hover
-// fill. Hidden at rest; shown on hover, keyboard focus, and while its menu
-// is open. Inside the scroller, so its focus halos are inset.
-const ROW_ACTIONS = [
-  "pointer-events-none absolute bottom-0 right-1 flex h-6 items-center gap-0.5 pl-4 opacity-0 transition-opacity duration-75",
-  "bg-[image:linear-gradient(to_right,transparent,var(--dohc-hover)_16px),linear-gradient(to_right,transparent,var(--dohc-panel)_16px)]",
-  "[&_button:focus-visible]:-outline-offset-2",
-  "group-hover:pointer-events-auto group-hover:opacity-100",
-  "keyboard:group-focus-within:pointer-events-auto keyboard:group-focus-within:opacity-100",
-  "has-[[aria-expanded=true]]:pointer-events-auto has-[[aria-expanded=true]]:opacity-100",
-].join(" ");
+function UnderName(props: { chevron: boolean; children: ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      {props.chevron ? <span className="w-3 shrink-0" /> : null}
+      <span className="w-[18px] shrink-0" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">{props.children}</div>
+    </div>
+  );
+}
+
+function WhoLine(props: { who: Who }) {
+  const { who } = props;
+  return who.name === undefined ? (
+    <span
+      data-testid="sharing-row-who"
+      title={who.title}
+      className={`${SECOND_LINE} line-clamp-2 text-balance wrap-anywhere`}
+    >
+      {who.text}
+    </span>
+  ) : (
+    <span data-testid="sharing-row-who" title={who.title} className={`${SECOND_LINE} flex min-w-0`}>
+      <span className="truncate">{who.name}</span>
+      <span className="shrink-0 whitespace-pre">{who.text.slice(who.name.length)}</span>
+    </span>
+  );
+}
 
 function Chevron(props: { open: boolean }) {
   return (
@@ -719,17 +743,17 @@ function ConfirmCard(props: {
       }}
       className={CARD}
     >
-      <p className="m-0 text-[12px] leading-4 text-ink">{props.words}</p>
-      <div className="flex items-center justify-end gap-2">
-        {props.held ? (
-          <span
-            id={heldId}
-            data-testid={`${props.testId}-held`}
-            className="mr-auto min-w-0 text-[12px] leading-4 text-muted"
-          >
-            {props.held}
-          </span>
-        ) : null}
+      <p className="m-0 text-[12px] leading-4 text-ink wrap-anywhere">{props.words}</p>
+      {props.held ? (
+        <span
+          id={heldId}
+          data-testid={`${props.testId}-held`}
+          className="text-[12px] leading-4 text-muted"
+        >
+          {props.held}
+        </span>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <SecondaryButton
           ref={cancelRef}
           size="compact"
@@ -775,112 +799,7 @@ export type SharingActions = {
   reviewConflicts: () => void;
 };
 
-type PersonCopyId = "copy" | "copy-code";
-type PersonCopy = {
-  id: PersonCopyId;
-  label: string;
-  secret: CopySecret;
-  getText: () => Promise<string | null>;
-};
-type PersonRemoval = { disabled: boolean; why: string | null; onSelect: () => void };
-
-function PersonMenu(props: {
-  name: string;
-  grantId: string;
-  copies: readonly PersonCopy[];
-  removal: PersonRemoval | null;
-}) {
-  const report = useContext(ShellErrorReporter);
-  const [open, setOpen] = useState(false);
-  const [feedback, setFeedback] = useState<{ id: PersonCopyId; words: CopyFeedback } | null>(null);
-  const latest = useRef({ copies: props.copies, report });
-  latest.current = { copies: props.copies, report };
-  const copyingId = useRef<PersonCopyId | null>(null);
-  const answered = useRef(false);
-  const usingKeyboard = useRef(false);
-  const status = useRef<HTMLSpanElement>(null);
-  const action = useRef<ReturnType<typeof createCopy<PersonCopyId>> | null>(null);
-  useLayoutEffect(() => {
-    const copyOf = (id: PersonCopyId | null) =>
-      latest.current.copies.find((copy) => copy.id === id);
-    const made = createCopy<PersonCopyId>({
-      getText: (id) => {
-        copyingId.current = id;
-        return copyOf(id)?.getText() ?? null;
-      },
-      report: () => latest.current.report,
-      secret: () => copyOf(copyingId.current)?.secret,
-      show: (next) => {
-        if (next && copyingId.current !== null) {
-          answered.current = true;
-          setFeedback({ id: copyingId.current, words: next });
-          return;
-        }
-        if (!answered.current) return;
-        answered.current = false;
-        setFeedback(null);
-        const focusInside =
-          status.current?.closest('[role="menu"]')?.contains(document.activeElement) === true;
-        if (!(usingKeyboard.current && focusInside)) setOpen(false);
-      },
-    });
-    action.current = made;
-    return () => made.dispose();
-  }, []);
-  const { copies, removal } = props;
-  if (copies.length === 0 && !removal) return null;
-  return (
-    <span
-      className="contents"
-      onKeyDown={() => {
-        usingKeyboard.current = true;
-      }}
-      onPointerDown={() => {
-        usingKeyboard.current = false;
-      }}
-    >
-      <Menu
-        label={`Options for ${props.name}`}
-        testId={`sharing-person-menu-${props.grantId}`}
-        open={open}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (next) return;
-          answered.current = false;
-          setFeedback(null);
-        }}
-        closeOnPick={false}
-        width={ROW_MENU_WIDTH}
-        items={[
-          ...copies.map((copy) => ({
-            id: copy.id,
-            label: feedback?.id === copy.id ? COPY_WORDS[feedback.words] : copy.label,
-            onSelect: () => void action.current?.copy(copy.id),
-          })),
-          ...(removal
-            ? [
-                {
-                  id: "remove",
-                  label: "Remove access",
-                  danger: true,
-                  disabled: removal.disabled,
-                  ...(removal.why ? { description: removal.why } : {}),
-                  onSelect: () => {
-                    setOpen(false);
-                    removal.onSelect();
-                  },
-                },
-              ]
-            : []),
-        ]}
-      >
-        <span ref={status} role="status" aria-live="polite" className="sr-only">
-          {feedback ? COPY_WORDS[feedback.words] : ""}
-        </span>
-      </Menu>
-    </span>
-  );
-}
+type CopiedPart = "invitation" | "code";
 
 function PersonRow(props: {
   grant: LeveledRow;
@@ -914,77 +833,132 @@ function PersonRow(props: {
   const confirmKey = removeConfirmKey(grant.grantId);
   const detail =
     filesOf(grant) === null
-      ? ""
+      ? null
       : grant.via === "named"
         ? invitedByEmailWords(grant.recipientUserId !== null)
         : grant.via === "dependent"
           ? "Joined through a link"
-          : "";
+          : null;
   const browserLink = invitable({ ...grant, access: confirmedLevel(grant, props.change) });
   const invitation = props.invitations && browserLink;
-  const copyInvitation: PersonCopy = {
-    id: "copy",
-    label: grant.via === "named" ? "Copy invitation" : "Copy code",
-    secret: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
+  const invited = grant.via === "named";
+  const invitationCopy = useCopy({
     getText: () => actions.copy(grant, invitation ? "invitation" : "code"),
-  };
-  const copyCode: PersonCopy = {
-    id: "copy-code",
-    label: "Copy share code",
-    secret: SHARE_CODE_SECRET,
+    words: { copied: invited ? "Invitation copied" : "Share code copied" },
+    sensitive: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
+  });
+  const codeCopy = useCopy({
     getText: () => actions.copy(grant, "code"),
-  };
-  const copies = !copyable(grant)
-    ? []
-    : browserLink
-      ? [copyInvitation, copyCode]
-      : [copyInvitation];
+    words: { copied: "Share code copied" },
+    sensitive: SHARE_CODE_SECRET,
+  });
+  const [copiedLast, setCopiedLast] = useState<CopiedPart>("invitation");
+  const copied = copiedLast === "code" ? codeCopy : invitationCopy;
+  const menuActions: MenuEntry[] = [
+    ...(copyable(grant)
+      ? [
+          {
+            id: "copy-invitation",
+            label: invited ? "Copy invitation" : "Copy code",
+            testId: `sharing-person-copy-${grant.grantId}`,
+            onSelect: () => {
+              setCopiedLast("invitation");
+              invitationCopy.copy();
+            },
+          },
+        ]
+      : []),
+    ...(copyable(grant) && browserLink
+      ? [
+          {
+            id: "copy-code",
+            label: "Copy share code",
+            testId: `sharing-person-copy-code-${grant.grantId}`,
+            onSelect: () => {
+              setCopiedLast("code");
+              codeCopy.copy();
+            },
+          },
+        ]
+      : []),
+    ...(removable(grant)
+      ? [
+          {
+            id: "remove",
+            label: "Remove access",
+            danger: true,
+            disabled: writing,
+            testId: `sharing-person-remove-${grant.grantId}`,
+            onSelect: () => actions.startEnd(confirmKey),
+          },
+        ]
+      : []),
+  ];
   return (
     <li data-testid="sharing-person" data-grant-id={grant.grantId} className="flex flex-col gap-1">
-      <div className="flex min-h-8 items-center gap-2">
-        <ChatAvatar presentation={neutralPresentation} name={name} kind="human" size="strip" />
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span
-            id={nameId}
-            data-testid="sharing-person-name"
-            title={name}
-            className="truncate text-[13px] text-ink"
-          >
-            {name}
-          </span>
-          <span className="text-[12px] text-subtle">{detail}</span>
+      <div className="flex gap-2 px-2 py-1">
+        <span className="w-3 shrink-0" />
+        <span className="flex h-7 w-[18px] shrink-0 items-center justify-center">
+          <ChatAvatar presentation={neutralPresentation} name={name} kind="human" size="strip" />
         </span>
-        {retunable({ ...grant, access }) ? (
-          <ShareAccessMenu
-            label={`Access for ${name}`}
-            describedBy={nameId}
-            access={shareAccessOf(access)}
-            options={options}
-            disabled={writing}
-            testId={`sharing-person-access-${grant.grantId}`}
-            width={288}
-            align="end"
-            onPick={(next) => {
-              if (next !== access) actions.retune(grant, next, props.title);
-            }}
-          />
-        ) : (
-          <span className={QUIET_LEVEL}>{levelWords(access)}</span>
-        )}
-        <PersonMenu
-          name={name}
-          grantId={grant.grantId}
-          copies={copies}
-          removal={
-            removable(grant)
-              ? {
-                  disabled: writing,
-                  why: changing ? CHANGING_ACCESS : null,
-                  onSelect: () => actions.startEnd(confirmKey),
-                }
-              : null
-          }
-        />
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="flex min-w-0 flex-wrap items-center justify-end">
+            <span
+              id={nameId}
+              data-testid="sharing-person-name"
+              title={name}
+              className="min-w-0 flex-1 basis-16 truncate pr-1 text-[13px] leading-7 text-ink"
+            >
+              {name}
+            </span>
+            {retunable({ ...grant, access }) ? (
+              <span className="-mr-2 flex shrink-0">
+                <ShareAccessMenu
+                  label={`Access for ${name}`}
+                  describedBy={nameId}
+                  access={shareAccessOf(access)}
+                  options={options}
+                  actions={menuActions}
+                  disabled={writing}
+                  testId={`sharing-person-access-${grant.grantId}`}
+                  width={288}
+                  align="end"
+                  onPick={(next) => {
+                    if (next !== access) actions.retune(grant, next, props.title);
+                  }}
+                />
+              </span>
+            ) : (
+              <>
+                <span data-testid="sharing-person-level" className={QUIET_LEVEL}>
+                  {levelWords(access)}
+                </span>
+                {menuActions.length > 0 ? (
+                  <span className="-mr-1 flex shrink-0">
+                    <ShareOptionsMenu
+                      label={`Options for ${name}`}
+                      items={menuActions}
+                      testId={`sharing-person-menu-${grant.grantId}`}
+                      width={ROW_MENU_WIDTH}
+                    />
+                  </span>
+                ) : null}
+              </>
+            )}
+          </span>
+          <span data-testid="sharing-person-detail" className={`${SECOND_LINE} text-muted`}>
+            {copied.feedback === null ? (
+              detail
+            ) : (
+              <span className={copied.feedback === "failed" ? "text-danger" : undefined}>
+                {copied.words[copied.feedback]}
+              </span>
+            )}
+          </span>
+          <span role="status" aria-live="polite" className="sr-only">
+            {copied.announcement}
+          </span>
+        </span>
       </div>
       {removable(grant) && props.confirmKey === confirmKey ? (
         <ConfirmCard
@@ -1044,28 +1018,13 @@ function ItemRow(props: {
       ? `Review changes (${waiting.count})`
       : "Review changes"
     : null;
-  const body = (
+  const named = (
     <>
       <span className={MARK_COLUMN}>{subject.glyph}</span>
-      <span className="flex min-w-0 flex-1 flex-col">
-        <NameLine name={item.name} title={subject.title} className="h-5 leading-5 text-ink" />
-        {who ? (
-          <span
-            data-testid="sharing-row-who"
-            title={who.title}
-            className="mt-1 text-[12px] leading-4 wrap-anywhere"
-          >
-            {who.text}
-          </span>
-        ) : null}
-        {notSent ? (
-          <span id={noteId} data-testid="sharing-row-note" className="mt-1 text-[12px] leading-4">
-            {notSent.state} {notSent.next}
-          </span>
-        ) : null}
-      </span>
+      <NameLine name={item.name} className="h-5 flex-1 leading-5 text-ink" />
     </>
   );
+  const rowTitle = [subject.title, who?.title].filter(Boolean).join("\n");
   const menu: MoreMenuItem[] = [
     ...(waiting && review
       ? [{ label: review, onSelect: () => actions.reviewChanges(waiting.oldestProposalId) }]
@@ -1098,51 +1057,67 @@ function ItemRow(props: {
               "data-sharing-row-focus": true,
               "aria-describedby": notSent ? noteId : undefined,
             })}
-        className={`${ROW} min-h-10 ${hasPanel ? "dohc-row-open" : "hover:bg-hover dohc-focus-row"} ${who || notSent ? "items-start" : "items-center"}`}
+        className={`${ROW} min-h-10 ${hasPanel ? "dohc-row-open" : "hover:bg-hover dohc-focus-row"}`}
       >
-        {hasPanel ? (
-          <button
-            type="button"
-            data-sharing-row-focus
-            data-testid="sharing-item-toggle"
-            title={subject.title}
-            aria-expanded={props.open}
-            aria-controls={props.open ? panelId : undefined}
-            aria-describedby={notSent ? noteId : undefined}
-            onClick={props.onToggle}
-            className="dohc-row-open-target flex min-w-0 flex-1 items-start gap-2 text-left"
-          >
-            <Chevron open={props.open} />
-            {body}
-          </button>
-        ) : (
-          <span title={subject.title} className="flex min-w-0 flex-1 items-start gap-2">
-            <span className={CHEVRON_COLUMN} />
-            {body}
-          </span>
-        )}
-        {waiting && review ? (
-          <button
-            type="button"
-            data-testid="sharing-review"
-            aria-label={review}
-            title="Review changes"
-            onClick={() => actions.reviewChanges(waiting.oldestProposalId)}
-            className="flex h-5 shrink-0 items-center gap-1 rounded-full border border-line bg-panel-2 px-1.5 text-[11px] tabular-nums text-muted hover:bg-hover hover:text-ink"
-          >
-            <FileDiff size={11} aria-hidden />
-            {waiting.count}
-          </button>
-        ) : null}
-        {menu.length > 0 ? (
-          <span data-testid="sharing-granted-actions" className={ROW_ACTIONS}>
-            <MoreMenu
-              label="Share actions"
-              testId="sharing-granted-menu"
-              items={menu}
-              width={ROW_MENU_WIDTH}
-            />
-          </span>
+        <span className={LINE}>
+          {hasPanel ? (
+            <button
+              type="button"
+              data-sharing-row-focus
+              data-testid="sharing-item-toggle"
+              title={rowTitle}
+              aria-expanded={props.open}
+              aria-controls={props.open ? panelId : undefined}
+              aria-describedby={notSent ? noteId : undefined}
+              onClick={props.onToggle}
+              className={`dohc-row-open-target ${LINE} flex-1 text-left`}
+            >
+              <Chevron open={props.open} />
+              {named}
+            </button>
+          ) : (
+            <span title={rowTitle} className={`${LINE} flex-1`}>
+              <span className={CHEVRON_COLUMN} />
+              {named}
+            </span>
+          )}
+          {waiting && review ? (
+            <button
+              type="button"
+              data-testid="sharing-review"
+              aria-label={review}
+              title="Review changes"
+              onClick={() => actions.reviewChanges(waiting.oldestProposalId)}
+              className="flex h-5 shrink-0 items-center gap-1 rounded-full border border-line bg-panel-2 px-1.5 text-[11px] tabular-nums text-muted hover:bg-hover hover:text-ink"
+            >
+              <FileDiff size={11} aria-hidden />
+              {waiting.count}
+            </button>
+          ) : null}
+          {menu.length > 0 ? (
+            <span data-testid="sharing-granted-actions" className={ROW_MENU}>
+              <MoreMenu
+                label="Share actions"
+                testId="sharing-granted-menu"
+                items={menu}
+                width={ROW_MENU_WIDTH}
+              />
+            </span>
+          ) : null}
+        </span>
+        {who || notSent ? (
+          <UnderName chevron>
+            {who ? <WhoLine who={who} /> : null}
+            {notSent ? (
+              <span
+                id={noteId}
+                data-testid="sharing-row-note"
+                className={`${SECOND_LINE} text-pretty`}
+              >
+                {notSent.state} {notSent.next}
+              </span>
+            ) : null}
+          </UnderName>
         ) : null}
       </div>
       {props.confirmKey === confirmKey && ending.length > 0 ? (
@@ -1165,11 +1140,7 @@ function ItemRow(props: {
         />
       ) : null}
       {props.open && hasPanel ? (
-        <div
-          id={panelId}
-          data-testid="sharing-item-people"
-          className="mb-2 ml-5 flex flex-col gap-1 pl-2 pr-1"
-        >
+        <div id={panelId} data-testid="sharing-item-people" className="mb-2 flex flex-col gap-1">
           <ul aria-label={`Who has ${item.name}`} className="m-0 flex list-none flex-col p-0">
             {item.people.map((grant) => (
               <PersonRow
@@ -1186,32 +1157,39 @@ function ItemRow(props: {
               />
             ))}
             {item.links.map((link) => (
-              <li
-                key={link.grantId}
-                data-testid="sharing-link"
-                className="flex min-h-8 items-center gap-2"
-              >
-                <LinkMark />
-                <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
-                  Anyone with the link
+              <li key={link.grantId} data-testid="sharing-link" className="flex gap-2 px-2 py-1">
+                <span className="w-3 shrink-0" />
+                <span className="flex h-7 w-[18px] shrink-0 items-center justify-center">
+                  <LinkMark />
                 </span>
-                <span className={QUIET_LEVEL}>{levelWords(link.access)}</span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="flex h-7 min-w-0 items-center text-[13px] text-ink">
+                    <span className="truncate">Anyone with the link</span>
+                  </span>
+                  <span className={`${SECOND_LINE} text-muted`}>{levelWords(link.access)}</span>
+                </span>
               </li>
             ))}
           </ul>
-          {linksOnly ? (
-            <p data-testid="sharing-links-note" className="m-0 text-[12px] leading-4 text-muted">
-              {END_LINKS_IN_SHARE}
-            </p>
-          ) : null}
-          {target && share ? (
-            <GhostButton
-              data-testid="sharing-open-share"
-              className="-ml-2 self-start"
-              onClick={() => share(target)}
-            >
-              Open Share…
-            </GhostButton>
+          {linksOnly || (target && share) ? (
+            <div className="px-2">
+              <UnderName chevron>
+                {linksOnly ? (
+                  <p data-testid="sharing-links-note" className={`m-0 ${SECOND_LINE} text-muted`}>
+                    {END_LINKS_IN_SHARE}
+                  </p>
+                ) : null}
+                {target && share ? (
+                  <GhostButton
+                    data-testid="sharing-open-share"
+                    className="-ml-2 self-start"
+                    onClick={() => share(target)}
+                  >
+                    Open Share…
+                  </GhostButton>
+                ) : null}
+              </UnderName>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -1249,34 +1227,40 @@ function EndedGrantedRow(props: {
         role="group"
         aria-label={[name, damaged ? "Damaged" : null, who].filter(Boolean).join(", ")}
         data-sharing-row-focus
-        className={`${ROW} min-h-8 items-start pl-7 hover:bg-hover dohc-focus-row`}
+        className={`${ROW} min-h-8 pl-7 hover:bg-hover dohc-focus-row`}
       >
-        <span className={MARK_COLUMN}>{subject.glyph}</span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <NameLine name={name} title={subject.title} className="h-5 leading-5" />
-          {damaged || who ? (
-            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
-              {damaged ? <DamagedPill /> : null}
-              {who ? <span data-testid="sharing-row-who">{who}</span> : null}
+        <div className={LINE}>
+          <span className={MARK_COLUMN}>{subject.glyph}</span>
+          <NameLine name={name} title={subject.title} className="h-5 flex-1 leading-5" />
+          {canEnd ? (
+            <span data-testid="sharing-granted-actions" className={ROW_MENU}>
+              <MoreMenu
+                label="Share actions"
+                testId="sharing-granted-menu"
+                width={ROW_MENU_WIDTH}
+                items={[
+                  {
+                    label: "End share…",
+                    onSelect: () => actions.startEnd(confirmKey),
+                    disabled: props.busy,
+                    danger: true,
+                  },
+                ]}
+              />
             </span>
           ) : null}
-        </span>
-        {canEnd ? (
-          <span data-testid="sharing-granted-actions" className={ROW_ACTIONS}>
-            <MoreMenu
-              label="Share actions"
-              testId="sharing-granted-menu"
-              width={ROW_MENU_WIDTH}
-              items={[
-                {
-                  label: "End share…",
-                  onSelect: () => actions.startEnd(confirmKey),
-                  disabled: props.busy,
-                  danger: true,
-                },
-              ]}
-            />
-          </span>
+        </div>
+        {damaged || who ? (
+          <UnderName chevron={false}>
+            <span className={`${SECOND_LINE} flex flex-wrap items-center gap-y-1`}>
+              {damaged ? <DamagedPill /> : null}
+              {who ? (
+                <span data-testid="sharing-row-who" className="line-clamp-2 min-w-0 wrap-anywhere">
+                  {who}
+                </span>
+              ) : null}
+            </span>
+          </UnderName>
         ) : null}
       </div>
       {props.confirmKey === confirmKey && group.rows.some(endsOnEnd) ? (
@@ -1407,8 +1391,9 @@ function ReceivedRow(props: {
   const { entry, actions } = props;
   const { row, mount, subject, sender, shareId } = entry;
   const name = shownName(subject, props.repeated);
-  // A mounted share shows its pinned level: the pin is what its pulls enforce.
-  const access = entry.ended ? null : mount ? (mount.damaged ? null : mount.access) : row?.access;
+  const listedLive = entry.active ? row?.access : null;
+  const copyRecord = mount ? (mount.damaged ? null : mount.access) : row?.access;
+  const access = entry.ended ? null : (listedLive ?? copyRecord);
   const { primary, menu } = receivedActions(entry, !props.skipsShown, actions);
   const where =
     mount && !entry.ended
@@ -1439,74 +1424,88 @@ function ReceivedRow(props: {
           .join(", ")}
         aria-describedby={note ? noteId : undefined}
         data-sharing-row-focus
-        className={`${ROW} min-h-8 hover:bg-hover dohc-focus-row ${entry.ended ? "pl-7" : ""} ${second || where || note || primary ? "items-start" : "items-center"}`}
+        className={`${ROW} min-h-8 hover:bg-hover dohc-focus-row ${entry.ended ? "pl-7" : ""}`}
       >
-        <span className={MARK_COLUMN}>{subject.glyph}</span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="flex h-5 min-w-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-2">
+          <span className={`${LINE} flex-1 basis-24`}>
+            <span className={MARK_COLUMN}>{subject.glyph}</span>
             <NameLine
               name={name}
               title={subject.title}
-              className={`flex-1 leading-5 ${entry.ended ? "" : "text-ink"}`}
+              className={`h-5 flex-1 leading-5 ${entry.ended ? "" : "text-ink"}`}
             />
+          </span>
+          <span className="flex h-5 shrink-0 items-center gap-2">
             {access ? (
               <span data-testid="sharing-row-level" className={QUIET_LEVEL}>
                 {levelWords(access)}
               </span>
             ) : null}
+            {menu.length > 0 ? (
+              <span data-testid="sharing-received-actions" className={ROW_MENU}>
+                <MoreMenu
+                  label="Share actions"
+                  testId="sharing-received-menu"
+                  items={menu.map((item) => ({
+                    ...item,
+                    disabled: props.busy && item.label !== "Show skipped changes",
+                  }))}
+                  width={ROW_MENU_WIDTH}
+                />
+              </span>
+            ) : entry.ended ? null : (
+              <span aria-hidden className="-mr-2 size-6 shrink-0" />
+            )}
           </span>
-          {second ? (
-            <span className="mt-1 text-[12px] leading-4 wrap-anywhere">
-              {entry.damaged ? <DamagedPill /> : null}
-              {from ? (
-                <span data-testid="sharing-row-who" title={`From ${sender.full}`}>
-                  {from}
-                </span>
-              ) : null}
-            </span>
-          ) : null}
-          {where ? (
-            <span
-              data-testid="sharing-mounted"
-              title={`shared-with-me/${mount!.label}`}
-              className="mt-1 flex items-start gap-1 text-[12px] leading-4"
-            >
-              <FolderInput size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
-              {where}
-            </span>
-          ) : null}
-          {note ? (
-            <span id={noteId} data-testid="sharing-row-note" className="mt-1 text-[12px] leading-4">
-              {note}
-            </span>
-          ) : null}
-          {primary ? (
-            <SecondaryButton
-              size="row"
-              data-testid="sharing-row-primary"
-              className="my-1 self-start"
-              disabled={props.busy}
-              onClick={primary.onSelect}
-            >
-              {primary.label}
-            </SecondaryButton>
-          ) : null}
-        </span>
-        {menu.length > 0 ? (
-          <span data-testid="sharing-received-actions" className="flex h-5 shrink-0 items-center">
-            <MoreMenu
-              label="Share actions"
-              testId="sharing-received-menu"
-              items={menu.map((item) => ({
-                ...item,
-                disabled: props.busy && item.label !== "Show skipped changes",
-              }))}
-              width={ROW_MENU_WIDTH}
-            />
-          </span>
-        ) : entry.ended ? null : (
-          <span aria-hidden className="size-6 shrink-0" />
-        )}
+        </div>
+        {second || where || note || primary ? (
+          <UnderName chevron={false}>
+            {second ? (
+              <span className={`${SECOND_LINE} flex flex-wrap items-center gap-y-1`}>
+                {entry.damaged ? <DamagedPill /> : null}
+                {from ? (
+                  <span
+                    data-testid="sharing-row-who"
+                    title={`From ${sender.full}`}
+                    className="line-clamp-2 min-w-0 wrap-anywhere"
+                  >
+                    {from}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
+            {where ? (
+              <span
+                data-testid="sharing-mounted"
+                title={`shared-with-me/${mount!.label}`}
+                className={`${SECOND_LINE} flex items-start gap-1`}
+              >
+                <FolderInput size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+                <span className="min-w-0 text-balance">{where}</span>
+              </span>
+            ) : null}
+            {note ? (
+              <span
+                id={noteId}
+                data-testid="sharing-row-note"
+                className={`${SECOND_LINE} text-pretty`}
+              >
+                {note}
+              </span>
+            ) : null}
+            {primary ? (
+              <SecondaryButton
+                size="row"
+                data-testid="sharing-row-primary"
+                className="mb-1 self-start"
+                disabled={props.busy}
+                onClick={primary.onSelect}
+              >
+                {primary.label}
+              </SecondaryButton>
+            ) : null}
+          </UnderName>
+        ) : null}
       </div>
       {mount && props.skipsShown ? <SkippedChanges mount={mount} actions={actions} /> : null}
       {props.confirming && entry.files && entry.active ? (
@@ -1614,9 +1613,9 @@ export function skipsShown(mount: ShareMount | undefined, view: SkipView): boole
   );
 }
 
-const LANES: ReadonlyArray<{ value: SharingLane; label: string }> = [
-  { value: "granted", label: LANE.granted.label },
-  { value: "received", label: LANE.received.label },
+const LANES: ReadonlyArray<{ value: SharingLane; label: string; short: string }> = [
+  { value: "granted", label: LANE.granted.label, short: LANE.granted.short },
+  { value: "received", label: LANE.received.label, short: LANE.received.short },
 ];
 
 // What a lane shows now, apart from its Ended group. "24+" while more can
@@ -1659,11 +1658,15 @@ function LaneSwitch(props: {
           {...group.radio(index)}
           data-testid={`sharing-lane-${option.value}`}
           data-sharing-lane-focus={option.value}
-          className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+          title={option.label}
+          className={`flex min-w-0 flex-auto items-center justify-center gap-1 rounded-md px-1 py-1 text-xs transition-colors ${
             props.lane === option.value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
           }`}
         >
-          <span className="truncate">{option.label}</span>
+          <span className="sr-only">{option.label}</span>
+          <span aria-hidden className="truncate">
+            {option.short}
+          </span>
           {props.counts[option.value]}
         </button>
       ))}

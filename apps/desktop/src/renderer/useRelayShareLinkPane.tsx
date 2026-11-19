@@ -446,7 +446,8 @@ const AGENT_COPY_WORDS = { copied: "Copied for an agent" };
 function LinkRowActions(props: {
   grantId: string;
   url: string | null;
-  items: readonly MenuEntry[];
+  everyday: readonly MenuEntry[];
+  lifecycle: readonly MenuEntry[];
 }) {
   const { url } = props;
   const address = url === null ? null : agentAddressFor(url);
@@ -474,10 +475,9 @@ function LinkRowActions(props: {
             onSelect: () => agentCopy.copy(setup.id),
           })),
         ];
-  const items: MenuEntry[] =
-    forAgent.length > 0 && props.items.length > 0
-      ? [...forAgent, MENU_SEPARATOR, ...props.items]
-      : [...forAgent, ...props.items];
+  const items: MenuEntry[] = [props.everyday, forAgent, props.lifecycle]
+    .filter((group) => group.length > 0)
+    .flatMap((group, index) => (index === 0 ? group : [MENU_SEPARATOR, ...group]));
   return (
     <>
       <span
@@ -2220,7 +2220,13 @@ export function useRelayShareLinkPane(props: {
             options
           ) : (
             // Keyed by the link, so a reset link is a new control.
-            <LinkRowActions key={url ?? ""} grantId={row.grantId} url={url} items={items} />
+            <LinkRowActions
+              key={url ?? ""}
+              grantId={row.grantId}
+              url={url}
+              everyday={ofShare}
+              lifecycle={lifecycle}
+            />
           )}
         </ShareLinkRow>
 
@@ -2920,7 +2926,8 @@ export function useRelayShareLinkPane(props: {
                 key={minted.url}
                 grantId={minted.grantId}
                 url={minted.url}
-                items={[]}
+                everyday={[]}
+                lifecycle={[]}
               />
             </ShareLinkRow>
             {renderLinkDetails(minted.grantId, renderLinkUrl(minted.url))}

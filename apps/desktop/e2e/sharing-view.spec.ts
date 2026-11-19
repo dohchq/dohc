@@ -96,10 +96,13 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await page.keyboard.press("Enter");
     await expect(row.getByTestId("sharing-item-toggle")).toHaveAttribute("aria-expanded", "true");
     await expect(row.getByTestId("sharing-person")).toContainText(RECIPIENT_EMAIL);
-    const personOptions = row.getByRole("button", { name: /^Options for/ });
+    const personMenu = row.getByTestId("sharing-person").locator('button[aria-haspopup="menu"]');
+    await expect(personMenu).toHaveText("Can view");
     await holdSystemClipboard(test.info(), async (remainingMs) => {
-      await personOptions.focus({ timeout: remainingMs() });
+      await personMenu.focus({ timeout: remainingMs() });
       await page.keyboard.press("Enter");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
       await expect(page.getByRole("menuitem", { name: "Copy invitation" })).toBeFocused();
       await page.keyboard.press("Enter");
       await expect
@@ -108,10 +111,8 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
         })
         .toBe(shareCode);
     });
-    await expect(page.getByRole("menu")).toBeVisible();
-    await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
-    await expect(personOptions).toBeFocused();
+    await expect(personMenu).toBeFocused();
 
     await page.getByTestId(activityPin("sharing")).click();
     await expect(view).toBeHidden();

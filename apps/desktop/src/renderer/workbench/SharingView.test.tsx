@@ -272,9 +272,14 @@ async function people(item: HTMLElement) {
 }
 
 async function personMenu(person: HTMLElement) {
-  await userEvent.click(within(person).getByRole("button", { name: /^Options for/ }));
-  return screen.getByRole("menu");
+  await userEvent.click(person.querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
+  return screen.getByRole("menu", { hidden: true });
 }
+
+const menuItem = (menu: HTMLElement, name: string) =>
+  within(menu).getByRole("menuitem", { hidden: true, name });
+const menuRows = (menu: HTMLElement) =>
+  [...menu.querySelectorAll('[role^="menuitem"]')].map((row) => row.getAttribute("data-testid"));
 
 async function choose(row: HTMLElement, name: string) {
   const shown = within(row).queryByRole("button", { name });
@@ -304,6 +309,14 @@ describe("the Sharing view's two lists", () => {
     const grantedRows = await screen.findAllByTestId("sharing-granted-row");
     expect(grantedRows).toHaveLength(2);
     expect(grantedRows[0]!.textContent).toBe("competitors.mdsam@example.com can view");
+    const [who] = within(grantedRows[0]!).getAllByTestId("sharing-row-who");
+    expect([...who!.children].map((part) => [part.textContent, part.className])).toEqual([
+      ["sam@example.com", "truncate"],
+      [" can view", "shrink-0 whitespace-pre"],
+    ]);
+    expect(within(grantedRows[1]!).getByTestId("sharing-row-who").className.split(" ")).toEqual(
+      expect.arrayContaining(["line-clamp-2", "text-balance"]),
+    );
     expect(grantedRows[1]!.textContent).toBe("product-plan.md2 people");
     expect(within(grantedRows[1]!).getByText("product-plan").parentElement!.className).toContain(
       "text-ink",
@@ -532,7 +545,7 @@ describe("the actions Settings offers on a share", () => {
     render(<View />);
     const row = await screen.findByTestId("sharing-granted-row");
     await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(row)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     const confirm = screen.getByTestId("sharing-end-confirm");
     expect(confirm.textContent).toContain(
@@ -546,14 +559,14 @@ describe("the actions Settings offers on a share", () => {
     expect(document.activeElement).toBe(opener);
 
     await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(row)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     await userEvent.click(screen.getByTestId("sharing-end-cancel"));
     expect(screen.queryByTestId("sharing-end-confirm")).toBeNull();
     expect(document.activeElement).toBe(opener);
 
     await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(row)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     await userEvent.click(screen.getByTestId("sharing-end"));
     await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledOnce());
@@ -580,7 +593,7 @@ describe("the actions Settings offers on a share", () => {
     const { rerender } = render(<View />);
     const row = await screen.findByTestId("sharing-granted-row");
     await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(row)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     await userEvent.click(screen.getByTestId("sharing-end"));
     await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
@@ -850,7 +863,10 @@ describe("the actions Settings offers on a share", () => {
     await openEnded("granted");
     const row = await screen.findByTestId("sharing-granted-row");
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Damaged");
-    const end = within(await openMenu(row)).getByRole("menuitem", { name: "End share…" });
+    const end = within(await openMenu(row)).getByRole("menuitem", {
+      hidden: true,
+      name: "End share…",
+    });
     expect(end.className).toContain("text-danger");
     await userEvent.click(end);
     await userEvent.click(screen.getByTestId("sharing-end"));
@@ -906,7 +922,7 @@ describe("copying a share's code or invitation", () => {
   ];
   const rowOf = grantedRow;
 
-  it("offers a person's invitation or code from their row, and nothing for a link or a chat", async () => {
+  it("offers a person's invitation or code from their one menu, and nothing for a link or a chat", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
     render(<CopyView />);
@@ -917,62 +933,68 @@ describe("copying a share's code or invitation", () => {
       shareId: "share-1",
       grantId: "grant-1",
     });
-    await userEvent.click(
-      within(await personMenu(named!)).getByRole("menuitem", { name: "Copy invitation" }),
-    );
+    expect(named!.querySelectorAll("button")).toHaveLength(1);
+    await userEvent.click(menuItem(await personMenu(named!), "Copy invitation"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(INVITING.browserInvitationUrl));
-    await userEvent.keyboard("{Escape}");
-    await userEvent.click(
-      within(await personMenu(dependent!)).getByRole("menuitem", { name: "Copy code" }),
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    await waitFor(() =>
+      expect(within(named!).getByTestId("sharing-person-detail").textContent).toBe(
+        "Invitation copied",
+      ),
     );
+
+    expect(dependent!.querySelectorAll("button")).toHaveLength(1);
+    expect(within(dependent!).getByTestId("sharing-person-level").textContent).toBe("Can view");
+    await userEvent.click(menuItem(await personMenu(dependent!), "Copy code"));
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(INVITING.shareCode));
-    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(within(dependent!).getByTestId("sharing-person-detail").textContent).toBe(
+        "Share code copied",
+      ),
+    );
+
     expect(within(item).getByTestId("sharing-link").textContent).toBe(
       "Anyone with the linkCan edit",
     );
     expect(within(item).getByTestId("sharing-link").querySelector("button")).toBeNull();
     const [member] = await people(await rowOf("share-chat"));
-    expect(within(member!).queryByRole("button", { name: /^Options for/ })).toBeNull();
-    // An item's own actions sit over the end of its last line, so no row
-    // changes height; they show on hover, keyboard focus, and while their
-    // menu is open.
+    expect(member!.querySelector("button")).toBeNull();
     const actions = within(item).getByTestId("sharing-granted-actions");
     expect(actions.parentElement).toBe(
-      item.querySelector("[data-sharing-row-focus]")!.parentElement,
+      within(item).getByTestId("sharing-item-toggle").parentElement,
     );
-    expect(actions.className.split(" ")).toEqual(
-      expect.arrayContaining([
-        "absolute",
-        "bottom-0",
-        "opacity-0",
-        "pointer-events-none",
-        "group-hover:opacity-100",
-        "keyboard:group-focus-within:opacity-100",
-        "has-[[aria-expanded=true]]:opacity-100",
-      ]),
-    );
+    expect(actions.className.split(" ")).not.toContain("absolute");
   });
 
-  it("offers Copy share code beside Copy invitation for a person who can edit files, and it copies the code", async () => {
+  it("puts a person's levels first in their menu, then Copy invitation, Copy share code and Remove access", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
     render(<CopyView />);
     const [named, dependent] = await people(await rowOf("share-1"));
     const menu = await personMenu(named!);
+    expect(menuRows(menu)).toEqual([
+      "sharing-person-access-grant-1-view",
+      "sharing-person-access-grant-1-edit",
+      "sharing-person-copy-grant-1",
+      "sharing-person-copy-code-grant-1",
+      "sharing-person-remove-grant-1",
+    ]);
     expect(
       within(menu)
-        .getAllByRole("menuitem")
-        .map((item) => item.textContent),
+        .getAllByRole("menuitem", { hidden: true })
+        .map((row) => row.textContent),
     ).toEqual(["Copy invitation", "Copy share code", "Remove access"]);
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy share code" }));
+    await userEvent.click(menuItem(menu, "Copy share code"));
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
-    await within(menu).findByRole("menuitem", { name: "Copied" });
-    expect(within(menu).getByRole("menuitem", { name: "Copy invitation" })).toBeTruthy();
-    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(within(named!).getByTestId("sharing-person-detail").textContent).toBe(
+        "Share code copied",
+      ),
+    );
     expect(
       within(await personMenu(dependent!))
-        .getAllByRole("menuitem")
-        .map((item) => item.textContent),
+        .getAllByRole("menuitem", { hidden: true })
+        .map((row) => row.textContent),
     ).toEqual(["Copy code", "Remove access"]);
   });
 
@@ -983,13 +1005,15 @@ describe("copying a share's code or invitation", () => {
     render(<CopyView />);
     const [named] = await people(await rowOf("share-1"));
     await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
-    const menu = await personMenu(named!);
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy invitation" }));
+    await userEvent.click(menuItem(await personMenu(named!), "Copy invitation"));
     await waitFor(() => expect(reportFailure).toHaveBeenCalledOnce());
     expect(writeText).toHaveBeenLastCalledWith(INVITING.browserInvitationUrl);
+    const detail = within(named!).getByTestId("sharing-person-detail");
+    await waitFor(() => expect(detail.textContent).toBe("Could not copy"));
+    expect(detail.querySelector(".text-danger")).not.toBeNull();
     const copyInvitationAgain = reportFailure.mock.calls[0]![0].retry as () => void;
 
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy share code" }));
+    await userEvent.click(menuItem(await personMenu(named!), "Copy share code"));
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(INVITING.shareCode));
     await act(async () => copyInvitationAgain());
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(3));
@@ -997,7 +1021,7 @@ describe("copying a share's code or invitation", () => {
     expect(reportFailure).toHaveBeenCalledOnce();
   });
 
-  it("chooses what to copy by the confirmed level while a change to Edit is under way", async () => {
+  it("offers no copy while a change to Edit is under way, and the browser invitation once the relay confirms it", async () => {
     answerWith({
       granted: answer("granted", {
         rows: [
@@ -1018,23 +1042,22 @@ describe("copying a share's code or invitation", () => {
     const [person] = await people(await rowOf("share-1"));
     await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
     const level = within(person!).getByTestId("sharing-person-access-grant-1");
-    await userEvent.click(level);
+    expect(menuRows(await personMenu(person!))).not.toContain("sharing-person-copy-code-grant-1");
     await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
     expect(level.textContent).toBe("Can edit");
     expect(level).toHaveProperty("disabled", true);
-
-    const asked = await personMenu(person!);
-    expect(within(asked).queryByRole("menuitem", { name: "Copy share code" })).toBeNull();
-    await userEvent.click(within(asked).getByRole("menuitem", { name: "Copy invitation" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
-    await userEvent.keyboard("{Escape}");
+    await userEvent.click(level);
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    expect(writeText).not.toHaveBeenCalled();
 
     await act(async () => change.resolve({ access: "edit", generation: 3 }));
     await waitFor(() => expect(level).toHaveProperty("disabled", false));
     const confirmed = await personMenu(person!);
-    expect(within(confirmed).getByRole("menuitem", { name: "Copy share code" })).toBeTruthy();
-    await userEvent.click(within(confirmed).getByRole("menuitem", { name: "Copy invitation" }));
-    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(INVITING.browserInvitationUrl));
+    expect(menuRows(confirmed)).toContain("sharing-person-copy-code-grant-1");
+    await userEvent.click(menuItem(confirmed, "Copy invitation"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.browserInvitationUrl),
+    );
     expect(reportFailure).not.toHaveBeenCalled();
   });
 
@@ -1052,49 +1075,43 @@ describe("copying a share's code or invitation", () => {
     expect(level.textContent).toBe("Can view");
 
     const menu = await personMenu(person!);
-    expect(within(menu).queryByRole("menuitem", { name: "Copy share code" })).toBeNull();
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy invitation" }));
+    expect(
+      within(menu).queryByRole("menuitem", { hidden: true, name: "Copy share code" }),
+    ).toBeNull();
+    await userEvent.click(
+      within(menu).getByRole("menuitem", { hidden: true, name: "Copy invitation" }),
+    );
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
     expect(reportFailure).not.toHaveBeenCalled();
   });
 
-  it("keeps the menu open for a person using the keyboard inside it, until Escape puts focus back", async () => {
+  it("copies from the keyboard, says so on the person's second line, and puts focus back on their menu", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
     render(<CopyView />);
-    const toggle = within(await rowOf("share-1")).getByTestId("sharing-item-toggle");
+    const item = await rowOf("share-1");
+    const toggle = within(item).getByTestId("sharing-item-toggle");
     toggle.focus();
     await userEvent.keyboard("{Enter}");
-    const trigger = screen.getAllByRole("button", { name: "Options for sam@example.com" })[0]!;
+    const [named] = within(item).getAllByTestId("sharing-person");
+    const detail = within(named!).getByTestId("sharing-person-detail");
+    expect(detail.textContent).toBe("Invited by email");
+    const trigger = within(named!).getByTestId("sharing-person-access-grant-1");
     trigger.focus();
     await userEvent.keyboard("{Enter}");
-    const menu = screen.getByRole("menu");
-    expect(document.activeElement).toBe(
-      within(menu).getByRole("menuitem", { name: "Copy invitation" }),
-    );
+    const menu = screen.getByRole("menu", { hidden: true });
+    expect(document.activeElement).toBe(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(menuItem(menu, "Copy invitation"));
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(INVITING.browserInvitationUrl));
-    await within(menu).findByRole("menuitem", { name: "Copied" });
-    await within(menu).findByRole(
-      "menuitem",
-      { name: "Copy invitation" },
-      { timeout: 2 * COPY_FEEDBACK_MS },
-    );
-    expect(screen.getByRole("menu")).toBe(menu);
-    await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
     expect(document.activeElement).toBe(trigger);
-  });
-
-  it("closes the menu once Copied has shown for a person using the pointer", async () => {
-    answerWith({ granted: answer("granted", { rows: ROWS }) });
-    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
-    render(<CopyView />);
-    const [named] = await people(await rowOf("share-1"));
-    const menu = await personMenu(named!);
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Copy invitation" }));
-    await within(menu).findByRole("menuitem", { name: "Copied" });
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull(), {
+    await waitFor(() => expect(detail.textContent).toBe("Invitation copied"));
+    await waitFor(() =>
+      expect(within(named!).getByRole("status").textContent).toBe("Invitation copied"),
+    );
+    await waitFor(() => expect(detail.textContent).toBe("Invited by email"), {
       timeout: 2 * COPY_FEEDBACK_MS,
     });
   });
@@ -1107,7 +1124,10 @@ describe("copying a share's code or invitation", () => {
     await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
     const reads = bridgeMock.listSharingAccess.mock.calls.length;
     await userEvent.click(
-      within(await personMenu(named!)).getByRole("menuitem", { name: "Copy invitation" }),
+      within(await personMenu(named!)).getByRole("menuitem", {
+        hidden: true,
+        name: "Copy invitation",
+      }),
     );
     await waitFor(() =>
       expect(bridgeMock.listSharingAccess.mock.calls.length).toBeGreaterThan(reads),
@@ -1170,7 +1190,10 @@ describe("mounts and their skipped changes", () => {
     expect(row.dataset.status).toBe("unlisted");
     expect(within(row).queryByTestId("sharing-row-status")).toBeNull();
     expect(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Remove from workspace" }),
+      within(await openMenu(row)).getByRole("menuitem", {
+        hidden: true,
+        name: "Remove from workspace",
+      }),
     ).toBeTruthy();
   });
 
@@ -1202,7 +1225,10 @@ describe("mounts and their skipped changes", () => {
     rerender(<View mounts={[{ ...mount, skippedOps: seen }]} />);
     expect(within(row).queryByTestId("sharing-skipped")).toBeNull();
     await userEvent.click(
-      within(await openMenu(row)).getByRole("menuitem", { name: "Show skipped changes" }),
+      within(await openMenu(row)).getByRole("menuitem", {
+        hidden: true,
+        name: "Show skipped changes",
+      }),
     );
     expect(within(row).getAllByTestId("sharing-skipped")).toHaveLength(1);
   });
@@ -1244,9 +1270,13 @@ describe("one list at a time", () => {
     await screen.findByTestId("sharing-granted-row");
     const group = screen.getByRole("radiogroup", { name: "Sharing" });
     const [byMe, withMe] = within(group).getAllByRole("radio");
-    expect(byMe!.textContent).toBe("Shared by me1");
+    expect(byMe!.textContent).toBe("Shared by meBy me1");
+    expect(within(byMe!).getByText("Shared by me").className).toContain("sr-only");
+    expect(within(byMe!).getByText("By me").getAttribute("aria-hidden")).toBe("true");
+    expect(byMe!.getAttribute("title")).toBe("Shared by me");
     expect(byMe!.getAttribute("aria-checked")).toBe("true");
-    await waitFor(() => expect(withMe!.textContent).toBe("Shared with me2"));
+    await waitFor(() => expect(withMe!.textContent).toBe("Shared with meWith me2"));
+    expect(within(withMe!).getByText("With me").getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("sharing-received")).toBeNull();
 
     byMe!.focus();
@@ -1322,7 +1352,7 @@ describe("Shared by me, by what is shared", () => {
     await userEvent.click(within(item).getByTestId("sharing-item-toggle"));
 
     expect(within(item).getByTestId("sharing-person").textContent).toBe(
-      "Nnew@example.comInvited, not signed in yetCan edit",
+      "Nnew@example.comCan editInvited, not signed in yet",
     );
   });
 
@@ -1344,8 +1374,8 @@ describe("Shared by me, by what is shared", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     const rowsOfPeople = within(item).getAllByTestId("sharing-person");
     expect(rowsOfPeople.map((person) => person.textContent)).toEqual([
-      "Ssam@example.comInvited by emailCan edit",
-      "Nnova@example.comInvited by emailCan view",
+      "Ssam@example.comCan editInvited by email",
+      "Nnova@example.comCan viewInvited by email",
     ]);
     expect(within(item).getByTestId("sharing-link").textContent).toBe(
       "Anyone with the linkCan view",
@@ -1486,11 +1516,7 @@ describe("Shared by me, by what is shared", () => {
     await userEvent.click(access());
     await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
     expect(access()).toHaveProperty("disabled", true);
-    const remove = within(await personMenu(person!)).getByRole("menuitem", {
-      name: "Remove access",
-    });
-    expect(remove.getAttribute("aria-disabled")).toBe("true");
-    await userEvent.keyboard("{Escape}");
+    expect(person!.querySelectorAll("button")).toHaveLength(1);
 
     const toggle = within(await grantedRow("share-1")).getByTestId("sharing-item-toggle");
     await userEvent.click(toggle);
@@ -1504,12 +1530,7 @@ describe("Shared by me, by what is shared", () => {
     const [again] = await people(await grantedRow("share-1"));
     expect(access().textContent).toBe("Can edit");
     expect(access()).toHaveProperty("disabled", true);
-    expect(
-      within(await personMenu(again!))
-        .getByRole("menuitem", { name: "Remove access" })
-        .getAttribute("aria-disabled"),
-    ).toBe("true");
-    await userEvent.keyboard("{Escape}");
+    expect(again!.querySelectorAll("button")).toHaveLength(1);
 
     await act(async () => first.resolve({ access: "edit", generation: 5 }));
     await waitFor(() => expect(access()).toHaveProperty("disabled", false));
@@ -1544,7 +1565,10 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const [, nova] = await people(await grantedRow("share-1"));
     await userEvent.click(
-      within(await personMenu(nova!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(nova!)).getByRole("menuitem", {
+        hidden: true,
+        name: "Remove access",
+      }),
     );
     const confirm = within(nova!).getByTestId("sharing-end-confirm");
     expect(confirm.textContent).toContain(
@@ -1579,7 +1603,7 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const [sam] = await people(await grantedRow("share-1"));
     await userEvent.click(
-      within(await personMenu(sam!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(sam!)).getByRole("menuitem", { hidden: true, name: "Remove access" }),
     );
     expect(within(sam!).getByTestId("sharing-end-confirm").textContent).toContain(
       "Remove sam@example.com's access to product-plan.md?",
@@ -1622,7 +1646,7 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const [sam] = await people(await grantedRow("share-link"));
     await userEvent.click(
-      within(await personMenu(sam!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(sam!)).getByRole("menuitem", { hidden: true, name: "Remove access" }),
     );
     expect(within(sam!).getByTestId("sharing-end-confirm").textContent).toBe(
       "Remove sam@example.com's access to product-plan.md? This ends the access they got by joining through a link. They can join again while the link is active. End the link in Share to keep them out.CancelRemove access",
@@ -1656,8 +1680,10 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const [, nova] = await people(await grantedRow("share-1"));
     const menu = await personMenu(nova!);
-    expect(within(menu).queryByRole("menuitem", { name: "End share…" })).toBeNull();
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Remove access" }));
+    expect(within(menu).queryByRole("menuitem", { hidden: true, name: "End share…" })).toBeNull();
+    await userEvent.click(
+      within(menu).getByRole("menuitem", { hidden: true, name: "Remove access" }),
+    );
     expect(within(nova!).getByTestId("sharing-end-confirm").textContent).toBe(
       "Remove nova@example.com's access to product-plan.md? This ends the email invitation they have not used yet.CancelRemove access",
     );
@@ -1696,7 +1722,7 @@ describe("Shared by me, by what is shared", () => {
     );
     const item = await grantedRow("share-1");
     await userEvent.click(
-      within(await openMenu(item)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(item)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     expect(within(item).getByTestId("sharing-end-confirm").textContent).toBe(
       "End this share with 2 people and decline 1 change nova@example.com sent? Undo restores the share, not the declined change. Anyone with the link keeps access. End links in Share.CancelEnd share",
@@ -1710,7 +1736,7 @@ describe("Shared by me, by what is shared", () => {
 
     const other = await grantedRow("share-4");
     await userEvent.click(
-      within(await openMenu(other)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(other)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     expect(within(other).getByTestId("sharing-end-confirm").textContent).toContain(
       "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates.Cancel",
@@ -1724,7 +1750,7 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const item = await grantedRow("share-1");
     await userEvent.click(
-      within(await openMenu(item)).getByRole("menuitem", { name: "End share…" }),
+      within(await openMenu(item)).getByRole("menuitem", { hidden: true, name: "End share…" }),
     );
     expect(within(item).getByTestId("sharing-end-confirm").textContent).toBe(
       "End this share with 1 person? sam@example.com keeps a read-only copy and stops receiving updates. Not every share is shown yet. Any others stay as they are.CancelEnd share",
@@ -1741,7 +1767,10 @@ describe("Shared by me, by what is shared", () => {
     render(<View />);
     const [person] = await people(await grantedRow("share-1"));
     await userEvent.click(
-      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(person!)).getByRole("menuitem", {
+        hidden: true,
+        name: "Remove access",
+      }),
     );
     const confirm = within(person!).getByTestId("sharing-end-confirm");
     const remove = within(confirm).getByTestId("sharing-end");
@@ -1778,7 +1807,10 @@ describe("Shared by me, by what is shared", () => {
     const changeAgain = callbacks.reportError.mock.calls[0]![2] as () => void | false;
 
     await userEvent.click(
-      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(person!)).getByRole("menuitem", {
+        hidden: true,
+        name: "Remove access",
+      }),
     );
     await userEvent.click(within(person!).getByTestId("sharing-end"));
     expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledOnce();
@@ -1793,7 +1825,10 @@ describe("Shared by me, by what is shared", () => {
     const [person] = await people(await grantedRow("share-1"));
     const level = within(person!).getByTestId("sharing-person-access-grant-1");
     await userEvent.click(
-      within(await personMenu(person!)).getByRole("menuitem", { name: "Remove access" }),
+      within(await personMenu(person!)).getByRole("menuitem", {
+        hidden: true,
+        name: "Remove access",
+      }),
     );
     await userEvent.click(within(person!).getByTestId("sharing-end"));
     await waitFor(() => expect(shareRemovals.failed).toHaveBeenCalledOnce());
@@ -1877,7 +1912,10 @@ describe("Shared by me, by what is shared", () => {
     await userEvent.click(within(item).getByTestId("sharing-review"));
     expect(callbacks.onReviewChanges).toHaveBeenLastCalledWith("oldest");
     await userEvent.click(
-      within(await openMenu(item)).getByRole("menuitem", { name: "Review changes (2)" }),
+      within(await openMenu(item)).getByRole("menuitem", {
+        hidden: true,
+        name: "Review changes (2)",
+      }),
     );
     expect(callbacks.onReviewChanges).toHaveBeenCalledTimes(2);
     expect(callbacks.onReviewChanges).toHaveBeenLastCalledWith("oldest");
@@ -2114,7 +2152,7 @@ describe("Shared with me, by who shared", () => {
     const menu = await openMenu(rows[1]!);
     expect(
       within(menu)
-        .getAllByRole("menuitem")
+        .getAllByRole("menuitem", { hidden: true })
         .map((item) => item.textContent),
     ).toEqual(["Add to workspace", "Leave share…"]);
   });
@@ -2332,6 +2370,27 @@ describe("Shared with me, by who shared", () => {
     rerender(<View mounts={[]} facts={RECONNECTING} />);
     await waitFor(() => expect(liveShareIds()).toEqual(["in-1", "in-2"]));
     expect(screen.queryByTestId("sharing-received-ended")).toBeNull();
+  });
+
+  it("shows a copy's level from the list its actions go by, and from the copy's record only without one", async () => {
+    const mounts: ShareMount[] = [
+      { shareId: "in-1", label: "funnel", granterEmail: "sam@example.com", access: "view" },
+    ];
+    answerWith({ received: answer("received", { rows: [received({ access: "edit" })] }) });
+    const { unmount } = render(<View mounts={mounts} />);
+    const row = await receivedRow();
+    expect(within(row).getByTestId("sharing-row-level").textContent).toBe("Can edit");
+    expect(within(row).getByTestId("sharing-row-primary").textContent).toBe("Open to edit");
+    expect(within(row).getByTestId("sharing-mounted").textContent).toBe(
+      "In this workspace as a read-only copy",
+    );
+    unmount();
+
+    answerWith({ received: UNKNOWN("received") });
+    render(<View facts={SIGNED_OUT} mounts={mounts} />);
+    const local = await receivedRow();
+    expect(within(local).getByTestId("sharing-row-level").textContent).toBe("Can view");
+    expect(within(local).queryByTestId("sharing-row-primary")).toBeNull();
   });
 
   it("counts only the shares the list confirms are live", async () => {
