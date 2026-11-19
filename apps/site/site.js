@@ -92,14 +92,12 @@ function detectedDesktopPlatform() {
     return "unknown";
   if (/Windows|Win32|Win64/i.test(fingerprint)) return "windows";
   if (/Macintosh|MacIntel|Mac OS/i.test(fingerprint)) return "mac";
-  if (/Linux|X11/i.test(fingerprint)) return "linux";
   return "unknown";
 }
 
 async function preferredDownloadKey() {
   const platform = detectedDesktopPlatform();
   if (platform === "windows") return "windows-x64";
-  if (platform === "linux") return "linux-x64";
   if (platform !== "mac") return null;
 
   const reportedArchitecture = `${navigator.userAgent ?? ""}`;
