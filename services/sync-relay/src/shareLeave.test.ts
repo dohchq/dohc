@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from "vitest";
+import type { StorageContext } from "./storage/context";
 import { hashLinkBearer } from "./linkSecurity";
 import {
   closeTestStorages,
@@ -210,11 +211,34 @@ it("ends the owner's Undo of one person's removal once that person leaves", asyn
   expect(storage.getShareGrant("reader")?.status).toBe("revoked");
 });
 
+it("clears a share that ended with its owner's account, and keeps no row for it", async () => {
+  const { storage, handle, leave, received } = await fixture();
+  const { db } = storage as unknown as StorageContext;
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS sync_relay_ended_shares (share_id TEXT NOT NULL, recipient_user_id TEXT NOT NULL, ended_at_ms INTEGER NOT NULL, PRIMARY KEY (share_id, recipient_user_id)) STRICT",
+  );
+  db.prepare("INSERT INTO sync_relay_ended_shares VALUES (?, ?, ?)").run("gone", "reader", 2000);
+  expect((await received("reader")).removed.map((row) => row.shareId)).toContain("gone");
+
+  expect((await leave("other", "gone", { ended: true })).status).toBe(404);
+  expect((await leave("reader", "gone", { ended: true })).status).toBe(200);
+
+  expect((await received("reader")).removed.map((row) => row.shareId)).not.toContain("gone");
+  const full = (await (await handle(request("reader", "/sync/shares"))).json()) as {
+    removed: { shareId: string }[];
+  };
+  expect(full.removed.map((row) => row.shareId)).not.toContain("gone");
+  expect(db.prepare("SELECT COUNT(*) AS total FROM sync_relay_share_departures").get()).toEqual({
+    total: 0,
+  });
+});
+
 it("touches nobody else's access", async () => {
   const { storage, leave } = await fixture();
   const owner = storage.getShare("s");
 
   expect((await leave("stranger")).status).toBe(404);
+  expect((await leave("stranger", "s", { ended: true })).status).toBe(404);
   expect((await leave("owner")).status).toBe(404);
   expect((await leave(null)).status).toBe(401);
   expect((await leave("reader", "missing")).status).toBe(404);

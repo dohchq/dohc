@@ -328,19 +328,27 @@ export function leaveShare(
 ): { ok: false } | { ok: true; left: boolean; workspaceId: string | null } {
   return storage.tx(() => {
     const share = storage.getShare(input.shareId);
-    const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
-    if (share && !selector) return { ok: false };
-    const held = share
-      ? (storage.db
-          .prepare(
-            `SELECT grant_id FROM sync_relay_share_grants
-               WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
-                 AND status = 'active' AND revoked_at_ms IS NULL`,
-          )
-          .all(input.shareId, input.userId) as { grant_id: string }[])
-      : [];
+    if (!share) {
+      const cleared = endedSharesRecorded(storage)
+        ? storage.db
+            .prepare(
+              "DELETE FROM sync_relay_ended_shares WHERE share_id = ? AND recipient_user_id = ?",
+            )
+            .run(input.shareId, input.userId).changes
+        : 0;
+      return cleared > 0 ? { ok: true, left: true, workspaceId: null } : { ok: false };
+    }
+    const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    if (!selector) return { ok: false };
+    const held = storage.db
+      .prepare(
+        `SELECT grant_id FROM sync_relay_share_grants
+           WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
+             AND status = 'active' AND revoked_at_ms IS NULL`,
+      )
+      .all(input.shareId, input.userId) as { grant_id: string }[];
     if (held.length > 0 && input.onlyEnded) return { ok: true, left: false, workspaceId: null };
-    if (held.length > 0 && "kind" in selector!) return { ok: false };
+    if (held.length > 0 && "kind" in selector) return { ok: false };
     for (const { grant_id } of held) {
       revokeShareGrantInTransaction(storage, {
         shareId: input.shareId,
@@ -349,7 +357,7 @@ export function leaveShare(
       });
     }
     const [removed] = listRemovedSharesForRecipient(storage, input.userId, input.shareId);
-    if (!removed) return { ok: false };
+    if (!removed) throw notFound();
     if (!input.onlyEnded) {
       const mine = storage.db
         .prepare(
@@ -366,7 +374,7 @@ export function leaveShare(
          ON CONFLICT (share_id, recipient_user_id) DO UPDATE SET left_at_ms = excluded.left_at_ms`,
       )
       .run(input.shareId, input.userId, Math.max(Math.trunc(input.nowMs), removed.removedAtMs));
-    return { ok: true, left: true, workspaceId: held.length > 0 ? share!.workspaceId : null };
+    return { ok: true, left: true, workspaceId: held.length > 0 ? share.workspaceId : null };
   });
 }
 
@@ -386,6 +394,14 @@ export function listRemovedSharesInRecipientList(
   );
   return listRemovedSharesForRecipient(storage, userId, shareId).filter(
     (row) => (leftAt.get(row.shareId) ?? -1) < row.removedAtMs,
+  );
+}
+
+function endedSharesRecorded(storage: StorageContext): boolean {
+  return Boolean(
+    storage.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_relay_ended_shares'")
+      .get(),
   );
 }
 
@@ -409,11 +425,7 @@ export function listRemovedSharesForRecipient(
     grant_id: string;
     revoked_at_ms: number;
   }[];
-  if (
-    storage.db
-      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_relay_ended_shares'")
-      .get()
-  ) {
+  if (endedSharesRecorded(storage)) {
     const ended = storage.db
       .prepare(
         "SELECT share_id,ended_at_ms FROM sync_relay_ended_shares WHERE recipient_user_id=?" +
