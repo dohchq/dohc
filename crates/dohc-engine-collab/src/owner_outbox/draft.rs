@@ -3748,6 +3748,66 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_edit_with_the_accepted_state_s_bytes_leaves_and_its_blob_stays_the_checkpoint() {
+        use super::super::accepted::{apply_sync_in_tx, read_state_in, OwnerAcceptedFrameInput};
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let delta = owner.richdoc_append_paragraph("Owner offline edit");
+        let draft = bounded(&owner).unwrap();
+        let draft_digest = hex_sha256(&draft);
+        let append = pending(&mut store, &observed, draft);
+        super::super::acknowledge_taken(
+            &mut store,
+            &mut cache,
+            "workspace",
+            &append.outbox_id,
+            &receipt_for(&append.delivery_id, &append.update_digest, 5),
+        )
+        .unwrap();
+        assert_eq!(taken_rows(&store), 1);
+
+        let host = Ydoc::wire();
+        host.apply(&checkpoint).unwrap();
+        host.apply(&delta).unwrap();
+        let input = OwnerAcceptedFrameInput {
+            binding: observed.binding.clone(),
+            relay_database_namespace: observed.relay_database_namespace.clone(),
+            expected_revision: observed.revision,
+            expected_native_head_sequence: observed.native_head_sequence,
+            previous_accepted_cursor: 0,
+            journal_cursor: 5,
+            update_bytes: delta,
+        };
+        let vector = host.encode_state_vector();
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_sync_in_tx(tx, "workspace", &input, &vector, 20)
+            })
+            .unwrap();
+
+        let state = store
+            .read_with(|c| read_state_in(c, &observed.binding, "relay"))
+            .unwrap();
+        assert_eq!(state.accepted_cursor, 5);
+        assert_eq!(taken_rows(&store), 0);
+        let (bound, blobs) = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT checkpoint_digest,(SELECT COUNT(*) FROM binary_blobs WHERE sha256=checkpoint_digest) FROM ydoc_owner_bindings",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap();
+        assert_eq!(bound, draft_digest);
+        assert_eq!(blobs, 1);
+    }
+
+    #[test]
     fn owner_layer_rows_survive_draft_eviction_and_clear_on_binding_change() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
