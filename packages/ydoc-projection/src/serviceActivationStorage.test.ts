@@ -3415,7 +3415,9 @@ type Row = [string, Record<string, unknown>];
 // The service host's feed once Stop opened the retirement (or before, with
 // `stopped` false): the owner applied the seed, and the edit accepted after
 // it, at F, waits for its application.
-async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true) {
+const moveNoteAwayInObjectIndex = (f: ReturnType<typeof fixture>) =>
+  f.raw.exec("UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id='object'");
+async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true, leaves = true) {
   enroll(f);
   await completeActivation(f);
   const edit = admitEdit(f);
@@ -3430,7 +3432,10 @@ async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true) {
     hostedFeed: true,
     authorize: (input) => authorizeServiceHostReplication(f.storage, { ...credential, ...input }),
   });
-  const stop = () => stopDocument(f, 10);
+  const stop = () => {
+    stopDocument(f, 10);
+    if (leaves) moveNoteAwayInObjectIndex(f);
+  };
   if (stopped) stop();
   const request = (method: string, suffix: string, body?: BodyInit, type = "application/json") =>
     handle(
@@ -3841,13 +3846,14 @@ it("proves a retiring settlement audit before its later moment, and refuses a se
 });
 
 // A successor's capture whose source is the retiring host's settlement moment:
-// the host published the edit it settled as a departed Y.Doc row, then the
-// settlement's audit and, unless only the audit, its moment.
+// the host published the edit it settled as a Y.Doc row, then the settlement's
+// audit and, unless only the audit, its moment. All depart unless the note stays.
 async function departedSettlementSource(
   f: ReturnType<typeof fixture>,
   published: "moment" | "audit",
+  leaves = true,
 ) {
-  const r = await retiringFeed(f);
+  const r = await retiringFeed(f, true, leaves);
   r.applyEdit();
   await r.upload(r.editBytes);
   const { record, audit, moment } = await retiringSettlement(f, r);
@@ -3858,7 +3864,9 @@ async function departedSettlementSource(
   ];
   expect(await r.push(rows, 0)).toMatchObject({ status: 200, body: { inserted: rows.length } });
   for (const [originSeq, [opKind]] of rows.entries())
-    expect(r.coordinate(originSeq)).toEqual(departed(opKind));
+    expect(r.coordinate(originSeq)).toEqual(
+      leaves ? departed(opKind) : { op_kind: opKind, relay_admission: null },
+    );
   const state = Buffer.from(
     f.raw
       .prepare("SELECT content FROM sync_relay_blobs WHERE sha256=?")
@@ -3882,6 +3890,15 @@ it("verifies a capture whose source is a departed settlement moment the relay pr
   const f = fixture();
   try {
     await departedSettlementSource(f, "moment");
+    expect(await verify(f)).toEqual({ verified: true });
+  } finally {
+    f.close();
+  }
+});
+it("verifies a capture whose source is the settlement moment of a stopped note that stays", async () => {
+  const f = fixture();
+  try {
+    await departedSettlementSource(f, "moment", false);
     expect(await verify(f)).toEqual({ verified: true });
   } finally {
     f.close();

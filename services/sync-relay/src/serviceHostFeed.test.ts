@@ -715,10 +715,10 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   ]);
 });
 
-// Proves: the last save a retiring note publishes reaches the stored note when the note stays, as
-// when its Edit access ended, and moves nothing after a Stop.
-it.each(["access ended", "stopped"] as const)(
-  "publishes a retiring note's last save to the stored note only while the note stays: %s",
+// Proves: the last save a retiring note publishes reaches the stored note while the note stays at its
+// path, after a Stop, a Pause or the end of its Edit access, so a share link shows that save.
+it.each(["access ended", "stopped", "paused"] as const)(
+  "publishes a retiring note's last save to the stored note while the note stays: %s",
   async (ending) => {
     const f = await fixture();
     retainServiceActivation(f.raw, namespace, true);
@@ -731,13 +731,13 @@ it.each(["access ended", "stopped"] as const)(
       .run(last.sha256, last.content.byteLength);
     // The save names the file it replaces, as the host's settlement does.
     for (const content of [A, last]) await f.upload(content);
-    if (ending === "stopped") {
+    if (ending !== "access ended") {
       preparedStop(f.storage, {
         workspaceId: ws,
         path: "docs/a.md",
         ownerUserId: "owner-1",
         enabled: false,
-        retire: true,
+        retire: ending === "stopped",
         nowMs: 20,
         guard() {},
       });
@@ -771,25 +771,24 @@ it.each(["access ended", "stopped"] as const)(
     ).json()) as PushAnswer;
     expect(body).toMatchObject({ inserted: 1 });
     expect(body.refusals).toBeUndefined();
-    const stays = ending === "access ended";
     // A note that stays keeps the save as ordinary history, which every history reader counts.
     expect(
       f.raw
         .prepare("SELECT relay_admission FROM sync_relay_log WHERE origin_id=?")
         .get(HOST_ORIGIN)!.relay_admission,
-    ).toBe(stays ? null : "departed");
+    ).toBeNull();
     expect(
       f.raw
         .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
         .get(ws, "docs/a.md")!.blob_sha256,
-    ).toBe(stays ? last.sha256 : A.sha256);
+    ).toBe(last.sha256);
     expect(
       f.raw
         .prepare(
           "SELECT count(*) AS count FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq WHERE m.workspace_id=? AND l.origin_id=?",
         )
         .get(ws, HOST_ORIGIN)!.count,
-    ).toBe(stays ? 1 : 0);
+    ).toBe(1);
   },
 );
 
