@@ -77,6 +77,7 @@ import {
   isDocumentTooDenseCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineYDocOpenedSession,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 
@@ -113,6 +114,7 @@ export interface EngineYDocIpcSender {
 export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
+  lineageAtOpen?: WorkspaceEngineYDocOpenedSession["lineageAtOpen"];
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
@@ -1264,6 +1266,48 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         return { path, ...applied };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
+      }
+    } finally {
+      authority.release();
+    }
+  }
+
+  async startLiveInBackground(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<"seeded" | "existing" | "held"> {
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (this.#isSharedView(workspace)) {
+        throw new Error("A shared view's documents start live editing on their host.");
+      }
+      const path = await this.#markdownDocumentPath(workspace, input.path, "write");
+      authority.assertCurrent();
+      const attachment = workspace.attachmentId;
+      const ownsDocument = () => this.#owner.ownsDocument(attachment, path);
+      if (ownsDocument()) return "held";
+      try {
+        return await this.#documentReservations.runMutation(
+          attachment,
+          path,
+          ownsDocument,
+          async () => {
+            const capture = this.#captureFor(workspace);
+            if (!capture) throw new Error("The workspace engine is not running.");
+            const provider = await capture.openYDocSession({
+              path,
+              contentKind: "richdoc",
+              onRemoteUpdate: () => undefined,
+            });
+            await provider.close();
+            return provider.lineageAtOpen === "existing" ? "existing" : "seeded";
+          },
+        );
+      } catch (error) {
+        if (error instanceof LiveDocumentOwnedError) return "held";
+        throw error;
       }
     } finally {
       authority.release();

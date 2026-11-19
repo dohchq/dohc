@@ -359,6 +359,8 @@ import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { createBackgroundLiveStart } from "./workspaces/backgroundLiveStart";
+import { createShowOnPhone } from "./workspaces/showOnPhone";
 import { holdsDeliveries } from "./workspaces/ownerLivePause";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor, isReservedPath } from "@dohc/workspace-core";
@@ -2800,6 +2802,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     return state;
   },
   disposeState: async (state, binding, workspaceAtDisposal) => {
+    await backgroundLiveStart.drop(binding.workspaceId);
     await appViews?.closeWorkspace(binding.workspaceId);
     forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
@@ -3769,6 +3772,7 @@ const activity = {
     notifyRenderer();
   },
   stopEngines: async (): Promise<void> => {
+    await backgroundLiveStart.drop();
     await Promise.all(
       workspaceAuthorities
         .workspaceIds()
@@ -7337,6 +7341,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
 // Close every live engine Y.Doc session (app quit) before the engine stores are
 // stopped, so no session settles onto a closed store.
 async function closeAllEngineYDocSessions(): Promise<void> {
+  await backgroundLiveStart.stop();
   await engineYDocSessionIpc.shutdown();
 }
 
@@ -7422,6 +7427,83 @@ const { refreshDispatchTray, refreshTrayIcon, dispatchKeepsRunning, noticeRunnin
     },
   });
 
+const showOnPhone = createShowOnPhone({
+  session: async () => {
+    await warmCredentialCache();
+    const { credentials, generation } = credentialSessionCache.snapshot();
+    if (!credentials?.relayUrl) return null;
+    return {
+      generation,
+      relay: {
+        baseUrl: credentials.relayUrl,
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+      },
+      unauthorized: async () => {
+        await handleRelayUnauthorized({
+          requestCredentials: credentials,
+          currentCredentials: cachedCredentials,
+          clearCachedCredentials: () => clearCachedCredentials(),
+          ...cloudSessionChange(),
+          invalidatePersistedSessionIf: (expected) => cloudLogin().invalidateSessionIf(expected),
+        });
+      },
+    };
+  },
+  onError: (message, error) => console.warn(message, error),
+});
+const backgroundLiveStart = createBackgroundLiveStart({
+  eligible: (workspaceId) => {
+    const credentials = cachedCredentials;
+    const entry = findWorkspace(workspaceId);
+    return (
+      !appLifecycle.isQuitting() &&
+      !!activity.engineCaptureFor(workspaceId) &&
+      !!credentials?.relayUrl &&
+      !!entry?.remote &&
+      entry.joinBootstrapPending !== true &&
+      !shareViewIsPresent(entry.shareView) &&
+      credentials.userId === entry.remote.ownerUserId &&
+      relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl)
+    );
+  },
+  noteIdentity: async (workspaceId, path) => {
+    const entry = findWorkspace(workspaceId);
+    if (!entry) return null;
+    const resolved = await withEngineAdapter(entry, (adapter) =>
+      adapter.resolveFiles({ workspaceId, targets: [{ path }] }),
+    );
+    const file = resolved?.results[0];
+    return resolved && file?.status === "found"
+      ? `${resolved.versionId}\u0000${file.objectId}`
+      : null;
+  },
+  showsOnPhone: (workspaceId) => showOnPhone.shows(workspaceId),
+  noteBytes: async (workspaceId, path) => {
+    const rootPath = findWorkspace(workspaceId)?.rootPath;
+    if (!rootPath) return null;
+    try {
+      const info = await lstat(join(rootPath, path));
+      return info.isFile() ? info.size : null;
+    } catch {
+      return null;
+    }
+  },
+  isLossyNote: async (workspaceId, path) => {
+    const rootPath = findWorkspace(workspaceId)?.rootPath;
+    if (!rootPath) return true;
+    const read = await readWorkspaceText(rootPath, path);
+    if (read.truncated) return true;
+    const digest = createHash("sha256").update(read.text).digest("hex");
+    return await documentProjection.run({ kind: "lossy", markdown: read.text, digest });
+  },
+  start: async (workspaceId, path) => {
+    const result = await engineYDocSessionIpc.startLiveInBackground({ workspaceId, path });
+    if (result === "seeded") activity.queueCloudPull(workspaceId);
+  },
+  onError: (message, error) => console.warn(message, error),
+});
+
 const desktopEngine = createDesktopEngine({
   resourcesBasePath,
   onWorkspaceOpened: (workspaceId) => {
@@ -7504,6 +7586,7 @@ const desktopEngine = createDesktopEngine({
   collectionAutomations: { current: collectionAutomationsOf },
   noteWriteDeferred: (workspaceId, path) =>
     activity.engineCaptureFor(workspaceId)?.noteWriteDeferred(path),
+  backgroundLiveStart,
   launchMarks,
   desktopMarks,
   logLaunchMarksOnce,
