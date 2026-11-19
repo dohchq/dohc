@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
 use dohc_engine_collab::{
-    ContentKind, DocKey, LineageClaimStatus, SuccessorBase, SuccessorIdentity,
-    SuccessorIdentityInput, SuccessorReplacement, fresh_successor_base,
+    ContentKind, DocKey, LineageClaimStatus, SuccessorAuthor, SuccessorBase, SuccessorIdentity,
+    SuccessorIdentityInput, SuccessorInstallOutcome, SuccessorReplacement, fresh_successor_base,
 };
 use dohc_engine_domain::{
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictResolution, ConflictStatus,
-    MAX_CAPTURE_BINARY_FILE_BYTES, ResolveConflictKind, ResolveTextConflict,
-    ResolveTextConflictResult, TextConflict, TextSnapshot, WriteBinaryFile,
+    CollectionRecordApplyFacts, ConflictChoice, ConflictContentKind, ConflictFileState,
+    ConflictResolution, ConflictStatus, MAX_CAPTURE_BINARY_FILE_BYTES, ResolveConflictKind,
+    ResolveTextConflict, ResolveTextConflictResult, TextConflict, TextSnapshot, WriteBinaryFile,
     derive_capture_object_id, insert_text_conflict_if_absent, select_snapshot_by_path_in_tx,
     validate_plaintext_storable_path, write_binary_file_in_tx,
 };
@@ -200,6 +200,7 @@ pub struct PreparedLocalConflictResolveV1 {
     built: BuiltConflictResolveV1,
     pre_effect_moment_order: i64,
     lineage: LocalLineagePlan,
+    author_json: Option<String>,
 }
 
 impl PreparedLocalConflictResolveV1 {
@@ -1439,6 +1440,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             conflict_id: payload.conflict_id.clone(),
             inserted: None,
             matched: true,
+            record_facts: None,
         });
     }
     if rival.is_some() {
@@ -1462,7 +1464,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             let mut review_payload = payload.clone();
             let path_ref = intern_path(&mut review_payload.paths, &path);
             let renamed_head = imported_live_head(tx, &review_payload, path_ref)?;
-            commit_imported_lineage(tx, payload, Some(key), envelope.recorded_at_ms)?;
+            let record_facts = commit_imported_lineage(tx, envelope, payload, Some(key))?;
             tx.execute("UPDATE ydoc_docs SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![key.workspace_id,key.version_id,key.object_id,path]).map_err(SyncError::persist)?;
             let (review_id, inserted) =
@@ -1471,6 +1473,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 conflict_id: review_id,
                 inserted: Some(inserted),
                 matched: false,
+                record_facts,
             });
         }
         disposition = ImportedHeadDisposition::ReviewedSide;
@@ -1536,6 +1539,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
     }
 
     let mut materialization_changes = Vec::new();
+    let mut record_facts = None;
     match disposition {
         ImportedHeadDisposition::ExactCurrent => {
             for shadow in &validated.shadows {
@@ -1547,7 +1551,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 )?;
                 materialization_changes.extend(result.materialization_changes);
             }
-            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            record_facts = commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             close_imported_conflict(tx, payload, false)?;
         }
         ImportedHeadDisposition::ReviewedSide => {
@@ -1575,7 +1579,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             if let (Some(lineage), Some(key)) = (retired, key.as_ref()) {
                 lineage.reinstall_in_tx(tx, key, envelope.recorded_at_ms)?;
             }
-            commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+            record_facts = commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             // This machine's conflict holds the kept copy as its incoming side.
             let named_mirrored = revived && payload.chosen_from == ResolveChoiceV1::Current;
             close_imported_conflict(tx, payload, named_mirrored)?;
@@ -1622,7 +1626,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 .as_ref()
                 .is_none_or(|transition| transition.successor.is_some())
             {
-                commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
+                record_facts = commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             }
             close_imported_conflict(tx, payload, false)?;
         }
@@ -1659,6 +1663,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 conflict_id: review_conflict_id,
                 inserted: Some(inserted),
                 matched: false,
+                record_facts: None,
             });
         }
     }
@@ -1673,6 +1678,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         conflict_id: payload.conflict_id.clone(),
         inserted: None,
         matched: true,
+        record_facts,
     })
 }
 
@@ -2674,12 +2680,13 @@ fn install_scene_successor_assets(
 
 fn commit_imported_lineage(
     tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
     payload: &ConflictResolveV1,
     key: Option<&DocKey>,
-    now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
+    let now_ms = envelope.recorded_at_ms;
     let Some(transition) = payload.lineage_transition.as_ref() else {
-        return reconcile_unbound_receiver_lineages(tx, payload, now_ms);
+        return reconcile_unbound_receiver_lineages(tx, payload, &envelope.origin_id, now_ms);
     };
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
@@ -2719,7 +2726,7 @@ fn commit_imported_lineage(
         } else {
             reviewed_local_predecessor(tx, payload, key)?
         };
-        dohc_engine_collab::replace_reviewed_lineage_with_successor_in_tx(
+        let installed = dohc_engine_collab::replace_reviewed_lineage_with_successor_in_tx(
             tx,
             SuccessorReplacement {
                 key,
@@ -2729,6 +2736,11 @@ fn commit_imported_lineage(
                 path: &payload.paths[result.path_ref],
                 successor: &successor_base,
                 scene_result: scene_result.as_deref(),
+                author: SuccessorAuthor {
+                    origin_id: Some(&envelope.origin_id),
+                    attribution: None,
+                    source: Some((&envelope.origin_id, envelope.origin_seq)),
+                },
                 now_ms,
             },
             reviewed
@@ -2776,6 +2788,7 @@ fn commit_imported_lineage(
             )
             .map_err(SyncError::persist)?;
         }
+        Ok(installed_record_facts(installed))
     } else {
         dohc_engine_collab::archive_active_lineage_in_tx(
             tx,
@@ -2789,15 +2802,25 @@ fn commit_imported_lineage(
             now_ms,
         )
         .map_err(map_local_collab_error)?;
+        Ok(None)
     }
-    Ok(())
+}
+
+fn installed_record_facts(
+    installed: SuccessorInstallOutcome,
+) -> Option<CollectionRecordApplyFacts> {
+    match installed {
+        SuccessorInstallOutcome::Installed { record_facts, .. } => record_facts.map(|facts| *facts),
+        SuccessorInstallOutcome::Replayed { .. } => None,
+    }
 }
 
 fn reconcile_unbound_receiver_lineages(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
+    resolver_origin_id: &str,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
     let current_key = payload
         .current
         .present()
@@ -2835,27 +2858,31 @@ fn reconcile_unbound_receiver_lineages(
                 tx,
                 current_key,
                 crate::ResultingHead::BinaryOrAbsent,
+                None,
                 now_ms,
             )?;
         }
-        reconcile_unbound_result_head(tx, payload, result_key, now_ms)?;
+        reconcile_unbound_result_head(tx, payload, result_key, resolver_origin_id, now_ms)
     } else if let Some(current_key) = current_key.as_ref() {
         crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
             tx,
             current_key,
             crate::ResultingHead::BinaryOrAbsent,
+            None,
             now_ms,
-        )?;
+        )
+    } else {
+        Ok(None)
     }
-    Ok(())
 }
 
 fn reconcile_unbound_result_head(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
     key: &DocKey,
+    resolver_origin_id: &str,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
     let result = payload.result.present().ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve result object is absent",
     })?;
@@ -2865,6 +2892,7 @@ fn reconcile_unbound_result_head(
                 tx,
                 key,
                 crate::ResultingHead::BinaryOrAbsent,
+                None,
                 now_ms,
             )
         }
@@ -2877,6 +2905,7 @@ fn reconcile_unbound_result_head(
                     path: &payload.paths[result.path_ref],
                     text: &text,
                 },
+                Some(resolver_origin_id),
                 now_ms,
             )
         }
@@ -3284,6 +3313,7 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         built,
         pre_effect_moment_order,
         lineage,
+        author_json: input.author_json.clone(),
     })
 }
 
@@ -3296,7 +3326,9 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
     tx: &Transaction<'_>,
     prepared: &PreparedLocalConflictResolveV1,
     result: &ResolveTextConflictResult,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
+    let (actor, attribution) =
+        dohc_engine_domain::moment_author_attribution(prepared.author_json.as_deref());
     let mut local_expected = prepared.built.validated.payload.clone();
     local_expected.exported_before = None;
     verify_local_result_in_tx(tx, &local_expected, result)?;
@@ -3305,8 +3337,8 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
         &prepared.built.validated.payload.workspace_id,
         &prepared.built.validated.payload.conflict_id,
     )?;
-    match &prepared.lineage {
-        LocalLineagePlan::None => {}
+    let record_facts = match &prepared.lineage {
+        LocalLineagePlan::None => None,
         LocalLineagePlan::ExactSuccessor {
             key,
             predecessor_claim_id,
@@ -3316,19 +3348,26 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
             ..
         } => {
             let scene_result = scene_successor_result(tx, successor)?;
-            dohc_engine_collab::replace_lineage_with_successor_in_tx(
-                tx,
-                SuccessorReplacement {
-                    key,
-                    expected_predecessor_claim_id: predecessor_claim_id,
-                    expected_predecessor_state_vector_sha256: predecessor_state_vector_sha256,
-                    path,
-                    successor,
-                    scene_result: scene_result.as_deref(),
-                    now_ms: result.conflict.updated_at_ms,
-                },
+            installed_record_facts(
+                dohc_engine_collab::replace_lineage_with_successor_in_tx(
+                    tx,
+                    SuccessorReplacement {
+                        key,
+                        expected_predecessor_claim_id: predecessor_claim_id,
+                        expected_predecessor_state_vector_sha256: predecessor_state_vector_sha256,
+                        path,
+                        successor,
+                        scene_result: scene_result.as_deref(),
+                        author: SuccessorAuthor {
+                            origin_id: actor.as_deref(),
+                            attribution: attribution.as_ref(),
+                            source: None,
+                        },
+                        now_ms: result.conflict.updated_at_ms,
+                    },
+                )
+                .map_err(map_local_collab_error)?,
             )
-            .map_err(map_local_collab_error)?;
         }
         LocalLineagePlan::ExactArchive {
             key,
@@ -3346,17 +3385,21 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 result.conflict.updated_at_ms,
             )
             .map_err(map_local_collab_error)?;
+            None
         }
         LocalLineagePlan::UnclaimedText { key, path, text } => {
-            crate::fold_resolution_into_ydoc_in_tx(
+            crate::ydoc_apply::fold_authored_resolution_in_tx(
                 tx,
-                &key.workspace_id,
-                &key.version_id,
-                &key.object_id,
+                key,
                 path,
                 text,
+                crate::ydoc_apply::LineageFoldAuthor {
+                    actor_origin_id: actor.as_deref(),
+                    attribution: attribution.as_ref(),
+                    moment_id: None,
+                },
                 result.conflict.updated_at_ms,
-            )?;
+            )?
         }
         LocalLineagePlan::UnclaimedRetire { key } => {
             crate::ydoc_apply::retire_unclaimed_resolution_lineage_in_tx(
@@ -3364,6 +3407,7 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 key,
                 result.conflict.updated_at_ms,
             )?;
+            None
         }
         LocalLineagePlan::RetiredIncoming { key, path, text } => {
             let now_ms = result.conflict.updated_at_ms;
@@ -3377,13 +3421,15 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                 crate::ResultingHead::Text { path, text },
                 now_ms,
             )?;
+            None
         }
-    }
+    };
     crate::conflict_outbox::persist_local_conflict_resolve_v1_in_tx(
         tx,
         &prepared.built,
         prepared.pre_effect_moment_order,
-    )
+    )?;
+    Ok(record_facts)
 }
 
 fn planned_choice(resolution: &ResolveConflictKind) -> ResolveChoiceV1 {
@@ -4539,6 +4585,7 @@ mod tests {
             |tx, result, prepared| {
                 *built.borrow_mut() = Some(prepared.built.clone());
                 commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map(drop)
                     .map_err(sync_as_domain)
             },
         )?;
@@ -5255,6 +5302,7 @@ mod tests {
                 |tx, result, prepared| {
                     *built.borrow_mut() = Some(prepared.built.clone());
                     commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map(drop)
                         .map_err(sync_as_domain)
                 },
             )
@@ -6871,7 +6919,7 @@ mod tests {
                 },
                 |tx, result, prepared| {
                     let committed = commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result);
-                    committed.map_err(refuse)
+                    committed.map(drop).map_err(refuse)
                 },
             )
             .map(drop)
@@ -7273,6 +7321,7 @@ mod tests {
                 },
                 |tx, result, prepared| {
                     commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map(drop)
                         .map_err(sync_as_domain)
                 },
             )
