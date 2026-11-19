@@ -189,6 +189,12 @@ jobs:
             -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
             > "$OUT/logs/warm-up.log" 2>&1 || status=$?
           echo "Warm-up: xcodebuild exited $status in $((SECONDS - started)) s" | tee -a "$OUT/summary.txt"
+          # A warm-up the alarm ended may leave its runner behind, so stop what it started and boot the simulator afresh.
+          if (( status == 142 )); then
+            pkill -f -- "-destination id=$udid" || true
+            xcrun simctl shutdown "$udid"
+            xcrun simctl bootstatus "$udid" -b
+          fi
           runs=0 failed=0
           for appearance in light dark; do
             xcrun simctl ui "$udid" appearance "$appearance"
