@@ -559,7 +559,8 @@ test("@states-page @states-baselines every shared part matches its baseline in b
                 el && el !== button;
                 el = el.parentElement
               ) {
-                if (getComputedStyle(el).overflowY === "visible") continue;
+                const style = getComputedStyle(el);
+                if (style.overflowY === "visible" || style.display === "contents") continue;
                 const clip = el.getBoundingClientRect();
                 clipTop = Math.max(clipTop, clip.top);
                 clipBottom = Math.min(clipBottom, clip.bottom);
