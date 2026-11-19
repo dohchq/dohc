@@ -2034,19 +2034,25 @@ mod tests {
 
         probe.pause_next_open_install();
         let ctx = RequestContext::unbounded();
-        let (refused, ()) = tokio::join!(service.workspace_open(&ctx, params), async {
-            probe.wait_until_open_install_paused().await;
-            let actor = probe.paused_open_actor().expect("the paused open's actor");
-            let waited = std::time::Instant::now();
-            while actor.lifecycle() != LifecycleState::Damaged {
-                assert!(
-                    waited.elapsed() < Duration::from_secs(30),
-                    "the page check stops the actor"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        let (refused, stopped) = tokio::join!(service.workspace_open(&ctx, params), async {
+            let paused = tokio::time::timeout(
+                Duration::from_secs(30),
+                probe.wait_until_open_install_paused(),
+            )
+            .await;
+            let stopped = paused.is_ok()
+                && tokio::time::timeout(Duration::from_secs(30), async {
+                    let actor = probe.paused_open_actor().expect("the paused open's actor");
+                    while actor.lifecycle() != LifecycleState::Damaged {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok();
             probe.release_open_install();
+            stopped
         });
+        assert!(stopped, "the page check stops the paused open's actor");
         let refused = refused.expect_err("an open whose store stopped serving fails");
         assert_eq!(
             (refused.code, refused.message.as_str()),
@@ -2079,49 +2085,47 @@ mod tests {
 
         damage_a_page(&db_path);
 
-        let opened = match service
+        match service
             .workspace_open(&RequestContext::unbounded(), params.clone())
             .await
         {
-            Ok(opened) => opened,
-            Err(refused) => {
+            Ok(opened) => {
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened["workspace"].clone()).expect("handle");
+                let actor = service.open(Some(&handle)).expect("open").actor.clone();
+                let waited = std::time::Instant::now();
+                while actor.lifecycle() != LifecycleState::Damaged {
+                    assert!(
+                        waited.elapsed() < Duration::from_secs(30),
+                        "the page check stops the actor"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let refused = service
+                    .ensure_handle_allows_method(Some(&handle), "versionedText.read")
+                    .expect_err("a damaged store serves nothing");
                 assert_eq!(
                     (refused.code, refused.message.as_str()),
-                    (ErrorCode::Internal, "state-corrupt"),
-                    "a page check that stops the open names the damage"
+                    (ErrorCode::Internal, "state-corrupt")
                 );
-                return;
+                service
+                    .ensure_handle_allows_method(Some(&handle), "workspace.close")
+                    .expect("a damaged store still closes");
+                service
+                    .workspace_close(Some(handle.clone()))
+                    .await
+                    .expect("a damaged store closes");
+                assert!(
+                    service.open(Some(&handle)).is_err(),
+                    "the closed handle is gone"
+                );
             }
-        };
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("handle");
-        let actor = service.open(Some(&handle)).expect("open").actor.clone();
-        let waited = std::time::Instant::now();
-        while actor.lifecycle() != LifecycleState::Damaged {
-            assert!(
-                waited.elapsed() < Duration::from_secs(30),
-                "the page check stops the actor"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            Err(refused) => assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (ErrorCode::Internal, "state-corrupt"),
+                "a page check that stops the open names the damage"
+            ),
         }
-        let refused = service
-            .ensure_handle_allows_method(Some(&handle), "versionedText.read")
-            .expect_err("a damaged store serves nothing");
-        assert_eq!(
-            (refused.code, refused.message.as_str()),
-            (ErrorCode::Internal, "state-corrupt")
-        );
-        service
-            .ensure_handle_allows_method(Some(&handle), "workspace.close")
-            .expect("a damaged store still closes");
-        service
-            .workspace_close(Some(handle.clone()))
-            .await
-            .expect("a damaged store closes");
-        assert!(
-            service.open(Some(&handle)).is_err(),
-            "the closed handle is gone"
-        );
 
         let refused = service
             .workspace_open(&RequestContext::unbounded(), params)
