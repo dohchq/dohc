@@ -14,6 +14,7 @@ import {
   nextPushDeliveryAt,
   PUSH_DELIVERY_EXPIRY_MS,
   PUSH_SENDER_ATTEMPTS_PER_MINUTE,
+  readPushLease,
   recordNoticePushDeliveries,
 } from "./storage/pushDeliveries";
 import {
@@ -342,7 +343,8 @@ it("gives one alert when the run Notice arrives before its message", async () =>
       notice_id: "agent-run:1",
     }),
   ]);
-  expect(claimPushDelivery(f.storage, Date.now())).toMatchObject({ noticeId: "agent-run:1" });
+  const claimed = claimPushDelivery(f.storage, Date.now());
+  expect(claimed && readPushLease(f.storage, claimed, Date.now())).toEqual({ noticeId: "agent-run:1" });
 });
 
 it("alerts for a message on its own when the run Notice that waited for it isn't its agent's", async () => {
