@@ -24,9 +24,9 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.channelCreate, params: { channelId: "c", name: "C", kind: "channel" } },
   {
     method: CHATS_METHOD.channelEnsureAgent,
-    params: { channelId: "agent", agentId: "default", name: "Nova" },
+    params: { agentId: "default", name: "Nova" },
   },
-  { method: CHATS_METHOD.channelEnsureGeneral, params: { channelId: "general" } },
+  { method: CHATS_METHOD.channelEnsureGeneral, params: {} },
   { method: CHATS_METHOD.channelFindBySlug, params: { slug: "general" } },
   { method: CHATS_METHOD.channelsList, params: {} },
   { method: CHATS_METHOD.channelGetWireId, params: { channelId: "c" } },

@@ -937,9 +937,9 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.channelCreate:
       return ["channelId", "name", "kind", "type", "purpose", "folderPath", "nowMs"];
     case CHATS_METHOD.channelEnsureAgent:
-      return ["channelId", "agentId", "name", "nowMs"];
+      return ["agentId", "name", "nowMs"];
     case CHATS_METHOD.channelEnsureGeneral:
-      return ["channelId", "nowMs"];
+      return ["nowMs"];
     case CHATS_METHOD.channelFindBySlug:
       return ["slug"];
     case CHATS_METHOD.channelsList:
@@ -1730,7 +1730,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const existing = [...state.channels.values()].find((channel) => channel.slug === wantedSlug);
     if (existing) return jsonResult(this.channelJson(existing));
     return this.channelCreate(state, workspace, {
-      channelId: requiredString(params, "channelId"),
+      channelId: "channel:general",
       name,
       kind,
       ...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
@@ -1756,7 +1756,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
           "invalid-channel-name",
         );
     const channelSlug = isDefault ? "my-agent" : `my-agent-${agentId}`;
-    const channelId = requiredString(params, "channelId");
+    // The engine gives each agent's chat the same id on every computer.
+    const channelId = agentId.startsWith("p-")
+      ? `personal-dm:${agentId}`
+      : `channel:agent:${agentId}`;
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     // A group an earlier build named like this chat keeps its name and moves

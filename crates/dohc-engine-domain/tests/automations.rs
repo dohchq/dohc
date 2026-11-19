@@ -1466,14 +1466,14 @@ fn the_reaper_requeues_with_attempts_left_and_exhausts_without() {
     );
 }
 
-const GROUP: &str = "gen-1";
+const GROUP: &str = "channel:general";
 const TASK: &str = "collection:object-tasks#task";
 const ALL: &str = "collection:object-tasks#all";
 
 fn open_group(scratch: &ScratchDir) -> EngineStore {
     let mut store = open_store(scratch);
     LinkedChatStore::new(&mut store)
-        .ensure_general_channel(WS, GROUP, 5, &NO_FAULTS)
+        .ensure_general_channel(WS, 5, &NO_FAULTS)
         .expect("Group");
     store
 }
@@ -1588,10 +1588,10 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
             .create_channel(WS, "dm-1", "Ana", ChatChannelKind::Dm, 5, &NO_FAULTS)
             .expect("DM");
         chats
-            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 5, &NO_FAULTS)
+            .ensure_agent_channel(WS, "default", "My agent", 5, &NO_FAULTS)
             .expect("agent channel");
     }
-    for channel_id in ["dm-1", "agent-1", "no-such-group"] {
+    for channel_id in ["dm-1", "channel:agent:default", "no-such-group"] {
         assert!(
             matches!(
                 watch_groups(&mut store, &[(TASK, channel_id, None)]),
@@ -1791,7 +1791,7 @@ fn releasing_group_subscriptions_stops_message_claims_here() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_group(&scratch);
     LinkedChatStore::new(&mut store)
-        .ensure_general_channel(OTHER, GROUP, 5, &NO_FAULTS)
+        .ensure_general_channel(OTHER, 5, &NO_FAULTS)
         .expect("the other workspace's Group");
     watch_groups(
         &mut store,
@@ -1980,7 +1980,7 @@ fn a_long_message_travels_truncated_and_a_settled_claim_keeps_its_key() {
 
 const STAMP: &str = "collection:tasks#stamp";
 const ASK: &str = "collection:tasks#ask";
-const MY_AGENT: &str = "agent-1";
+const MY_AGENT: &str = "channel:agent:default";
 
 fn changed_by(
     origin_seq: i64,
@@ -2070,7 +2070,7 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
         .expect("subscribe");
     }
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
 
     let asked = ask_agent(&mut store, "m-person", None, 10);
@@ -2138,7 +2138,7 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     let mut store = open_store(&scratch);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let thread = StartChannelThread {
         channel_id: MY_AGENT.to_owned(),
@@ -2267,7 +2267,7 @@ fn an_agents_post_during_a_run_claims_at_the_runs_depth() {
     let mut store = open_group(&scratch);
     watch_groups(&mut store, &[(ALL, GROUP, None)]).expect("all");
     LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, MY_AGENT, "default", "My agent", 5, &NO_FAULTS)
+        .ensure_agent_channel(WS, "default", "My agent", 5, &NO_FAULTS)
         .expect("My agent");
     let woken = ask_agent(&mut store, "m-wake", Some(2), 10);
     let by_agent = |message_id: &str, now_ms: i64| StartChannelThread {

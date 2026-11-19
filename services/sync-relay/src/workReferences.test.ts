@@ -570,6 +570,91 @@ describe("work reference registration and resolution", () => {
     ).not.toMatchObject({ target: { channelId: "later" } });
   });
 
+  it("accepts a General reference from each of the owner's devices, never one a member's create names", async () => {
+    const { handler } = await fixture();
+    const general = "channel_wire_general_v1";
+    // Each device makes General before it syncs, under the one id every device gives it.
+    for (const originId of ["device-a", "device-b"]) {
+      await appendLog(
+        handler,
+        "owner",
+        ws,
+        sequenced([
+          chatChannelCreate(general, {
+            channelId: "channel:general",
+            name: "general",
+            slug: "general",
+          }),
+          chatThreadCreate(`thread-${originId}`, general, { slug: "general" }),
+        ]),
+        { originId },
+      );
+    }
+    const references = ["G", "H", "I"].map((letter) => letter.repeat(43));
+    expect(
+      await json(
+        await register(handler, [
+          {
+            reference: references[0],
+            target: { kind: "chat", channelId: "channel:general" },
+            createdAtMs: 1,
+          },
+          {
+            reference: references[1],
+            target: { kind: "thread", threadId: "thread-device-b", channelId: "channel:general" },
+            createdAtMs: 1,
+          },
+          {
+            reference: references[2],
+            target: { kind: "thread", threadId: "thread-device-a", channelId: "channel:general" },
+            createdAtMs: 1,
+          },
+        ]),
+      ),
+    ).toMatchObject({ registeredReferences: references });
+
+    // General is never shared. A member of a Group share can push a create of
+    // that Group under any id, including General's, but names no chat with it.
+    await appendLog(handler, "owner", ws, sequenced([chatChannelCreate("group")], 2), {
+      originId: "device-a",
+    });
+    const shareId = await createShare(handler, "owner", ws, {
+      channelWireId: "group",
+      recipientUserId: "member",
+      access: "read-write",
+    });
+    const pushed = await handler(
+      request(
+        "member",
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "member-device",
+          ops: sequenced([
+            chatChannelCreate("group", { channelId: "channel:general" }),
+            chatChannelCreate("group", { channelId: "member-group" }),
+          ]),
+        }),
+      ),
+    );
+    expect(pushed.status, await pushed.clone().text()).toBe(200);
+    expect(
+      await json(
+        await register(handler, [
+          {
+            reference: "J".repeat(43),
+            target: { kind: "chat", channelId: "member-group" },
+            createdAtMs: 1,
+          },
+          {
+            reference: "K".repeat(43),
+            target: { kind: "chat", channelId: "channel:general" },
+            createdAtMs: 1,
+          },
+        ]),
+      ),
+    ).toMatchObject({ registeredReferences: ["K".repeat(43)] });
+  });
+
   it("rechecks revocation after an asynchronous dataset proof", async () => {
     const { handler, storage } = await fixture();
     const shareId = await createShare(handler, "owner", ws, {

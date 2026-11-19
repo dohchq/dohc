@@ -410,12 +410,13 @@ describe("CLI socket server", () => {
           return { id: request.id, result: { closed: true } };
         }
         const params = { ...(request.params as Record<string, unknown>) };
-        if (
-          request.method === CHATS_METHOD.channelCreate ||
+        if (request.method === CHATS_METHOD.channelCreate) {
+          params.channelId = `channel-${++idCounters.channel}`;
+          params.nowMs = storeNowMs += 1_000;
+        } else if (
           request.method === CHATS_METHOD.channelEnsureAgent ||
           request.method === CHATS_METHOD.channelEnsureGeneral
         ) {
-          params.channelId = `channel-${++idCounters.channel}`;
           params.nowMs = storeNowMs += 1_000;
         } else if (request.method === CHATS_METHOD.threadCreate) {
           params.threadId = `thread-${++idCounters.thread}`;

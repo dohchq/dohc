@@ -134,12 +134,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
     ));
     assert!(matches!(
         actor
-            .chat_channel_ensure_general(
-                workspace_id.clone(),
-                "general-channel".to_owned(),
-                30,
-                token.clone(),
-            )
+            .chat_channel_ensure_general(workspace_id.clone(), 30, token.clone(),)
             .await,
         Err(RuntimeError::Cancelled)
     ));
@@ -147,7 +142,6 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         actor
             .chat_channel_ensure_agent(
                 workspace_id.clone(),
-                "agent-channel".to_owned(),
                 "default".to_owned(),
                 "My agent".to_owned(),
                 30,
@@ -226,18 +220,12 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         .await
         .expect("channel input is valid");
     actor
-        .chat_channel_ensure_general(
-            workspace_id.clone(),
-            "general-channel".to_owned(),
-            30,
-            CancellationToken::new(),
-        )
+        .chat_channel_ensure_general(workspace_id.clone(), 30, CancellationToken::new())
         .await
         .expect("general channel input is valid");
     actor
         .chat_channel_ensure_agent(
             workspace_id,
-            "agent-channel".to_owned(),
             "default".to_owned(),
             "My agent".to_owned(),
             30,

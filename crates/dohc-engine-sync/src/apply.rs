@@ -9,8 +9,9 @@ use dohc_engine_domain::chats::{
     agent_channel_wire_id, agent_id_for_channel_wire_id, bump_chat_conversation_revision,
     channel_collision_slug, chat_thread_display_title, free_agent_channel_slug,
     index_replicated_chat_message_search_rows, is_agent_channel_slug, is_agent_id,
-    normalize_reported_agent, normalize_work_report, personal_agent_may_post_in,
-    replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row, work_report_json,
+    is_well_known_channel_id, normalize_reported_agent, normalize_work_report,
+    personal_agent_may_post_in, replicated_source_origin, truncate_slug_base,
+    upsert_chat_search_index_row, well_known_channel_id, work_report_json,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
@@ -1033,9 +1034,13 @@ fn apply_channel(
 ) -> Result<(), SyncError> {
     let channel_id = normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
         .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
+    // Only the chat a well-known wire id names may hold its fixed channel id.
     if channel_id != payload.channel_id
         || channel_id == GENERAL_CHANNEL_WIRE_ID
         || agent_id_for_channel_wire_id(&channel_id).is_some()
+        || (is_well_known_channel_id(&channel_id)
+            && payload.wire_id.as_deref().and_then(well_known_channel_id)
+                != Some(channel_id.clone()))
     {
         return Err(SyncError::InvalidInput {
             reason: "chat channel id is invalid",
@@ -1614,7 +1619,12 @@ fn resolve_or_create_placeholder(
         .ok_or(SyncError::InvalidInput {
             reason: "channel thread lacks an identity",
         })?;
-    let channel_id = format!("placeholder:{}:{}", op.origin_id, identity);
+    // General and an agent's chat wait under the id every computer gives them.
+    let channel_id = payload
+        .channel_wire_id
+        .as_deref()
+        .and_then(well_known_channel_id)
+        .unwrap_or_else(|| format!("placeholder:{}:{}", op.origin_id, identity));
     let requested_slug = payload.channel_slug.as_deref().unwrap_or(identity);
     let placeholder_name = channel_allocation_base(requested_slug);
     let allocation_identity = payload.channel_wire_id.as_deref().unwrap_or(&channel_id);

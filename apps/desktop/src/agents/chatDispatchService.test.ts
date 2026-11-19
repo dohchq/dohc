@@ -333,10 +333,12 @@ async function fakeDispatchDaemon(
 
     switch (request.method) {
       case CHATS_METHOD.channelCreate:
-      case CHATS_METHOD.channelEnsureAgent:
-      case CHATS_METHOD.channelEnsureGeneral:
         chatIds.channel += 1;
         params.channelId = `channel-${chatIds.channel}`;
+        params.nowMs = takeChatTimestamp();
+        break;
+      case CHATS_METHOD.channelEnsureAgent:
+      case CHATS_METHOD.channelEnsureGeneral:
         params.nowMs = takeChatTimestamp();
         break;
       case CHATS_METHOD.threadStart:

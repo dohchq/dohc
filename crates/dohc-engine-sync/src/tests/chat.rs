@@ -1,5 +1,8 @@
 use super::*;
-use dohc_engine_domain::chats::{DEFAULT_AGENT_ID, GENERAL_CHANNEL_WIRE_ID, agent_channel_wire_id};
+use dohc_engine_domain::chats::{
+    DEFAULT_AGENT_ID, GENERAL_CHANNEL_ID, GENERAL_CHANNEL_WIRE_ID, agent_channel_id,
+    agent_channel_wire_id,
+};
 
 fn reaction_winner(engine: &EngineStore) -> (String, i64, String, i64) {
     engine
@@ -2220,9 +2223,9 @@ fn incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock
 
     for (local_created_at_ms, label) in [(1_000, "local-earlier"), (9_000, "local-later")] {
         let (_scratch, _path, mut engine) = open_store();
-        let local_channel_id = format!("general-{label}");
+        let local_channel_id = GENERAL_CHANNEL_ID;
         LinkedChatStore::new(&mut engine)
-            .ensure_general_channel("ws", &local_channel_id, local_created_at_ms, &NoFaults)
+            .ensure_general_channel("ws", local_created_at_ms, &NoFaults)
             .expect("bootstrap local general");
 
         let incoming = envelope(
@@ -5372,27 +5375,13 @@ fn general_and_agent_chats_made_before_sync_share_one_channel_id() {
     for (engine, at) in [(&mut a, 10), (&mut b, 20)] {
         let mut chats = LinkedChatStore::new(engine);
         chats
-            .ensure_general_channel("ws", &format!("general-{at}"), at, &NoFaults)
+            .ensure_general_channel("ws", at, &NoFaults)
             .expect("General");
         chats
-            .ensure_agent_channel(
-                "ws",
-                &format!("agent-{at}"),
-                DEFAULT_AGENT_ID,
-                "My agent",
-                at,
-                &NoFaults,
-            )
+            .ensure_agent_channel("ws", DEFAULT_AGENT_ID, "My agent", at, &NoFaults)
             .expect("the default agent's chat");
         chats
-            .ensure_agent_channel(
-                "ws",
-                &format!("research-{at}"),
-                "research",
-                "Research",
-                at,
-                &NoFaults,
-            )
+            .ensure_agent_channel("ws", "research", "Research", at, &NoFaults)
             .expect("research's chat");
     }
     let (from_a, from_b) = (journaled_channel_creates(&a), journaled_channel_creates(&b));
@@ -5414,4 +5403,88 @@ fn general_and_agent_chats_made_before_sync_share_one_channel_id() {
             "{wire} has a different channel id on each computer"
         );
     }
+}
+
+/// A thread in General can arrive from a computer that did not make General,
+/// before General's create does. The chat waits under General's own id, so
+/// it still has that id once General arrives.
+#[test]
+fn general_waiting_for_its_create_has_generals_channel_id() {
+    let (_scratch, _path, mut engine) = open_store();
+    let thread = envelope(
+        "other-computer",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "early-thread",
+            "title": "Early",
+            "createdAtMs": 5,
+            "channelSlug": "general",
+            "channelWireId": GENERAL_CHANNEL_WIRE_ID
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread before General");
+    assert_eq!(
+        channel_for_wire(&engine, GENERAL_CHANNEL_WIRE_ID),
+        GENERAL_CHANNEL_ID
+    );
+    let general = LinkedChatStore::new(&mut engine)
+        .ensure_general_channel("ws", 10, &NoFaults)
+        .expect("General");
+    assert_eq!(general.channel_id, GENERAL_CHANNEL_ID);
+}
+
+/// A group may not take the id General or an agent's chat has on every
+/// computer, here or from sync.
+#[test]
+fn a_group_cannot_take_a_well_known_chats_channel_id() {
+    let (_scratch, _path, mut engine) = open_store();
+    for channel_id in [
+        GENERAL_CHANNEL_ID.to_owned(),
+        agent_channel_id(DEFAULT_AGENT_ID),
+        agent_channel_id("p-research"),
+    ] {
+        assert!(
+            LinkedChatStore::new(&mut engine)
+                .create_channel(
+                    "ws",
+                    &channel_id,
+                    "Squatter",
+                    ChatChannelKind::Channel,
+                    10,
+                    &NoFaults
+                )
+                .is_err(),
+            "{channel_id}"
+        );
+        let squat = envelope(
+            &format!("squatter-{channel_id}"),
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": channel_id,
+                "name": "Squatter",
+                "slug": "squatter",
+                "kind": "channel",
+                "createdAtMs": 10,
+                "wireId": "squatter-wire"
+            }),
+        );
+        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &squat, &NoFaults));
+    }
+    // General's wire may not carry an agent chat's id either.
+    let crossed = envelope(
+        "crossed",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": agent_channel_id("research"),
+            "name": "general",
+            "slug": "general",
+            "kind": "channel",
+            "createdAtMs": 10,
+            "wireId": GENERAL_CHANNEL_WIRE_ID
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &crossed, &NoFaults));
 }
