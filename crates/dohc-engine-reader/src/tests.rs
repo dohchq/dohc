@@ -642,11 +642,21 @@ fn a_larger_note_gets_longer_to_answer_up_to_the_cap() {
     fail(run(reader.request(request("slow"))), Failure::TimedOut);
     let mut large = request("slow");
     large.source = vec![b'a'; 64 * 1024];
-    assert!(run(reader.request(large)).is_ok());
+    assert!(run(reader.request(large.clone())).is_ok());
     assert_eq!(
         Deadlines::default().request(2 * 1024 * 1024 + wire::UPDATE),
         Duration::from_secs(60)
     );
+    finish(&mut reader);
+    let (_dir, c) = fixture("ok");
+    let capped = Deadlines {
+        request_cap: Duration::from_millis(300),
+        ..d
+    };
+    let mut reader = Reader::with_deadlines(Some(c), capped);
+    assert!(run(reader.request(request("ok"))).is_ok());
+    fail(run(reader.request(large)), Failure::TooLarge);
+    fail(run(reader.request(request("slow"))), Failure::TimedOut);
     finish(&mut reader);
 }
 #[test]
