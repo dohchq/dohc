@@ -8,7 +8,7 @@ import { builderRequire } from "./electron-builder.testSupport.mjs";
 
 // patches/app-builder-lib@26.15.3.patch keeps an .rpm upgrade from removing the new package's link.
 test(
-  "the .rpm's after-remove script removes the dohc-desktop link on an erase, not on an upgrade",
+  "the .rpm's after-remove script removes the dohc-desktop link on an erase, not while a copy stays installed",
   { skip: process.platform === "win32" },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "dohc-after-remove-"));
@@ -41,6 +41,7 @@ test(
       );
     };
     assert.deepEqual(await run("1"), []);
+    assert.deepEqual(await run("2"), []);
     assert.deepEqual(await run("0"), ["--remove dohc-desktop /opt/dohc/dohc-desktop"]);
   },
 );

@@ -57,11 +57,11 @@ index 302bc34061afa692327ef828189ead514f9c827b..20a541dc0ef803a4abba47b6c3379f40
 @@ -1,5 +1,11 @@
  #!/bin/bash
  
-+# An rpm upgrade runs the old package's after-remove last, with 1 as its argument,
-+# so it would undo the new package's link and AppArmor profile. Only an erase passes 0.
-+if [ "$1" = 1 ]; then
-+    exit 0
-+fi
++# rpm passes the number of copies left installed: 0 on an erase, 1 or more after an
++# upgrade, which runs the old package's after-remove last and would undo the new link.
++case "$1" in
++    [1-9]*) exit 0 ;;
++esac
 +
  # Delete the link to the binary
  # update-alternatives --remove <name> <path>: 'path' must be the registered alternative binary,
