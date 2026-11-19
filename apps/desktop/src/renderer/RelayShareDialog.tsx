@@ -1,6 +1,7 @@
 import { CloudOff, CloudUpload, LogIn, Share2, X, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
+import type { ShareCopyResult } from "../ipc/shareCopyOperations";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
@@ -35,19 +36,53 @@ type InvitedPerson = { shareId: string; grantId: string; name: string; access: S
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
 
-async function invitationOf(
-  person: InvitedPerson,
+type InvitationAnswer = { value: ShareCopyResult | undefined; error: unknown };
+
+function useInvitation(
+  person: Pick<InvitedPerson, "shareId" | "grantId">,
   reload: () => Promise<unknown>,
-): Promise<string | null> {
-  const details = await bridge().getShareCopyDetails({
-    shareId: person.shareId,
-    grantId: person.grantId,
+): () => Promise<string | null> {
+  const { shareId, grantId } = person;
+  const query = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${shareId}\0${grantId}`,
+    manual: true,
+    load: () => bridge().getShareCopyDetails({ shareId, grantId }),
   });
-  if (details.status === "ended") {
-    void reload();
-    return null;
-  }
-  return details.browserInvitationUrl ?? details.shareCode;
+  const waiting = useRef<((answer: InvitationAnswer) => void) | null>(null);
+  useEffect(() => {
+    if (query.pending || !waiting.current) return;
+    const settle = waiting.current;
+    waiting.current = null;
+    settle({ value: query.value, error: query.error });
+  });
+  const { retry } = query;
+  return () =>
+    new Promise<string | null>((resolve, reject) => {
+      waiting.current?.({ value: undefined, error: null });
+      waiting.current = ({ value, error }) => {
+        if (error !== null) reject(error);
+        else if (!value) resolve(null);
+        else if (value.status === "ended") {
+          void reload();
+          resolve(null);
+        } else resolve(value.browserInvitationUrl ?? value.shareCode);
+      };
+      void retry();
+    });
+}
+
+function CopyInvitation(props: { person: InvitedPerson; reload: () => Promise<unknown> }) {
+  const invitation = useInvitation(props.person, props.reload);
+  return (
+    <CopyButton
+      iconOnly
+      label="Copy invitation"
+      copiedLabel="Invitation copied"
+      testId={`share-copy-invitation-${props.person.grantId}`}
+      sensitive={INVITATION_SECRET}
+      getText={invitation}
+    />
+  );
 }
 
 // The people this selection was shared with by email, from the listing the
@@ -290,14 +325,7 @@ export function RelayShareDialog(props: {
                       name={person.name}
                       detail={`${person.access ? `${SHARE_ACCESS_WORDS[person.access]} · ` : ""}Invited by email`}
                     >
-                      <CopyButton
-                        iconOnly
-                        label="Copy invitation"
-                        copiedLabel="Invitation copied"
-                        testId={`share-copy-invitation-${person.grantId}`}
-                        sensitive={INVITATION_SECRET}
-                        getText={() => invitationOf(person, loadInvited)}
-                      />
+                      <CopyInvitation person={person} reload={loadInvited} />
                       {onOpenSharing ? (
                         <MoreMenu
                           label="Share options"
