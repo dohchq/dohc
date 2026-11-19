@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
@@ -109,7 +109,13 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
       const root = await createTestScratch("dohc-background-live-");
       const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
       const person = { kind: "human", humanId: "local-person" } as const;
-      const text = "# Written as a file\n\nNobody opened this note.\n";
+      // Markdown the editor would write differently, so an unchanged file proves the stored source was kept.
+      const text = "---\ntitle: x\n---\nTitle\n=====\n\n* one\n* two  \n";
+      const file = join(root, "agent.md");
+      const onDisk = async () => ({
+        bytes: await readFile(file),
+        modified: (await stat(file, { bigint: true })).mtimeNs,
+      });
       let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
       let capture: WorkspaceEngineCapture | undefined;
       // The relay's own test for a page a phone can edit (mainLiveLineageExists).
@@ -135,11 +141,13 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         });
         const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
         await relay.claim();
-        const { objectId } = await capture.writeAuthoredFile(join(root, "agent.md"), text, person, {
+        const { objectId } = await capture.writeAuthoredFile(file, text, person, {
           createOnly: true,
         });
         await pushUntilDrained(relay);
         expect(serverHoldsLineage(objectId)).toBe(false);
+        const written = await onDisk();
+        expect(written.bytes).toEqual(Buffer.from(text));
 
         // What startLiveInBackground does once no editor holds the note: open with no window, then close.
         const backgroundStart = async () => {
@@ -155,11 +163,11 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
         expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
         expect(serverHoldsLineage(objectId)).toBe(true);
         // Nothing changed the text, so the close wrote no file.
-        expect(await readFile(join(root, "agent.md"), "utf8")).toBe(text);
+        expect(await onDisk()).toEqual(written);
 
         // A later run starts the note again. The engine says it has the history, so main asks for no pass.
         expect(await backgroundStart()).toBe("existing");
-        expect(await readFile(join(root, "agent.md"), "utf8")).toBe(text);
+        expect(await onDisk()).toEqual(written);
       } finally {
         await capture?.stop();
         await owner?.close();

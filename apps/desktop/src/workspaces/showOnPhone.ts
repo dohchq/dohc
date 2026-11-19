@@ -18,10 +18,7 @@ const AccountWorkspaces = z.object({
   workspaces: z.array(z.object({ workspaceId: z.string(), showOnPhone: z.boolean() })),
 });
 
-/**
- * Whether a workspace shows on its owner's phone, from one cached read of the
- * account's workspaces. A workspace the server doesn't confirm doesn't show.
- */
+/** Whether the owner's server confirms a workspace shows on the phone, from one cached read. */
 export function createShowOnPhone(options: {
   session(): Promise<ShowOnPhoneSession | null>;
   onError(message: string, error: unknown): void;

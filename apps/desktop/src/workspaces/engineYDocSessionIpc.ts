@@ -1268,15 +1268,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
-  /**
-   * Starts live editing of a note no editor holds, with no window: the engine
-   * seeds its live history from the file, and closing claims that history for
-   * sync, as the first open in an editor would. Nothing changes the text, so
-   * the close writes no file. Answers "seeded" when the open made the note's
-   * live history, "existing" when the engine already held one, and "held"
-   * when an editor holds the note or is opening it, since that open starts
-   * live editing itself.
-   */
+  /** Opens and closes a note no editor holds, with no window, as an editor's first open would; writes no file. */
   async startLiveInBackground(input: {
     workspaceId: string;
     path: string;

@@ -7472,6 +7472,17 @@ const backgroundLiveStart = createBackgroundLiveStart({
       relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl)
     );
   },
+  noteIdentity: async (workspaceId, path) => {
+    const entry = findWorkspace(workspaceId);
+    if (!entry) return null;
+    const resolved = await withEngineAdapter(entry, (adapter) =>
+      adapter.resolveFiles({ workspaceId, targets: [{ path }] }),
+    );
+    const file = resolved?.results[0];
+    return resolved && file?.status === "found"
+      ? `${resolved.versionId}\u0000${file.objectId}`
+      : null;
+  },
   showsOnPhone: (workspaceId) => showOnPhone.shows(workspaceId),
   noteBytes: async (workspaceId, path) => {
     const rootPath = findWorkspace(workspaceId)?.rootPath;

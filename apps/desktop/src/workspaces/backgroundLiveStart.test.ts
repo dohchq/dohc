@@ -14,6 +14,7 @@ function setup(overrides: Partial<BackgroundLiveStartOptions> = {}) {
   const errors: unknown[] = [];
   const options: BackgroundLiveStartOptions = {
     eligible: () => true,
+    noteIdentity: async (_workspaceId, path) => `object:${path}`,
     showsOnPhone: async () => true,
     noteBytes: async () => 10,
     isLossyNote: async () => false,
@@ -114,6 +115,27 @@ describe("background live start", () => {
     expect(started).toEqual(["w:a.md"]);
   });
 
+  it("keeps the gap between notes while capture records past the most wait", async () => {
+    const { queue, started } = setup({ maxWaitMs: 12_000 });
+    queue.note("w", ["a.md", "b.md", "c.md"]);
+    for (let elapsed = 0; elapsed < 11_000; elapsed += 1_000) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      queue.note("w", ["x.md"]);
+    }
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(started).toEqual(["w:a.md"]);
+    for (const next of ["w:b.md", "w:c.md"]) {
+      const count = started.length;
+      // Capture goes on recording within the gap.
+      await vi.advanceTimersByTimeAsync(GAP / 2);
+      queue.note("w", ["x.md"]);
+      await vi.advanceTimersByTimeAsync(GAP / 2 - 1);
+      expect(started).toHaveLength(count);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(started.at(-1)).toBe(next);
+    }
+  });
+
   it("skips a note past the live size cap, and starts one at the cap", async () => {
     const sizes: Record<string, number> = {
       "big.md": WYSIWYG_MARKDOWN_THRESHOLD_BYTES + 1,
@@ -148,6 +170,40 @@ describe("background live start", () => {
     queue.note("w", ["a.md"]);
     await vi.advanceTimersByTimeAsync(QUIET);
     expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("starts a different note created at a started note's old path", async () => {
+    const objects: Record<string, string> = { "agent.md": "first" };
+    const { queue, started } = setup({
+      noteIdentity: async (_workspaceId, path) => objects[path] ?? null,
+    });
+    queue.note("w", ["agent.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:agent.md"]);
+
+    // Rename the started note, then write a new one where it was.
+    objects["archive.md"] = "first";
+    objects["agent.md"] = "second";
+    queue.note("w", ["archive.md", "agent.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(started).toEqual(["w:agent.md", "w:agent.md"]);
+  });
+
+  it("doesn't remember a note whose path held another object by the time it started", async () => {
+    const objects: Record<string, string> = { "a.md": "first" };
+    const { queue, started } = setup({
+      noteIdentity: async (_workspaceId, path) => objects[path] ?? null,
+      start: async (workspaceId, path) => {
+        started.push(`${workspaceId}:${path}`);
+        objects["a.md"] = "second";
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    objects["b.md"] = "first";
+    queue.note("w", ["b.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:a.md", "w:b.md"]);
   });
 
   it("starts nothing in a workspace its server doesn't confirm shows on the phone", async () => {

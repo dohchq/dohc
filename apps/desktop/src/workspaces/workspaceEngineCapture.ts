@@ -560,8 +560,6 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
-// A session as openYDocSession hands it out: also whether the engine already
-// held the note's live history when it opened.
 export type WorkspaceEngineYDocOpenedSession = WorkspaceEngineYDocProviderSession & {
   readonly lineageAtOpen: "existing" | "absent";
 };
