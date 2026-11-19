@@ -1047,6 +1047,42 @@ describe("registered received-view handlers", () => {
       },
     );
 
+    it("does not take an upgrade that a newer access answer came after, and takes it on the next refresh", async () => {
+      const { h } = await pinnedAt("view");
+      h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+      const recording = deferred<{ identity: "recorded" }>();
+      h.recordIdentity.mockReturnValueOnce(recording.promise);
+      const refreshed = refresh(h);
+      await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
+      h.fetchAccess.mockResolvedValueOnce("view");
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      });
+      recording.resolve({ identity: "recorded" });
+      await refreshed;
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      expect(() => requireShareViewProposalScope(h.workspace.shareView)).toThrow();
+
+      await refresh(h);
+      expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
+    });
+
+    it("still says a collision record was set aside when editing could not be turned on", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { h } = await pinnedAt("view");
+      h.reconcile.mockResolvedValue({
+        kind: "refresh",
+        outcome: { ...outcome, collisionRecordQuarantined: true },
+      });
+      h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+      h.recordIdentity.mockRejectedValueOnce(new Error("store busy"));
+      await expect(refresh(h)).resolves.toMatchObject({
+        ok: false,
+        errorMessage: "dohc could not turn on editing for this share.",
+        collisionRecordQuarantined: true,
+      });
+    });
+
     it("reads the level once for an open window, and not again on its background pulls", async () => {
       const { h } = await pinnedAt("view");
       h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
