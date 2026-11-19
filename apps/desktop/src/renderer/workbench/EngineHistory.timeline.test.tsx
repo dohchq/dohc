@@ -694,7 +694,7 @@ describe("History timeline sources", () => {
     const retry = screen.getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
     expect(retry.className.split(" ")).toEqual(
-      expect.arrayContaining(["border", "border-line", "h-6"]),
+      expect.arrayContaining(["border", "border-line", "min-h-6"]),
     );
     expect(screen.getByTestId("history-sources-unavailable").textContent).toBe(
       "dohc could not load changes from Guests.",
@@ -746,7 +746,7 @@ describe("History timeline sources", () => {
     expect(screen.queryByText("No changes yet.")).toBeNull();
     const retry = within(state).getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
-    expect(retry.className.split(" ")).toContain("h-8");
+    expect(retry.className.split(" ")).toContain("min-h-8");
     fireEvent.click(retry);
     expect(calls.retry).toHaveBeenCalledOnce();
   });
