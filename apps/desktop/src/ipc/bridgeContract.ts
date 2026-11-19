@@ -6750,6 +6750,7 @@ export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
 export const MountShareResult = z.object({
   workspace: WorkspaceSummary,
   mount: ShareMountStatusRow,
+  alreadyAdded: z.literal(true).optional(),
 });
 export type MountShareResult = z.infer<typeof MountShareResult>;
 

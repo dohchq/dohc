@@ -44,7 +44,6 @@ import type {
   ImportWorkspaceFilesResult,
   MyShareChangeRow,
   RebuildEngineStoreResult,
-  ShareAccess,
   ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
@@ -263,7 +262,7 @@ import {
   LIVE_STOP_WAITING,
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
-import { OpenSharedView } from "./OpenSharedView";
+import { OpenSharedView, type MountedShare } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -7459,13 +7458,14 @@ export function DesktopWorkspaceShell(props: {
     agentSetup.runnerEnabled;
 
   // `openPath` is the file a notice named, inside the share.
-  function handleMountedShare(label: string, access: ShareAccess | null, openPath?: string) {
-    setOpenShare(null);
+  function handleMountedShare(mounted: MountedShare, openPath?: string) {
+    const { label, access, alreadyAdded } = mounted;
+    if (!mounted.left) setOpenShare(null);
     void reloadShareMounts();
     void refreshFiles()
       .catch(() => undefined)
       .then(() => {
-        if (openPath) openFile(`shared-with-me/${label}/${openPath}`);
+        if (openPath && !mounted.left) openFile(`shared-with-me/${label}/${openPath}`);
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
@@ -7473,9 +7473,11 @@ export function DesktopWorkspaceShell(props: {
     // an Edit grant to Open separately; a person who chose Add is told how
     // to reach the access they have.
     showSuccessNotice(
-      access === "edit"
-        ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
-        : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
+      alreadyAdded
+        ? `${label} is already in shared-with-me.`
+        : access === "edit"
+          ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
+          : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
     );
   }
 
@@ -10056,8 +10058,8 @@ export function DesktopWorkspaceShell(props: {
                                 : {
                                     mountInto: {
                                       workspaceId,
-                                      onMounted: (label: string, access: ShareAccess | null) =>
-                                        handleMountedShare(label, access, openSharePath),
+                                      onMounted: (mounted: MountedShare) =>
+                                        handleMountedShare(mounted, openSharePath),
                                     },
                                   })}
                             />
