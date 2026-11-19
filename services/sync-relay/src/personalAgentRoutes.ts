@@ -594,6 +594,7 @@ export function createPersonalAgentToolRoutes(input: {
       });
       const bytes = storage.getBlob(workspaceId, sha256);
       if (!bytes || bytes.byteLength !== byteLength) throw notFound();
+      let fresh = authority;
       const response = guardedByteResponse(
         bytes,
         {
@@ -607,8 +608,10 @@ export function createPersonalAgentToolRoutes(input: {
           },
           release: () => releaseBytes(),
           terminatedMessage: "personal agent access changed during stream",
-          guard: async () => {
-            const fresh = await linkAuthority.freshPersonal(authority);
+          refresh: async () => {
+            fresh = await linkAuthority.freshPersonal(authority);
+          },
+          guard: () => {
             const read = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
             if (!read.ok || reachedLength(read.reach) !== byteLength) throw notFound();
           },
