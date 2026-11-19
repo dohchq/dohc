@@ -1,3 +1,4 @@
+import { accountWords } from "@dohc/interface-words/account";
 import { fetch } from "expo/fetch";
 import {
   createContext,
@@ -45,6 +46,7 @@ import {
 } from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
+import { ProblemLine } from "./ProblemLine";
 import { secureSignInStore } from "./secureSignInStore";
 
 interface AccountValue {
@@ -334,13 +336,19 @@ export function useSignIn(): SignIn {
 
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
-  const { state, deletion } = useAccount();
+  const { account, state, deletion } = useAccount();
   // Once Connect shows, it stays while a Sign out's delete has failed, even if a sign-in finishes meanwhile, so the
   // failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
   const [onConnect, setOnConnect] = useState(false);
   const showConnect = state.status === "signed-out" || (onConnect && deletion !== "none");
   if (showConnect !== onConnect) setOnConnect(showConnect);
   if (state.status === "loading") return <View style={{ flex: 1, backgroundColor: theme.bg }} />;
+  if (state.status === "unreadable")
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: "center", padding: 24 }}>
+        <ProblemLine text={accountWords.savedUnreadable} onRetry={() => void account.restore()} />
+      </View>
+    );
   if (showConnect) return <Connect />;
   return children;
 }

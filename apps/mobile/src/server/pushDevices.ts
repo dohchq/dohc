@@ -27,14 +27,7 @@ export const bindPushDevice = (
   client: ServerClient,
   device: { readonly token: string; readonly environment: ApnsEnvironment },
   signal: AbortSignal,
-) =>
-  client.send(
-    "PUT",
-    PATH,
-    readStatus,
-    { token: device.token, environment: device.environment },
-    { signal },
-  );
+) => client.send("PUT", PATH, readStatus, device, { signal });
 
 export const removePushDevice = (client: ServerClient, generation: number, signal: AbortSignal) =>
   client.send("DELETE", PATH, readStatus, { generation }, { signal });

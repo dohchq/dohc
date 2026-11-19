@@ -20,6 +20,7 @@ import { workspaceName } from "../src/chats/workspaceName";
 import { confirm } from "../src/confirm";
 import { recoveryRows } from "../src/conversation/outboxMessages";
 import { useOutboxState } from "../src/conversation/useOutbox";
+import { OutboxError } from "../src/server/outbox";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
 import {
@@ -149,11 +150,16 @@ function SettingsScreen() {
   // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count. When the
   // delete can't be made safe, the phone stays signed in and says so here, with Try again. If a 401 has signed the phone
   // out meanwhile, Settings is gone, and Connect shows the failure from the outbox's own state instead.
-  const [signOutFailed, setSignOutFailed] = useState(false);
+  const [signOutFailed, setSignOutFailed] = useState<string | null>(null);
   const leave = useCallback(() => {
-    setSignOutFailed(false);
-    account.signOut().catch(() => {
-      if (signIn.isCurrent()) setSignOutFailed(true);
+    setSignOutFailed(null);
+    account.signOut().catch((error: unknown) => {
+      if (signIn.isCurrent())
+        setSignOutFailed(
+          error instanceof OutboxError
+            ? accountWords.signOutFailed
+            : accountWords.signOutNotStarted,
+        );
     });
   }, [account, signIn]);
   const signOut = useCallback(async () => {
@@ -366,7 +372,7 @@ function SettingsScreen() {
       ) : null}
 
       <Section>
-        {signOutFailed ? <ProblemLine text={accountWords.signOutFailed} onRetry={leave} /> : null}
+        {signOutFailed ? <ProblemLine text={signOutFailed} onRetry={leave} /> : null}
         <Pressable
           accessibilityRole="button"
           onPress={() => void signOut()}
@@ -398,7 +404,7 @@ function AlertsSection({ alerts, server }: { alerts: Alerts; server: string }) {
                   ? accountWords.alertsNotSaved
                   : accountWords.problem(state.problem, server)
               }
-              onRetry={() => void alerts.sync()}
+              onRetry={alerts.retry}
             />
           ) : null}
           <Row

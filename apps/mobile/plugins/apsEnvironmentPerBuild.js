@@ -1,4 +1,3 @@
-// The entitlement reads the build setting, so Xcode signs Debug for APNs development and Release for production.
 const { withEntitlementsPlist, withXcodeProject } = require("expo/config-plugins");
 
 module.exports = function apsEnvironmentPerBuild(config) {

@@ -4,29 +4,23 @@ import {
   type ApnsEnvironment,
   type PushDeviceStatus,
 } from "@dohc/workspace-contracts/push-subscriptions";
-import { isFields } from "../server/api";
+import { isFields, listWorkspaces, type AccountWorkspace } from "../server/api";
 import type { SignIn } from "../server/account";
 import { ServerError, shownProblem } from "../server/client";
 import type { KeptStore } from "../server/keptStore";
 import { bindPushDevice, readPushDevice, removePushDevice } from "../server/pushDevices";
 import { readRegistration, saveRegistration } from "../server/pushRegistration";
-import type { WorkspaceList } from "../server/workspaceList";
 
 export type Permission = "granted" | "denied" | "undetermined";
 
-/** What the alerts need of the operating system. */
 export interface NativeAlerts {
   permission(): Promise<Permission>;
   ask(): Promise<Permission>;
   token(): Promise<string>;
-  onToken(listener: () => void): () => void;
+  onToken(listener: (token: string) => void): () => void;
 }
 
-/**
- * `unavailable`: the server sends no alerts. `ready`: `on` once the person turned alerts on and the system allows them;
- * `denied` when they turned them on and the system doesn't. `problem` is the last change's failure: the server's, or
- * `kept` when this phone couldn't save it.
- */
+/** `problem` is `kept` when this phone couldn't save the choice. */
 export type AlertsState =
   | { readonly status: "loading" }
   | { readonly status: "unavailable" }
@@ -43,8 +37,9 @@ export interface Alerts {
   subscribe(listener: () => void): () => void;
   /** The binding the server last acknowledged for this sign-in, or null. */
   generation(): number | null;
-  /** Brings the server's binding in line with the choice and the system's permission. */
   sync(): Promise<void>;
+  /** Saves a choice that failed to save, then syncs. */
+  retry(): void;
   turnOn(): void;
   turnOff(): void;
   stop(): void;
@@ -52,7 +47,6 @@ export interface Alerts {
 
 const READY = { status: "ready", on: false, denied: false, busy: false, problem: null } as const;
 
-/** One sign-in's alerts: its row in kept.db, the system's permission, and the server's binding for its session. */
 export function createAlerts(options: {
   readonly signIn: SignIn;
   readonly store: KeptStore;
@@ -65,7 +59,11 @@ export function createAlerts(options: {
   const listeners = new Set<() => void>();
   let state: AlertsState = { status: "loading" };
   let wanted: boolean | null = null;
+  let requested: boolean | null = null;
   let generation: number | null = null;
+  let latest: string | null = null;
+  let pushed: string | null = null;
+  let fetching = false;
   let running = false;
   let again = false;
   const live = () => !controller.signal.aborted && signIn.isCurrent();
@@ -81,7 +79,8 @@ export function createAlerts(options: {
 
   async function save(alerts: boolean, next: number | null) {
     if (alerts === wanted && next === generation) return;
-    await saveRegistration(store, owner, alerts, next);
+    await saveRegistration(store, owner, alerts, next, live);
+    if (!live()) return;
     wanted = alerts;
     generation = next;
   }
@@ -100,15 +99,18 @@ export function createAlerts(options: {
     if (!status.available) return set({ status: "unavailable" });
     const want = wanted && permission === "granted";
     if (want) {
-      const token = await native.token();
+      fetching = pushed === null;
+      const token = pushed ?? (await native.token().finally(() => (fetching = false)));
+      pushed = null;
       if (!live()) return;
+      latest = token;
       if (!isApnsDeviceToken(token)) throw new ServerError("invalid");
       status = await bindPushDevice(
         signIn.client,
         { token, environment: options.environment },
         controller.signal,
       );
-    } else if (status.available && status.enabled) {
+    } else if (status.enabled) {
       status = await removePushDevice(signIn.client, status.generation, controller.signal);
     }
     if (!live()) return;
@@ -139,19 +141,29 @@ export function createAlerts(options: {
     }
   }
 
-  async function change(alerts: boolean) {
+  async function change(alerts: boolean | null) {
     if (!live() || state.status !== "ready" || state.busy) return;
+    if (alerts !== null) requested = alerts;
     ready({ busy: true });
     try {
-      if (alerts) await native.ask().catch(() => undefined);
-      await save(alerts, generation);
+      if (requested !== null) {
+        if (requested) await native.ask().catch(() => undefined);
+        if (!live()) return;
+        await save(requested, generation);
+        if (!live()) return;
+        requested = null;
+      }
     } catch {
       return ready({ busy: false, problem: "kept" });
     }
     await sync();
   }
 
-  const stopToken = native.onToken(() => void sync());
+  const stopToken = native.onToken((token) => {
+    if (fetching || token === latest) return;
+    latest = pushed = token;
+    void sync();
+  });
   return {
     state: () => state,
     subscribe(listener) {
@@ -160,6 +172,7 @@ export function createAlerts(options: {
     },
     generation: () => generation,
     sync,
+    retry: () => void change(null),
     turnOn: () => void change(true),
     turnOff: () => void change(false),
     stop() {
@@ -178,19 +191,31 @@ export interface AlertTarget {
 const id = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 
-/**
- * Where a tapped alert opens: its message, when the alert names the binding the server last acknowledged for this
- * sign-in, and the workspace shows on this phone. Null sends the tap to Home.
- */
 export function alertTarget(
   data: unknown,
   generation: number | null,
-  list: WorkspaceList,
+  workspaces: readonly AccountWorkspace[],
 ): AlertTarget | null {
   if (!isFields(data) || generation === null || data.generation !== generation) return null;
   const { workspaceId, threadId, messageId } = data;
   if (!id(workspaceId) || !id(threadId) || !id(messageId)) return null;
-  if (list.status !== "ready" || list.pending.has(workspaceId)) return null;
-  const entry = list.workspaces.find((item) => item.workspaceId === workspaceId);
+  const entry = workspaces.find((item) => item.workspaceId === workspaceId);
   return entry?.showOnPhone && entry.canOpen ? { workspaceId, threadId, messageId } : null;
+}
+
+/** Reads the workspaces from the server first. Null when the sign-in changed; a problem to retry when offline. */
+export async function openTap(
+  signIn: SignIn,
+  data: unknown,
+  generation: () => number | null,
+): Promise<AlertTarget | "home" | "offline" | "server-busy" | null> {
+  try {
+    const workspaces = await listWorkspaces(signIn.client);
+    if (!signIn.isCurrent()) return null;
+    return alertTarget(data, generation(), workspaces) ?? "home";
+  } catch (error) {
+    const problem = shownProblem(error);
+    if (!signIn.isCurrent() || problem === null) return null;
+    return problem === "offline" || problem === "server-busy" ? problem : "home";
+  }
 }

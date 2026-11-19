@@ -1,39 +1,77 @@
+import { accountWords, type ServerProblemKind } from "@dohc/interface-words/account";
 import * as Notifications from "expo-notifications";
 import { useRouter } from "expo-router";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "../account/AccountProvider";
-import { alertTarget, type AlertsState } from "./alerts";
+import { ProblemLine } from "../account/ProblemLine";
+import { serverName } from "../server/origin";
+import { useTheme } from "../theme";
+import { openTap, type AlertsState } from "./alerts";
 
 const UNAVAILABLE: AlertsState = { status: "unavailable" };
 const none = { subscribe: () => () => undefined, state: () => UNAVAILABLE };
 
-/** Opens a tapped alert's message, at launch too, once the workspace list and the alerts' row are read. */
 export function AlertTaps() {
   const router = useRouter();
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const response = Notifications.useLastNotificationResponse();
-  const { alerts, workspaces, chooseWorkspace } = useAccount();
+  const { state, alerts, chooseWorkspace } = useAccount();
+  const signIn = state.status === "signed-in" ? state.signIn : null;
   const alertsState = useSyncExternalStore((alerts ?? none).subscribe, (alerts ?? none).state);
   const handled = useRef<string | null>(null);
+  const [failed, setFailed] = useState<ServerProblemKind | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!response || response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
     const { request } = response.notification;
-    if (handled.current === request.identifier) return;
-    if (workspaces.status === "loading" || alertsState.status === "loading") return;
+    if (!signIn || handled.current === request.identifier || alertsState.status === "loading")
+      return;
     handled.current = request.identifier;
-    Notifications.clearLastNotificationResponse();
-    const target = alertTarget(request.content.data, alerts?.generation() ?? null, workspaces);
-    if (!target) return router.navigate("/home");
-    chooseWorkspace(target.workspaceId);
-    router.push({
-      pathname: "/chat/[id]",
-      params: {
-        id: target.threadId,
-        thread: "1",
-        workspace: target.workspaceId,
-        message: target.messageId,
+    setFailed(null);
+    void openTap(signIn, request.content.data, () => alerts?.generation() ?? null).then(
+      (target) => {
+        if (handled.current !== request.identifier) return;
+        if (target === null || target === "offline" || target === "server-busy") {
+          handled.current = null;
+          return setFailed(target);
+        }
+        Notifications.clearLastNotificationResponse();
+        if (target === "home") return router.navigate("/home");
+        chooseWorkspace(target.workspaceId);
+        router.push({
+          pathname: "/chat/[id]",
+          params: {
+            id: target.threadId,
+            thread: "1",
+            workspace: target.workspaceId,
+            message: target.messageId,
+          },
+        });
       },
-    });
-  }, [response, workspaces, alerts, alertsState, chooseWorkspace, router]);
-  return null;
+    );
+  }, [response, signIn, alerts, alertsState, attempt, chooseWorkspace, router]);
+
+  if (!failed || !signIn) return null;
+  return (
+    <View
+      style={{
+        position: "absolute",
+        left: 16,
+        right: 16,
+        bottom: insets.bottom + 66,
+        paddingHorizontal: 16,
+        borderRadius: 12,
+        backgroundColor: theme.raised,
+      }}
+    >
+      <ProblemLine
+        text={accountWords.problem(failed, serverName(signIn.origin))}
+        onRetry={() => setAttempt((count) => count + 1)}
+      />
+    </View>
+  );
 }

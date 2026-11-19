@@ -4,8 +4,7 @@ import { createServerClient } from "../server/client";
 import { pendingSignOuts, readRegistration, saveRegistration } from "../server/pushRegistration";
 import { keptDisk, type KeptDisk } from "../server/testKeptDisk";
 import { deferred, testServer, type Answer } from "../server/testServer";
-import type { WorkspaceList } from "../server/workspaceList";
-import { alertTarget, createAlerts, type NativeAlerts, type Permission } from "./alerts";
+import { alertTarget, createAlerts, openTap, type NativeAlerts, type Permission } from "./alerts";
 
 const TOKEN = "ab".repeat(32);
 const PATH = "/sync/push/devices";
@@ -19,16 +18,27 @@ const on = (generation: number) => ({
 function fakeNative(initial: Permission = "undetermined") {
   let permission = initial;
   let token = TOKEN;
+  let fetches = 0;
+  let asking: Promise<void> = Promise.resolve();
   const asked: Permission[] = [];
-  const tokenListeners = new Set<() => void>();
+  const tokenListeners = new Set<(token: string) => void>();
+  const announce = () => {
+    for (const listener of tokenListeners) listener(token);
+  };
   const native: NativeAlerts = {
     permission: async () => permission,
     ask: async () => {
       asked.push(permission);
+      await asking;
       if (permission === "undetermined") permission = "granted";
       return permission;
     },
-    token: async () => token,
+    // As expo-notifications on iOS: each fetch registers again, and the registration announces the token.
+    token: async () => {
+      fetches += 1;
+      announce();
+      return token;
+    },
     onToken(listener) {
       tokenListeners.add(listener);
       return () => tokenListeners.delete(listener);
@@ -37,10 +47,12 @@ function fakeNative(initial: Permission = "undetermined") {
   return {
     native,
     asked,
+    fetches: () => fetches,
+    holdAsk: (until: Promise<void>) => (asking = until),
     deny: () => (permission = "denied"),
     newToken(next: string) {
       token = next;
-      for (const listener of tokenListeners) listener();
+      announce();
     },
   };
 }
@@ -142,19 +154,77 @@ describe("alerts", () => {
     expect(device.asked).toEqual([]);
   });
 
-  it("bind a new token when the system replaces it", async () => {
+  it("fetch the token once per sync, though each fetch announces it again", async () => {
+    const { server, device, store, alerts } = setup({ permission: "granted" });
+    await saveRegistration(store, OWNER, true, 1);
+    server.on("GET", PATH, on(1));
+    server.on("PUT", PATH, on(1));
+    await alerts.sync();
+    await alerts.sync();
+    expect(device.fetches()).toBe(2);
+    expect(server.paths()).toEqual([`GET ${PATH}`, `PUT ${PATH}`, `GET ${PATH}`, `PUT ${PATH}`]);
+  });
+
+  it("bind a new token when the system replaces it, without fetching it again", async () => {
     const { server, device, store, alerts } = setup({ permission: "granted" });
     await saveRegistration(store, OWNER, true, 1);
     server.on("GET", PATH, on(1));
     server.on("PUT", PATH, on(1), on(2));
-    alerts.sync();
-    await vi.waitFor(() => expect(alerts.state()).toMatchObject({ on: true }));
+    await alerts.sync();
     device.newToken("cd".repeat(32));
     await vi.waitFor(() => expect(alerts.generation()).toBe(2));
+    expect(device.fetches()).toBe(1);
     expect(server.calls.at(-1)!.body).toEqual({
       token: "cd".repeat(32),
       environment: "production",
     });
+  });
+
+  it("save nothing once the sign-in ends during the prompt", async () => {
+    const { server, store, device, alerts, end } = setup();
+    server.on("GET", PATH, off);
+    await alerts.sync();
+    const prompt = deferred<void>();
+    device.holdAsk(prompt.promise);
+    alerts.turnOn();
+    await vi.waitFor(() => expect(device.asked).toHaveLength(1));
+    end();
+    prompt.resolve();
+    await store.transaction(async () => undefined);
+    expect(await readRegistration(store, OWNER)).toBeNull();
+  });
+
+  it("save nothing once the sign-in ends while the save waits its turn", async () => {
+    const { server, store, alerts, end } = setup({ permission: "granted" });
+    await saveRegistration(store, OWNER, true, 2);
+    server.on("GET", PATH, on(2));
+    server.on("PUT", PATH, on(2));
+    await alerts.sync();
+    const turn = deferred<void>();
+    const cleanup = store.transaction(async (sql) => {
+      await turn.promise;
+      await sql.run("DELETE FROM push_registrations", []);
+    });
+    alerts.turnOff();
+    end();
+    turn.resolve();
+    await cleanup;
+    await store.transaction(async () => undefined);
+    expect(await readRegistration(store, OWNER)).toBeNull();
+  });
+
+  it("repeat a choice that failed to save on Try again", async () => {
+    const { server, disk, store, alerts } = setup({ permission: "granted" });
+    server.on("GET", PATH, off);
+    server.on("PUT", PATH, on(6));
+    await alerts.sync();
+    disk.failWrites = /push_registrations/;
+    alerts.turnOn();
+    expect(await ready(alerts)).toMatchObject({ on: false, problem: "kept" });
+    disk.failWrites = null;
+    alerts.retry();
+    await vi.waitFor(() => expect(alerts.state()).toMatchObject({ on: true, problem: null }));
+    expect(await readRegistration(store, OWNER)).toMatchObject({ alerts: true, generation: 6 });
   });
 
   it("show a failure with the switch where it was, and change nothing once the sign-in ends", async () => {
@@ -198,15 +268,10 @@ describe("a pending Sign out's row", () => {
 });
 
 describe("a tapped alert", () => {
-  const list: WorkspaceList = {
-    status: "ready",
-    workspaces: [
-      { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true },
-      { workspaceId: "ws-2", name: "Work", canOpen: true, showOnPhone: false },
-    ],
-    pending: new Set(),
-    problem: null,
-  };
+  const list = [
+    { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true },
+    { workspaceId: "ws-2", name: "Work", canOpen: true, showOnPhone: false },
+  ];
   const data = { generation: 4, workspaceId: "ws-1", threadId: "t-1", messageId: "m-1" };
 
   it("opens its message only for this sign-in's binding and a workspace the phone shows", () => {
@@ -221,6 +286,43 @@ describe("a tapped alert", () => {
     expect(alertTarget({ ...data, workspaceId: "ws-3" }, 4, list)).toBeNull();
     expect(alertTarget({ ...data, messageId: "" }, 4, list)).toBeNull();
     expect(alertTarget({ ...data, generation: "4" }, 4, list)).toBeNull();
-    expect(alertTarget(data, 4, { status: "loading" })).toBeNull();
+  });
+
+  function tapping() {
+    const server = testServer();
+    let current = true;
+    const signIn: SignIn = {
+      origin: OWNER.origin,
+      userId: OWNER.userId,
+      email: "ice@example.com",
+      isCurrent: () => current,
+      client: createServerClient({
+        origin: OWNER.origin,
+        token: "t",
+        fetch: server.fetch,
+        signal: new AbortController().signal,
+      }),
+    };
+    const listed = (workspaces: unknown) => ({ status: 200, body: { ok: true, workspaces } });
+    const tap = () => openTap(signIn, data, () => 4);
+    return { server, listed, tap, end: () => (current = false) };
+  }
+
+  it("opens only what the server lists now, waits offline, and drops a tap the sign-in outlived", async () => {
+    const { server, listed, tap, end } = tapping();
+    server.on("GET", "/sync/account/workspaces", listed(list));
+    expect(await tap()).toEqual({ workspaceId: "ws-1", threadId: "t-1", messageId: "m-1" });
+    server.on("GET", "/sync/account/workspaces", listed([{ ...list[0], canOpen: false }]));
+    expect(await tap()).toBe("home");
+    server.on("GET", "/sync/account/workspaces", { status: 403, body: { ok: false } });
+    expect(await tap()).toBe("home");
+    server.on("GET", "/sync/account/workspaces", "offline");
+    expect(await tap()).toBe("offline");
+    const held = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => held.promise);
+    const late = tap();
+    end();
+    held.resolve(listed(list));
+    expect(await late).toBeNull();
   });
 });

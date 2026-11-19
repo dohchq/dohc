@@ -16,15 +16,6 @@ import type { PendingSignOuts } from "./pushRegistration";
 // sign-out, so it changes the generation too. A change aborts every request of the generation before it. Anything
 // that would update state, the screen, the token store or a cache, checks its generation first, and gives up once it
 // has moved on.
-//
-// A token the phone drops without Sign out, as a superseded sign-in's, is deleted from the store first, then its
-// session is revoked with the copy held in memory. Writes to the store run one at a time, in order, so a delete
-// always lands after a save it raced.
-//
-// Sign out runs `onSignOut`, the outbox's delete, first. The sign-in ends only when that hook calls `leave`: once its
-// delete can no longer be lost. A hook that rejects before then keeps the phone signed in. `leave` then waits for the
-// server to end the session, which also ends its alerts, and deletes the token only after. Until the server answers,
-// the Sign out is pending: the token stays, no sign-in starts, and `pendingSignOuts` keeps it across a relaunch.
 
 /** What the token store keeps for this phone: the server, the session token, and whose it is. */
 export interface StoredSignIn {
@@ -51,6 +42,7 @@ export interface SignIn {
 
 export type AccountState =
   | { readonly status: "loading" }
+  | { readonly status: "unreadable" }
   /**
    * `origin` is the last server, to sign in to again; `ended` when the server ended the session. `forgetFailed` while
    * a token this phone signed out of is still in the store, because deleting it failed. `pendingSignOut` while a
@@ -70,7 +62,7 @@ export type SignInOutcome = "signed-in" | "denied" | "expired" | "cancelled";
 export interface Account {
   state(): AccountState;
   subscribe(listener: () => void): () => void;
-  /** Reads the saved sign-in, once, at launch. */
+  /** Reads the saved sign-in at launch, and again after `unreadable`. */
   restore(): Promise<void>;
   /**
    * Signs in to `origin` through the device flow, superseding any sign-in in progress. `onCode` gets the code and the
@@ -121,7 +113,6 @@ export function createAccount(options: {
   let writes: Promise<unknown> = Promise.resolve();
   /** Tokens this phone ended whose delete failed, with their servers. */
   const unforgotten = new Map<string, string>();
-  /** The sign-in a Sign out ended whose session the server hasn't ended yet. */
   let unrevoked: StoredSignIn | null = null;
   let revokeFailed = false;
 
@@ -143,7 +134,6 @@ export function createAccount(options: {
     };
   }
 
-  /** Shows a delete or a Sign out that failed, or one that has now worked, on a signed-out phone. */
   function showSignedOut() {
     const shown = state;
     if (shown.status !== "signed-out") return;
@@ -180,7 +170,6 @@ export function createAccount(options: {
     showSignedOut();
   }
 
-  /** Resolves once the server has ended the session, also when it had before this asked. */
   async function revoke(origin: string, token: string): Promise<void> {
     const client = createServerClient({
       origin,
@@ -190,14 +179,15 @@ export function createAccount(options: {
       timeoutMs: REVOKE_TIMEOUT_MS,
     });
     const sessions = await listSessions(client).catch((error: unknown) => {
-      if (isProblem(error, "signed-out")) return [];
+      if (isProblem(error, "signed-out")) return null;
       throw error;
     });
+    if (sessions === null) return;
     const mine = sessions.find((session) => session.current);
-    if (mine)
-      await endSession(client, mine.sessionId).catch((error: unknown) => {
-        if (!isProblem(error, "signed-out", "not-found")) throw error;
-      });
+    if (!mine) throw new ServerError("invalid");
+    await endSession(client, mine.sessionId).catch((error: unknown) => {
+      if (!isProblem(error, "signed-out", "not-found")) throw error;
+    });
   }
 
   /** Deletes the token, then ends its session on the server. Never rejects. */
@@ -251,6 +241,8 @@ export function createAccount(options: {
     const ending = saved ?? unrevoked;
     const at = generation;
     const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
+    const marked = ending !== null && ending === saved;
+    if (marked && options.pendingSignOuts) await options.pendingSignOuts.begin(ending);
     let leaving: Promise<void> | null = null;
     const leaveOnce = async () => {
       // A 401 moved the generation while the hook ran: the server has ended the session, and what it holds now stays.
@@ -265,9 +257,7 @@ export function createAccount(options: {
       setState(signedOut(origin, false));
       if (!ending) return;
       try {
-        await options.pendingSignOuts?.begin(ending);
         await revoke(ending.origin, ending.token);
-        await options.pendingSignOuts?.end(ending);
       } catch (error) {
         revokeFailed = true;
         showSignedOut();
@@ -276,6 +266,8 @@ export function createAccount(options: {
       unrevoked = null;
       showSignedOut();
       await forget(ending.origin, ending.token);
+      if (!unforgotten.has(ending.token))
+        await options.pendingSignOuts?.end(ending).catch(() => undefined);
     };
     const leave = () => (leaving ??= leaveOnce());
     const cleaning = options.onSignOut?.(leave);
@@ -283,8 +275,11 @@ export function createAccount(options: {
       try {
         await cleaning;
       } catch (error) {
-        // Signed out already: the hook finishes its cleanup itself.
-        if (!leaving) throw error;
+        if (!leaving) {
+          if (marked && saved === ending)
+            await options.pendingSignOuts?.end(ending).catch(() => undefined);
+          throw error;
+        }
       }
     }
     await leave();
@@ -303,14 +298,16 @@ export function createAccount(options: {
       // A token this phone already signed out of is never signed in with again.
       const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
       const pending =
-        stored !== null &&
-        (await options.pendingSignOuts?.isPending(stored).catch(() => false)) === true;
+        stored && options.pendingSignOuts
+          ? await options.pendingSignOuts.isPending(stored).catch(() => null)
+          : false;
       if (current.id !== generation) {
         // Signed out while the store was read: the token it held goes too.
         if (stored) void endToken(stored.origin, stored.token);
         return;
       }
-      if (pending) {
+      if (pending === null) return setState({ status: "unreadable" });
+      if (pending && stored) {
         unrevoked = stored;
         setState(signedOut(stored.origin, false));
         void signOut().catch(() => undefined);

@@ -1,5 +1,5 @@
 import * as Notifications from "expo-notifications";
-import type { Account } from "../server/account";
+import type { Account, AccountState } from "../server/account";
 import type { NativeAlerts, Permission } from "./alerts";
 
 const permission = (status: Notifications.NotificationPermissionsStatus): Permission =>
@@ -9,6 +9,8 @@ const permission = (status: Notifications.NotificationPermissionsStatus): Permis
       ? "denied"
       : "undetermined";
 
+const hex = (token: Notifications.DevicePushToken) => String(token.data).toLowerCase();
+
 export const nativeAlerts: NativeAlerts = {
   permission: async () => permission(await Notifications.getPermissionsAsync()),
   ask: async () =>
@@ -17,22 +19,31 @@ export const nativeAlerts: NativeAlerts = {
         ios: { allowAlert: true, allowSound: true, allowBadge: false },
       }),
     ),
-  token: async () => String((await Notifications.getDevicePushTokenAsync()).data).toLowerCase(),
+  token: async () => hex(await Notifications.getDevicePushTokenAsync()),
   onToken(listener) {
-    const subscription = Notifications.addPushTokenListener(listener);
+    const subscription = Notifications.addPushTokenListener((token) => listener(hex(token)));
     return () => subscription.remove();
   },
 };
 
-/** When a sign-in ends, its delivered alerts leave the phone, and the phone stops taking alerts until the next one. */
+const phase = (state: AccountState) =>
+  state.status === "signed-in"
+    ? "in"
+    : state.status === "signed-out" && state.pendingSignOut !== null
+      ? "pending"
+      : "out";
+
+/** When a sign-in ends, or a launch finds a Sign out pending, its alerts leave the phone until the next sign-in. */
 export function clearAlertsAtSignOut(account: Pick<Account, "state" | "subscribe">): () => void {
-  let signedIn = account.state().status === "signed-in";
-  return account.subscribe(() => {
-    const now = account.state().status === "signed-in";
-    if (signedIn && !now) {
+  let was: ReturnType<typeof phase> = "out";
+  const check = () => {
+    const now = phase(account.state());
+    if (now !== "in" && (was === "in" || (now === "pending" && was !== "pending"))) {
       void Notifications.dismissAllNotificationsAsync().catch(() => undefined);
       void Notifications.unregisterForNotificationsAsync().catch(() => undefined);
     }
-    signedIn = now;
-  });
+    was = now;
+  };
+  check();
+  return account.subscribe(check);
 }

@@ -498,7 +498,8 @@ describe("signing out", () => {
     );
     account.cancelSignIn();
     expect(tokens.current()).toEqual(SAVED);
-    revoking.resolve({ status: 200, body: { ok: true, sessions: [] } });
+    serveSessionEnd(server);
+    revoking.resolve(SESSIONS);
     await ending;
     expect(tokens.current()).toBeNull();
     expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
@@ -614,9 +615,111 @@ describe("signing out", () => {
     held.resolve({ status: 401 });
     await vi.waitFor(() => expect(tokens.current()).toBeNull());
     expect(rows.size).toBe(0);
-    expect(log).toEqual(["begin", "begin", "end"]);
+    expect(log).toEqual(["begin", "end"]);
     expect(statuses).not.toContain("signed-in");
     expect(relaunched.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+  });
+
+  it("commits the mark while still signed in, and stays signed in with its token when it can't", async () => {
+    const { server, tokens } = setup();
+    serveSessionEnd(server);
+    const { pending, log } = memoryPending();
+    const seen: string[] = [];
+    let failBegin = true;
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      onSignOut: async (leave) => {
+        log.push("hook");
+        await leave();
+      },
+      pendingSignOuts: {
+        ...pending,
+        begin: async (owner) => {
+          seen.push(account.state().status);
+          if (failBegin) throw new Error("disk full");
+          await pending.begin(owner);
+        },
+      },
+    });
+    await account.restore();
+    const signIn = signedIn(account);
+    await expect(account.signOut()).rejects.toThrow("disk full");
+    expect(signedIn(account)).toBe(signIn);
+    expect(tokens.current()).toEqual(SAVED);
+    expect(server.calls).toHaveLength(0);
+    expect(log).toEqual([]);
+
+    failBegin = false;
+    await account.signOut();
+    expect(seen).toEqual(["signed-in", "signed-in"]);
+    expect(log).toEqual(["begin", "hook", "end"]);
+    expect(tokens.current()).toBeNull();
+  });
+
+  it("clears the mark when the hook rejects before leave", async () => {
+    const { server, tokens } = setup();
+    const { pending, rows } = memoryPending();
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      onSignOut: async () => {
+        expect(rows.size).toBe(1);
+        throw new Error("couldn't delete");
+      },
+      pendingSignOuts: pending,
+    });
+    await account.restore();
+    await expect(account.signOut()).rejects.toThrow("couldn't delete");
+    expect(rows.size).toBe(0);
+    expect(account.state().status).toBe("signed-in");
+  });
+
+  it("finishes once the server ended the session, even when the mark can't be cleared", async () => {
+    const { server, tokens } = setup();
+    serveSessionEnd(server);
+    const { pending } = memoryPending();
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: { ...pending, end: async () => Promise.reject(new Error("disk full")) },
+    });
+    await account.restore();
+    await account.signOut();
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: null });
+    expect(tokens.current()).toBeNull();
+  });
+
+  it("doesn't sign in when the launch can't read the mark, and signs in once Try again reads it", async () => {
+    const { server, tokens } = setup();
+    const { pending } = memoryPending();
+    let unreadable = true;
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      pendingSignOuts: {
+        ...pending,
+        isPending: async (owner) =>
+          unreadable ? Promise.reject(new Error("I/O")) : pending.isPending(owner),
+      },
+    });
+    await account.restore();
+    expect(account.state()).toEqual({ status: "unreadable" });
+    unreadable = false;
+    await account.restore();
+    expect(account.state().status).toBe("signed-in");
+  });
+
+  it("doesn't count a session list without this phone's session as ended", async () => {
+    const { server, tokens, account } = setup();
+    await account.restore();
+    server.on("GET", "/sync/account/sessions", {
+      status: 200,
+      body: { ok: true, sessions: [SESSIONS.body.sessions[0]] },
+    });
+    await expect(account.signOut()).rejects.toBeInstanceOf(ServerError);
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "failed" });
+    expect(tokens.current()).toEqual(SAVED);
   });
 
   it("shows a failed delete, still revokes, and never signs in with that token again", async () => {

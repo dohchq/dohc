@@ -41,15 +41,17 @@ export const saveRegistration = (
   owner: Owner,
   alerts: boolean,
   generation: number | null,
+  live: () => boolean = () => true,
 ) =>
-  store.transaction((sql) =>
-    sql.run(
+  store.transaction(async (sql) => {
+    if (!live()) return;
+    await sql.run(
       `INSERT INTO push_registrations (origin, account_id, alerts, generation, signing_out) VALUES (?, ?, ?, ?, 0)
        ON CONFLICT (origin, account_id) DO UPDATE SET alerts = excluded.alerts, generation = excluded.generation
        WHERE signing_out = 0`,
       [...key(owner), alerts ? 1 : 0, generation],
-    ),
-  );
+    );
+  });
 
 export const pendingSignOuts = (store: KeptStore): PendingSignOuts => ({
   begin: (owner) =>

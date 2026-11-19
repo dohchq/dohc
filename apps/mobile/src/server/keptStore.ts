@@ -54,8 +54,6 @@ export const CACHE_FILE = "cache.db";
  * is deleted, but a rolled-back insert's sequence comes back: the outbox allocates past any it still holds in memory.
  * `notice_lists`: each account's last whole Notice list, as JSON. `notice_marks`: its marks the server hasn't taken,
  * in the order they were made, each with the key the phone made for it, so a retried insert finds its row.
- * `push_registrations`: whether the account turned alerts on, the binding generation the server last acknowledged, and
- * a Sign out waiting for the server to end its session.
  */
 export const KEPT_SCHEMA = `CREATE TABLE IF NOT EXISTS outbox (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
