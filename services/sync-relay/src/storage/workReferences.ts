@@ -16,6 +16,7 @@ import {
   targetVersionId,
   type ChatShareThreadResolver,
 } from "../shareFilter";
+import { LINK_CHAT_ORIGIN_PREFIX, SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import type { StorageContext } from "./context";
 
 export const WORK_REFERENCE_BATCH = 128;
@@ -146,24 +147,36 @@ function snapshotObject(
 }
 
 type ChatCreatePayload = { channelId?: unknown; wireId?: unknown; kind?: unknown };
-const chatCreates = (field: "channelId" | "wireId") =>
-  `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'
-  AND json_extract(payload_json,'$.${field}')=? ORDER BY relay_seq`;
+const CHAT_CREATES = `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='chat.channel.create'`;
 
 // A chat's wire id and kind, from the first create of its wire. A share member
-// can push a create of a granted wire under any id, and that create never names a chat.
+// or link holder can push a create of a granted wire under any id, and that
+// create never names a chat, so the walk leaves those rows out.
 function chatCreate(
   storage: StorageContext,
   workspaceId: string,
   channelId: string,
 ): { wireId: string; kind: unknown } | null {
   const refused = new Set<string>();
-  for (const row of storage.db.prepare(chatCreates("channelId")).iterate(workspaceId, channelId)) {
+  const owned = storage.db.prepare(
+    `${CHAT_CREATES} AND json_extract(payload_json,'$.channelId')=?
+    AND substr(origin_id,1,?)<>? AND substr(origin_id,1,?)<>? ORDER BY relay_seq`,
+  );
+  for (const row of owned.iterate(
+    workspaceId,
+    channelId,
+    SHARE_MEMBER_ORIGIN_PREFIX.length,
+    SHARE_MEMBER_ORIGIN_PREFIX,
+    LINK_CHAT_ORIGIN_PREFIX.length,
+    LINK_CHAT_ORIGIN_PREFIX,
+  )) {
     const named = JSON.parse(String(row.payload_json)) as ChatCreatePayload;
     if (typeof named.wireId !== "string") return { wireId: channelId, kind: named.kind };
     if (refused.has(named.wireId)) continue;
     const created = storage.db
-      .prepare(`${chatCreates("wireId")} LIMIT 1`)
+      .prepare(
+        `${CHAT_CREATES} AND json_extract(payload_json,'$.wireId')=? ORDER BY relay_seq LIMIT 1`,
+      )
       .get(workspaceId, named.wireId);
     if (
       created &&
