@@ -471,6 +471,7 @@ describe("a joined workspace", () => {
         viewer: { memberId: "member-me", role: "member" },
         memberLevel: "comment",
         inviteLink: null,
+        groupRules: null,
         people: [],
       },
     });
