@@ -509,6 +509,11 @@ fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
     (code == ErrorCode::Internal).then(|| {
         let word = match error {
             RuntimeError::Relay(relay) => relay_refusal_word(relay),
+            RuntimeError::Search(SearchError::Storage(sqlite)) => {
+                dohc_engine_storage::StorageError::named_cause(sqlite)
+                    .map_or("search-storage", |named| named.code())
+                    .into()
+            }
             other => other.code().into(),
         };
         format!("engine: internal refusal: {} {word}", code.as_str())
@@ -995,7 +1000,7 @@ mod tests {
                     None,
                 ))),
                 "disk-full",
-                "engine: internal refusal: INTERNAL search-storage",
+                "engine: internal refusal: INTERNAL disk-full",
             ),
             (
                 RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
@@ -1003,7 +1008,7 @@ mod tests {
                     None,
                 ))),
                 "state-corrupt",
-                "engine: internal refusal: INTERNAL search-storage",
+                "engine: internal refusal: INTERNAL state-corrupt",
             ),
             (
                 RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(

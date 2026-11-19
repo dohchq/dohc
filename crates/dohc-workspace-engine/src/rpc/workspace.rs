@@ -2038,6 +2038,14 @@ mod tests {
         service
             .ensure_handle_allows_method(Some(&handle), "workspace.close")
             .expect("a damaged store still closes");
+        service
+            .workspace_close(Some(handle.clone()))
+            .await
+            .expect("a damaged store closes");
+        assert!(
+            service.open(Some(&handle)).is_err(),
+            "the closed handle is gone"
+        );
 
         let refused = service
             .workspace_open(&RequestContext::unbounded(), params)
