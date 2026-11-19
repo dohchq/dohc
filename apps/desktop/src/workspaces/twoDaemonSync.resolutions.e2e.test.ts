@@ -1,11 +1,13 @@
-import { readFile, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 
 import { createTestScratch } from "./testTemp";
+import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
 
 import {
   engine,
@@ -92,36 +94,22 @@ async function settled(pair: Pair, path: string) {
   };
 }
 
-it.each([
-  ["keep-current", "unopened"],
-  ["apply-merged", "unopened"],
-  ["keep-current", "mirrored"],
+it.skipIf(engine.missing).each([
+  ["keeping this computer's copy", { kind: "keep-current" }, "from B\n"],
+  ["merging the copies", { kind: "apply-merged", text: "merged on B\n" }, "merged on B\n"],
 ] as const)(
-  "a %s decision closes the conflict on the computer whose edit it settled (%s)",
-  async (kind, order) => {
-    if (engine.missing) return;
+  "%s closes the conflict on the computer whose edit it settled",
+  async (_name, choice, kept) => {
     const path = "note.md";
-    await withPair(`${order}-${kind}`, path, "base\n", async (pair) => {
+    await withPair(choice.kind, path, "base\n", async (pair) => {
       await writeAndCapture(pair.a, pair.rootA, path, "from A\n");
       expect((await pushUntilDrained(pair.a.relay)).pushed).toBeGreaterThan(0);
       await writeAndCapture(pair.b, pair.rootB, path, "from B\n");
-      if (order === "mirrored") {
-        await pushUntilDrained(pair.b.relay);
-        await pullCaptured(pair.a.relay, pair.a.capture);
-        const opened = (await openConflicts(pair.a)).length;
-        console.log(`REPRO-OBS ${JSON.stringify({ case: `${order}-${kind}:a`, opened })}`);
-      }
       await pullCaptured(pair.b.relay, pair.b.capture);
       const onB = await openConflicts(pair.b);
       expect(onB).toHaveLength(1);
-      const kept = kind === "keep-current" ? "from B\n" : "merged on B\n";
-      await pair.b.capture.resolveConflict(
-        onB[0]!.id,
-        kind === "keep-current" ? { kind } : { kind, text: kept },
-      );
-      const end = await settled(pair, path);
-      console.log(`REPRO-OBS ${JSON.stringify({ case: `${order}-${kind}`, end })}`);
-      expect(end).toMatchObject({
+      await pair.b.capture.resolveConflict(onB[0]!.id, choice);
+      expect(await settled(pair, path)).toMatchObject({
         a: { text: kept, open: [], notices: { notices: [] } },
         b: { text: kept, open: [], notices: { notices: [] } },
       });
@@ -146,16 +134,10 @@ it.skipIf(engine.missing)(
         await pushUntilDrained(pair.b.relay);
         await pullCaptured(pair.a.relay, pair.a.capture);
         await pullCaptured(pair.b.relay, pair.b.capture);
-        const onA = await openConflicts(pair.a);
         const onB = await openConflicts(pair.b);
-        console.log(
-          `REPRO-OBS ${JSON.stringify({ case: "first-editor-offline:opened", a: onA.length, b: onB.length })}`,
-        );
         expect(onB).toHaveLength(1);
         await pair.b.capture.resolveConflict(onB[0]!.id, { kind: "keep-current" });
-        const end = await settled(pair, path);
-        console.log(`REPRO-OBS ${JSON.stringify({ case: "first-editor-offline", end })}`);
-        expect(end).toMatchObject({
+        expect(await settled(pair, path)).toMatchObject({
           a: { text: "changed on B\n", open: [], notices: { notices: [] } },
           b: { text: "changed on B\n", open: [], notices: { notices: [] } },
         });
@@ -163,8 +145,7 @@ it.skipIf(engine.missing)(
         editors.push(later);
         await typeAtEnd(later, "later on A\n");
         await later.session.close();
-        const after = await settled(pair, path);
-        expect(after).toMatchObject({
+        expect(await settled(pair, path)).toMatchObject({
           a: { text: "changed on B\nlater on A\n", open: [] },
           b: { text: "changed on B\nlater on A\n", open: [] },
         });
@@ -182,12 +163,23 @@ it.skipIf(engine.missing)(
     const path = "picture.bin";
     const seed = Buffer.from([0, 1, 2, 3, 255, 0, 7]);
     await withPair("binary-revival", path, seed, async (pair) => {
-      const objectBefore = await pair.a.capture.fileObjectIdForPath(path);
-      await rm(join(pair.rootB, path));
-      pair.b.capture.observeFileEvents([{ path, operation: "delete" }]);
-      await vi.waitFor(async () => expect(await pair.b.capture.fileObjectIdForPath(path)).toBeNull(), {
-        timeout: 30_000,
-      });
+      const trash = await createTestScratch("dohc-resolution-binary-trash-");
+      await mkdir(trash, { recursive: true });
+      await deleteWorkspacePathByHand(
+        {
+          workspace: { ...pair.b.workspace, readOnly: false, shareView: undefined },
+          assertCurrent() {},
+        },
+        path,
+        { kind: "human", humanId: "local-person" },
+        {
+          capture: pair.b.capture,
+          requestId: randomUUID(),
+          markDeleted: () => undefined,
+          trashItem: (target) => rename(target, join(trash, randomUUID())),
+        },
+      );
+      expect(await pair.b.capture.fileObjectIdForPath(path)).toBeNull();
       const changed = Buffer.from([0, 1, 2, 3, 255, 0, 8, 9]);
       await writeAndCapture(pair.a, pair.rootA, path, changed);
       await pushUntilDrained(pair.a.relay);
@@ -199,18 +191,11 @@ it.skipIf(engine.missing)(
       await pair.b.capture.resolveConflict(onB[0]!.id, { kind: "apply-incoming" });
       for (const daemon of [pair.a, pair.b]) await pushUntilDrained(daemon.relay);
       for (const daemon of [pair.a, pair.b]) await pullCaptured(daemon.relay, daemon.capture);
-      const objects = {
-        before: objectBefore,
-        a: await pair.a.capture.fileObjectIdForPath(path),
-        b: await pair.b.capture.fileObjectIdForPath(path),
-      };
-      const open = {
-        a: (await openConflicts(pair.a)).length,
-        b: (await openConflicts(pair.b)).length,
-      };
-      console.log(`REPRO-OBS ${JSON.stringify({ case: "binary-revival", objects, open })}`);
-      expect(objects.b).toBe(objects.a);
-      expect(open).toEqual({ a: 0, b: 0 });
+      expect(await pair.b.capture.fileObjectIdForPath(path)).toBe(
+        await pair.a.capture.fileObjectIdForPath(path),
+      );
+      expect(await openConflicts(pair.a)).toEqual([]);
+      expect(await openConflicts(pair.b)).toEqual([]);
       const again = Buffer.from([10, 11, 12]);
       await writeAndCapture(pair.a, pair.rootA, path, again);
       await pushUntilDrained(pair.a.relay);

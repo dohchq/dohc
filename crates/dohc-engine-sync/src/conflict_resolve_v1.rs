@@ -2031,7 +2031,7 @@ fn classify_imported_head(
                 || same_object_and_projected_content(&current_live, &payload.result)
             {
                 ImportedHeadDisposition::AlreadyResult
-            } else if kept_text_write_reviews_incoming(tx, payload, &current_live)?
+            } else if receiver_holds_reviewed_incoming(tx, payload, &current_live)?
                 || (payload
                     .lineage_transition
                     .as_ref()
@@ -2091,13 +2091,12 @@ fn reviewed_note_moved_here(
     .map_err(SyncError::corrupt)
 }
 
-fn kept_text_write_reviews_incoming(
+fn receiver_holds_reviewed_incoming(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
     live: &HeadV1,
 ) -> Result<bool, SyncError> {
-    if payload.resolution != ResolutionV1::KeptCurrent
-        || payload.lineage_transition.is_some()
+    if payload.lineage_transition.is_some()
         || payload.effects.len() != 1
         || payload.effects[0].kind != EffectKindV1::Write
         || !payload
@@ -2115,27 +2114,19 @@ fn kept_text_write_reviews_incoming(
     {
         return Ok(false);
     }
-    let Some(row) = dohc_engine_domain::load_text_conflict_in_tx(
-        tx,
-        &payload.workspace_id,
-        &payload.conflict_id,
-    )
-    .map_err(map_local_domain_error)?
-    else {
-        return Ok(false);
-    };
-    if row.status != ConflictStatus::Open || row.target_version_id != payload.target_version_id {
-        return Ok(false);
-    }
-    let receiver_path = &payload.paths[payload.incoming.path_ref()];
-    let resolver_path = &payload.paths[payload.current.path_ref()];
-    Ok(row.path == *receiver_path
-        && row.current.path == *receiver_path
-        && row.incoming.path == *resolver_path
-        && head_from_conflict_side(&row.current, payload.incoming.path_ref(), None)?
-            == payload.incoming
-        && head_from_conflict_side(&row.incoming, payload.current.path_ref(), None)?
-            == payload.current)
+    let other_review_open: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM conflicts WHERE workspace_id=?1                AND target_version_id=?2 AND path=?3 AND status='open' AND conflict_id<>?4)",
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                payload.paths[payload.incoming.path_ref()],
+                payload.conflict_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!other_review_open)
 }
 
 fn imported_live_head(
@@ -2905,37 +2896,90 @@ fn close_imported_conflict(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
 ) -> Result<(), SyncError> {
-    let choice = match payload.chosen_from {
-        ResolveChoiceV1::Current => "current",
-        ResolveChoiceV1::Incoming => "incoming",
-        ResolveChoiceV1::Merged => "merged",
-    };
-    let resolution = match payload.resolution {
-        ResolutionV1::KeptCurrent => "kept-current",
-        ResolutionV1::AppliedIncoming => "applied-incoming",
-        ResolutionV1::AppliedMerged => "applied-merged",
-    };
-    let changed = tx
-        .execute(
-            "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
-         WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-            params![
-                payload.workspace_id,
-                payload.conflict_id,
-                choice,
-                resolution,
-                payload.effect_context.recorded_at_ms
-            ],
-        )
-        .map_err(SyncError::persist)?;
-    if changed > 0 {
-        crate::refusal_notices::clear_conflict_in_tx(
-            tx,
-            &payload.workspace_id,
-            &payload.conflict_id,
-        )?;
+    let mut closing = vec![(payload.conflict_id.clone(), false)];
+    closing.extend(local_reviews_of_same_heads(tx, payload)?);
+    for (conflict_id, mirrored) in closing {
+        let (choice, resolution) = match (payload.resolution, mirrored) {
+            (ResolutionV1::KeptCurrent, false) | (ResolutionV1::AppliedIncoming, true) => {
+                ("current", "kept-current")
+            }
+            (ResolutionV1::AppliedIncoming, false) | (ResolutionV1::KeptCurrent, true) => {
+                ("incoming", "applied-incoming")
+            }
+            (ResolutionV1::AppliedMerged, _) => ("merged", "applied-merged"),
+        };
+        let changed = tx
+            .execute(
+                "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5              WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
+                params![
+                    payload.workspace_id,
+                    conflict_id,
+                    choice,
+                    resolution,
+                    payload.effect_context.recorded_at_ms
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        if changed > 0 {
+            crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
+        }
     }
     Ok(())
+}
+
+/// This machine's own open reviews of the two heads the decision settled. Each
+/// machine names an editor change with its own moment, so they match by
+/// object and content, in either order.
+fn local_reviews_of_same_heads(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+) -> Result<Vec<(String, bool)>, SyncError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2              AND status='open' AND conflict_id<>?3",
+        )
+        .map_err(SyncError::corrupt)?;
+    let ids = statement
+        .query_map(
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                payload.conflict_id
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    let side = |state: &ConflictFileState| -> Result<Option<HeadV1>, SyncError> {
+        payload
+            .paths
+            .iter()
+            .position(|path| *path == state.path)
+            .map(|path_ref| head_from_conflict_side(state, path_ref, None))
+            .transpose()
+    };
+    let mut reviews = Vec::new();
+    for conflict_id in ids {
+        let Some(row) =
+            dohc_engine_domain::load_text_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)
+                .map_err(map_local_domain_error)?
+        else {
+            continue;
+        };
+        let (Some(current), Some(incoming)) = (side(&row.current)?, side(&row.incoming)?) else {
+            continue;
+        };
+        let same = |left: &HeadV1, right: &HeadV1| {
+            left.path_ref() == right.path_ref() && same_object_and_projected_content(left, right)
+        };
+        if same(&current, &payload.current) && same(&incoming, &payload.incoming) {
+            reviews.push((conflict_id, false));
+        } else if same(&current, &payload.incoming) && same(&incoming, &payload.current) {
+            reviews.push((conflict_id, true));
+        }
+    }
+    Ok(reviews)
 }
 
 fn conflict_state_from_head(
