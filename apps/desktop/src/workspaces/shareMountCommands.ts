@@ -276,9 +276,9 @@ export function createShareMountCommands<WorkspaceSummary>(
         const existing = dependencies.readMounts(workspace.workspaceId);
         const [added] = shareMountRecordsForId(existing, parsed.shareId);
         if (added !== undefined) {
+          const listedAlone = usableShareMountRecord(existing, added);
           const row =
-            usableShareMountRecord(existing, added) &&
-            readableShareLevel(added.grantedSelector) !== null
+            listedAlone && readableShareLevel(added.grantedSelector) !== null
               ? shareMountResultRow({
                   shareId: added.shareId,
                   label: added.label,
@@ -287,11 +287,9 @@ export function createShareMountCommands<WorkspaceSummary>(
                 })
               : null;
           if (row === null) {
-            const listedInSharing =
-              typeof added.label === "string" && added.label.length > 0 && added.label.length <= 64;
             throw new Error(
               "This share is already in this workspace, but dohc could not read its record." +
-                (listedInSharing ? " Remove it from Sharing, then add it again." : ""),
+                (listedAlone ? " Remove it from Sharing, then add it again." : ""),
             );
           }
           return {

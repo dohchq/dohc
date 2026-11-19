@@ -590,7 +590,7 @@ describe("share mount commands", () => {
     ).rejects.toThrow("could not read its record. Remove it from Sharing");
 
     await h.dependencies.updateMounts(WORKSPACE.workspaceId, (mounts) =>
-      mounts.map((mount) => ({ ...mount, label: "" })),
+      mounts.map((mount) => ({ ...mount, label: "team/archive" })),
     );
     const unlisted = await commands
       .mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })
