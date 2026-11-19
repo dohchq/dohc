@@ -3053,6 +3053,10 @@ const createJoinedWorkspace = createJoinedWorkspaceRunner({
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
   },
+  lostDrawings: (workspaceId) =>
+    [...(typingRecoveryFailures.get(workspaceId)?.values() ?? [])].flatMap((failure) =>
+      failure.reason === "drawing-unavailable" && failure.path ? [failure.path] : [],
+    ),
   logError: (message, error) => console.error(message, error),
 });
 
