@@ -2307,6 +2307,73 @@ describe("a personal agent in a workspace its person joined", () => {
     await ok(await postIn({ filePath: "plans/a.md" }));
   });
 
+  it("withholds a file link its person can't read, in a Group, in Comments, and in a wait answered after a rule hid it", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    communityGroups(f);
+    await communityWrite(f, "plans/a.md", "open plan");
+    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    await communityWrite(f, "hidden/b.md", "hidden plan");
+    await communityWrite(f, "later/c.md", "for now");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+    fromComputer(f, COMMUNITY, [
+      fileThread("thread-open", { linkedObjectId: "object-plans/a.md" }),
+      ownerSays("in-team", "thread-team", "@Helper see @[hidden/b.md#Layoffs] and @[plans/a.md]", {
+        authorDisplayName: "Ada @[hidden/b.md]",
+      }),
+      ownerSays("on-open", "thread-open", "@Helper compare @[hidden/b.md]"),
+    ]);
+    const team = {
+      messageId: "in-team",
+      authorDisplayName: "Ada (a file not shared here)",
+      body: "@Helper see (a file not shared here) and @[plans/a.md]",
+    };
+    const comment = { messageId: "on-open", body: "@Helper compare (a file not shared here)" };
+    const read = async (action: string, fields: Record<string, unknown>) =>
+      ((await ok(await tool(f, agent, action, { workspaceId: COMMUNITY, ...fields }))) as ChatPage)
+        .messages;
+
+    expect(await read("chat", { channelWireId: "wire-team" })).toEqual([
+      expect.objectContaining(team),
+    ]);
+    expect(await read("discussion", { filePath: "plans/a.md" })).toEqual([
+      expect.objectContaining(comment),
+    ]);
+    expect(await read("discussion", { threadId: "thread-open" })).toEqual([
+      expect.objectContaining(comment),
+    ]);
+    const answer = await waitOnce(f, agent);
+    expect(answer.messages).toEqual(
+      expect.arrayContaining([expect.objectContaining(team), expect.objectContaining(comment)]),
+    );
+    expect(JSON.stringify(answer)).not.toContain("hidden/");
+
+    // A folder hidden after the wait's scan read the message is withheld in its answer.
+    fromComputer(f, COMMUNITY, [
+      ownerSays("to-later", "thread-team", "@Helper read @[later/c.md]"),
+    ]);
+    const fresh = f.h.linkAuthority.freshPersonal.bind(f.h.linkAuthority);
+    let entered!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(f.h.linkAuthority, "freshPersonal").mockImplementationOnce(async (authority) => {
+      entered();
+      await released;
+      return await fresh(authority);
+    });
+    const answered = tool(f, agent, "wait", { cursor: answer.cursor, timeoutMs: 0 });
+    await holding;
+    await communityWrite(f, "later/access.yaml", HIDING_RULE);
+    release();
+    expect(((await ok(await answered)) as WaitAnswer).messages).toEqual([
+      expect.objectContaining({
+        messageId: "to-later",
+        body: "@Helper read (a file not shared here)",
+      }),
+    ]);
+  });
+
   it("answers not-found for General, a direct message and its own chat id in a joined workspace, and reads another agent's chat in an owned one without posting there", async () => {
     const f = await fixture();
     joinCommunity(f);

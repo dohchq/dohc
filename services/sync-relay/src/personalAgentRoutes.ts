@@ -179,6 +179,21 @@ function chatMessage(
   return message ? { message, payload: payload as Record<string, unknown> } : null;
 }
 
+// The message as its reach reads it. In a joined workspace a file link the
+// person's files don't cover reads "(a file not shared here)", as in their
+// browser. An owned workspace's agent reads every link.
+function served<Message extends LinkChatMessage>(reach: PersonalReach, message: Message): Message {
+  if (reach.owned) return message;
+  const files = workspaceFileReach(reach.selector);
+  const read = (text: string | null) => (text === null ? null : withheldLinkText(text, files));
+  return {
+    ...message,
+    authorDisplayName: withheldLinkText(message.authorDisplayName, files),
+    authorOwnerDisplayName: read(message.authorOwnerDisplayName),
+    body: read(message.body),
+  };
+}
+
 // The message with its bytes in the answer, when they fit in `room`. The
 // first message of an answer always goes in, without its body if need be.
 function fitted<Message extends LinkChatMessage>(
@@ -392,6 +407,7 @@ export function createPersonalAgentToolRoutes(input: {
   // The messages of a page whose thread `kept` keeps, as many as fit in an
   // answer that also holds `frame`. One check per thread on the page.
   function fittedPage(
+    reach: PersonalReach,
     page: ReturnType<SyncRelayStorage["fetchChatMessages"]>,
     frame: Record<string, string>,
     kept: (threadId: string) => boolean,
@@ -415,7 +431,11 @@ export function createPersonalAgentToolRoutes(input: {
       const { threadId } = read.message;
       if (!keeps.has(threadId)) keeps.set(threadId, kept(threadId));
       if (!keeps.get(threadId)) continue;
-      const next = fitted(linkChatMessage(read.message), room, messages.length === 0);
+      const next = fitted(
+        served(reach, linkChatMessage(read.message)),
+        room,
+        messages.length === 0,
+      );
       if (!next) {
         olderCursor = messages[messages.length - 1]!.relaySeq;
         break;
@@ -440,6 +460,7 @@ export function createPersonalAgentToolRoutes(input: {
     // A thread is the channel's only when its first create names the channel
     // and no file, as a share link reads it.
     const { messages, olderCursor } = fittedPage(
+      reach,
       page,
       { workspaceId, channelWireId },
       (threadId) => storage.findThreadCreateChannelWireId(workspaceId, threadId) === channelWireId,
@@ -474,6 +495,7 @@ export function createPersonalAgentToolRoutes(input: {
     });
     // A thread is the file's only when its first create binds this file and no other.
     const { messages, olderCursor } = fittedPage(
+      reach,
       page,
       { workspaceId, filePath },
       (threadId) => commentFileOf(storage, workspaceId, threadId)?.objectId === objectId,
@@ -493,6 +515,7 @@ export function createPersonalAgentToolRoutes(input: {
     const { filePath } = reachedFile(reach, commentFileOf(storage, workspaceId, threadId));
     const page = storage.fetchThreadMessages({ workspaceId, threadId, ...request });
     const { messages, olderCursor } = fittedPage(
+      reach,
       page,
       { workspaceId, threadId, filePath },
       () => true,
@@ -646,7 +669,10 @@ export function createPersonalAgentToolRoutes(input: {
       const place = (entry: PersonalScope["reach"][number]) =>
         Math.max(seqs.get(entry.workspaceId) ?? entry.startSeq, entry.startSeq);
 
-      const scan = (within: PersonalScope): { found: PersonalWaitMessage[]; behind: boolean } => {
+      // The messages found, and the room left in the answer after them.
+      const scan = (
+        within: PersonalScope,
+      ): { found: PersonalWaitMessage[]; behind: boolean; room: number } => {
         const reach = [...within.reach].sort((a, b) =>
           a.workspaceId < b.workspaceId ? -1 : a.workspaceId > b.workspaceId ? 1 : 0,
         );
@@ -654,7 +680,7 @@ export function createPersonalAgentToolRoutes(input: {
         seqs.clear();
         for (const [id, seq] of placed) seqs.set(id, seq);
         const found: PersonalWaitMessage[] = [];
-        if (reach.length === 0) return { found, behind: false };
+        if (reach.length === 0) return { found, behind: false, room: 0 };
         let start = turn === null ? 0 : reach.findIndex((entry) => entry.workspaceId >= turn!);
         if (start < 0) start = 0;
         turn = reach[(start + 1) % reach.length]!.workspaceId;
@@ -723,6 +749,7 @@ export function createPersonalAgentToolRoutes(input: {
         return {
           found,
           behind: reach.some((entry) => seqs.get(entry.workspaceId)! < entry.headSeq),
+          room,
         };
       };
 
@@ -802,6 +829,8 @@ export function createPersonalAgentToolRoutes(input: {
       scope = scopeOf(current);
       const inReach = new Map(scope.reach.map((entry) => [entry.workspaceId, entry]));
       for (const id of [...seqs.keys()]) if (!inReach.has(id)) seqs.delete(id);
+      const size = (message: PersonalWaitMessage) => Buffer.byteLength(JSON.stringify(message));
+      let room = result.room;
       const answer: {
         ok: true;
         messages: PersonalWaitMessage[];
@@ -810,15 +839,22 @@ export function createPersonalAgentToolRoutes(input: {
       } = {
         ok: true,
         // A file can move to a secret path, and a rule can hide a Group or a
-        // folder, while the wait holds, so each message is placed again. A
-        // message deleted meanwhile leaves.
-        messages: result.found.filter((message) => {
+        // folder, while the wait holds, so each message is placed and read
+        // again. A message deleted meanwhile leaves. A link hidden since the
+        // scan reads longer; a message that no longer fits the answer's room
+        // goes without its body.
+        messages: result.found.flatMap((message) => {
           const entry = inReach.get(message.workspaceId);
-          return (
-            entry !== undefined &&
-            reaches(entry, agentId, message) &&
-            !storage.messageDeleted(message.workspaceId, message.threadId, message.messageId)
-          );
+          if (entry === undefined || !reaches(entry, agentId, message)) return [];
+          if (storage.messageDeleted(message.workspaceId, message.threadId, message.messageId))
+            return [];
+          const read = served(entry, message);
+          const grown = size(read) - size(message);
+          if (grown <= room) {
+            room -= grown;
+            return [read];
+          }
+          return [{ ...read, body: null, bodyTooLarge: true }];
         }),
         cursor: { v: 1, agentId, seqs: Object.fromEntries(seqs), turn },
         more: result.behind,
@@ -888,7 +924,12 @@ export function createPersonalAgentToolRoutes(input: {
     const filePath =
       channelWireId === null ? commentFileOf(storage, workspaceId, threadId)?.filePath : null;
     if (filePath === undefined) return null;
-    return { ...linkChatMessage(read.message), workspaceId, channelWireId, filePath };
+    return served(entry, {
+      ...linkChatMessage(read.message),
+      workspaceId,
+      channelWireId,
+      filePath,
+    });
   }
 
   return async function respondToPersonalAgentTools(
