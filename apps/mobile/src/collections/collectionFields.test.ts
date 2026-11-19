@@ -1,7 +1,15 @@
 import { collectionWords } from "@dohc/interface-words/collections";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { DatasetColumnFieldType } from "@dohc/security-contract/dataset";
-import { draftOf, editorKind, rowText, shownValue, valueOf } from "./collectionFields";
+import {
+  dateOf,
+  dayOf,
+  draftOf,
+  editorKind,
+  rowText,
+  shownValue,
+  valueOf,
+} from "./collectionFields";
 
 const files = { "file-1234567890abcdef": "receipt.pdf" };
 const shown = (type: DatasetColumnFieldType, value: Parameters<typeof shownValue>[1]) =>
@@ -83,11 +91,18 @@ describe("a field's editor", () => {
   const field = (type: DatasetColumnFieldType, options: string[] = []) => ({ type, options });
   const choices = ["Unpaid", "Paid", "Waived"];
 
-  it("edits the types the phone has an editor for, and not a date, a relation or an attachment", () => {
-    for (const type of ["text", "number", "url", "checkbox", "select", "multi-select"] as const)
+  it("edits the types the phone has an editor for, and not a relation or an attachment", () => {
+    for (const type of [
+      "text",
+      "number",
+      "url",
+      "checkbox",
+      "select",
+      "multi-select",
+      "date",
+    ] as const)
       expect(editorKind({ type })).toBe(type);
-    for (const type of ["date", "relation", "attachment"] as const)
-      expect(editorKind({ type })).toBeNull();
+    for (const type of ["relation", "attachment"] as const) expect(editorKind({ type })).toBeNull();
   });
 
   it("starts from the record's value", () => {
@@ -140,5 +155,49 @@ describe("a field's editor", () => {
       value: ["Unpaid", "Waived"],
     });
     expect(valueOf(field("multi-select", choices), [])).toEqual({ value: [] });
+  });
+
+  it("starts a date from the record's day, or today", () => {
+    expect(draftOf({ type: "date" }, "2026-11-14")).toBe("2026-11-14");
+    for (const value of [null, undefined, "", "2026-02-30", "2026-11-18T09:30:00Z"])
+      expect(draftOf({ type: "date" }, value), String(value)).toBe(dayOf(new Date()));
+  });
+
+  it("saves a picked day, and Clear as null", () => {
+    expect(valueOf(field("date"), "2026-11-14")).toEqual({ value: "2026-11-14" });
+    expect(valueOf(field("date"), "")).toEqual({ value: null });
+  });
+});
+
+describe("a date field's day", () => {
+  const zone = process.env.TZ;
+  afterEach(() => {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  });
+
+  // UTC+14 and UTC-11: a local midnight read or written through UTC lands on the day before or after.
+  for (const tz of ["Pacific/Kiritimati", "Pacific/Pago_Pago", "UTC"])
+    it(`keeps the calendar day both ways in ${tz}`, () => {
+      process.env.TZ = tz;
+      const picked = dateOf("2026-11-14");
+      expect(picked?.getFullYear()).toBe(2026);
+      expect(picked?.getMonth()).toBe(10);
+      expect(picked?.getDate()).toBe(14);
+      expect(dayOf(picked!)).toBe("2026-11-14");
+      // A pick late on the 14th, local time, is still the 14th.
+      expect(dayOf(new Date(2026, 10, 14, 23, 59))).toBe("2026-11-14");
+      expect(dayOf(new Date(2026, 10, 14, 0, 0))).toBe("2026-11-14");
+    });
+
+  it("proves the zone took: Kiritimati's local midnight is the day before in UTC", () => {
+    process.env.TZ = "Pacific/Kiritimati";
+    expect(dateOf("2026-11-14")?.toISOString().slice(0, 10)).toBe("2026-11-13");
+  });
+
+  it("reads only a real day", () => {
+    for (const day of ["2026-02-30", "2026-13-01", "26-11-14", "2026-11-14T00:00", ""])
+      expect(dateOf(day), day).toBeNull();
+    expect(dayOf(dateOf("0099-01-02")!)).toBe("0099-01-02");
   });
 });

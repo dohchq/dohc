@@ -87,11 +87,18 @@ export function rowText(shown: ShownValue, fieldName: string): string | null {
 }
 
 /**
- * How the phone edits a field's type: typed text, a number or a web address with their keyboards, a switch, or a list
- * of choices. Null for a type it doesn't edit yet: a date needs a native picker the app doesn't have, and a relation
- * or an attachment a picker of records or files.
+ * How the phone edits a field's type: typed text, a number or a web address with their keyboards, a switch, a list
+ * of choices, or the system's date picker. Null for a type it doesn't edit yet: a relation or an attachment needs a
+ * picker of records or files.
  */
-export type EditorKind = "text" | "number" | "url" | "checkbox" | "select" | "multi-select";
+export type EditorKind =
+  | "text"
+  | "number"
+  | "url"
+  | "checkbox"
+  | "select"
+  | "multi-select"
+  | "date";
 
 export function editorKind(field: Pick<CollectionField, "type">): EditorKind | null {
   switch (field.type) {
@@ -101,19 +108,42 @@ export function editorKind(field: Pick<CollectionField, "type">): EditorKind | n
     case "checkbox":
     case "select":
     case "multi-select":
+    case "date":
       return field.type;
     default:
       return null;
   }
 }
 
+/**
+ * A date field's day, `YYYY-MM-DD` as the Collection takes it, at local midnight; null for anything else. Read in local
+ * calendar terms, never through UTC, so a picker shows the stored day in every time zone.
+ */
+export function dateOf(day: string): Date | null {
+  const match = DAY.exec(day);
+  if (!match) return null;
+  const date = new Date(2000, 0, 1);
+  // setFullYear, unlike the constructor, keeps years before 100.
+  date.setFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return dayOf(date) === day ? date : null;
+}
+
+/** The local calendar day a picked date falls on, as a date field stores it. */
+export function dayOf(date: Date): string {
+  const pad = (part: number, width = 2) => String(part).padStart(width, "0");
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 export type Draft = string | boolean | readonly string[];
 
+/** A date starts from today when the record has no day, so Save keeps the day the picker shows. */
 export function draftOf(
   field: Pick<CollectionField, "type">,
   value: RecordValue | undefined,
 ): Draft {
   switch (field.type) {
+    case "date":
+      return typeof value === "string" && dateOf(value) ? value : dayOf(new Date());
     case "checkbox":
       return value === true;
     case "select":
