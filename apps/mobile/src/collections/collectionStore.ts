@@ -3,10 +3,15 @@ import type { SignIn } from "../server/account";
 import { requestGenerations, shownProblem } from "../server/client";
 import {
   collectionOperations,
+  type ChangeAnswer,
   type CollectionDescription,
+  type CollectionField,
   type CollectionRecord,
+  type FieldChange,
   type PhoneCollection,
   type RecordCursor,
+  type RecordId,
+  type RecordValue,
 } from "../server/phoneCollections";
 import type { ReadProblem } from "../server/workspaceData";
 
@@ -17,6 +22,44 @@ import type { ReadProblem } from "../server/workspaceData";
 // account clears it, dropping what it read and every read on its way, before other work at Sign out, a sign-in change
 // (a 401 included), a workspace switch and Show on phone off (appTeardown). A Sign out that fails keeps the sign-in, so
 // the store reads again when asked.
+
+/** A record's last change and where it stands. An Undo isn't `reversible`, so nothing undoes it. */
+export interface RecordChange {
+  readonly change: FieldChange;
+  readonly reversible: boolean;
+  readonly state:
+    | { readonly kind: "saving" }
+    | ChangeAnswer
+    | { readonly kind: "failed"; readonly problem: ReadProblem };
+}
+
+/** A field of the open record as its editor opened: its value then, and the version and rules a change names. */
+export interface FieldEdit {
+  readonly field: CollectionField;
+  readonly from: Omit<FieldChange, "idempotencyKey">;
+}
+
+export const recordKey = (datasetId: string, tableId: string, id: RecordId): string =>
+  JSON.stringify([datasetId, tableId, id]);
+
+export const canUndo = (last: RecordChange | undefined): boolean =>
+  last?.state.kind === "saved" && last.reversible && "priorValue" in last.state;
+
+// An older read never undoes what the phone holds of a later version, such as a confirmed change's.
+const newest = (read: CollectionRecord, held: CollectionRecord | undefined): CollectionRecord =>
+  held && (held.version ?? 0) > (read.version ?? 0) ? held : read;
+
+/** Undo's change: the prior value, at the saved version, under the rules the edit ran under, with a new key. */
+export function undoChange(last: RecordChange): FieldChange | null {
+  const { state } = last;
+  if (!canUndo(last) || state.kind !== "saved") return null;
+  return {
+    ...last.change,
+    value: state.priorValue ?? null,
+    expectedVersion: state.version,
+    idempotencyKey: crypto.randomUUID(),
+  };
+}
 
 export interface CollectionsState {
   readonly collections: readonly PhoneCollection[] | null;
@@ -67,6 +110,21 @@ export interface WorkspaceCollections {
   more(): Promise<void>;
   /** Keeps a record of the table on screen for its own screen. */
   openRecord(record: CollectionRecord): void;
+  /** The record's screen closed, so a Reload on its way no longer lands. */
+  closeRecord(): void;
+  /** Each record's last change, by `recordKey`. */
+  changes(): ReadonlyMap<string, RecordChange>;
+  /** A field of the open record as its editor starts, or null when the phone can't change it. */
+  edit(fieldId: string): FieldEdit | null;
+  /** Sends `value` as `edit` opened it, unless the record's last change is still saving. */
+  change(edit: FieldEdit, value: RecordValue): void;
+  /** Sends a failed change again, as it was. */
+  retry(key: string): void;
+  /** Drops a change that isn't saving. */
+  discard(key: string): void;
+  undo(key: string): void;
+  /** Reads the Collection's rules and the open record again, and drops its change. False when that failed. */
+  reloadRecord(): Promise<boolean>;
   stop(): void;
 }
 
@@ -82,9 +140,11 @@ export function createWorkspaceCollections(
   let stopped = false;
   const listReads = requestGenerations();
   const viewReads = requestGenerations();
+  const recordReads = requestGenerations();
   const listeners = new Set<() => void>();
   let list = NO_LIST;
   let view: CollectionView | null = null;
+  let changes: ReadonlyMap<string, RecordChange> = new Map();
   const isLive = () => !stopped && signIn.isCurrent();
   const emit = () => {
     for (const listener of listeners) listener();
@@ -100,11 +160,58 @@ export function createWorkspaceCollections(
     operations = collectionOperations(signIn.client, workspaceId, controller.signal);
     listReads.next();
     viewReads.next();
+    recordReads.next();
     list = NO_LIST;
     view = null;
+    changes = new Map();
     emit();
   };
   const remove = ends.add({ signIn, workspaceId }, { end: clear });
+
+  const setChange = (key: string, next: RecordChange | null) => {
+    const copy = new Map(changes);
+    if (next) copy.set(key, next);
+    else copy.delete(key);
+    changes = copy;
+    emit();
+  };
+  // The record as a saved change left it, wherever the Collection on screen shows it.
+  const saved = (
+    { datasetId, tableId, recordId, fieldId, value }: FieldChange,
+    version: number,
+  ) => {
+    const now = view;
+    if (now?.datasetId !== datasetId) return;
+    // A replayed receipt can be older than what a later read showed; that read wins.
+    const patch = (record: CollectionRecord) =>
+      record.id === recordId && (record.version ?? 0) < version
+        ? { ...record, version, values: { ...record.values, [fieldId]: value } }
+        : record;
+    const { opened } = now;
+    update(datasetId, {
+      rows: now.tableId === tableId ? now.rows.map(patch) : now.rows,
+      opened: opened?.tableId === tableId ? { ...opened, record: patch(opened.record) } : opened,
+    });
+  };
+  // An answer lands only while its change is still the record's, so one Discard dropped, or a store cleared, never
+  // comes back.
+  async function send(key: string, entry: Omit<RecordChange, "state">) {
+    if (!isLive()) return;
+    const sent: RecordChange = { ...entry, state: { kind: "saving" } };
+    setChange(key, sent);
+    const lands = () => isLive() && changes.get(key) === sent;
+    try {
+      const answer = await operations.change(sent.change);
+      if (!lands()) return;
+      setChange(key, { ...sent, state: answer });
+      if (answer.kind === "saved") saved(sent.change, answer.version);
+    } catch (error) {
+      const problem = shownProblem(error);
+      // A cancelled change belongs to a store cleared already, and a 401 clears it.
+      if (!lands() || problem === null) return;
+      setChange(key, { ...sent, state: { kind: "failed", problem } });
+    }
+  }
 
   const refresh = async () => {
     if (!isLive()) return;
@@ -145,21 +252,29 @@ export function createWorkspaceCollections(
       if (!lands() || !view) return;
       const ready = page?.status === "ready" ? page : null;
       const { opened } = view;
+      const held = new Map(
+        view.tableId === table?.tableId
+          ? view.rows.map((row) => [JSON.stringify(row.id), row])
+          : [],
+      );
+      const rows = (ready?.rows ?? []).map((row) => newest(row, held.get(JSON.stringify(row.id))));
       const fresh =
         opened?.tableId === table?.tableId
-          ? ready?.rows.find((row) => row.id === opened?.record.id)
+          ? rows.find((row) => row.id === opened?.record.id)
           : undefined;
       update(datasetId, {
         description,
         tableId: table?.tableId ?? null,
-        rows: !ready ? [] : more ? [...view.rows, ...ready.rows] : ready.rows,
+        rows: more ? [...view.rows, ...rows] : rows,
         files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
         next: ready?.next ?? null,
         refused: page?.status === "refused",
         reading: null,
         problem: null,
         opened:
-          opened && fresh && ready ? { ...opened, record: fresh, files: ready.files } : opened,
+          opened && fresh && ready && newest(fresh, opened.record) === fresh
+            ? { ...opened, record: fresh, files: ready.files }
+            : opened,
       });
     } catch (error) {
       const cause = shownProblem(error);
@@ -215,8 +330,111 @@ export function createWorkspaceCollections(
         ? read("more", false)
         : Promise.resolve(),
     openRecord(record) {
+      recordReads.next();
       if (view?.tableId)
         update(view.datasetId, { opened: { tableId: view.tableId, record, files: view.files } });
+    },
+    closeRecord: () => void recordReads.next(),
+    changes: () => changes,
+    edit(fieldId) {
+      const opened = view?.opened;
+      const description = view?.description;
+      const field = description?.tables
+        .find((table) => table.tableId === opened?.tableId)
+        ?.fields.find((field) => field.fieldId === fieldId);
+      if (
+        !view ||
+        !opened ||
+        !description ||
+        !field?.editable ||
+        opened.record.version === null ||
+        changes.get(recordKey(view.datasetId, opened.tableId, opened.record.id))?.state.kind ===
+          "saving"
+      )
+        return null;
+      return {
+        field,
+        from: {
+          datasetId: view.datasetId,
+          tableId: opened.tableId,
+          recordId: opened.record.id,
+          fieldId,
+          value: opened.record.values[fieldId] ?? null,
+          expectedVersion: opened.record.version,
+          revision: description.revision,
+          revisionSha256: description.revisionSha256,
+        },
+      };
+    },
+    change({ field, from }, value) {
+      const key = recordKey(from.datasetId, from.tableId, from.recordId);
+      if (changes.get(key)?.state.kind === "saving") return;
+      void send(key, {
+        change: { ...from, value, idempotencyKey: crypto.randomUUID() },
+        reversible: field.reversible,
+      });
+    },
+    retry(key) {
+      const last = changes.get(key);
+      if (last?.state.kind === "failed") void send(key, last);
+    },
+    discard(key) {
+      if (changes.has(key) && changes.get(key)?.state.kind !== "saving") setChange(key, null);
+    },
+    undo(key) {
+      const last = changes.get(key);
+      const change = last && undoChange(last);
+      if (change) void send(key, { change, reversible: false });
+    },
+    async reloadRecord() {
+      const now = view;
+      const opened = now?.opened;
+      if (!isLive() || !now || !opened) return false;
+      const { datasetId } = now;
+      const { tableId } = opened;
+      const id = opened.record.id;
+      const key = recordKey(datasetId, tableId, id);
+      // Reload clears the change it was asked for, never one made while it read.
+      const asked = changes.get(key);
+      const request = recordReads.next();
+      const lands = () =>
+        isLive() &&
+        recordReads.isLatest(request) &&
+        view?.datasetId === datasetId &&
+        view.opened?.tableId === tableId &&
+        view.opened.record.id === id;
+      try {
+        const description = await operations.describe(datasetId);
+        if (!lands()) return false;
+        const table = description.tables.find((table) => table.tableId === tableId);
+        const read = table
+          ? await operations.record(datasetId, table, id)
+          : { record: null, files: {} };
+        if (!lands() || !view?.opened) return false;
+        const held = view.opened.record;
+        const record = read.record && newest(read.record, held);
+        const shown = view.tableId === tableId;
+        // A record that's gone leaves its screen, which says so.
+        update(datasetId, {
+          description,
+          rows: !shown
+            ? view.rows
+            : record
+              ? view.rows.map((row) => (row.id === id ? newest(record, row) : row))
+              : view.rows.filter((row) => row.id !== id),
+          files: shown ? { ...view.files, ...read.files } : view.files,
+          problem: null,
+          opened: record
+            ? { ...view.opened, record, files: record === held ? view.opened.files : read.files }
+            : null,
+        });
+        if (asked && changes.get(key) === asked) setChange(key, null);
+        return record !== null;
+      } catch (error) {
+        const cause = shownProblem(error);
+        if (lands() && cause) update(datasetId, { problem: { cause, more: false } });
+        return false;
+      }
     },
     stop() {
       if (stopped) return;

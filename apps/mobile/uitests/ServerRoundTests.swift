@@ -321,4 +321,108 @@ final class ServerRoundTests: XCTestCase {
                    "The server should have the message exactly as sent: \(body)")
     say("DOHC_MENTION_SENT \(body)")
   }
+
+  /// The record of DOHC_SERVER_COLLECTION whose row shows `value`, on its own screen, and its field holding `value`.
+  @MainActor
+  private func openRecord(_ app: XCUIApplication, _ name: String, _ value: String) -> XCUIElement {
+    tab(app, "Home")
+    let collection = app.buttons[name]
+    XCTAssertTrue(collection.waitForExistence(timeout: 30), "Home should list the Collection \(name)")
+    collection.tap()
+    let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
+    row.tap()
+    let field = app.otherElements.matching(identifier: "record-field")
+      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
+    return field
+  }
+
+  /// Opens the field's editor, types `typed` after its text, or deletes `deleting` characters from its end, and saves.
+  @MainActor
+  private func edit(_ app: XCUIApplication, _ field: XCUIElement, typing typed: String = "", deleting: Int = 0) {
+    field.tap()
+    let input = app.textViews.firstMatch
+    XCTAssertTrue(input.waitForExistence(timeout: 10), "The field should open its editor")
+    XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "The editor should raise the keyboard")
+    // The editor opens with the cursor after the field's text.
+    app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting) + typed)
+    app.navigationBars.buttons["Save"].tap()
+  }
+
+  /// Waits for the record's last change to settle: no saving mark, the field taking a change again, and no failure or
+  /// refusal, which would offer Discard.
+  @MainActor
+  private func settled(_ app: XCUIApplication, _ field: XCUIElement, _ what: String) {
+    XCTAssertTrue(app.activityIndicators["Saving"].waitForNonExistence(timeout: 60), "\(what) should save within 60 s")
+    XCTAssertTrue(field.buttons.firstMatch.waitForExistence(timeout: 10), "\(what): the field should take a change again")
+    XCTAssertFalse(app.buttons["Discard"].exists, "\(what) should save, not fail or be refused")
+  }
+
+  /// Reads the open record again from the server: back to its Collection, pull to refresh, and open the record again.
+  @MainActor
+  private func reread(_ app: XCUIApplication, _ value: String) {
+    back(app)
+    let shows = NSPredicate(format: "label CONTAINS %@", value)
+    let list = app.scrollViews.containing(shows).firstMatch
+    XCTAssertTrue(list.waitForExistence(timeout: 10), "Back should show the Collection's records")
+    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+      .press(forDuration: 0.1, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
+    XCTAssertTrue(app.activityIndicators.firstMatch.waitForNonExistence(timeout: 30), "The Collection should read again within 30 s")
+    let row = app.buttons.matching(shows).firstMatch
+    XCTAssertTrue(row.waitForExistence(timeout: 30), "The records read again should show \(value)")
+    row.tap()
+  }
+
+  // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1, and the record test9 reads, with DOHC_SERVER_RECORD in a text
+  // field that a reversible edit changes. Adds a word to that field and waits for the change to save, which offers
+  // Undo; Undo puts the value back. Each save is checked by reading the record again. The phone keeps Undo in memory
+  // only, so Undo comes before the relaunch: the test then makes the change again, reads it back after a relaunch, and
+  // leaves the field as the seed had it.
+  @MainActor
+  func test11_editsACollectionField() throws {
+    let name = try need("DOHC_SERVER_COLLECTION")
+    let value = try need("DOHC_SERVER_RECORD")
+    let added = " \(UUID().uuidString.prefix(8))"
+    let changed = value + added
+    let app = XCUIApplication()
+    app.launch()
+    let undo = app.buttons["Undo last edit"]
+    let showing = { (text: String) in
+      app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+    }
+    // `value` is a prefix of `changed`, so a field showing `value` must not also show `changed`.
+    let only = { (text: String, what: String) in
+      XCTAssertTrue(showing(text).waitForExistence(timeout: 10), what)
+      if text == value { XCTAssertFalse(showing(changed).exists, what) }
+    }
+
+    edit(app, openRecord(app, name, value), typing: added)
+    let start = Date()
+    XCTAssertTrue(showing(changed).waitForExistence(timeout: 10), "The field should show the change as it saves")
+    settled(app, showing(changed), "The change")
+    XCTAssertTrue(undo.exists, "A saved change should offer Undo")
+    say("SERVER ROUND COLLECTION SAVED \(since(start)) ms")
+    reread(app, changed)
+    only(changed, "The server should have \(changed)")
+
+    // The record opened again still offers Undo for its last edit.
+    XCTAssertTrue(undo.waitForExistence(timeout: 10), "The record should still offer Undo")
+    undo.tap()
+    settled(app, showing(value), "Undo")
+    only(value, "Undo should put \(value) back")
+    reread(app, value)
+    only(value, "The server should have \(value) back")
+
+    edit(app, showing(value), typing: added)
+    settled(app, showing(changed), "The change made again")
+    app.terminate()
+    app.launch()
+    let field = openRecord(app, name, changed)
+    // Back as the seed had it, for the next round.
+    edit(app, field, deleting: added.count)
+    settled(app, showing(value), "The seed's value")
+    reread(app, value)
+    only(value, "The server should have \(value) again")
+  }
 }

@@ -1,9 +1,11 @@
 import { collectionWords } from "@dohc/interface-words/collections";
+import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { Square, SquareCheck } from "lucide-react-native";
+import { Stack, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
+import { ChevronRight, Square, SquareCheck, Undo2 } from "lucide-react-native";
 import { memo, useCallback, useEffect, useSyncExternalStore } from "react";
 import {
+  ActivityIndicator,
   AppState,
   FlatList,
   Pressable,
@@ -17,20 +19,29 @@ import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { outsideLink } from "../apps/appNavigation";
 import { offerLink } from "../apps/offerLink";
+import { ActionPill } from "../notices/ActionPill";
 import type {
   CollectionField,
   CollectionRecord,
   CollectionTable,
+  RecordValue,
 } from "../server/phoneCollections";
+import { phoneWrites } from "../server/phoneWrites";
+import type { ReadProblem } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
 import { useProblemText } from "../workspace/useView";
-import { rowText, shownValue } from "./collectionFields";
-import type { WorkspaceCollections } from "./collectionStore";
+import { editorKind, rowText, shownValue } from "./collectionFields";
+import {
+  canUndo,
+  recordKey,
+  type RecordChange,
+  type WorkspaceCollections,
+} from "./collectionStore";
 
-// A Collection's records, from Home, and one record, read-only. The list reads its first table, or the one chosen, 50
-// records at a time, the next page as it nears its end. Pulling down, and a return to the foreground, read the
-// Collection again. Errors show in place, as on any screen outside the tabs.
+// A Collection's records, from Home, and one record. The list reads its first table, or the one chosen, 50 records at
+// a time, the next page as it nears its end. Pulling down, and a return to the foreground, read the Collection again.
+// Errors show in place, as on any screen outside the tabs.
 
 const nothing = () => () => undefined;
 
@@ -218,43 +229,174 @@ const RecordRow = memo(function RecordRow(props: {
   );
 });
 
-/** The record opened from the list, which stays while a refresh of the list reads pages without it. */
+/**
+ * The record opened from the list, which stays while a refresh of the list reads pages without it. With phone writes
+ * on, a field the Collection lets the phone change opens its editor, and the record's last change shows on its field:
+ * saving, or why it didn't save with what to do next. Undo in the header reverses the last saved edit.
+ */
 export function RecordScreen() {
   const theme = useTheme();
+  const router = useRouter();
+  const navigation = useNavigation();
   const problemText = useProblemText();
   const { collections } = useAccount();
   const view = useSyncExternalStore(
     collections?.subscribe ?? nothing,
     useCallback(() => collections?.view() ?? null, [collections]),
   );
+  const changes = useSyncExternalStore(
+    collections?.subscribe ?? nothing,
+    useCallback(() => collections?.changes() ?? NO_CHANGES, [collections]),
+  );
+  useEffect(() => () => collections?.closeRecord(), [collections]);
   const opened = view?.opened;
   const table = view?.description?.tables.find((table) => table.tableId === opened?.tableId);
-  if (!view || !opened || !table) return <ScreenFailure text={collectionWords.recordMissing} />;
+  if (!collections || !view || !opened || !table)
+    return <ScreenFailure text={collectionWords.recordMissing} />;
   const { record, files } = opened;
+  const key = recordKey(view.datasetId, table.tableId, record.id);
+  const last = changes.get(key);
   const lead = leadField(table);
   const title =
     (lead && rowText(shownValue(lead, record.values[lead.fieldId], files), lead.name)) ??
     String(record.id);
+  const edit = (fieldId: string, value?: RecordValue) =>
+    router.push({
+      pathname: "/collection-field",
+      params: { field: fieldId, ...(value === undefined ? {} : { value: JSON.stringify(value) }) },
+    });
+  // Reads the record again, then opens the editor with what the person entered, if the same record is still open and
+  // on top, so no editor opened meanwhile sits under it, and its field still takes a change.
+  const reload = async ({ change }: RecordChange) => {
+    if (!(await collections.reloadRecord()) || !navigation.isFocused()) return;
+    const from = collections.edit(change.fieldId)?.from;
+    if (from && recordKey(from.datasetId, from.tableId, from.recordId) === key)
+      edit(change.fieldId, change.value);
+  };
+  const undo = phoneWrites && canUndo(last);
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.bg }}
       contentContainerStyle={styles.record}
     >
-      <Stack.Screen options={{ title }} />
+      <Stack.Screen
+        options={{
+          title,
+          headerRight: undo
+            ? () => (
+                <Pressable
+                  onPress={() => collections.undo(key)}
+                  hitSlop={8}
+                  style={styles.headerButton}
+                  accessibilityRole="button"
+                  accessibilityLabel={collectionWords.undoLastEdit}
+                >
+                  <Undo2 size={22} color={theme.ink} strokeWidth={2} />
+                </Pressable>
+              )
+            : undefined,
+        }}
+      />
       {view.problem ? (
         <ProblemLine
           text={`${collectionWords.recordsFailed(table.name)} ${problemText(view.problem.cause)}`}
-          onRetry={() => void (view.problem?.more ? collections?.more() : collections?.reload())}
+          onRetry={() => void (view.problem?.more ? collections.more() : collections.reload())}
         />
       ) : null}
-      {table.fields.map((field) => (
-        <View key={field.fieldId} style={styles.field} testID="record-field">
-          <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
-          <FieldValue field={field} record={record} files={files} />
-        </View>
-      ))}
+      {table.fields.map((field) => {
+        // The change shows its value on its field until it saves, when the record holds it.
+        const change = last?.change.fieldId === field.fieldId ? last : undefined;
+        const pending = change && change.state.kind !== "saved" ? change : undefined;
+        const shown = pending
+          ? { ...record, values: { ...record.values, [field.fieldId]: pending.change.value } }
+          : record;
+        const editable =
+          phoneWrites &&
+          field.editable &&
+          editorKind(field) !== null &&
+          record.version !== null &&
+          last?.state.kind !== "saving";
+        const body = (
+          <>
+            <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
+            <View style={styles.valueLine}>
+              <View style={styles.valueText}>
+                <FieldValue field={field} record={shown} files={files} />
+              </View>
+              {pending?.state.kind === "saving" ? (
+                <ActivityIndicator accessibilityLabel={collectionWords.saving} />
+              ) : editable ? (
+                <ChevronRight size={18} color={theme.subtle} strokeWidth={2} />
+              ) : null}
+            </View>
+          </>
+        );
+        return (
+          <View key={field.fieldId} style={styles.field} testID="record-field">
+            {editable ? (
+              <Pressable
+                onPress={() => edit(field.fieldId)}
+                style={({ pressed }) => [styles.editable, pressed ? { opacity: 0.6 } : null]}
+                accessibilityRole="button"
+              >
+                {body}
+              </Pressable>
+            ) : (
+              body
+            )}
+            {pending ? (
+              <ChangeLine
+                change={pending}
+                cause={(problem) => problemText(problem)}
+                onRetry={() => collections.retry(key)}
+                onReload={() => void reload(pending)}
+                onDiscard={() => collections.discard(key)}
+              />
+            ) : null}
+          </View>
+        );
+      })}
     </ScrollView>
+  );
+}
+
+const NO_CHANGES: ReadonlyMap<string, RecordChange> = new Map();
+
+/** Why a change didn't save, and what to do next: send it again, read the record again, or drop it. */
+function ChangeLine(props: {
+  change: RecordChange;
+  cause(problem: ReadProblem): string;
+  onRetry(): void;
+  onReload(): void;
+  onDiscard(): void;
+}) {
+  const theme = useTheme();
+  const { state } = props.change;
+  if (state.kind === "saving" || state.kind === "saved") return null;
+  const stale = state.kind === "refused" && state.code === "stale_record";
+  const text =
+    state.kind === "failed"
+      ? `${collectionWords.notConfirmed} ${props.cause(state.problem)}`
+      : state.kind === "rulesChanged"
+        ? collectionWords.rulesChanged
+        : stale
+          ? collectionWords.recordChanged
+          : collectionWords.refused(state.message);
+  return (
+    <View style={styles.change}>
+      <Text style={[styles.changeText, { color: theme.danger }]} accessibilityRole="alert">
+        {text}
+      </Text>
+      <View style={styles.actions}>
+        {state.kind === "failed" ? (
+          <ActionPill label={noticesWords.tryAgain} onPress={props.onRetry} />
+        ) : state.kind === "rulesChanged" || stale ? (
+          <ActionPill label={collectionWords.reload} onPress={props.onReload} />
+        ) : null}
+        <ActionPill label={chatWords.discard} onPress={props.onDiscard} />
+      </View>
+    </View>
   );
 }
 
@@ -329,4 +471,11 @@ const styles = StyleSheet.create({
   value: { fontSize: 17, lineHeight: 22 },
   linkTarget: { minHeight: 44, justifyContent: "center" },
   link: { textDecorationLine: "underline" },
+  editable: { minHeight: 44, gap: 4 },
+  valueLine: { flexDirection: "row", alignItems: "center", gap: 8 },
+  valueText: { flex: 1 },
+  headerButton: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
+  change: { gap: 8, paddingTop: 8 },
+  changeText: { fontSize: 15, lineHeight: 20 },
+  actions: { flexDirection: "row", gap: 8 },
 });

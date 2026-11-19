@@ -85,3 +85,69 @@ export function rowText(shown: ShownValue, fieldName: string): string | null {
       return shown.text;
   }
 }
+
+/**
+ * How the phone edits a field's type: typed text, a number or a web address with their keyboards, a switch, or a list
+ * of choices. Null for a type it doesn't edit yet: a date needs a native picker the app doesn't have, and a relation
+ * or an attachment a picker of records or files.
+ */
+export type EditorKind = "text" | "number" | "url" | "checkbox" | "select" | "multi-select";
+
+export function editorKind(field: Pick<CollectionField, "type">): EditorKind | null {
+  switch (field.type) {
+    case "text":
+    case "number":
+    case "url":
+    case "checkbox":
+    case "select":
+    case "multi-select":
+      return field.type;
+    default:
+      return null;
+  }
+}
+
+export type Draft = string | boolean | readonly string[];
+
+export function draftOf(
+  field: Pick<CollectionField, "type">,
+  value: RecordValue | undefined,
+): Draft {
+  switch (field.type) {
+    case "checkbox":
+      return value === true;
+    case "select":
+      return typeof value === "string" ? [value] : [];
+    case "multi-select":
+      return Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string")
+        : [];
+    default:
+      return typeof value === "string" || typeof value === "number" ? String(value) : "";
+  }
+}
+
+const NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
+
+/**
+ * The value an editor saves, which the Collection checks; empty saves as null. Null for text that isn't a number, which
+ * the editor keeps rather than send as null and empty the field.
+ */
+export function valueOf(
+  field: Pick<CollectionField, "type" | "options">,
+  draft: Draft,
+): { readonly value: RecordValue } | null {
+  if (field.type === "checkbox") return { value: draft === true };
+  if (field.type === "select" || field.type === "multi-select") {
+    const chosen = Array.isArray(draft) ? field.options.filter((item) => draft.includes(item)) : [];
+    return { value: field.type === "multi-select" ? chosen : (chosen[0] ?? null) };
+  }
+  if (typeof draft !== "string") return { value: null };
+  if (field.type === "text") return { value: draft === "" ? null : draft };
+  const typed = draft.trim();
+  if (typed === "") return { value: null };
+  if (field.type !== "number") return { value: typed };
+  // A decimal comma, as some keyboards type it.
+  const number = typed.replace(",", ".");
+  return NUMBER.test(number) && Number.isFinite(Number(number)) ? { value: Number(number) } : null;
+}

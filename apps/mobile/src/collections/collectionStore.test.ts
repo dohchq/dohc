@@ -4,27 +4,44 @@ import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
 import { deferred, memoryStore, testServer, type Answer, type Call } from "../server/testServer";
-import { createWorkspaceCollections, type WorkspaceCollections } from "./collectionStore";
+import type { RecordValue } from "../server/phoneCollections";
+import {
+  canUndo,
+  createWorkspaceCollections,
+  recordKey,
+  type WorkspaceCollections,
+} from "./collectionStore";
 
 const D = "00000000-0000-4000-8000-000000000001";
 const OPS = "/sync/ws-1/ops";
+const SHA = "a".repeat(64);
+const field = (fieldId: string, name: string, type: string, editable: boolean) => ({
+  fieldId,
+  name,
+  type,
+  editable,
+  reversible: editable,
+});
 const table = (tableId: string, name: string) => ({
   tableId,
   name,
   primaryFieldId: "f-name",
-  fields: [{ fieldId: "f-name", name: "Name", type: "text" }],
+  fields: [field("f-name", "Name", "text", true), field("f-paid", "Paid", "checkbox", false)],
 });
-const description: Answer = {
+const describedAs = (revision: number): Answer => ({
   status: 200,
   body: {
     ok: true,
     result: {
       datasetId: D,
       name: "Registrations",
+      revision,
+      revisionSha256: SHA,
       tables: [table("t-people", "People"), table("t-notes", "Notes")],
     },
   },
-};
+});
+const description = describedAs(3);
 const ok = (result: unknown): Answer => ({ status: 200, body: { ok: true, result } });
 const records = (names: string[], next: string | null): Answer =>
   ok({
@@ -163,7 +180,7 @@ describe("a Collection's records", () => {
     await collections.reload();
     expect(collections.view()?.opened).toEqual({
       tableId: "t-people",
-      record: { id: "a2", values: { "f-name": "A2" } },
+      record: { id: "a2", version: 2, values: { "f-name": "A2" } },
       files: { f: "x.png" },
     });
     server.on("POST", `${OPS}/collection`, "offline");
@@ -333,5 +350,368 @@ describe("teardown", () => {
     held.resolve(ok({ collections: [{ datasetId: D, name: "Registrations" }], nextCursor: null }));
     await refresh;
     expect(collections.state().collections).toBeNull();
+  });
+});
+
+describe("a record's change", () => {
+  const KEY = recordKey(D, "t-people", "a0");
+  const EDIT = `${OPS}/collectionEdit`;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  /** A store open on record `a0`. */
+  async function onRecord() {
+    const f = setup();
+    pages(f.server);
+    await f.collections.open(D);
+    f.collections.openRecord(f.collections.view()!.rows[0]!);
+    return f;
+  }
+  const state = (collections: WorkspaceCollections) => collections.changes().get(KEY)?.state;
+  /** Waits until the record's change has an answer. */
+  async function answered(collections: WorkspaceCollections) {
+    while (state(collections)?.kind === "saving") await new Promise((done) => setTimeout(done, 0));
+  }
+  const edits = (server: ReturnType<typeof testServer>) =>
+    server.calls.filter((call) => call.path === EDIT).map((call) => call.body);
+  /** Opens the field's editor and saves `value` at once. */
+  const change = (collections: WorkspaceCollections, fieldId: string, value: RecordValue) => {
+    const edit = collections.edit(fieldId);
+    if (edit) collections.change(edit, value);
+  };
+  const page = (rows: unknown[], files: Record<string, string> = {}) =>
+    ok({ status: "ready", rows, nextCursor: null, files });
+
+  it("sends the field's change with a random key and the rules' stamp, then shows it saved, with Undo", async () => {
+    const { server, collections } = await onRecord();
+    server.on(
+      "POST",
+      EDIT,
+      ok({ saved: { version: 2, priorValue: "a0" } }),
+      ok({ saved: { version: 3, priorValue: "Maya" } }),
+    );
+    change(collections, "f-name", "Maya");
+    expect(state(collections)).toEqual({ kind: "saving" });
+    await answered(collections);
+    const [sent] = edits(server) as [Record<string, unknown>];
+    expect(sent).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      recordId: "a0",
+      fieldId: "f-name",
+      value: "Maya",
+      expectedVersion: 1,
+      revision: 3,
+      revisionSha256: SHA,
+      idempotencyKey: expect.stringMatching(UUID),
+    });
+    expect(state(collections)).toEqual({ kind: "saved", version: 2, priorValue: "a0" });
+    const shown = { id: "a0", version: 2, values: { "f-name": "Maya" } };
+    expect(collections.view()?.opened?.record).toEqual(shown);
+    expect(collections.view()?.rows[0]).toEqual(shown);
+    expect(canUndo(collections.changes().get(KEY))).toBe(true);
+
+    // Undo: the prior value at the saved version, under the same stamp, with a new key.
+    collections.undo(KEY);
+    await answered(collections);
+    const undo = edits(server)[1] as Record<string, unknown>;
+    expect(undo).toMatchObject({ value: "a0", expectedVersion: 2, revision: 3 });
+    expect(undo.idempotencyKey).not.toBe(sent.idempotencyKey);
+    expect(collections.view()?.opened?.record).toEqual({
+      id: "a0",
+      version: 3,
+      values: { "f-name": "a0" },
+    });
+    // An Undo has no Undo of its own.
+    expect(canUndo(collections.changes().get(KEY))).toBe(false);
+  });
+
+  it("offers no Undo for an edit that gave no prior value", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, ok({ saved: { version: 2 } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    expect(canUndo(collections.changes().get(KEY))).toBe(false);
+    collections.undo(KEY);
+    expect(edits(server)).toHaveLength(1);
+  });
+
+  it("keeps a change that got no answer, and Try again sends it with the same key and stamp", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, "offline", { status: 503 }, ok({ saved: { version: 2 } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "failed", problem: "offline" });
+    // The record shows what the server last said.
+    expect(collections.view()?.opened?.record.values).toEqual({ "f-name": "a0" });
+    collections.retry(KEY);
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "failed", problem: "server-busy" });
+    collections.retry(KEY);
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "saved", version: 2 });
+    const [first, ...tries] = edits(server);
+    expect(tries).toEqual([first, first]);
+  });
+
+  it("sends nothing for a field it can't change, or while the record's last change is saving", async () => {
+    const { server, collections } = await onRecord();
+    expect(collections.edit("f-paid")).toBeNull();
+    const held = deferred<Answer>();
+    server.on("POST", EDIT, () => held.promise);
+    change(collections, "f-name", "Maya");
+    change(collections, "f-name", "Other");
+    collections.discard(KEY);
+    await sent(server, 3);
+    expect(edits(server)).toHaveLength(1);
+    expect(state(collections)).toEqual({ kind: "saving" });
+    held.resolve(ok({ saved: { version: 2 } }));
+    await answered(collections);
+    expect(state(collections)?.kind).toBe("saved");
+  });
+
+  it("shows a refusal and a rules change, and Discard drops either", async () => {
+    const { server, collections } = await onRecord();
+    const refusal = { code: "stale_record", message: "This record changed." };
+    server.on("POST", EDIT, ok({ refused: refusal }), ok({ rulesChanged: true }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "refused", ...refusal });
+    collections.discard(KEY);
+    expect(collections.changes().size).toBe(0);
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "rulesChanged" });
+    // Try again is only for a change with no answer.
+    collections.retry(KEY);
+    expect(edits(server)).toHaveLength(2);
+  });
+
+  it("reads the rules and the record again on Reload, and drops its change", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, ok({ rulesChanged: true }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    server.on("POST", `${OPS}/collection`, describedAs(4));
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      ok({
+        status: "ready",
+        rows: [{ id: "a0", version: 5, values: { "f-name": "Ana" } }],
+        nextCursor: null,
+        files: {},
+      }),
+    );
+    expect(await collections.reloadRecord()).toBe(true);
+    expect(server.calls.at(-1)?.body).toEqual({
+      datasetId: D,
+      tableId: "t-people",
+      recordId: "a0",
+    });
+    expect(collections.changes().size).toBe(0);
+    const fresh = { id: "a0", version: 5, values: { "f-name": "Ana" } };
+    expect(collections.view()?.opened?.record).toEqual(fresh);
+    expect(collections.view()?.rows[0]).toEqual(fresh);
+    expect(collections.view()?.description?.revision).toBe(4);
+    // The next change names the new version and rules.
+    server.on("POST", EDIT, ok({ saved: { version: 6 } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    expect(edits(server).at(-1)).toMatchObject({ expectedVersion: 5, revision: 4 });
+  });
+
+  it("leaves a record that's gone on Reload, and keeps the change when Reload fails", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, ok({ refused: { code: "stale_record", message: "Changed." } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    server.on("POST", `${OPS}/collection`, "offline");
+    expect(await collections.reloadRecord()).toBe(false);
+    expect(state(collections)?.kind).toBe("refused");
+    expect(collections.view()?.problem).toEqual({ cause: "offline", more: false });
+    server.on("POST", `${OPS}/collection`, description);
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      ok({ status: "ready", rows: [], nextCursor: null, files: {} }),
+    );
+    expect(await collections.reloadRecord()).toBe(false);
+    expect(collections.view()?.opened).toBeNull();
+    expect(names(collections.view()?.rows)).toEqual(["a1"]);
+  });
+
+  it("saves against the version and rules its editor opened with, not a refresh's", async () => {
+    const { server, collections } = await onRecord();
+    const edit = collections.edit("f-name")!;
+    // A return to the foreground reads version 2 and new rules while the editor is open.
+    server.on("POST", `${OPS}/collection`, describedAs(4));
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      page([{ id: "a0", version: 2, values: { "f-name": "Ana" } }]),
+    );
+    await collections.reload();
+    expect(collections.view()?.opened?.record.version).toBe(2);
+    server.on("POST", EDIT, ok({ refused: { code: "stale_record", message: "Changed." } }));
+    collections.change(edit, "Maya");
+    await answered(collections);
+    expect(edits(server)).toEqual([
+      expect.objectContaining({ value: "Maya", expectedVersion: 1, revision: 3 }),
+    ]);
+    expect(state(collections)?.kind).toBe("refused");
+  });
+
+  it("keeps a confirmed edit over an older read that lands after it, from the table or Reload", async () => {
+    const { server, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    const refresh = collections.reload();
+    await sent(server, 4);
+    server.on("POST", EDIT, ok({ saved: { version: 2, priorValue: "a0" } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    held.resolve(records(["a0", "a1"], null));
+    await refresh;
+    const saved = { id: "a0", version: 2, values: { "f-name": "Maya" } };
+    expect(collections.view()?.rows).toEqual([
+      saved,
+      { id: "a1", version: 1, values: { "f-name": "a1" } },
+    ]);
+    expect(collections.view()?.opened?.record).toEqual(saved);
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      page([{ id: "a0", version: 1, values: { "f-name": "a0" } }]),
+    );
+    expect(await collections.reloadRecord()).toBe(true);
+    expect(collections.view()?.opened?.record).toEqual(saved);
+    expect(collections.view()?.rows[0]).toEqual(saved);
+  });
+
+  it("keeps a later read over a replayed receipt for an older version", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, "offline", ok({ saved: { version: 2, priorValue: "a0" } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    // The first try saved version 2; a later change elsewhere made version 3, which a refresh reads.
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      page([{ id: "a0", version: 3, values: { "f-name": "Ana" } }]),
+    );
+    await collections.reload();
+    collections.retry(KEY);
+    await answered(collections);
+    expect(state(collections)).toMatchObject({ kind: "saved", version: 2 });
+    const later = { id: "a0", version: 3, values: { "f-name": "Ana" } };
+    expect(collections.view()?.opened?.record).toEqual(later);
+    expect(collections.view()?.rows[0]).toEqual(later);
+  });
+
+  it("lands no Reload once its screen closes, another record opens, or a newer Reload starts", async () => {
+    const { server, collections } = await onRecord();
+    const read = (version: number) =>
+      page([{ id: "a0", version, values: { "f-name": `v${version}` } }]);
+    const version = () => collections.view()?.opened?.record.version;
+
+    const closing = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => closing.promise);
+    const closed = collections.reloadRecord();
+    await sent(server, 4);
+    collections.closeRecord();
+    closing.resolve(read(5));
+    expect(await closed).toBe(false);
+    expect(version()).toBe(1);
+
+    const opening = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => opening.promise);
+    const other = collections.reloadRecord();
+    await sent(server, 6);
+    collections.openRecord(collections.view()!.rows[1]!);
+    opening.resolve(read(6));
+    expect(await other).toBe(false);
+    expect(collections.view()?.opened?.record.id).toBe("a1");
+
+    collections.openRecord(collections.view()!.rows[0]!);
+    const slow = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => slow.promise, read(8));
+    const first = collections.reloadRecord();
+    await sent(server, 8);
+    expect(await collections.reloadRecord()).toBe(true);
+    slow.resolve(read(9));
+    expect(await first).toBe(false);
+    expect(version()).toBe(8);
+  });
+
+  it("keeps a change made while Reload reads", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", EDIT, ok({ refused: { code: "stale_record", message: "Changed." } }));
+    change(collections, "f-name", "Maya");
+    await answered(collections);
+    const held = deferred<Answer>();
+    server.on("POST", `${OPS}/collectionRecords`, () => held.promise);
+    const reload = collections.reloadRecord();
+    await sent(server, 5);
+    server.on("POST", EDIT, "offline");
+    change(collections, "f-name", "Ana");
+    await answered(collections);
+    held.resolve(page([{ id: "a0", version: 1, values: { "f-name": "a0" } }]));
+    expect(await reload).toBe(true);
+    expect(state(collections)).toEqual({ kind: "failed", problem: "offline" });
+    expect(collections.changes().get(KEY)?.change.value).toBe("Ana");
+  });
+
+  it("opens no editor while the record's change is saving", async () => {
+    const { server, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", EDIT, () => held.promise);
+    change(collections, "f-name", "Maya");
+    expect(collections.edit("f-name")).toBeNull();
+    held.resolve(ok({ saved: { version: 2 } }));
+    await answered(collections);
+    expect(collections.edit("f-name")).not.toBeNull();
+  });
+
+  it("takes Reload's file names, and clears the view's problem", async () => {
+    const { server, collections } = await onRecord();
+    server.on("POST", `${OPS}/collectionRecords`, "offline");
+    await collections.more();
+    expect(collections.view()?.problem).toEqual({ cause: "offline", more: true });
+    server.on(
+      "POST",
+      `${OPS}/collectionRecords`,
+      page([{ id: "a0", version: 2, values: { "f-name": "a0" } }], { "file-1": "receipt.pdf" }),
+    );
+    expect(await collections.reloadRecord()).toBe(true);
+    expect(collections.view()?.opened?.files).toEqual({ "file-1": "receipt.pdf" });
+    expect(collections.view()?.files).toEqual({ "file-1": "receipt.pdf" });
+    expect(collections.view()?.problem).toBeNull();
+  });
+
+  it("lands a change's answer after the Collection closes", async () => {
+    const { server, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", EDIT, () => held.promise);
+    change(collections, "f-name", "Maya");
+    collections.close(D);
+    held.resolve(ok({ saved: { version: 2 } }));
+    await answered(collections);
+    expect(state(collections)).toEqual({ kind: "saved", version: 2 });
+  });
+
+  it("drops a change, and its late answer, at a workspace switch", async () => {
+    const { server, stores, collections } = await onRecord();
+    const held = deferred<Answer>();
+    server.on("POST", EDIT, () => held.promise);
+    change(collections, "f-name", "Maya");
+    await sent(server, 3);
+    appTeardown(stores).open("ws-2");
+    expect(collections.changes().size).toBe(0);
+    let painted = 0;
+    collections.subscribe(() => painted++);
+    held.resolve(ok({ saved: { version: 2 } }));
+    await new Promise((done) => setTimeout(done, 0));
+    expect(collections.changes().size).toBe(0);
+    expect(collections.view()).toBeNull();
+    expect(painted).toBe(0);
   });
 });
