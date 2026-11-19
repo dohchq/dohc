@@ -77,7 +77,7 @@ const MAX_EMAIL_CHARS = 320;
 // longer current, so this is not the current-grant rule.
 export function requireOwnedShareGrant(
   storage: Pick<SyncRelayStorage, "getShare" | "getShareGrant" | "workspaceIsOwnedBy">,
-  kind: "link" | "user",
+  kind: "link" | "user" | "person",
   shareId: string,
   grantId: string,
   actor: { userId: string },
@@ -85,14 +85,18 @@ export function requireOwnedShareGrant(
 ): SyncRelayShareWithGrantRow {
   const share = storage.getShare(shareId);
   const grant = storage.getShareGrant(grantId);
+  const claimed = grant?.principalKind === "user" && Boolean(grant.principalUserId);
+  const ofKind =
+    kind === "link"
+      ? grant?.principalKind === "link"
+      : claimed || (kind === "person" && grant?.principalKind === "email");
   if (
     !share ||
     share.granterUserId !== actor.userId ||
     !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
     !grant ||
     grant.shareId !== share.shareId ||
-    grant.principalKind !== kind ||
-    (kind === "user" && !grant.principalUserId) ||
+    !ofKind ||
     (!allowRevoked && (grant.status !== "active" || grant.revokedAtMs !== null))
   ) {
     throw notFound();
@@ -211,7 +215,7 @@ export function createShareGrantRoutes(
     return access;
   };
   const requireOwnedGrant = (
-    kind: "link" | "user",
+    kind: "link" | "user" | "person",
     shareId: string,
     grantId: string,
     actor: { userId: string },
@@ -409,7 +413,13 @@ export function createShareGrantRoutes(
       if (Object.keys(input).some((key) => key !== "workspaceId")) {
         throw badRequest("request body contains an unknown field");
       }
-      const { share, grant } = requireOwnedGrant("user", route.shareId, route.grantId, actor, true);
+      const { share, grant } = requireOwnedGrant(
+        "person",
+        route.shareId,
+        route.grantId,
+        actor,
+        true,
+      );
       requireShareWorkspace(share, workspaceId);
       const result = await endAccess(route.shareId, grant.access === "edit", () =>
         storage.removeShareAccess({
@@ -419,7 +429,7 @@ export function createShareGrantRoutes(
           nowMs: nowMs(),
           guard: () => {
             requireShareWorkspace(
-              requireOwnedGrant("user", route.shareId, route.grantId, actor, true).share,
+              requireOwnedGrant("person", route.shareId, route.grantId, actor, true).share,
               workspaceId,
             );
           },
