@@ -3859,6 +3859,10 @@ mod tests {
         .unwrap();
         assert_eq!(stop.paused.map(|paused| paused.applied_cursor), Some(0));
         assert!(stored_text(&store).contains("Typed after the pause"));
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        assert!(!store
+            .read_with(|conn| super::super::release::owner_saves_publish_in(conn, &key))
+            .unwrap());
     }
 
     /// A held note: the collaborator's committed row at 5, the owner's own
