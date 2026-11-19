@@ -54,16 +54,20 @@ const isVersioned = (person: ListedPerson | undefined): person is AnsweredPerson
  * The people Share knows from the relay's own answers: a person invited here,
  * or one whose access changed here. `listing` is the newest list of grants
  * with their generations that was read, and a failed read leaves it as it
- * was. An answer stands while that list holds the grant at an older
- * generation, or not yet. A grant the list has held and a later list leaves
- * out has ended, so it goes and joins `retired`.
+ * was. `read` is false while no list has been read, and then `listing`
+ * says nothing about who has access. An answer stands while that list holds
+ * the grant at an older generation, or not yet. A grant the list has held and
+ * a later list leaves out has ended, so it goes and joins `retired`.
  */
-export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) {
+export function useLocalPeople(scope: string, listing: readonly ListedPerson[], read: boolean) {
   const [held, setHeld] = useState(() => noLocalPeople(scope));
   const { byGrant, retired } = held.scope === scope ? held : noLocalPeople(scope);
   const newestListing = useRef(listing);
   newestListing.current = listing;
+  const scopeNow = useRef(scope);
+  scopeNow.current = scope;
   useEffect(() => {
+    if (!read) return;
     setHeld((current) => {
       if (current.scope !== scope) return current;
       let changed = false;
@@ -82,7 +86,7 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) 
         ? { scope, byGrant: kept, retired: [...current.retired, ...leftOut] }
         : current;
     });
-  }, [listing, scope]);
+  }, [listing, read, scope]);
   return {
     /**
      * The people given, each at the access of the newest source that carries a
@@ -115,6 +119,7 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) 
     /** The grants that ended: retired here, or left out by a list that had held them. */
     retired,
     keep(person: AnsweredPerson) {
+      if (scopeNow.current !== scope) return;
       const listed = newestListing.current.some((known) => known.grantId === person.grantId);
       setHeld((current) => {
         const now = current.scope === scope ? current : noLocalPeople(scope);
@@ -122,6 +127,7 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[]) 
       });
     },
     retire(grantId: string) {
+      if (scopeNow.current !== scope) return;
       setHeld((current) => {
         const now = current.scope === scope ? current : noLocalPeople(scope);
         return {

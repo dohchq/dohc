@@ -194,6 +194,7 @@ function useSharedPeople(input: {
   return {
     people: query.value?.invited ?? NO_PEOPLE,
     onLinkShares: query.value?.onLinkShares ?? NO_PEOPLE,
+    read: query.value != null,
     failed: query.error !== null,
     load: retry,
   };
@@ -236,8 +237,8 @@ export function RelayShareDialog(props: {
   });
   const loadInvited = invited.load;
   const reloadInvited = () => setInvitedRevision((revision) => revision + 1);
-  const local = useLocalPeople(scope, invited.people);
-  const independent = useLocalPeople(scope, invited.onLinkShares);
+  const local = useLocalPeople(scope, invited.people, invited.read);
+  const independent = useLocalPeople(scope, invited.onLinkShares, invited.read);
   const linkPane = useRelayShareLinkPane({
     workspaceId: props.workspaceId,
     target: props.target,
