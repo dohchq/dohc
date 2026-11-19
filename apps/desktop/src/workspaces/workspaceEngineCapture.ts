@@ -560,6 +560,12 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
+// A session as openYDocSession hands it out: also whether the engine already
+// held the note's live history when it opened.
+export type WorkspaceEngineYDocOpenedSession = WorkspaceEngineYDocProviderSession & {
+  readonly lineageAtOpen: "existing" | "absent";
+};
+
 // The session this layer holds, which keeps the evict the public one drops.
 // `setTextAside` puts the text of a document whose file was deleted outside
 // dohc in Notices and answers a handle to that write, or null without a draft
@@ -706,7 +712,7 @@ export interface WorkspaceEngineCapture {
       readOnlyCause?: undefined,
       failure?: unknown,
     ) => void;
-  }): Promise<WorkspaceEngineYDocProviderSession>;
+  }): Promise<WorkspaceEngineYDocOpenedSession>;
   // Save it again: the person chose to write a document back to its file
   // after the file was deleted outside dohc. The engine refuses every other
   // save over a deleted file, so this is the one thing that brings it back.
@@ -5120,11 +5126,11 @@ export function createWorkspaceEngineCapture(
   function openSession(
     input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0],
     recordWrite?: false,
-  ): Promise<WorkspaceEngineYDocProviderSession>;
+  ): Promise<WorkspaceEngineYDocOpenedSession>;
   function openSession(
     input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0],
     recordWrite = false,
-  ): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
+  ): Promise<WorkspaceEngineYDocOpenedSession | RecordEditSession> {
     // ON THE CAPTURE CHAIN, deliberately. The version this session
     // binds to is read here and the registry entry is written at the end,
     // with a daemon round trip in between. Off the chain, a switch/merge/
@@ -5151,7 +5157,7 @@ export function createWorkspaceEngineCapture(
     });
 
     async function openYDocSessionTask(): Promise<
-      WorkspaceEngineYDocProviderSession | RecordEditSession
+      WorkspaceEngineYDocOpenedSession | RecordEditSession
     > {
       // This session's own place in the observation order, taken before
       // anything else runs: the registration door
@@ -6652,7 +6658,7 @@ export function createWorkspaceEngineCapture(
       } else if (absentHeadDisk === "empty" && updatesSeen === 0) {
         reportSaveState("saved", 0, "status");
       }
-      const publicSession: WorkspaceEngineYDocProviderSession = {
+      const publicSession: WorkspaceEngineYDocOpenedSession = {
         get nativeOwner() {
           return session.nativeOwner;
         },
@@ -6666,6 +6672,7 @@ export function createWorkspaceEngineCapture(
           return session.lineageClaimId;
         },
         contentKind: session.contentKind,
+        lineageAtOpen: lineage,
         get artifactAssets() {
           return session.artifactAssets ?? [];
         },

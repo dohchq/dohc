@@ -77,6 +77,7 @@ import {
   isDocumentTooDenseCause,
   type EngineYDocSaveEvent,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineYDocOpenedSession,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 
@@ -109,10 +110,11 @@ export interface EngineYDocIpcSender {
 }
 
 // A shared view's named live provider settles on its host and has no
-// settleNow; a local capture's provider does.
+// settleNow or lineageAtOpen; a local capture's provider has both.
 export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
+  lineageAtOpen?: WorkspaceEngineYDocOpenedSession["lineageAtOpen"];
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
@@ -1258,6 +1260,58 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         return { path, ...applied };
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
+      }
+    } finally {
+      authority.release();
+    }
+  }
+
+  /**
+   * Starts live editing of a note no editor holds, with no window: the engine
+   * seeds its live history from the file, and closing claims that history for
+   * sync, as the first open in an editor would. Nothing changes the text, so
+   * the close writes no file. Answers "seeded" when the open made the note's
+   * live history, "existing" when the engine already held one, and "held"
+   * when an editor holds the note or is opening it, since that open starts
+   * live editing itself.
+   */
+  async startLiveInBackground(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<"seeded" | "existing" | "held"> {
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (this.#isSharedView(workspace)) {
+        throw new Error("A shared view's documents start live editing on their host.");
+      }
+      const path = await this.#markdownDocumentPath(workspace, input.path);
+      authority.assertCurrent();
+      const attachment = workspace.attachmentId;
+      const ownsDocument = () => this.#owner.ownsDocument(attachment, path);
+      if (ownsDocument()) return "held";
+      try {
+        return await this.#documentReservations.runMutation(
+          attachment,
+          path,
+          ownsDocument,
+          async () => {
+            // A closed workspace is not started again for a background open.
+            const capture = this.#captureFor(workspace);
+            if (!capture) throw new Error("The workspace engine is not running.");
+            const provider = await capture.openYDocSession({
+              path,
+              contentKind: "richdoc",
+              onRemoteUpdate: () => undefined,
+            });
+            await provider.close();
+            return provider.lineageAtOpen === "existing" ? "existing" : "seeded";
+          },
+        );
+      } catch (error) {
+        if (error instanceof LiveDocumentOwnedError) return "held";
+        throw error;
       }
     } finally {
       authority.release();

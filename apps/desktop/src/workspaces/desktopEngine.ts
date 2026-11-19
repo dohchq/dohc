@@ -23,12 +23,15 @@ import {
 } from "./engineRelayClient";
 import {
   CAPTURE_INITIAL_SETTLED_EVENT,
+  CAPTURE_MOMENT_RECORDED_EVENT,
   COLLECTIONS_PROJECTED_EVENT,
   bridgeCaptureEventsToRenderer,
   bridgeNoAtomicPlacement,
   bridgeWriteDeferred,
+  scopeOf,
 } from "./captureActivityBridge";
 import { bridgeAutomationClaimsToExecutors } from "./automationClaimsBridge";
+import type { BackgroundLiveStart } from "./backgroundLiveStart";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
@@ -232,6 +235,9 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // to replace a file.
   noteNoAtomicPlacement(workspaceId: string): void;
   noteWriteDeferred(workspaceId: string, path: string): void;
+  // Hears the paths capture recorded, unless an announcement did not list them all. Pauses while
+  // the engine restarts.
+  backgroundLiveStart?: Pick<BackgroundLiveStart, "note" | "pause" | "resume">;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
   // The server accepted or refused a document's edits, so the notes waiting for it changed.
   notifyOwnerDraftsChanged?(workspaceId: string): void;
@@ -1817,6 +1823,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             gate
           )
             await waitForEnginePublicationGate(gate, signal);
+          // Not awaited: a start in flight may be waiting for the engine this barrier holds back.
+          void dependencies.backgroundLiveStart?.pause();
           stopOwnerHost();
           await stopOwnerDelivery();
           await Promise.all(
@@ -1842,6 +1850,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             automations.resumeAfterEngineRestart();
           }
           restartingCollectionAutomations.clear();
+          dependencies.backgroundLiveStart?.resume();
           notifyRenderer();
         },
       });
@@ -1869,6 +1878,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       bridgeWriteDeferred(rustEngineDaemon, dependencies.noteWriteDeferred);
       rustEngineDaemon.onEvent((event) => {
         if (event.name === "sync.refusalsChanged") dependencies.onRefusalsChanged?.();
+        if (event.name === CAPTURE_MOMENT_RECORDED_EVENT && dependencies.backgroundLiveStart) {
+          const scope = scopeOf(event.payload);
+          if (scope?.paths) dependencies.backgroundLiveStart.note(scope.workspaceId, scope.paths);
+        }
       });
       // The daemon also claims each local record change for its subscribed
       // automations (ADR 0008); its automation.claimed events wake the owning

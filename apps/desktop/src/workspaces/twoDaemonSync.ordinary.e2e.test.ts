@@ -101,4 +101,70 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
     },
     3 * REAL_DAEMON_DEADLINE_MS,
   );
+
+  it(
+    "gives the server a live history for a note written as a file once a background start opens and closes it, and knows it has one the next time",
+    async () => {
+      const workspaceId = `two-daemon-background-live-${randomUUID()}`;
+      const root = await createTestScratch("dohc-background-live-");
+      const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const person = { kind: "human", humanId: "local-person" } as const;
+      const text = "# Written as a file\n\nNobody opened this note.\n";
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      let capture: WorkspaceEngineCapture | undefined;
+      // The relay's own test for a page a phone can edit (mainLiveLineageExists).
+      const serverHoldsLineage = (objectId: string) => {
+        const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+        try {
+          return (
+            relayDb
+              .prepare(
+                "SELECT 1 FROM sync_relay_log WHERE workspace_id=? AND op_kind='ydoc.update' AND json_extract(payload_json, '$.objectId')=? AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL LIMIT 1",
+              )
+              .get(workspaceId, objectId) !== undefined
+          );
+        } finally {
+          relayDb.close();
+        }
+      };
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+        capture = createWorkspaceEngineCapture({
+          ...owner.workspace,
+          rustEngineSessions: owner.sessions,
+        });
+        const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+        await relay.claim();
+        const { objectId } = await capture.writeAuthoredFile(join(root, "agent.md"), text, person, {
+          createOnly: true,
+        });
+        await pushUntilDrained(relay);
+        expect(serverHoldsLineage(objectId)).toBe(false);
+
+        // What startLiveInBackground does once no editor holds the note: open with no window, then close.
+        const backgroundStart = async () => {
+          const session = await capture!.openYDocSession({
+            path: "agent.md",
+            contentKind: "richdoc",
+            onRemoteUpdate: () => undefined,
+          });
+          await session.close();
+          return session.lineageAtOpen;
+        };
+        expect(await backgroundStart()).toBe("absent");
+        expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
+        expect(serverHoldsLineage(objectId)).toBe(true);
+        // Nothing changed the text, so the close wrote no file.
+        expect(await readFile(join(root, "agent.md"), "utf8")).toBe(text);
+
+        // A later run starts the note again. The engine says it has the history, so main asks for no pass.
+        expect(await backgroundStart()).toBe("existing");
+        expect(await readFile(join(root, "agent.md"), "utf8")).toBe(text);
+      } finally {
+        await capture?.stop();
+        await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
 });

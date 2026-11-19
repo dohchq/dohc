@@ -24,6 +24,7 @@ import {
   YDocPathNotInVersionError,
   YDocRemovalInProgressError,
   YDocSessionUnreleasedError,
+  type WorkspaceEngineYDocOpenedSession,
   type WorkspaceEngineYDocProviderSession,
 } from "./workspaceEngineCapture";
 import {
@@ -112,13 +113,14 @@ function asset(id: string, ref = `assets/${id}.png`): ArtifactAssetDescriptor {
 }
 
 function providerSession(
-  input: Partial<WorkspaceEngineYDocProviderSession> = {},
-): WorkspaceEngineYDocProviderSession {
+  input: Partial<WorkspaceEngineYDocOpenedSession> = {},
+): WorkspaceEngineYDocOpenedSession {
   const base = {
     doc: new Y.Doc(),
     initialUpdate: new Uint8Array(),
     path: "notes/a.md",
     contentKind: "richdoc",
+    lineageAtOpen: "absent",
     settleNow: vi.fn(async () => {
       throw new Error("settleNow is not used by this IPC adapter fixture");
     }),
@@ -129,7 +131,7 @@ function providerSession(
       bytes: new Uint8Array([1, 2, 3]),
     })),
     close: vi.fn(async () => undefined),
-  } satisfies WorkspaceEngineYDocProviderSession;
+  } satisfies WorkspaceEngineYDocOpenedSession;
   return Object.assign(base, input);
 }
 
@@ -2913,6 +2915,87 @@ describe("engine Y.Doc IPC adapter", () => {
       await editing;
       await expect(opening).resolves.toMatchObject({ available: true });
       expect(trace).toEqual(["apply", "settle", "close", "editor-open"]);
+      await h.ipc.shutdown();
+    });
+
+    it("starts live editing in the background with no window, and changes nothing", async () => {
+      const trace: string[] = [];
+      const h = harness(editableSession(trace));
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("seeded");
+      expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md", contentKind: "richdoc" });
+      expect(trace).toEqual(["close"]);
+      await h.ipc.shutdown();
+    });
+
+    it("says when the engine already held the note's live history", async () => {
+      const trace: string[] = [];
+      const session = Object.assign(editableSession(trace), { lineageAtOpen: "existing" as const });
+      const h = harness(session);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("existing");
+      expect(trace).toEqual(["close"]);
+      await h.ipc.shutdown();
+    });
+
+    it("leaves a note an editor holds to that editor", async () => {
+      const h = harness(editableSession());
+      await h.ipc.open(new FakeSender(7), openPayload);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("held");
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      await h.ipc.shutdown();
+    });
+
+    it("leaves a note an editor is opening to that editor", async () => {
+      const session = editableSession();
+      const h = harness(session);
+      const opening = deferred<WorkspaceEngineYDocProviderSession>();
+      vi.mocked(h.capture.openYDocSession).mockImplementationOnce(
+        async () => await opening.promise,
+      );
+      const opened = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(h.capture.openYDocSession).toHaveBeenCalledOnce());
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).resolves.toBe("held");
+      opening.resolve(session);
+      await expect(opened).resolves.toMatchObject({ available: true });
+      expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+      await h.ipc.shutdown();
+    });
+
+    it("keeps an editor that opens during a background start waiting until its session closes", async () => {
+      const trace: string[] = [];
+      const background = editableSession(trace);
+      const released = deferred<void>();
+      const resolveDocumentPath = vi.fn(async (_workspace: unknown, path: string) => path);
+      const h = harness(background, { resolveDocumentPath });
+      vi.mocked(background.close).mockImplementationOnce(async () => {
+        trace.push("close");
+        await released.promise;
+      });
+      vi.mocked(h.capture.openYDocSession)
+        .mockImplementationOnce(async () => background)
+        .mockImplementationOnce(async () => {
+          trace.push("editor-open");
+          return providerSession();
+        });
+      const starting = h.ipc.startLiveInBackground(DOCUMENT);
+      await vi.waitFor(() => expect(trace).toContain("close"));
+
+      const opening = h.ipc.open(new FakeSender(7), openPayload);
+      await vi.waitFor(() => expect(resolveDocumentPath).toHaveBeenCalledTimes(2));
+      await new Promise((drained) => setImmediate(drained));
+      expect(trace).toEqual(["close"]);
+
+      released.resolve();
+      await expect(starting).resolves.toBe("seeded");
+      await expect(opening).resolves.toMatchObject({ available: true });
+      expect(trace).toEqual(["close", "editor-open"]);
+      await h.ipc.shutdown();
+    });
+
+    it("starts nothing in a shared view", async () => {
+      const h = harness(editableSession());
+      h.setReadOnly(true);
+      await expect(h.ipc.startLiveInBackground(DOCUMENT)).rejects.toThrow("shared view");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
       await h.ipc.shutdown();
     });
 
