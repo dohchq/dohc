@@ -1,6 +1,7 @@
 import type { StorageContext } from "./storage/context";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
+import { namedShareOrigin } from "./relayLogInputs";
 import {
   LINK_KEY,
   RELAY_EXCHANGE_KEY,
@@ -52,6 +53,18 @@ async function register(handler: ReturnType<typeof testHandler>, references: unk
       jsonBody({ originId: "reference-probe", ops: [], workReferences: references }),
     ),
   );
+}
+
+// The relay now refuses this create at push. A log can still hold one written before.
+function appendEarlierMemberCreate(storage: StorageContext, shareId: string, channelId: string) {
+  storage.appendLogBatch({
+    workspaceId: ws,
+    originId: namedShareOrigin(shareId, "member", "earlier-member-device"),
+    ops: sequenced([chatChannelCreate("group", { channelId })]).map(({ payload, ...op }) => ({
+      ...op,
+      payloadJson: JSON.stringify(payload),
+    })),
+  });
 }
 
 async function fixture() {
@@ -571,7 +584,7 @@ describe("work reference registration and resolution", () => {
   });
 
   it("accepts a General reference from each of the owner's devices, never one a member's create names", async () => {
-    const { handler } = await fixture();
+    const { handler, storage } = await fixture();
     const general = "channel_wire_general_v1";
     // Each device makes General before it syncs, under the one id every device gives it.
     for (const originId of ["device-a", "device-b"]) {
@@ -623,16 +636,14 @@ describe("work reference registration and resolution", () => {
       recipientUserId: "member",
       access: "read-write",
     });
+    appendEarlierMemberCreate(storage, shareId, "channel-general");
     const pushed = await handler(
       request(
         "member",
         `/sync/shares/${shareId}/log`,
         jsonBody({
           originId: "member-device",
-          ops: sequenced([
-            chatChannelCreate("group", { channelId: "channel-general" }),
-            chatChannelCreate("group", { channelId: "member-group" }),
-          ]),
+          ops: sequenced([chatChannelCreate("group", { channelId: "member-group" })]),
         }),
       ),
     );
@@ -656,7 +667,7 @@ describe("work reference registration and resolution", () => {
   });
 
   it("resolves a General link after a member's create took General's id first", async () => {
-    const { handler } = await fixture();
+    const { handler, storage } = await fixture();
     await appendLog(handler, "owner", ws, sequenced([chatChannelCreate("group")]), {
       originId: "device-a",
     });
@@ -665,17 +676,7 @@ describe("work reference registration and resolution", () => {
       recipientUserId: "member",
       access: "read-write",
     });
-    const pushed = await handler(
-      request(
-        "member",
-        `/sync/shares/${shareId}/log`,
-        jsonBody({
-          originId: "member-device",
-          ops: sequenced([chatChannelCreate("group", { channelId: "channel-general" })]),
-        }),
-      ),
-    );
-    expect(pushed.status, await pushed.clone().text()).toBe(200);
+    appendEarlierMemberCreate(storage, shareId, "channel-general");
     await appendLog(
       handler,
       "owner",
