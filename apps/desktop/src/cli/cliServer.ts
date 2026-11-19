@@ -632,7 +632,7 @@ export interface CliServerOptions {
   // Try again for a conversation's stopped agent request, as the chat runs it.
   chatRuns?: Pick<
     ChatDispatchService,
-    "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly"
+    "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly" | "selfTestReply"
   >;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
@@ -4565,8 +4565,21 @@ async function dispatchWorkspace(
     }
 
     case "reply": {
-      const { threadId, messages } = await readReplyThread(context, chats, request.args.thread);
       const actor = writeActor(request.args.actor, context, options);
+      const selfTestReplyId =
+        actor === "agent"
+          ? (options.chatRuns?.selfTestReply(context.workspaceId, {
+              threadId: request.args.thread,
+              body: request.args.body,
+              runAgentId:
+                context.connected === undefined && context.run?.runId === null
+                  ? context.run.agentId
+                  : null,
+            }) ?? null)
+          : null;
+      if (selfTestReplyId !== null)
+        return { threadId: request.args.thread, messageId: selfTestReplyId };
+      const { threadId, messages } = await readReplyThread(context, chats, request.args.thread);
       const parent = request.args.to
         ? resolveMessageInThread(request.args.to, messages)
         : actor === "agent"

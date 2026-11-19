@@ -954,9 +954,9 @@ pub struct StartChannelThread {
     pub message_id: String,
     pub title: Option<String>,
     pub lane: ChatThreadLane,
-    /// Desktop's own thread in an agent DM, an automation's wake thread or the
-    /// runner self-test, stays its own post instead of joining the DM's
-    /// conversation. People, the CLI and MCP never set it.
+    /// Desktop's own thread in an agent DM, such as an automation's wake thread,
+    /// stays its own post instead of joining the DM's conversation. People, the
+    /// CLI and MCP never set it.
     pub own_thread: bool,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,

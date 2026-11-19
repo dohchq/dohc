@@ -749,6 +749,31 @@ function hitAtCenter(toast: Locator): Promise<string> {
   });
 }
 
+test("Check in Settings gets the agent's reply without posting in its chat", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-check-no-post-e2e");
+    await seedRunnerSettings(temp, "report");
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+    await trustOpenWorkspace(desktop);
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("agents")).click();
+    await page.getByTestId("agent-row").click();
+    await page.getByTestId("agent-check").click();
+    await expect(page.getByTestId("agent-check-state")).toContainText(/Replied in \d+ s/u);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
+    await openMyAgent(page);
+    await expect(page.getByText("No messages yet.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reply here to check the agent connection.")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("failed agent checks stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

@@ -4786,20 +4786,6 @@ const chatDispatchService = createChatDispatchService({
   listOpenWorkspaces: openDispatchWorkspaces,
   listSyncWorkspaces: syncDispatchWorkspaces,
   chatStoreFor: linkedChatStoreFor,
-  startSelfTestThread: (workspace, input) =>
-    withWorkspaceAttachmentAsync(workspace, async (lease) => {
-      const started = await chatWrites.startThread(
-        { workspaceId: workspace.workspaceId, store: linkedChatStoreFor(lease) },
-        {
-          ...input,
-          ownThread: true,
-          // CLI origin keeps this person's test message from starting an agent run.
-          writer: { via: "cli", actor: "human" },
-          resolveAttachments: async () => [],
-        },
-      );
-      return started.thread.id;
-    }),
   dispatchStoreFor: (workspace) => agentDispatchStoreHandleFor(workspace).store,
   readDispatchAgents: async () =>
     listAgents((await readCachedUserSettingsFile(stateDir())).settings),
