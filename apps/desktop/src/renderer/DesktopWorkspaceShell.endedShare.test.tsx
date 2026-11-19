@@ -430,6 +430,57 @@ describe("ended Edit Collection shares", () => {
     }
   });
 
+  it("offers editing after the owner raises the level, once the person returns to the window", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, SHARE_VIEW));
+    await screen.findByText("Retained task");
+    await act(async () => undefined);
+    expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    const refreshes = () =>
+      (bridge.refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).map(
+        ([payload]) => payload.trigger,
+      );
+    const fullRefreshes = () => refreshes().filter((trigger) => trigger === "manual").length;
+    const returnToWindow = async () => {
+      const checks = bridge.checkSharedViewAccess.mock.calls.length;
+      const pulls = refreshes().length;
+      focusAfterMinimum();
+      await waitFor(() => {
+        expect(bridge.checkSharedViewAccess.mock.calls.length).toBe(checks + 1);
+        expect(refreshes().length).toBeGreaterThan(pulls);
+      });
+      await act(async () => undefined);
+    };
+    await returnToWindow();
+    expect(fullRefreshes()).toBe(0);
+
+    bridge.checkSharedViewAccess.mockResolvedValue({
+      status: "current",
+      access: "view",
+      relayStatesMore: true,
+    });
+    await returnToWindow();
+    await waitFor(() => expect(fullRefreshes()).toBe(1));
+    expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({
+      workspaceId: SHARE_VIEW.workspaceId,
+      trigger: "manual",
+    });
+    await waitFor(() =>
+      expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false),
+    );
+
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    view.rerender(shell(bridge, EDIT_SHARE));
+    expect(await screen.findByTestId("collection-new-record")).toBeTruthy();
+    expect(screen.getByTestId("share-changes-send")).toBeTruthy();
+    await returnToWindow();
+    expect(fullRefreshes()).toBe(1);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    view.unmount();
+  });
+
   it("shows the access-ended notice for a save after the owner stops sharing", async () => {
     const bridge = collectionBridge();
     bridge.readWorkspaceText.mockResolvedValue({

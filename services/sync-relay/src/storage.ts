@@ -1785,6 +1785,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return result;
   }
 
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult {
+    const result = sharesStorage.retuneNamedShareGrant(this, input);
+    if (result.ok) notifyDesktopReadiness(this, { shareId: result.grant.shareId });
+    return result;
+  }
+
   revokeShareGrant(input: {
     shareId: string;
     grantId: string;

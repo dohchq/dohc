@@ -5348,6 +5348,32 @@ export const RevokeRelayShareGrantPayload = z
   .strict();
 export type RevokeRelayShareGrantPayload = z.infer<typeof RevokeRelayShareGrantPayload>;
 
+export const RetuneRelayShareGrantPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+  })
+  .strict();
+export type RetuneRelayShareGrantPayload = z.infer<typeof RetuneRelayShareGrantPayload>;
+
+export const RetuneRelayShareGrantResult = z
+  .object({
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+    generation: z.number().int().min(1),
+    status: z.literal("active"),
+    revokedAtMs: z.null(),
+    parentGrantId: OPAQUE_ID.nullable(),
+  })
+  .strict();
+export type RetuneRelayShareGrantResult = z.infer<typeof RetuneRelayShareGrantResult>;
+
+export const RelayShareGrantRetuneResponse = RetuneRelayShareGrantResult.extend({
+  ok: z.literal(true),
+}).strict();
+
 const RelayShareNamedGrantTransitionBase = {
   grantId: OPAQUE_ID,
   access: SHARE_ACCESS,
@@ -6668,6 +6694,7 @@ export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessP
 export const CheckSharedViewAccessResult = z.object({
   status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
   access: z.enum(["view", "comment", "edit"]).optional(),
+  relayStatesMore: z.literal(true).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 

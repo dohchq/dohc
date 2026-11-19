@@ -934,7 +934,7 @@ export function CollectionPage({
       : (draftAccess.current.writeRefusal ??
         (draftAccess.current.accessEnded
           ? "Your access to this share ended."
-          : "Your access to this share changed. Ask for Edit access, then reopen the share."));
+          : "Your access to this share changed. Ask for Edit access, then return to this window."));
   mayNotWrite.current = accessRefusal;
   // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
   const knownRecords = useRef(new Map<string, CollectionRecord>());
