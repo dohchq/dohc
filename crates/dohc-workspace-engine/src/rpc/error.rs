@@ -317,7 +317,16 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
             "Open the workspace in dohc first, then try again.",
         );
     }
-    if let Some(refused) = storage_failure(error) {
+    if let Some(
+        refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
+        | dohc_engine_storage::StorageError::ForeignDatabase
+        | dohc_engine_storage::StorageError::MigrationFailed { .. }
+        | dohc_engine_storage::StorageError::MigratedByNewerBuild { .. }
+        | dohc_engine_storage::StorageError::StateCorrupt { .. }
+        | dohc_engine_storage::StorageError::DiskFull { .. }
+        | dohc_engine_storage::StorageError::PermissionDenied { .. }),
+    ) = storage_failure(error)
+    {
         return storage_refusal(refused);
     }
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error
@@ -1041,6 +1050,13 @@ mod tests {
                 }),
                 "migration-failed: engine migration failed to apply: missing table",
                 "engine: internal refusal: INTERNAL migration-failed",
+            ),
+            (
+                RuntimeError::Storage(StorageError::InvalidInput {
+                    reason: "engine store role mismatch",
+                }),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL invalid-input",
             ),
         ] {
             let (wire, logged) = map_runtime_logged(error);
