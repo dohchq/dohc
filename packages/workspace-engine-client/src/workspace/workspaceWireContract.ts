@@ -1398,6 +1398,7 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.conflictsResolve]: Schema.Union([
     mutableStruct({
       conflict: ConflictRecordSchema,
+      placed: Schema.Boolean,
       write: Schema.NullOr(JsonObjectSchema),
       delete: Schema.NullOr(JsonObjectSchema),
     }),

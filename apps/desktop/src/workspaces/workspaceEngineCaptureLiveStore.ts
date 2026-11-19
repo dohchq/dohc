@@ -1432,6 +1432,7 @@ export function createCaptureLiveStores(
         return {
           kind: "resolved",
           conflict,
+          placed: raw.placed,
           write: {
             object: fileObjectFromWire(write.object),
             // One reader for both: a settled body and the moment’s `afterText`
@@ -1457,6 +1458,7 @@ export function createCaptureLiveStores(
         return {
           kind: "resolved",
           conflict,
+          placed: raw.placed,
           delete: {
             object: fileObjectFromWire(deletion.object),
             before: snapshotFromWire(deletion.before, input.metadata),
@@ -1468,7 +1470,7 @@ export function createCaptureLiveStores(
           },
         };
       }
-      return { kind: "resolved", conflict };
+      return { kind: "resolved", conflict, placed: raw.placed };
     },
 
     async flushCapture(options: { signal?: AbortSignal } = {}) {

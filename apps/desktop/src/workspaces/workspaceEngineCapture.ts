@@ -8044,7 +8044,6 @@ export function createWorkspaceEngineCapture(
 
     resolveConflict(conflictId, resolution) {
       return enqueueResult("resolve conflict", async () => {
-        const policy = await readPolicyForTask();
         const engine = await engineStore();
         // The engine refuses to resolve a file an open document holds, so
         // vacate live sessions first, as a merge does.
@@ -8063,50 +8062,17 @@ export function createWorkspaceEngineCapture(
             correlationId: `conflict-${conflictId}`,
           },
         });
-        // A kept moment changes the shared head while retaining the disk bytes.
-        // Only materialize a choice that changes the active version's content.
-        const activeVersionId = await activeVersionIdOf(engine);
-        if (result.conflict.targetVersionId === activeVersionId) {
-          const materializeResolution = async (writes: Parameters<typeof materialize>[0]) => {
-            await materialize(writes, policy);
-            // Establish the restored baseline before the next external edit.
-            await engine.reconcileCapture?.();
-          };
-          if (result.write && resolution.kind !== "keep-current") {
-            await materializeResolution([
-              await materializeWriteForSnapshot(engine, result.write.snapshot),
-            ]);
-          } else if (result.delete) {
-            await materializeResolution([{ kind: "delete", path: result.delete.before.path }]);
-          } else if (
-            result.conflict.chosenFrom === "incoming" &&
-            result.conflict.incoming.contentKind === "binary"
-          ) {
-            // Binary bytes never ride in a resolve result, so the engine
-            // reports no write. Read back the head the resolution wrote and
-            // mirror it, or the folder keeps the losing side's bytes.
-            const head = await engine.readTextFile({
-              workspaceId,
-              versionId: result.conflict.targetVersionId,
-              path: result.conflict.path,
-            });
-            if (!head) {
-              // Going quiet here would leave the folder on the losing bytes
-              // while the engine reports the conflict resolved. This message
-              // reaches the conflict panel, so it stays in the user's nouns;
-              // the precise state goes on the cause, for the log.
-              throw new Error(
-                `dohc could not keep the copy you chose for ${result.conflict.path}. The folder still has the other copy. Open the merge again and choose once more.`,
-                {
-                  cause: new Error(
-                    `resolved conflict ${result.conflict.id} has no head at ${result.conflict.path} in ${result.conflict.targetVersionId}`,
-                  ),
-                },
-              );
-            }
-            await materializeResolution([await materializeWriteForSnapshot(engine, head)]);
-          }
+        if (!result.placed) {
+          throw new Error(
+            `dohc could not keep the copy you chose for ${result.conflict.path}. The folder still has the other copy. Open the merge again and choose once more.`,
+            {
+              cause: new Error(
+                `resolved conflict ${result.conflict.id} was not placed at ${result.conflict.path} in ${result.conflict.targetVersionId}`,
+              ),
+            },
+          );
         }
+        await engine.reconcileCapture?.();
         const remaining = await engine.listTextConflicts({
           workspaceId,
           status: "open",

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename } from "node:fs/promises";
+import { mkdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { expect, it } from "vitest";
@@ -23,6 +23,7 @@ import {
   pullAndExpect,
   type OpenEditor,
 } from "./twoDaemonSync.fixture";
+import { waitForPathMoments } from "./waitForPathMoments";
 
 interface Pair {
   a: LiveDaemonCapture;
@@ -201,6 +202,36 @@ it.skipIf(engine.missing)(
       await pushUntilDrained(pair.a.relay);
       await pullCaptured(pair.b.relay, pair.b.capture);
       expect(await readFile(join(pair.rootB, path))).toEqual(again);
+    });
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "a page deleted in a file manager after taking the other computer's copy in a delete conflict leaves both computers",
+  async () => {
+    const path = "note.md";
+    await withPair("hand-delete-after-resolve", path, "base\n", async (pair) => {
+      await rm(join(pair.rootA, path));
+      await pair.a.reconcileCapture();
+      expect(await pair.a.capture.fileObjectIdForPath(path)).toBeNull();
+      await writeAndCapture(pair.b, pair.rootB, path, "changed on B\n");
+      for (const daemon of [pair.a, pair.b]) await pushUntilDrained(daemon.relay);
+      for (const daemon of [pair.a, pair.b]) await pullCaptured(daemon.relay, daemon.capture);
+      const open = await openConflicts(pair.a);
+      expect(open).toHaveLength(1);
+      await pair.a.capture.resolveConflict(open[0]!.id, { kind: "apply-incoming" });
+      expect(await readFile(join(pair.rootA, path), "utf8")).toBe("changed on B\n");
+      const recorded = (await waitForPathMoments(pair.a.capture, path, 1)).length;
+      await rm(join(pair.rootA, path));
+      const [latest] = (await waitForPathMoments(pair.a.capture, path, recorded + 1)).sort(
+        (a, b) => b.momentOrder - a.momentOrder,
+      );
+      expect(latest?.operation).toBe("delete");
+      expect(await settled(pair, path)).toMatchObject({
+        a: { text: null, open: [] },
+        b: { text: null, open: [] },
+      });
     });
   },
   120_000,

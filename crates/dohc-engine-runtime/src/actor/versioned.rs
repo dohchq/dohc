@@ -25,14 +25,15 @@ use dohc_engine_domain::{
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
-    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, NoFaults, Preimage,
-    StorageError, TxnOutcome, hex_sha256,
+    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, MaterializationOperation,
+    NoFaults, Preimage, StorageError, TxnOutcome, hex_sha256,
 };
 use dohc_engine_sync::{
     ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
     apply_conflict_envelope, read_replayed_refusal, retain_refusal_for_direct_retry,
 };
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -723,46 +724,56 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, leases, None, faults, token)
-            .await
-    }
-
-    /// Resolve and index a text conflict with the workspace root owned by the
-    /// calling session.
-    pub async fn conflict_resolve_indexed(
-        &self,
-        input: ResolveTextConflict,
-        leases: LeaseRegistry,
-        root_dir: PathBuf,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        self.conflict_resolve_with_root(input, leases, Some(root_dir), faults, token)
-            .await
-    }
-
-    async fn conflict_resolve_with_root(
-        &self,
-        input: ResolveTextConflict,
-        leases: LeaseRegistry,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<ResolveTextConflictResult, RuntimeError> {
         self.run(move |store, cache| {
-            let outcome = conflict_resolve_on_store(
-                store,
-                &input,
-                root_dir.as_deref(),
-                &leases,
-                faults.as_ref(),
-                &token,
-            );
+            let outcome =
+                conflict_resolve_on_store(store, &input, None, &leases, faults.as_ref(), &token);
             // Resolution can replace or archive a lineage; the tuple probe
             // already misses on every such outcome (the claim id changes or
             // the marker is deleted), but the reset hooks are unconditional.
             cache.clear();
             outcome
+        })
+        .await
+    }
+
+    /// Resolve and index a text conflict with the workspace root owned by the
+    /// calling session, then place the result in that root. The flag is false
+    /// when a file the resolution changed could not be placed.
+    pub async fn conflict_resolve_indexed(
+        &self,
+        input: ResolveTextConflict,
+        leases: LeaseRegistry,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(ResolveTextConflictResult, bool), RuntimeError> {
+        self.run(move |store, cache| {
+            let waiting: HashSet<String> = store
+                .list_pending_materialization_jobs()?
+                .into_iter()
+                .map(|job| job.job_id)
+                .collect();
+            let outcome = conflict_resolve_on_store(
+                store,
+                &input,
+                Some(&root_dir),
+                &leases,
+                faults.as_ref(),
+                &token,
+            );
+            cache.clear();
+            let result = outcome?;
+            let placed = place_resolution(
+                store,
+                &root_dir,
+                &input.workspace_id,
+                waiting,
+                self_writes.as_ref(),
+                input.now_ms,
+                faults.as_ref(),
+            );
+            Ok((result, placed))
         })
         .await
     }
@@ -3234,6 +3245,43 @@ fn conflict_resolve_on_store(
         write.automation_claims = automation_claims;
     }
     Ok(result)
+}
+
+/// Place each job the resolution queued, removals first. False when one ended
+/// without its bytes on disk.
+fn place_resolution(
+    store: &EngineStore,
+    root: &std::path::Path,
+    workspace_id: &str,
+    waiting: HashSet<String>,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> bool {
+    let Ok(pending) = store.list_pending_materialization_jobs() else {
+        return false;
+    };
+    let mut queued: Vec<_> = pending
+        .into_iter()
+        .filter(|job| !waiting.contains(&job.job_id))
+        .collect();
+    queued.sort_by_key(|job| job.operation != MaterializationOperation::Delete);
+    queued
+        .iter()
+        .filter(|job| {
+            !materialize_expected_job(
+                store,
+                root,
+                workspace_id,
+                &job.job_id,
+                self_writes,
+                now_ms,
+                faults,
+                None,
+            )
+        })
+        .count()
+        == 0
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error
