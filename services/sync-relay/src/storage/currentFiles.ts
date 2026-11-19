@@ -345,6 +345,7 @@ export function applyCurrentFileOp(
   opKind: string,
   payloadJson: string,
   relaySeq: number,
+  ownerSaveOfStoppedNote = false,
 ): void {
   let parsed: unknown;
   try {
@@ -417,7 +418,17 @@ export function applyCurrentFileOp(
     if (!before) return;
     const current = statements.get.get(workspaceId, versionId, before.path);
     if (current !== undefined) {
-      if (current.blob_sha256 !== before.blobSha256) return;
+      if (
+        current.blob_sha256 !== before.blobSha256 &&
+        !(
+          operation === "write" &&
+          versionId === "main" &&
+          before.path === afterPath &&
+          payload.payloadAfterContentKind !== "binary" &&
+          ownerSaveOfStoppedNote
+        )
+      )
+        return;
       if (
         before.path !== afterPath &&
         statements.get.get(workspaceId, versionId, afterPath) !== undefined

@@ -506,6 +506,23 @@ export function readServiceHostEnrollmentByObjectId(
     .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
   return value ? row(value) : null;
 }
+/** Whether the owner's save at this path continues the note they stopped, so it may build on a host save it never imported. */
+export function isOwnerSaveOfStoppedNote(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; objectId: string; path: string },
+): boolean {
+  const { workspaceId, userId, objectId, path } = input;
+  const enrollment = storage.db
+    .prepare(
+      `SELECT path FROM ${SERVICE_HOST_ENROLLMENTS}
+        WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND owner_stop='retire'`,
+    )
+    .get(workspaceId, objectId, userId);
+  return (
+    enrollment?.path === path &&
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId
+  );
+}
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
 const reclaimable = (enrollment: ServiceHostEnrollment) =>
   enrollment.retired && enrollment.ownerStop === null;

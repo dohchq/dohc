@@ -37,6 +37,7 @@ import {
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
 import { recordPushDeliveries } from "./pushDeliveries";
+import { isOwnerSaveOfStoppedNote } from "./serviceHostEnrollment";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -317,6 +318,7 @@ export function appendLogBatchInTransaction(
   const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
   const versionSnapshotBlobStmt = storage.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
   const currentFileStmt = currentFileStatements(storage.db);
+  const owner = input.workReferences?.userId;
   const pushMessages: number[] = [];
   for (const op of newOps) {
     const result = insertStmt.run(
@@ -352,8 +354,18 @@ export function appendLogBatchInTransaction(
         op.payloadJson,
         Number(result.lastInsertRowid),
       );
+    const resolved =
+      op.opKind === "moment.append" ? objectPathFromMomentPayload(op.payloadJson) : null;
+    const ownerSaveOfStoppedNote =
+      owner !== undefined &&
+      resolved?.path != null &&
+      isOwnerSaveOfStoppedNote(storage, {
+        workspaceId: input.workspaceId,
+        userId: owner,
+        objectId: resolved.objectId,
+        path: resolved.path,
+      });
     if (op.opKind === "moment.append") {
-      const resolved = objectPathFromMomentPayload(op.payloadJson);
       if (resolved) {
         objectPathStmt.run(
           input.workspaceId,
@@ -417,6 +429,7 @@ export function appendLogBatchInTransaction(
       op.opKind,
       op.payloadJson,
       Number(result.lastInsertRowid),
+      ownerSaveOfStoppedNote,
     );
   }
   for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
