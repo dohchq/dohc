@@ -1048,16 +1048,27 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     }
 }
 
-fn status_history(b: &EngineStore) -> Vec<(Option<String>, Option<String>)> {
+type StatusChange = (Option<String>, Option<String>, Option<String>);
+
+fn status_history(b: &EngineStore) -> Vec<StatusChange> {
     b.read_with(|conn| {
         conn.prepare(
-            "SELECT previous_value_json,next_value_json FROM collection_field_history \
+            "SELECT previous_value_json,next_value_json,author_origin_id \
+             FROM collection_field_history \
              WHERE workspace_id='ws' AND field_name='Status' ORDER BY history_id",
         )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect()
     })
     .expect("Status history")
+}
+
+fn status_change(previous: &str, next: &str, author: Option<&str>) -> StatusChange {
+    (
+        Some(format!("\"{previous}\"")),
+        Some(format!("\"{next}\"")),
+        author.map(str::to_owned),
+    )
 }
 
 #[test]
@@ -1096,11 +1107,74 @@ fn choosing_a_side_that_changes_a_field_records_its_history() {
             let after = status_history(&b);
             assert_eq!(
                 after[before.len()..],
-                [(Some("\"Planned\"".to_owned()), Some("\"Flown\"".to_owned()))],
+                [status_change("Planned", "Flown", None)],
                 "{label}"
             );
         }
     }
+}
+
+#[test]
+fn another_computer_records_the_history_of_a_chosen_side() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    let (_c_scratch, _c_path, mut c) = device_b(&created, &planned);
+    let scrubbed = md(&PLANNED.replace("Planned", "Scrubbed"));
+    a_saves(
+        &mut b,
+        RECORD,
+        RECORD_PATH,
+        &scrubbed,
+        "apollo-scrubbed",
+        25,
+    );
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    hydrate(&mut b, &[&flown]);
+    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
+    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
+    let b_ops: Vec<ReplicationEnvelope> = b
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT origin_seq,op_kind,payload_json,recorded_at_ms \
+                 FROM replication_log WHERE workspace_id='ws' AND imported=0 \
+                 ORDER BY origin_seq",
+            )?
+            .query_map([], |row| {
+                Ok(ReplicationEnvelope {
+                    recorded_at_ms: row.get(3)?,
+                    ..envelope(
+                        "device-b",
+                        row.get(0)?,
+                        &row.get::<_, String>(1)?,
+                        serde_json::from_str(&row.get::<_, String>(2)?).expect("B's op"),
+                    )
+                })
+            })?
+            .collect()
+        })
+        .expect("B's ops");
+    let decision = b_ops
+        .iter()
+        .find(|op| op.op_kind == "conflict.resolve")
+        .expect("B journals its decision");
+    hydrate(&mut c, &[&scrubbed, &flown]);
+    let before = status_history(&c);
+
+    for op in b_ops.iter().chain([decision]) {
+        deliver(&mut c, op, &NoLiveLeases).expect("C takes B's ops");
+    }
+    assert!(open_conflicts(&c).is_empty());
+    assert_eq!(head_text(&c, RECORD), Some(flown));
+    assert_eq!(indexed_status(&c), Some(json!("Flown")));
+    assert_eq!(
+        status_history(&c)[before.len()..],
+        [
+            status_change("Planned", "Scrubbed", Some("device-b")),
+            status_change("Scrubbed", "Flown", Some("device-b"))
+        ]
+    );
 }
 
 #[test]

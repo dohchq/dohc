@@ -4740,21 +4740,40 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
-        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+        ResultingHead::Text { path, text } => match fold_complete_ydoc_lineage_in_tx(
             tx,
             &complete,
             path,
             text,
-            LineageFoldAuthor::default(),
+            LineageFoldAuthor {
+                actor_origin_id,
+                ..LineageFoldAuthor::default()
+            },
             now_ms,
             LineageFoldCause::ConflictParent,
-        )
-        .map(|_| ()),
-        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+        )? {
+            LineageFold::Folded { facts, .. } => Ok(facts.map(|facts| *facts)),
+            LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                path,
+                text,
+                actor_origin_id,
+                None,
+                now_ms,
+            )
+            .map_err(map_domain_hard_error),
+        },
+        ResultingHead::BinaryOrAbsent => {
+            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+        }
     }
 }
 

@@ -2686,8 +2686,7 @@ fn commit_imported_lineage(
 ) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
     let now_ms = envelope.recorded_at_ms;
     let Some(transition) = payload.lineage_transition.as_ref() else {
-        reconcile_unbound_receiver_lineages(tx, payload, now_ms)?;
-        return Ok(None);
+        return reconcile_unbound_receiver_lineages(tx, payload, &envelope.origin_id, now_ms);
     };
     let key = key.ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve lineage transition has no current object",
@@ -2819,8 +2818,9 @@ fn installed_record_facts(
 fn reconcile_unbound_receiver_lineages(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
+    resolver_origin_id: &str,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
     let current_key = payload
         .current
         .present()
@@ -2858,27 +2858,31 @@ fn reconcile_unbound_receiver_lineages(
                 tx,
                 current_key,
                 crate::ResultingHead::BinaryOrAbsent,
+                None,
                 now_ms,
             )?;
         }
-        reconcile_unbound_result_head(tx, payload, result_key, now_ms)?;
+        reconcile_unbound_result_head(tx, payload, result_key, resolver_origin_id, now_ms)
     } else if let Some(current_key) = current_key.as_ref() {
         crate::ydoc_apply::reconcile_conflict_parent_resulting_head_in_tx(
             tx,
             current_key,
             crate::ResultingHead::BinaryOrAbsent,
+            None,
             now_ms,
-        )?;
+        )
+    } else {
+        Ok(None)
     }
-    Ok(())
 }
 
 fn reconcile_unbound_result_head(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
     key: &DocKey,
+    resolver_origin_id: &str,
     now_ms: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<CollectionRecordApplyFacts>, SyncError> {
     let result = payload.result.present().ok_or(SyncError::InvalidInput {
         reason: "conflict.resolve result object is absent",
     })?;
@@ -2888,6 +2892,7 @@ fn reconcile_unbound_result_head(
                 tx,
                 key,
                 crate::ResultingHead::BinaryOrAbsent,
+                None,
                 now_ms,
             )
         }
@@ -2900,6 +2905,7 @@ fn reconcile_unbound_result_head(
                     path: &payload.paths[result.path_ref],
                     text: &text,
                 },
+                Some(resolver_origin_id),
                 now_ms,
             )
         }
