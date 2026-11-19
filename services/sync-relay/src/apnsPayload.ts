@@ -25,8 +25,10 @@ function withholdTargets(text: string): string {
   let at = 0;
   for (let found = opener.exec(text); found; found = opener.exec(text)) {
     let end = opener.lastIndex;
-    for (let depth = 1; depth > 0 && end < text.length && !"\r\n".includes(text[end]!); end++)
-      depth += text[end] === "(" ? 1 : text[end] === ")" ? -1 : 0;
+    for (let depth = 1; depth > 0 && end < text.length && !"\r\n".includes(text[end]!); end++) {
+      if (text[end] === "\\" && !"\r\n".includes(text[end + 1] ?? "\n")) end++;
+      else depth += text[end] === "(" ? 1 : text[end] === ")" ? -1 : 0;
+    }
     kept += text.slice(at, found.index) + found[1];
     at = opener.lastIndex = end;
   }

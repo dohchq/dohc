@@ -746,6 +746,7 @@ it.each([
   ["a target with parentheses", "[doc](https://files.example/report(2026)/invite/SECRET)", "doc"],
   ["a target with a query after parentheses", "[doc](https://example.com/a(b)?secret=4417)", "doc"],
   ["a relative target with a title", '[doc](/private/SECRET "Document")', "doc"],
+  ["a target with an escaped parenthesis", "[doc](https://files.example/a\\)/invite/SECRET) after", "doc after"],
   ["a target never closed", "[doc](https://x.example/(a)/SECRET\nnext", "doc next"],
   ["a host without a dot", "see https://intranet/private?code=SECRET now", "see intranet now"],
   ["a URL with no host", "open file:///Users/kim/SECRET.txt", "open a link"],
