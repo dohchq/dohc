@@ -18,17 +18,6 @@ import {
 } from "../shareFilter";
 import type { StorageContext } from "./context";
 
-/**
- * The reader's grants changed while a reference collection ran. The pull
- * builds its answer again rather than serve mappings read under two grants.
- */
-export class StaleReferenceCollection extends Error {
-  constructor() {
-    super("work references changed during collection");
-    this.name = "StaleReferenceCollection";
-  }
-}
-
 export const WORK_REFERENCE_BATCH = 128;
 export const WORK_REFERENCE_SCAN_LIMIT = 1024;
 export function indexReceivedWorkTargets(
@@ -696,8 +685,6 @@ export async function listWorkReferences(
         }
       : null;
   };
-  // A revoked reader still reads as not-found, from authorize. A grant that
-  // changed while the collection ran makes it stale.
   const checkAuthority = () => {
     if (authorize() !== shareVersion) throw new StaleReferenceCollection();
   };
