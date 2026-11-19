@@ -22,7 +22,8 @@ test(
       script,
       template
         .replaceAll("${executable}", "dohc-desktop")
-        .replaceAll("${sanitizedProductName}", "dohc"),
+        .replaceAll("${sanitizedProductName}", "dohc")
+        .replaceAll("/etc/apparmor.d/", `${root}/`),
     );
     const calls = join(root, "calls.txt");
     await writeFile(
