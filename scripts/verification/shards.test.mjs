@@ -806,7 +806,7 @@ function passingCloudJobs() {
 }
 
 function publishAggregate(outputDirectory, aggregate) {
-  const published = join(outputDirectory, "verification-js-1");
+  const published = join(outputDirectory, "published");
   mkdirSync(published, { recursive: true });
   if (aggregate) writeFileSync(join(published, "js-result.json"), JSON.stringify(aggregate));
   else copyFileSync(join(outputDirectory, "js-result.json"), join(published, "js-result.json"));
@@ -2862,11 +2862,20 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     }),
     /aggregate.*commit/u,
   );
-  rmSync(join(outputDirectory, "verification-js-1"), { recursive: true });
+  rmSync(join(outputDirectory, "published"), { recursive: true });
   await assert.rejects(
     verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }),
     /Expected one JavaScript aggregate, found 0/u,
   );
+  for (const [attempt, verdict] of [
+    [1, "FAIL"],
+    [2, "PASS"],
+  ]) {
+    const published = join(outputDirectory, "published", `verification-js-${attempt}`);
+    mkdirSync(published, { recursive: true });
+    writeFileSync(join(published, "js-result.json"), JSON.stringify({ verdict, commit }));
+  }
+  await verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory });
 });
 test("preparation spends only artifact requests before two minutes", async (t) => {
   const log = t.mock.method(console, "log", () => {});
