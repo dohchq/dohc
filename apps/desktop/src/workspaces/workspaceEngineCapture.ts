@@ -4093,7 +4093,9 @@ export function createWorkspaceEngineCapture(
         return current?.ownerBound;
       },
       // Behind the edits already handed over, so the generation holds them.
-      leaveLiveEditing(leave) {
+      // Edits that arrive meanwhile wait behind it and never reach the engine,
+      // so `late` gets them with the state they build on.
+      leaveLiveEditing(leave, late) {
         if (closed) return Promise.reject(closedError());
         return append(async () => {
           const generation = current;
@@ -4102,12 +4104,21 @@ export function createWorkspaceEngineCapture(
             return leave(Y.encodeStateAsUpdate(canonicalDoc, Y.encodeStateVector(recordedDoc)));
           }
           leaving = generation;
+          let left;
           try {
-            return await generation.leaveLiveEditing(leave);
+            left = await generation.leaveLiveEditing(leave);
           } catch (error) {
             if (generation.ownerBound) leaving = null;
             throw error;
           }
+          if (late && canonicalDoc !== null && queuedOriginals.size > 0)
+            late(
+              Y.mergeUpdates([
+                Y.encodeStateAsUpdate(canonicalDoc),
+                ...[...queuedOriginals].map((original) => original.update),
+              ]),
+            );
+          return left;
         });
       },
       contentKind,
@@ -6676,8 +6687,8 @@ export function createWorkspaceEngineCapture(
         get ownerBound() {
           return session.ownerBound;
         },
-        leaveLiveEditing(leave) {
-          return session.leaveLiveEditing!(leave);
+        leaveLiveEditing(leave, late) {
+          return session.leaveLiveEditing!(leave, late);
         },
         async readArtifactAsset(descriptor) {
           const bytes = await engine.readBinaryBlob({

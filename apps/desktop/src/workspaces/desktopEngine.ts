@@ -242,10 +242,12 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
   notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
   // Runs `leave` between the edits of the editors here that edit the note at `path` live, given their unsent edits.
+  // `late` gets the edits that reached them while `leave` ran.
   leaveLiveEditing?<T>(
     workspaceId: string,
     path: string,
     leave: (unsent: Uint8Array[]) => Promise<T>,
+    late?: (edits: Uint8Array) => void,
   ): Promise<T>;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
@@ -1082,9 +1084,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                             create: (relative, text) =>
                               createDurableFile(operation.workspace.rootPath, relative, text),
                           },
-                          leaveLiveEditing: (path, leave) =>
+                          leaveLiveEditing: (path, leave, late) =>
                             dependencies.leaveLiveEditing
-                              ? dependencies.leaveLiveEditing(workspaceId, path, leave)
+                              ? dependencies.leaveLiveEditing(workspaceId, path, leave, late)
                               : leave([]),
                           render: (state) =>
                             dependencies.documentProjection.run({ kind: "file", state }),

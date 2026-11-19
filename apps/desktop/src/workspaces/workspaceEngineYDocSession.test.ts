@@ -2244,3 +2244,44 @@ it("pauses an open editor behind the typing it already handed over, then shows t
     editor.destroy();
   }
 });
+
+it("hands typing that reached it during the pause to late, with what it builds on", async () => {
+  await capture.stop();
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      ownerBound: false,
+    }),
+    onError: (context) => captureErrors.push(context),
+  });
+  const replacements = vi.fn();
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate() {},
+    onLineageReplaced: replacements,
+  });
+  const editor = mirrorEditor(session);
+  try {
+    typeIntoBody(editor, "Typed before the pause.");
+    const late: Uint8Array[] = [];
+    await session.leaveLiveEditing!(
+      async () => {
+        typeIntoBody(editor, " Typed during the pause.");
+      },
+      (edits) => late.push(edits),
+    );
+    expect(late).toHaveLength(1);
+    const copy = documentMarkdown(late[0]!);
+    expect(copy).toContain("Typed before the pause.");
+    expect(copy).toContain("Typed during the pause.");
+    await vi.waitFor(() => expect(replacements).toHaveBeenCalledOnce());
+    expect(journalMarkdown()).not.toContain("Typed during the pause.");
+  } finally {
+    await session.close({ settle: false });
+    editor.destroy();
+  }
+});
