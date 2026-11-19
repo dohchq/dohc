@@ -1286,6 +1286,14 @@ describe("chatDispatchService", () => {
       waiting: { agentId: "default", name: "Nova", triggerMessageIds: [followUp.id] },
     });
     expect(
+      await fixture.service.dispatchStateForThread(
+        WORKSPACE_ID,
+        "thread-other-device",
+        [],
+        [trigger.threadId],
+      ),
+    ).toMatchObject({ pendingCount: 1 });
+    expect(
       await fixture.service.dispatchStateForThread(WORKSPACE_ID, null, [trigger.threadId]),
     ).toEqual({
       liveRunId: null,

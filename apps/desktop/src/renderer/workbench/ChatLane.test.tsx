@@ -569,7 +569,7 @@ describe("ChatLane", () => {
     // Each device started the group's conversation, so sync kept two chat-lane threads.
     bridgeMock.listChannelThreads.mockResolvedValue({
       threads: [
-        thread({ id: "thread-later", createdAtMs: 2_000, messageCount: 1 }),
+        thread({ id: "thread-later", createdAtMs: 2_000, messageCount: 2 }),
         thread({ id: "thread-first", createdAtMs: 1_000, messageCount: 1 }),
       ],
     });
@@ -577,7 +577,16 @@ describe("ChatLane", () => {
       messages:
         threadId === "thread-first"
           ? [message({ id: "a", threadId, body: "From the laptop", createdAtMs: 1_000 })]
-          : [message({ id: "b", threadId, body: "From the phone", createdAtMs: 2_000 })],
+          : [
+              message({ id: "b", threadId, body: "From the phone", createdAtMs: 2_000 }),
+              message({
+                id: "b-reply",
+                threadId,
+                body: "Booked",
+                parentMessageId: "b",
+                createdAtMs: 3_000,
+              }),
+            ],
     }));
     render(lane());
     await screen.findByText("From the laptop");
@@ -604,7 +613,23 @@ describe("ChatLane", () => {
       expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         threadId: "thread-later",
-        upToSequence: 1,
+        upToSequence: 2,
+      }),
+    );
+    // A reply to the phone's message goes on in the phone's thread.
+    fireEvent.click(await screen.findByTestId("chats-lane-thread-summary"));
+    const reply = await screen.findByTestId("chats-lane-thread-composer");
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({
+      message: message({ id: "d", threadId: "thread-later", body: "Thanks", parentMessageId: "b" }),
+    });
+    fireEvent.change(reply, { target: { value: "Thanks" } });
+    fireEvent.keyDown(reply, { key: "Enter" });
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-later",
+        body: "Thanks",
+        parentMessageId: "b",
       }),
     );
   });

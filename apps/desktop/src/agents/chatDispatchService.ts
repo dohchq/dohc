@@ -1910,7 +1910,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const lane = new Set([threadId, ...laneThreadIds]);
     const running =
       live && lane.has(live.claim.run.threadId) && !live.finalized ? live.claim.run : null;
-    const queued = pending.filter((pending) => pending.threadId === threadId);
+    const queued = pending.filter((pending) => lane.has(pending.threadId));
     // A request to the agent at work waits while that run holds the
     // workspace, which a stopped or timed-out run does until its process
     // exits and its end is saved. A pause holds the request instead, so it
