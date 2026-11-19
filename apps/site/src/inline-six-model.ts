@@ -365,7 +365,7 @@ export function createInlineSixEngine() {
     intakeCover,
     [0, 0.374, 0.12],
   );
-  badge.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
+  badge.rotation.set(-Math.PI / 2, 0, -Math.PI / 2);
 
   // Central spark plugs and six leads follow the valley between the cam housings.
   for (const [i, z] of stations.entries()) {
