@@ -6,8 +6,10 @@ import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { EmailShareForm } from "./EmailShareForm";
 import { notSentWords } from "./notSentWords";
 import { SHARE_ACCESS_WORDS, SharePersonRow } from "./shareAccess";
+import { INVITATION_SECRET } from "./shareCopySecrets";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
+import { CopyButton } from "./ui/CopyButton";
 import { MoreMenu } from "./ui/MoreMenu";
 import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
 import {
@@ -32,6 +34,21 @@ type InvitedPerson = { shareId: string; grantId: string; name: string; access: S
 
 const isShareAccess = (access: string | null): access is ShareAccess =>
   access !== null && access in SHARE_ACCESS_WORDS;
+
+async function invitationOf(
+  person: InvitedPerson,
+  reload: () => Promise<unknown>,
+): Promise<string | null> {
+  const details = await bridge().getShareCopyDetails({
+    shareId: person.shareId,
+    grantId: person.grantId,
+  });
+  if (details.status === "ended") {
+    void reload();
+    return null;
+  }
+  return details.browserInvitationUrl ?? details.shareCode;
+}
 
 // The people this selection was shared with by email, from the listing the
 // Sharing view reads. `scope` names the workspace and the selection. The
@@ -273,6 +290,14 @@ export function RelayShareDialog(props: {
                       name={person.name}
                       detail={`${person.access ? `${SHARE_ACCESS_WORDS[person.access]} · ` : ""}Invited by email`}
                     >
+                      <CopyButton
+                        iconOnly
+                        label="Copy invitation"
+                        copiedLabel="Invitation copied"
+                        testId={`share-copy-invitation-${person.grantId}`}
+                        sensitive={INVITATION_SECRET}
+                        getText={() => invitationOf(person, loadInvited)}
+                      />
                       {onOpenSharing ? (
                         <MoreMenu
                           label="Share options"
