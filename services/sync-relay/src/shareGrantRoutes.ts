@@ -917,15 +917,16 @@ export function createShareGrantRoutes(
         ...browserInvitation,
         generation: 1,
         createdAtMs,
-        ...(await emailShareInvitation({
-          inviterUserId: actor.userId,
-          recipientEmail: email,
-          shareId,
-          subjectName,
-          group: "kind" in selector,
-          access,
-          browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
-        })),
+        ...("kind" in selector
+          ? {}
+          : await emailShareInvitation({
+              inviterUserId: actor.userId,
+              recipientEmail: email,
+              shareId,
+              subjectName,
+              access,
+              browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+            })),
       });
     }
     throw relayError("method_not_allowed");

@@ -5,7 +5,6 @@ const invitation = {
   recipientEmail: "friend@example.test",
   inviterEmail: "owner@dohc.test",
   subjectName: "Trip plan",
-  group: false,
   access: "edit",
   browserInvitationUrl: "https://share.example.test/s/edit/grant-0",
   shareCode: "dohc-share:share-0:https://relay.example.test",
@@ -75,17 +74,6 @@ it("says Someone when the inviter's email cannot be read, and a file when the sh
   expect(message.subject).toBe("Someone shared a file with you");
   expect(message.text).toContain("Someone shared a file with you on dohc. You can edit it.");
   expect(message.text).toContain("You got this email because someone invited friend@example.test.");
-});
-
-it("calls an unnamed chat share a Group and gives it no file role", () => {
-  const message = shareInvitationMessage({
-    ...invitation,
-    subjectName: null,
-    group: true,
-    access: "read-write",
-  });
-  expect(message.subject).toBe("owner@dohc.test shared a Group with you");
-  expect(message.text.split("\n")[0]).toBe("owner@dohc.test shared a Group with you on dohc.");
 });
 
 it("keeps a hostile name on one line, capped, and inside the quotation marks", () => {

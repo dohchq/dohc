@@ -227,7 +227,6 @@ it("answers failed at the deadline when the mail server never answers", async ()
     recipientEmail: "friend@dohc.test",
     shareId: "share-0",
     subjectName: "Trip plan",
-    group: false,
     access: "edit",
     browserInvitationUrl: null,
   });
@@ -348,8 +347,8 @@ it("drops every inviter's attempts older than the window when one is written", a
   expect(attempts(f.storage, "owner")).toBe(1);
 });
 
-it("calls a chat share started by email a Group, not a file", async () => {
-  const { sent, invite } = await fixture();
+it("sends nothing for a chat started by email, and counts nothing", async () => {
+  const { storage, sent, invite } = await fixture();
 
   const reply = await invite({
     recipientEmail: "friend@dohc.test",
@@ -359,10 +358,10 @@ it("calls a chat share started by email a Group, not a file", async () => {
     subjectName: undefined,
   });
 
-  expect(reply).toMatchObject({ ok: true, invitationEmail: "sent" });
-  expect(sent).toHaveLength(1);
-  expect(sent[0]!.subject).toBe("owner@dohc.test shared a Group with you");
-  expect(sent[0]!.text.split("\n")[0]).toBe("owner@dohc.test shared a Group with you on dohc.");
+  expect(reply).toMatchObject({ ok: true });
+  expect(reply).not.toHaveProperty("invitationEmail");
+  expect(sent).toHaveLength(0);
+  expect(attempts(storage, "owner")).toBe(0);
 });
 
 it("answers failed and keeps the invite when the count cannot be written", async () => {

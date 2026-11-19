@@ -21,7 +21,6 @@ export interface ShareInvitation {
   recipientEmail: string;
   shareId: string;
   subjectName: string | null;
-  group: boolean;
   access: string;
   browserInvitationUrl: string | null;
 }
@@ -68,7 +67,6 @@ export function createShareInvitationEmailer(options: {
             recipientEmail: invitation.recipientEmail,
             inviterEmail: await verifiedEmail(invitation.inviterUserId),
             subjectName: invitation.subjectName,
-            group: invitation.group,
             access: invitation.access,
             browserInvitationUrl: invitation.browserInvitationUrl,
             shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),

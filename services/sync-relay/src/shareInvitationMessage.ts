@@ -42,7 +42,6 @@ export function shareInvitationMessage(input: {
   recipientEmail: string;
   inviterEmail: string | null;
   subjectName: string | null;
-  group: boolean;
   access: string;
   browserInvitationUrl: string | null;
   shareCode: string | null;
@@ -53,7 +52,7 @@ export function shareInvitationMessage(input: {
     /["\u201c\u201d\u201e\u201f\u00ab\u00bb]/gu,
     "'",
   );
-  const shared = `${inviter || "Someone"} shared ${name ? `"${name}"` : input.group ? "a Group" : "a file"} with you`;
+  const shared = `${inviter || "Someone"} shared ${name ? `"${name}"` : "a file"} with you`;
   const role = ROLE_SENTENCES.get(input.access);
   const paragraphs = [
     `${shared} on dohc.${role ? ` ${role}` : ""}`,
