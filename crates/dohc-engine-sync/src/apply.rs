@@ -15,19 +15,17 @@ use dohc_engine_domain::chats::{
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
-    ChatActorKind,
-    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
-    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
-    ThreadMessageResolution, ThreadReadResolution, attachment_id_for, channel_slug_for_name,
-    encode_poll_options, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
-    merge_account_thread_read, normalize_agent_owner_name, normalize_author_user_id,
-    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
-    normalize_feed_identity, normalize_poll_options, normalize_reaction_agent_id,
-    normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    resolve_thread_read_coordinate, validate_addressable_plaintext_path,
-    validate_replicated_link_author,
+    ChatActorKind, ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError,
+    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
+    ReplicatedMessageAuthor, ThreadMessageResolution, ThreadReadResolution, attachment_id_for,
+    channel_slug_for_name, encode_poll_options, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, merge_account_thread_read, normalize_agent_owner_name,
+    normalize_author_user_id, normalize_body, normalize_channel_group, normalize_channel_name,
+    normalize_display_name, normalize_feed_identity, normalize_poll_options,
+    normalize_reaction_agent_id, normalize_reaction_author_id, normalize_replicated_chat_id,
+    parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
+    resolve_follow_target, resolve_thread_message, resolve_thread_read_coordinate,
+    validate_addressable_plaintext_path, validate_replicated_link_author,
 };
 
 use crate::error::local_corruption;

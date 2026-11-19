@@ -154,7 +154,12 @@ fn reactors(engine: &mut EngineStore) -> Vec<(String, Option<String>)> {
         .list_reactions("ws", "thread-imported", None, 10)
         .expect("reactions")
         .into_iter()
-        .map(|reaction| (format!("{:?}", reaction.author_kind), reaction.author_agent_id))
+        .map(|reaction| {
+            (
+                format!("{:?}", reaction.author_kind),
+                reaction.author_agent_id,
+            )
+        })
         .collect();
     reactors.sort();
     reactors
@@ -167,9 +172,21 @@ fn reactions_from_a_person_and_each_agent_stay_apart_on_another_computer() {
     let writes = [
         (ChatActorKind::Human, None, ChatReactionState::Added),
         (ChatActorKind::Agent, None, ChatReactionState::Added),
-        (ChatActorKind::Agent, Some("codex"), ChatReactionState::Added),
-        (ChatActorKind::Agent, Some("terminal"), ChatReactionState::Added),
-        (ChatActorKind::Agent, Some("codex"), ChatReactionState::Removed),
+        (
+            ChatActorKind::Agent,
+            Some("codex"),
+            ChatReactionState::Added,
+        ),
+        (
+            ChatActorKind::Agent,
+            Some("terminal"),
+            ChatReactionState::Added,
+        ),
+        (
+            ChatActorKind::Agent,
+            Some("codex"),
+            ChatReactionState::Removed,
+        ),
     ];
     for (index, (author_kind, agent, state)) in writes.into_iter().enumerate() {
         LinkedChatStore::new(&mut source)

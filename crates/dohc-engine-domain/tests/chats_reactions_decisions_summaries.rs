@@ -307,15 +307,17 @@ fn reaction_cells_keep_a_person_and_each_of_their_agents_apart() {
             let payloads = statement
                 .query_map([WS], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, rusqlite::Error>(payloads
-                .iter()
-                .map(|payload| {
-                    serde_json::from_str::<serde_json::Value>(payload)
-                        .expect("payload")
-                        .get("authorAgentId")
-                        .and_then(|agent| agent.as_str().map(str::to_owned))
-                })
-                .collect())
+            Ok::<_, rusqlite::Error>(
+                payloads
+                    .iter()
+                    .map(|payload| {
+                        serde_json::from_str::<serde_json::Value>(payload)
+                            .expect("payload")
+                            .get("authorAgentId")
+                            .and_then(|agent| agent.as_str().map(str::to_owned))
+                    })
+                    .collect(),
+            )
         })
         .expect("replicated reactions");
     assert_eq!(
@@ -544,7 +546,10 @@ fn reaction_read_hides_tombstones_and_orphans() {
                  (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
                   author_display_name,state,at_ms,origin_id,origin_seq) \
                  VALUES (?1,?2,'thread','orphan','🎉','Bob','human','Bob','added',31,'peer',0)",
-                params![WS, reaction_id_for("orphan", "🎉", "Bob", ChatActorKind::Human, "")],
+                params![
+                    WS,
+                    reaction_id_for("orphan", "🎉", "Bob", ChatActorKind::Human, "")
+                ],
             )
             .map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
