@@ -3415,6 +3415,8 @@ type Row = [string, Record<string, unknown>];
 // The service host's feed once Stop opened the retirement (or before, with
 // `stopped` false): the owner applied the seed, and the edit accepted after
 // it, at F, waits for its application.
+const moveNoteAwayInObjectIndex = (f: ReturnType<typeof fixture>) =>
+  f.raw.exec("UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id='object'");
 async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true, leaves = true) {
   enroll(f);
   await completeActivation(f);
@@ -3430,14 +3432,9 @@ async function retiringFeed(f: ReturnType<typeof fixture>, stopped = true, leave
     hostedFeed: true,
     authorize: (input) => authorizeServiceHostReplication(f.storage, { ...credential, ...input }),
   });
-  // Unless it stays, the note also leaves its path, so its retirement output departs. Rewriting
-  // its moments' path stands in for a move: the relay asks only them who is at a path.
   const stop = () => {
     stopDocument(f, 10);
-    if (leaves)
-      f.raw.exec(
-        "UPDATE sync_relay_object_moments SET path='docs/moved.md' WHERE object_id='object'",
-      );
+    if (leaves) moveNoteAwayInObjectIndex(f);
   };
   if (stopped) stop();
   const request = (method: string, suffix: string, body?: BodyInit, type = "application/json") =>
@@ -3898,7 +3895,6 @@ it("verifies a capture whose source is a departed settlement moment the relay pr
     f.close();
   }
 });
-// Resume after a Stop that left the note in place starts from the Stop's last save, now ordinary history.
 it("verifies a capture whose source is the settlement moment of a stopped note that stays", async () => {
   const f = fixture();
   try {
