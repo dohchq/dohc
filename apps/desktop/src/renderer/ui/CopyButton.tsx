@@ -28,9 +28,9 @@ const wordsClass =
 // A row's copy, one among a page header's 28px buttons, or one beside a
 // default SecondaryButton.
 const WORDS_SIZE = {
-  row: "h-6 gap-1.5 rounded-md px-2 text-[12px]",
-  header: "h-7 gap-1 rounded-md px-2 text-[11px]",
-  button: "h-8 gap-1.5 rounded-lg px-3 text-[13px]",
+  row: "min-h-6 py-0.5 gap-1.5 rounded-md px-2 text-[12px]",
+  header: "min-h-7 py-0.5 gap-1 rounded-md px-2 text-[11px]",
+  button: "min-h-8 py-1 gap-1.5 rounded-lg px-3 text-[13px]",
 } as const;
 
 // A missing clipboard is a failure like any other. The write starts in the

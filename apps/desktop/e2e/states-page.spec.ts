@@ -554,7 +554,11 @@ test("@states-page @states-baselines every shared part matches its baseline in b
                 continue;
               let clipTop = -Infinity;
               let clipBottom = Infinity;
-              for (let el = parent; el && el !== button; el = el.parentElement) {
+              for (
+                let el: HTMLElement | null = parent;
+                el && el !== button;
+                el = el.parentElement
+              ) {
                 if (getComputedStyle(el).overflowY === "visible") continue;
                 const clip = el.getBoundingClientRect();
                 clipTop = Math.max(clipTop, clip.top);
