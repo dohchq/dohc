@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -362,7 +362,8 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
       step.uses?.startsWith("actions/download-artifact@"),
     );
     assert.ok(install >= 0 && install < wait && wait < download);
-    assert.equal(job.steps[download].with.name, "rust-tests-${{ github.run_attempt }}");
+    assert.equal(job.steps[wait].id, "rust-archive");
+    assert.equal(job.steps[download].with.name, "${{ steps.rust-archive.outputs.name }}");
   }
   const steps = jobs.rust.steps;
   const compile = steps.findIndex(
@@ -396,12 +397,49 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   );
 });
 
+test("downloads read each artifact from the attempt that produced it, not the current one", () => {
+  const { jobs } = load(workflow);
+  const downloads = Object.entries(jobs).flatMap(([id, job]) =>
+    (job.steps ?? [])
+      .filter((step) => step.uses?.startsWith("actions/download-artifact@"))
+      .map((step) => [id, step]),
+  );
+  assert.ok(downloads.length >= 6);
+  for (const [id, step] of downloads) {
+    assert.equal(step.with["run-id"], "${{ github.run_id }}", id);
+    assert.equal(step.with["github-token"], "${{ github.token }}", id);
+    assert.doesNotMatch(JSON.stringify(step.with), /run_attempt/u, id);
+  }
+  const steps = jobs.together.steps,
+    wait = steps.findIndex(
+      (step) => step.run === "node scripts/verification/wait-preparation.mjs js",
+    );
+  assert.equal(steps[wait + 1].with.name, `\${{ steps.${steps[wait].id}.outputs.name }}`);
+});
+
+test("downloads list past a run's first 100 artifacts, where a later attempt finds earlier receipts", () => {
+  const { jobs } = load(workflow);
+  const actions = new Set(
+    Object.values(jobs).flatMap((job) =>
+      (job.steps ?? [])
+        .map((step) => step.uses)
+        .filter((uses) => uses?.startsWith("actions/download-artifact@")),
+    ),
+  );
+  assert.deepEqual(
+    [...actions],
+    ["actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"],
+  );
+});
+
 test("shared Rust archive downloads retry once under bounded step timeouts", () => {
   const { jobs } = load(workflow);
-  const action = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
+  const action = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
   const inputs = {
-    name: "rust-tests-${{ github.run_attempt }}",
+    name: "${{ steps.rust-archive.outputs.name }}",
     path: ".agent-artifacts/verification",
+    "run-id": "${{ github.run_id }}",
+    "github-token": "${{ github.token }}",
   };
   {
     const steps = jobs["rust-tests"].steps,
@@ -1127,10 +1165,12 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   assert.ok(jobs.changes.steps.indexOf(base) < jobs.changes.steps.indexOf(filter));
   for (const name of ["javascript", "rust"]) {
     const download = jobs[name].steps.find((step) => step.with?.pattern);
-    assert.equal(
-      download.with.pattern,
-      `verification-${name === "javascript" ? "js" : "rust"}-*-\${{ github.run_attempt }}`,
-    );
+    assert.deepEqual(download.with, {
+      pattern: `verification-${name === "javascript" ? "js" : "rust"}-*`,
+      path: ".agent-artifacts/verification/downloaded",
+      "run-id": "${{ github.run_id }}",
+      "github-token": "${{ github.token }}",
+    });
     const upload = jobs[name].steps.find((step) => step.with?.path?.endsWith("-result.json"));
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
@@ -1206,8 +1246,12 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   );
   assert.ok(downloadIndex >= 0 && downloadIndex < verdictIndex);
   assert.equal(job.steps[downloadIndex].if, "needs.javascript.result == 'success'");
-  assert.equal(job.steps[downloadIndex].with.name, "verification-js-${{ github.run_attempt }}");
-  assert.equal(job.steps[downloadIndex].with.path, ".agent-artifacts/verification/aggregate");
+  assert.deepEqual(job.steps[downloadIndex].with, {
+    pattern: "verification-js-[0-9]*",
+    path: ".agent-artifacts/verification/aggregate",
+    "run-id": "${{ github.run_id }}",
+    "github-token": "${{ github.token }}",
+  });
   const directory = mkdtempSync(join(tmpdir(), "completed-flaky-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   assert.equal(
@@ -1242,8 +1286,9 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     completed_at: new Date(started + 100_000).toISOString(),
   }));
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => {
+    mkdirSync(join(directory, "verification-js-1"), { recursive: true });
     writeFileSync(
-      join(directory, "js-result.json"),
+      join(directory, "verification-js-1", "js-result.json"),
       JSON.stringify({ verdict: "PASS", commit: checkout, flaky: [] }),
     );
     const checkedSource = source.replace(
