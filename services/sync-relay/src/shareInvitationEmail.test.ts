@@ -275,6 +275,37 @@ it("starts no send, and counts nothing, when the inviter's address arrives after
   expect(attempts(storage, "owner")).toBe(0);
 });
 
+it("starts no send when counting the attempt runs past the deadline", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const storage = await testStorage();
+  const sendEmail = vi.fn(async () => undefined);
+  const email = createShareInvitationEmailer({
+    storage,
+    nowMs: () => {
+      const until = performance.now() + 40;
+      while (performance.now() < until);
+      return 1_000_000;
+    },
+    sendEmail,
+    lookupVerifiedUserEmail: () => "owner@dohc.test",
+    relayPublicOrigin: RELAY_ORIGIN,
+    timeoutMs: 20,
+  });
+
+  const answer = await email({
+    inviterUserId: "owner",
+    recipientEmail: "friend@dohc.test",
+    shareId: "share-0",
+    subjectName: "Trip plan",
+    access: "edit",
+    browserInvitationUrl: null,
+  });
+
+  expect(answer).toEqual({ invitationEmail: "failed" });
+  expect(sendEmail).not.toHaveBeenCalled();
+  expect(attempts(storage, "owner")).toBe(1);
+});
+
 it("sends to the address the invite holds", async () => {
   const { storage, sent, invite } = await fixture();
 

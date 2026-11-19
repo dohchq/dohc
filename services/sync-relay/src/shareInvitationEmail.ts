@@ -37,11 +37,14 @@ export function createShareInvitationEmailer(options: {
   return async (invitation) => {
     if (!sendEmail) return { invitationEmail: "unavailable" };
     let deadline: ReturnType<typeof setTimeout> | undefined;
-    let expired = false;
+    const startedAt = performance.now();
+    const assertInTime = () => {
+      if (performance.now() - startedAt >= timeoutMs) throw new Error("timed out");
+    };
     const email = async (): Promise<ShareInvitationEmailAnswer> => {
       const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
       if (!inviterEmail) return { invitationEmail: "unavailable" };
-      if (expired) throw new Error("timed out");
+      assertInTime();
       const admission = admitShareInvitationEmail(options.storage, {
         inviterUserId: invitation.inviterUserId,
         nowMs: options.nowMs(),
@@ -58,6 +61,7 @@ export function createShareInvitationEmailer(options: {
           },
         };
       if (!ONE_MAILBOX.test(invitation.recipientEmail)) throw new Error("not one mailbox");
+      assertInTime();
       await sendEmail(
         shareInvitationMessage({
           recipientEmail: invitation.recipientEmail,
@@ -76,10 +80,7 @@ export function createShareInvitationEmailer(options: {
       return await Promise.race([
         emailing,
         new Promise<never>((_, reject) => {
-          deadline = setTimeout(() => {
-            expired = true;
-            reject(new Error("timed out"));
-          }, timeoutMs);
+          deadline = setTimeout(() => reject(new Error("timed out")), timeoutMs);
         }),
       ]);
     } catch {
