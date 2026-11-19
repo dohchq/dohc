@@ -159,6 +159,24 @@ describe("background live start", () => {
     expect(order).toEqual(["a.md", "b.md"]);
   });
 
+  it("waits only for capture in a workspace it can start notes in", async () => {
+    let release!: () => void;
+    const order: string[] = [];
+    const { queue } = setup({
+      eligible: (workspaceId) => workspaceId === "w",
+      start: async (_workspaceId, path) => {
+        order.push(path);
+        if (path === "a.md") await new Promise<void>((resolve) => (release = resolve));
+      },
+    });
+    queue.note("w", ["a.md", "b.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    queue.note("other", ["c.md"]);
+    release();
+    await vi.advanceTimersByTimeAsync(GAP);
+    expect(order).toEqual(["a.md", "b.md"]);
+  });
+
   it("skips a note past the live size cap, and starts one at the cap", async () => {
     const sizes: Record<string, number> = {
       "big.md": WYSIWYG_MARKDOWN_THRESHOLD_BYTES + 1,

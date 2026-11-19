@@ -144,8 +144,8 @@ export function createBackgroundLiveStart(
 
   return {
     note(workspaceId, paths) {
-      quietUntil = Date.now() + quietMs;
       if (stopped || paused || !options.eligible(workspaceId)) return;
+      quietUntil = Date.now() + quietMs;
       const before = queued.size;
       for (const path of paths) {
         if (queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
