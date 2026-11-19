@@ -64,6 +64,8 @@ it("removes one pending invitation and leaves the share's link, and Undo brings 
   expect(body).toMatchObject({ grantId: "pending", status: "revoked" });
   expect(storage.getShareGrant("pending")).toMatchObject({ status: "revoked", generation: 2 });
   expect(storage.getShareGrant("link")).toMatchObject({ status: "active", generation: 1 });
+  expect(storage.hasPendingInvite("new@dohc.test")).toBe(false);
+  expect(storage.claimPendingSharesForEmail("new@dohc.test", "newcomer")).toBe(0);
 
   storage.undoShareRemoval({
     shareId: "s",
@@ -75,6 +77,12 @@ it("removes one pending invitation and leaves the share's link, and Undo brings 
     status: "active",
     principalKind: "email",
     principalUserId: null,
+  });
+  expect(storage.hasPendingInvite("new@dohc.test")).toBe(true);
+  expect(storage.claimPendingSharesForEmail("new@dohc.test", "newcomer")).toBe(1);
+  expect(storage.getShareGrant("pending")).toMatchObject({
+    status: "active",
+    principalUserId: "newcomer",
   });
 });
 
