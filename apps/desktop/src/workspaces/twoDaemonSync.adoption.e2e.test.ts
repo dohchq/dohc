@@ -1,6 +1,7 @@
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 import { readFile, readdir, writeFile } from "node:fs/promises";
@@ -976,6 +977,30 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
             .toContain(`Name: ${value}`);
         };
         await editOrdinary("Local after stop", "after-stop");
+        // Nothing hosts the note while it is stopped, so a link shows the owner's save.
+        const ownerSaved = createHash("sha256")
+          .update(await readFile(join(rootA, path)))
+          .digest("hex");
+        await expect
+          .poll(
+            async () => {
+              await pushUntilDrained(relay);
+              const db = new DatabaseSync(relayOptions.dbPath, { readOnly: true });
+              try {
+                return (
+                  db
+                    .prepare(
+                      "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?",
+                    )
+                    .get(workspaceId, path) as { blob_sha256: string } | undefined
+                )?.blob_sha256;
+              } finally {
+                db.close();
+              }
+            },
+            { timeout: 60_000 },
+          )
+          .toBe(ownerSaved);
         const liveRow = async () => {
           const ready = (await discovery()).some((row) => row.binding.currentPath === path);
           const row = (discoveryPayload as { documents: Array<{ path: string }> }).documents.find(
