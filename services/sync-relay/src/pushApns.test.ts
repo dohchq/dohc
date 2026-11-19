@@ -199,14 +199,14 @@ async function relay(people: Array<[string, string]> = [["owner", "Kim"]]) {
         author,
       );
     },
-    agent(owner: string, messageId: string, threadId: string) {
+    agent(owner: string, messageId: string, threadId: string, name = "Claude") {
       append(
         `w-${owner}`,
         [
           chatMessageAppend(messageId, threadId, "Done.", {
             authorUserId: owner,
             authorKind: "agent",
-            authorDisplayName: "Claude",
+            authorDisplayName: name,
           }),
         ],
         `${owner}-agent`,
@@ -779,6 +779,16 @@ it("cleans a URL out of the sender's name in the title", async () => {
   await sender.close();
   const payload = JSON.parse(f.apple.requests[0]!.body) as { aps: { alert: { title: string } } };
   expect(payload.aps.alert.title).toBe("example.com mentioned you in Team");
+});
+
+it("keeps the agent mark after a name with an unclosed Markdown target", async () => {
+  const f = await relay();
+  f.agent("owner", "answer", "agent-thread", "[Ana](");
+  const sender = f.sender();
+  await sender.runOnce();
+  await sender.close();
+  const payload = JSON.parse(f.apple.requests[0]!.body) as { aps: { alert: { title: string } } };
+  expect(payload.aps.alert.title).toMatch(/^Ana \(.+'s agent\) /u);
 });
 
 it.each([

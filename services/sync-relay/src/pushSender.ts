@@ -266,25 +266,28 @@ function alertLabel(
   { message, access }: { message: PushMessage; access: { place: string } },
   reason: ChatMessageReason,
   accountName: string | null,
-  markLinkVisitor: boolean,
+  forPhone: boolean,
 ): string {
-  const ownerName = pushPlainText(accountName, "Someone");
+  const part = forPhone ? apnsText : (text: string) => text;
+  const ownerName = part(pushPlainText(accountName, "Someone"));
+  const senderLabel = part(message.senderLabel);
+  const place = part(access.place);
   const authorKind = message.authorKind;
   const sender =
     authorKind === "agent" || authorKind === "automation"
-      ? `${message.senderLabel} (${ownerName}'s ${authorKind})`
+      ? `${senderLabel} (${ownerName}'s ${authorKind})`
       : message.authorUserId
         ? ownerName
-        : markLinkVisitor
-          ? `${message.senderLabel} (via link)`
-          : message.senderLabel;
+        : forPhone
+          ? `${senderLabel} (via link)`
+          : senderLabel;
   // A push names no share, so its words keep no file link.
   return withholdChatFileLinks(
     reason === "mention"
-      ? `${sender} mentioned you in ${access.place}`
+      ? `${sender} mentioned you in ${place}`
       : reason === "dm"
         ? `${sender} sent you a message`
-        : `${sender} replied in ${access.place}`,
+        : `${sender} replied in ${place}`,
     () => false,
   );
 }
@@ -408,7 +411,7 @@ export function createPushSender(options: {
       },
       apnsPayload({
         // A chosen name or chat name can hold a URL too.
-        title: apnsText(alertLabel(fresh, delivery.reason, accountName, true)),
+        title: alertLabel(fresh, delivery.reason, accountName, true),
         body: apnsText(message.body),
         threadKey,
         data: {
