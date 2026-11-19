@@ -549,6 +549,27 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         }
         const outbox = new OwnerYDocOutbox(client, workspaceHandle),
           refusals = new OwnerKnownRefusals();
+        const clientRecordingRefusals = new Proxy(client, {
+          get(target, property) {
+            const value: unknown = Reflect.get(target, property, target);
+            if (typeof value !== "function") return value;
+            return (...args: unknown[]) => {
+              const result: unknown = value.apply(target, args);
+              if (result instanceof Promise)
+                result.catch((error: unknown) => {
+                  const seen = (results.engineRefusals ??= []) as unknown[];
+                  if (error instanceof EngineRequestError && seen.length < 32)
+                    seen.push({
+                      owner: name,
+                      call: String(property),
+                      method: error.method,
+                      wireError: error.wireError,
+                    });
+                });
+              return result;
+            };
+          },
+        });
         async function pass(onEnrolled?: () => Promise<void>): Promise<OwnerYDocDrainResult> {
           const lifetime = AbortSignal.timeout(deliveryConfig.attemptTimeoutMs);
           let completed!: (result: OwnerYDocDrainResult) => void, failed!: (error: unknown) => void;
@@ -562,7 +583,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
             config: deliveryConfig,
             async runPass(document, signal) {
               const result = await runNativeOwnerDeliveryPass({
-                client,
+                client: clientRecordingRefusals,
                 workspaceHandle,
                 document,
                 config: deliveryConfig,
@@ -1038,6 +1059,10 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         ),
       );
     } catch (error) {
+      console.error(
+        "Owner proof failed",
+        JSON.stringify({ stage: results.stage, engineRefusals: results.engineRefusals }),
+      );
       try {
         writeFileSync(
           join(root, "result.json"),
