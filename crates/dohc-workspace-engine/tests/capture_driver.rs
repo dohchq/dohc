@@ -1440,9 +1440,6 @@ async fn wait_on_disk(root: &Path, path: &str, text: &str) {
     }
 }
 
-/// A file an agent wrote or another computer synced is deleted or renamed in
-/// a file manager, whoever put it on disk. The old name is recorded as deleted
-/// as it is for a file capture recorded, so it syncs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_outside_delete_retires_a_file_another_route_wrote() {
     for (origin, publish, renamed) in [

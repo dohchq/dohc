@@ -1778,9 +1778,6 @@ fn a_respelled_head_retires_only_with_its_content() {
     }
 }
 
-/// A file found missing retires a head another route wrote only when the file
-/// last held that head's bytes and no write there is waiting to reach disk.
-/// An old write that ended in conflict does not stop it.
 #[test]
 fn a_missing_file_retires_the_head_whose_bytes_it_held() {
     use dohc_engine_domain::{TxnOutcome, capture_retire_absent_in_tx};
