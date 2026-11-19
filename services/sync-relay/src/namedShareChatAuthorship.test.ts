@@ -205,7 +205,7 @@ describe("named share chat author names", () => {
     expect((await f.push(changed)).status).toBe(409);
   });
 
-  it("stores an agent's reaction under its own name, and serves no id of an agent a desktop runs", async () => {
+  it("names an agent's reaction through a share for its account, and serves no id of an agent a desktop runs", async () => {
     const f = await fixture();
     const payload = {
       reactionId: "reaction",
@@ -215,7 +215,7 @@ describe("named share chat author names", () => {
       authorId: "recipient",
       authorKind: "agent",
       authorAgentId: "codex",
-      authorDisplayName: "  Codex \t",
+      authorDisplayName: "Owner",
       state: "added",
       atMs: 4,
     };
@@ -224,13 +224,13 @@ describe("named share chat author names", () => {
     const { authorAgentId: _kept, ...shared } = payload;
     expect(JSON.parse(f.coordinate(1)!.payloadJson)).toEqual({
       ...shared,
-      authorDisplayName: "Codex",
+      authorDisplayName: "Recipient",
     });
     const page = (await json(
       await f.h(request("recipient", "/sync/shares/" + f.shareId + "/log")),
     )) as { ops: Array<{ opKind: string; payload: Record<string, unknown> }> };
     const served = page.ops.find((op) => op.opKind === "chat.reaction.set")?.payload;
-    expect(served).toMatchObject({ authorKind: "agent", authorDisplayName: "Codex" });
+    expect(served).toMatchObject({ authorKind: "agent", authorDisplayName: "Recipient" });
     expect(served).not.toHaveProperty("authorAgentId");
   });
 
