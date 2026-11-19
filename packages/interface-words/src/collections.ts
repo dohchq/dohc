@@ -20,6 +20,8 @@ export const collectionWords = {
   rulesChanged:
     "The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.",
   undoLastEdit: "Undo last edit",
+  // TransactionalCollectionPage.tsx
+  clearValue: "Clear value",
 
   // The phone's.
   /** A table whose Collection has no operation that reads it. */

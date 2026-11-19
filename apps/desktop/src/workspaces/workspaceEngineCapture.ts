@@ -4099,7 +4099,10 @@ export function createWorkspaceEngineCapture(
         return current?.ownerBound;
       },
       // Behind the edits already handed over, so the generation holds them.
-      leaveLiveEditing(leave) {
+      // Edits that arrive meanwhile, until the editors show the engine's state,
+      // wait behind it and never reach the engine, so `late` gets them with
+      // the state they build on.
+      leaveLiveEditing(leave, late) {
         if (closed) return Promise.reject(closedError());
         return append(async () => {
           const generation = current;
@@ -4108,12 +4111,28 @@ export function createWorkspaceEngineCapture(
             return leave(Y.encodeStateAsUpdate(canonicalDoc, Y.encodeStateVector(recordedDoc)));
           }
           leaving = generation;
-          try {
-            return await generation.leaveLiveEditing(leave);
-          } catch (error) {
-            if (generation.ownerBound) leaving = null;
-            throw error;
+          const outcome = await generation.leaveLiveEditing(leave).then(
+            (left) => ({ left }),
+            (error: unknown) => {
+              if (generation.ownerBound) {
+                leaving = null;
+                throw error;
+              }
+              // Live editing can end before an answer that fails.
+              return { error };
+            },
+          );
+          if (late && canonicalDoc !== null) {
+            // The replacement retires this document, so its state is read first.
+            const base = Y.encodeStateAsUpdate(canonicalDoc);
+            await generation.resync?.().catch(() => undefined);
+            if (queuedOriginals.size > 0)
+              late(
+                Y.mergeUpdates([base, ...[...queuedOriginals].map((original) => original.update)]),
+              );
           }
+          if ("error" in outcome) throw outcome.error;
+          return outcome.left;
         });
       },
       contentKind,
@@ -6683,8 +6702,8 @@ export function createWorkspaceEngineCapture(
         get ownerBound() {
           return session.ownerBound;
         },
-        leaveLiveEditing(leave) {
-          return session.leaveLiveEditing!(leave);
+        leaveLiveEditing(leave, late) {
+          return session.leaveLiveEditing!(leave, late);
         },
         async readArtifactAsset(descriptor) {
           const bytes = await engine.readBinaryBlob({

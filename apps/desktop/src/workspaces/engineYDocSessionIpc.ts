@@ -1072,12 +1072,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   /**
    * Runs `leave` between the edits of each editor here that edits the note
    * at `path` live, given the edits the engine has not taken from them. Once
-   * it succeeds, those editors show the note as the engine holds it.
+   * it succeeds, those editors show the note as the engine holds it. `late`
+   * gets the edits that reached them while `leave` ran.
    */
   async leaveLiveEditing<T>(
     workspaceId: string,
     path: string,
     leave: (unsent: Uint8Array[]) => Promise<T>,
+    late?: (edits: Uint8Array) => void,
   ): Promise<T> {
     const authority = this.#acquireWorkspace(workspaceId);
     const editors: ((next: (unsent: Uint8Array) => Promise<T>) => Promise<T>)[] = [];
@@ -1087,7 +1089,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         this.#owner.forEachSessionUnderPath(authority.workspace.attachmentId, path, (session) => {
           const { provider } = session;
           if (provider.path === path && provider.ownerBound && provider.leaveLiveEditing)
-            editors.push((next) => provider.leaveLiveEditing!(next));
+            editors.push((next) => provider.leaveLiveEditing!(next, late));
         });
     } finally {
       authority.release();
