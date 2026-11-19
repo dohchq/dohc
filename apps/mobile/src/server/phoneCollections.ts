@@ -108,9 +108,8 @@ export type ChangeAnswer =
     }
   | WriteRefusal;
 
-export type CreateAnswer =
-  | { readonly kind: "saved"; readonly record: CollectionRecord }
-  | WriteRefusal;
+/** The new record's ID, which the phone reads the record by. */
+export type CreateAnswer = { readonly kind: "saved"; readonly id: RecordId } | WriteRefusal;
 export type DeleteAnswer = { readonly kind: "saved" } | WriteRefusal;
 
 /** Where the next page starts: the last record's ID and its sort value, as the read gave them. */
@@ -245,27 +244,13 @@ export const readChangeAnswer = (result: unknown): ChangeAnswer | null =>
       : null,
   );
 
-/** A new record, keeping only the fields the table describes. */
-export const readCreateAnswer = (result: unknown, table: CollectionTable): CreateAnswer | null =>
+export const readCreateAnswer = (result: unknown): CreateAnswer | null =>
   readWrite(result, (saved) =>
-    recordId(saved.id) && isCount(saved.version) && isFields(saved.values)
-      ? {
-          kind: "saved" as const,
-          record: { id: saved.id, version: saved.version, values: described(saved.values, table) },
-        }
-      : null,
+    recordId(saved.id) && isCount(saved.version) ? { kind: "saved" as const, id: saved.id } : null,
   );
 
 export const readDeleteAnswer = (result: unknown): DeleteAnswer | null =>
   readWrite(result, () => ({ kind: "saved" as const }));
-
-const described = (values: Readonly<Record<string, unknown>>, table: CollectionTable) => {
-  const kept: Record<string, RecordValue> = {};
-  for (const field of table.fields)
-    if (Object.hasOwn(values, field.fieldId))
-      kept[field.fieldId] = values[field.fieldId] as RecordValue;
-  return kept;
-};
 
 /** A page of a table's records, each keeping only the fields the table describes. */
 export function readPage(result: unknown, table: CollectionTable): RecordPage | null {
@@ -285,11 +270,11 @@ export function readPage(result: unknown, table: CollectionTable): RecordPage | 
     const key = JSON.stringify(row.id);
     if (seen.has(key)) return null;
     seen.add(key);
-    return {
-      id: row.id,
-      version: isCount(row.version) ? row.version : null,
-      values: described(row.values, table),
-    };
+    const values: Record<string, RecordValue> = {};
+    for (const field of table.fields)
+      if (Object.hasOwn(row.values, field.fieldId))
+        values[field.fieldId] = row.values[field.fieldId] as RecordValue;
+    return { id: row.id, version: isCount(row.version) ? row.version : null, values };
   });
   const cursor = result.nextCursor;
   const next =
@@ -345,8 +330,7 @@ export function collectionOperations(
 
     change: (change: FieldChange) => run("collectionEdit", change, readChangeAnswer),
 
-    create: (create: RecordCreate, table: CollectionTable) =>
-      run("collectionCreate", create, (result) => readCreateAnswer(result, table)),
+    create: (create: RecordCreate) => run("collectionCreate", create, readCreateAnswer),
 
     remove: (remove: RecordDelete) => run("collectionDelete", remove, readDeleteAnswer),
   };

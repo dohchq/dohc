@@ -43,10 +43,7 @@ export interface FieldEdit {
   readonly from: Omit<FieldChange, "idempotencyKey">;
 }
 
-/**
- * A new record or a deletion and where it stands, one at a time: a new record per table, under `newRecordKey`, and a
- * deletion per record, under `recordKey`. A saved deletion stays, so its record's screen leaves and no read shows it.
- */
+/** A new record per table, or a deletion per record; a saved deletion stays until its record shows again. */
 export type RecordAction = (
   | { readonly kind: "create"; readonly request: RecordCreate; readonly table: CollectionTable }
   | { readonly kind: "delete"; readonly request: RecordDelete }
@@ -146,18 +143,11 @@ export interface WorkspaceCollections {
   undo(key: string): void;
   /** Reads the Collection's rules and the open record again, and drops its change. False when that failed. */
   reloadRecord(): Promise<boolean>;
-  /** New records and deletions, by `newRecordKey` and `recordKey`. */
   actions(): ReadonlyMap<string, RecordAction>;
-  /**
-   * Adds a record to the table on screen, unless the last one hasn't saved. True once it saved and opened, when no
-   * other record opened or closed meanwhile; it leads the table's records either way.
-   */
+  /** Adds a record to the table on screen and lists it first; true if it opened, as no other record did meanwhile. */
   create(): Promise<boolean>;
-  /** Deletes the open record, unless it or a change to it is on its way. */
   remove(): void;
-  /** Sends a failed new record or deletion again, as it was. True as `create`. */
   retryAction(key: string): Promise<boolean>;
-  /** Drops a new record or deletion that didn't save. */
   discardAction(key: string): void;
   stop(): void;
 }
@@ -236,7 +226,7 @@ export function createWorkspaceCollections(
   // An answer lands only while its change is still the record's, so one Discard dropped, or a store cleared, never
   // comes back.
   async function send(key: string, entry: Omit<RecordChange, "state">) {
-    if (!isLive()) return;
+    if (!isLive() || busy(key)) return;
     const sent: RecordChange = { ...entry, state: { kind: "saving" } };
     setChange(key, sent);
     const lands = () => isLive() && changes.get(key) === sent;
@@ -260,9 +250,17 @@ export function createWorkspaceCollections(
     actions = copy;
     emit();
   };
+  // A saved deletion's record that shows again was added again.
+  const forget = (key: string) => {
+    if (actions.get(key)?.state.kind === "saved") setAction(key, null);
+  };
+  // A read of the table on its way may have started before a write saved, so it starts again.
+  const reread = (reading: CollectionView["reading"]) => {
+    if (reading) void read(reading, reading !== "more");
+  };
   // As `send`: an answer lands only while its action is still the key's.
   async function act(key: string, entry: RecordAction): Promise<boolean> {
-    if (!isLive()) return false;
+    if (!isLive() || busy(key)) return false;
     const sent: RecordAction = { ...entry, state: { kind: "saving" } };
     setAction(key, sent);
     const lands = () => isLive() && actions.get(key) === sent;
@@ -279,24 +277,35 @@ export function createWorkspaceCollections(
         setChange(key, null);
         const { recordId } = sent.request;
         const now = shown();
-        if (now) update(datasetId, { rows: now.rows.filter((row) => row.id !== recordId) });
+        if (now) {
+          update(datasetId, { rows: now.rows.filter((row) => row.id !== recordId) });
+          reread(now.reading);
+        }
         return true;
       }
-      const answer = await operations.create(sent.request, sent.table);
+      const answer = await operations.create(sent.request);
       if (!lands()) return false;
       if (answer.kind !== "saved") {
         setAction(key, { ...sent, state: answer });
         return false;
       }
+      // The record as it is now: with the rules' defaults, and any change since, if this answer was a replay.
+      const current = await operations.record(datasetId, sent.table, answer.id);
+      if (!lands()) return false;
       setAction(key, null);
       const now = shown();
-      if (!now) return false;
-      const { record } = answer;
+      if (!now || !current.record) return false;
+      forget(recordKey(datasetId, tableId, answer.id));
+      const record = newest(
+        current.record,
+        now.rows.find((row) => row.id === answer.id),
+      );
       const opens = screen !== null && recordReads.isLatest(screen);
       update(datasetId, {
         rows: [record, ...now.rows.filter((row) => row.id !== record.id)],
-        ...(opens ? { opened: { tableId, record, files: {} } } : {}),
+        ...(opens ? { opened: { tableId, record, files: current.files } } : {}),
       });
+      reread(now.reading);
       return opens;
     } catch (error) {
       const problem = shownProblem(error);
@@ -350,14 +359,7 @@ export function createWorkspaceCollections(
           ? view.rows.map((row) => [JSON.stringify(row.id), row])
           : [],
       );
-      // A read that started before a deletion saved can still hold the record.
-      const rows = (ready?.rows ?? [])
-        .filter(
-          (row) =>
-            !table ||
-            actions.get(recordKey(datasetId, table.tableId, row.id))?.state.kind !== "saved",
-        )
-        .map((row) => newest(row, held.get(JSON.stringify(row.id))));
+      const rows = (ready?.rows ?? []).map((row) => newest(row, held.get(JSON.stringify(row.id))));
       const fresh =
         opened?.tableId === table?.tableId
           ? rows.find((row) => row.id === opened?.record.id)
@@ -365,7 +367,10 @@ export function createWorkspaceCollections(
       update(datasetId, {
         description,
         tableId: table?.tableId ?? null,
-        rows: more ? [...view.rows, ...rows] : rows,
+        // A record added here can come again in a later page.
+        rows: more
+          ? [...view.rows, ...rows.filter((row) => !held.has(JSON.stringify(row.id)))]
+          : rows,
         files: !ready ? {} : more ? { ...view.files, ...ready.files } : ready.files,
         next: ready?.next ?? null,
         refused: page?.status === "refused",
@@ -431,8 +436,9 @@ export function createWorkspaceCollections(
         : Promise.resolve(),
     openRecord(record) {
       recordReads.next();
-      if (view?.tableId)
-        update(view.datasetId, { opened: { tableId: view.tableId, record, files: view.files } });
+      if (!view?.tableId) return;
+      forget(recordKey(view.datasetId, view.tableId, record.id));
+      update(view.datasetId, { opened: { tableId: view.tableId, record, files: view.files } });
     },
     closeRecord: () => void recordReads.next(),
     changes: () => changes,
@@ -466,9 +472,7 @@ export function createWorkspaceCollections(
       };
     },
     change({ field, from }, value) {
-      const key = recordKey(from.datasetId, from.tableId, from.recordId);
-      if (busy(key)) return;
-      void send(key, {
+      void send(recordKey(from.datasetId, from.tableId, from.recordId), {
         change: { ...from, value, idempotencyKey: crypto.randomUUID() },
         reversible: field.reversible,
       });
@@ -564,9 +568,7 @@ export function createWorkspaceCollections(
       const table = description?.tables.find((table) => table.tableId === opened?.tableId);
       if (!now || !opened || !description || !table?.canDelete || opened.record.version === null)
         return;
-      const key = recordKey(now.datasetId, table.tableId, opened.record.id);
-      if (busy(key)) return;
-      void act(key, {
+      void act(recordKey(now.datasetId, table.tableId, opened.record.id), {
         kind: "delete",
         request: {
           datasetId: now.datasetId,

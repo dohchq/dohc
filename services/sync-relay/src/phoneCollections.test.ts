@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
-import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import type { DatasetDefinition, DatasetDescription } from "@dohc/security-contract/dataset";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountOperationRoute } from "./accountOperationRoutes";
@@ -329,11 +329,12 @@ async function phone() {
       idempotencyKey: key,
     });
   const storage = base.storage as SyncRelayStorage;
-  // What the host does when it reads, which a test can add to.
+  // What the host does when it reads, which a test can add to, and how a test changes what it describes.
   let during: () => void = () => undefined;
+  let describing = (description: DatasetDescription) => description;
   const reading: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> = {
     list: host.list,
-    describe: host.describe,
+    describe: (auth, input) => describing(host.describe(auth, input)),
     invoke: async (auth, input) => {
       during();
       const answer = await host.invoke(auth, input);
@@ -378,6 +379,9 @@ async function phone() {
       ),
     during: (run: () => void) => {
       during = run;
+    },
+    describing: (alter: typeof describing) => {
+      describing = alter;
     },
   };
 }
@@ -847,18 +851,27 @@ const hasR01 = async (f: Awaited<ReturnType<typeof phone>>) =>
 it("adds a record with the desktop's starting values, replays its retry, and answers a reused key as rules changed", async () => {
   const f = await phone();
   const first = await create(f);
-  expect(first).toMatchObject(
-    ok({
-      saved: {
-        id: expect.any(String),
-        version: 1,
-        // Each field's default, or its empty value.
-        values: { [GUEST_NAME]: null, [GUEST_PAID]: false, [GUEST_STATUS]: "Unpaid" },
-      },
-    }),
-  );
+  // Its key, which the phone reads it by, and never values the relay only sent.
+  expect(first).toEqual(ok({ saved: { id: expect.any(String), version: 1 } }));
   const key = (first.body.result as { saved: { id: string } }).saved.id;
   expect(await guests(f)).toEqual([key]);
+  // Each field's default, or its empty value.
+  const read = await f.op("collectionRecords", {
+    datasetId: DATASET,
+    tableId: GUESTS,
+    recordId: key,
+  });
+  expect((read.body.result as { rows: unknown[] }).rows).toEqual([
+    expect.objectContaining({
+      id: key,
+      version: 1,
+      values: expect.objectContaining({
+        [GUEST_NAME]: null,
+        [GUEST_PAID]: false,
+        [GUEST_STATUS]: "Unpaid",
+      }),
+    }),
+  ]);
   // The same key and stamp answer the same receipt, with no second record.
   expect(await create(f)).toEqual(first);
   expect(await guests(f)).toEqual([key]);
@@ -912,8 +925,9 @@ it("refuses a new record or deletion that a table's operations don't allow, befo
   expect(await create(f, { tableId: NOTES })).toEqual(refused);
   expect(await remove(f, { tableId: NOTES })).toEqual(refused);
   expect(await create(f, { tableId: OTHER })).toEqual(notFound);
-  // Nor does a key that isn't random, or a version that isn't one.
+  // Nor does a key that isn't random, a version that isn't one, or values from the phone.
   expect((await create(f, { idempotencyKey: "new-guest" })).status).toBe(400);
+  expect((await create(f, { values: { [GUEST_NAME]: "Ada" } })).status).toBe(400);
   expect((await remove(f, { expectedVersion: 0 })).status).toBe(400);
   expect(invoked).toBe(0);
 });
@@ -969,4 +983,33 @@ it("refuses a new record or deletion when Show on phone turns off or its dataset
     });
     expect(await write(after)).toEqual(notFound);
   }
+});
+
+it("adds no record where the phone couldn't read it back by its key", async () => {
+  const f = await phone();
+  let invoked = 0;
+  f.during(() => void invoked++);
+  f.describing((description) => ({
+    ...description,
+    operations: description.operations.map((operation) =>
+      operation.operationId === GUEST_READ
+        ? { ...operation, fieldIds: operation.fieldIds.filter((field) => field !== GUEST_KEY) }
+        : operation,
+    ),
+  }));
+  const described = await f.op("collection", { datasetId: DATASET });
+  expect(
+    (described.body.result as { tables: { tableId: string; canCreate: boolean }[] }).tables.find(
+      (table) => table.tableId === GUESTS,
+    )?.canCreate,
+  ).toBe(false);
+  expect(await create(f)).toEqual(
+    ok({
+      refused: {
+        code: "forbidden",
+        message: "The Collection's rules no longer allow this change, so dohc did not save it.",
+      },
+    }),
+  );
+  expect(invoked).toBe(0);
 });

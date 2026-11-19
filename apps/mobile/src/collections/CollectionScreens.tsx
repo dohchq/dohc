@@ -102,7 +102,6 @@ function Records({
     },
     [router, collections],
   );
-  // The new record opens on its own screen, if the list is still on top.
   const added = (opened: boolean) => {
     if (opened && navigation.isFocused()) router.push("/collection-record");
   };
@@ -306,7 +305,6 @@ export function RecordScreen() {
       ? actions.get(recordKey(view.datasetId, opened.tableId, opened.record.id))
       : undefined;
   const deleted = deletion?.state.kind === "saved";
-  // A deleted record's screen leaves once it's on top.
   useFocusEffect(
     useCallback(() => {
       if (deleted && router.canGoBack()) router.back();
@@ -404,6 +402,7 @@ export function RecordScreen() {
           state={deletion.state}
           cause={problemText}
           onRetry={() => void collections.retryAction(key)}
+          blocked={last?.state.kind === "saving"}
           onReload={() =>
             void collections.reloadRecord().then((read) => read && collections.discardAction(key))
           }
@@ -457,6 +456,7 @@ export function RecordScreen() {
                 state={pending.state}
                 cause={(problem) => problemText(problem)}
                 onRetry={() => collections.retry(key)}
+                blocked={deleting}
                 onReload={() => void reload(pending)}
                 onDiscard={() => collections.discard(key)}
               />
@@ -471,14 +471,12 @@ export function RecordScreen() {
 const NO_CHANGES: ReadonlyMap<string, RecordChange> = new Map();
 const NO_ACTIONS: ReadonlyMap<string, RecordAction> = new Map();
 
-/**
- * Why a change, a new record or a deletion didn't save, and what to do next: send it again, read the record again
- * where that helps, or drop it.
- */
+/** Why a write didn't save, and what to do next. Try again waits while another write to the record saves. */
 function ChangeLine(props: {
   state: RecordChange["state"] | RecordAction["state"];
   cause(problem: ReadProblem): string;
   onRetry(): void;
+  blocked?: boolean;
   onReload?(): void;
   onDiscard(): void;
 }) {
@@ -501,7 +499,11 @@ function ChangeLine(props: {
       </Text>
       <View style={styles.actions}>
         {state.kind === "failed" ? (
-          <ActionPill label={noticesWords.tryAgain} onPress={props.onRetry} />
+          <ActionPill
+            label={noticesWords.tryAgain}
+            onPress={props.onRetry}
+            disabled={props.blocked}
+          />
         ) : props.onReload && (state.kind === "rulesChanged" || stale) ? (
           <ActionPill label={collectionWords.reload} onPress={props.onReload} />
         ) : null}

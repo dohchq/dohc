@@ -197,30 +197,25 @@ describe("the answer to a change", () => {
 });
 
 describe("the answer to a new record or a deletion", () => {
-  it("reads a new record's key, version and described values", () => {
-    expect(
-      readCreateAnswer(
-        { saved: { id: "r-1", version: 1, values: { "f-paid": false, "f-secret": "x" } } },
-        table,
-      ),
-    ).toEqual({ kind: "saved", record: { id: "r-1", version: 1, values: { "f-paid": false } } });
-    expect(readCreateAnswer({ saved: { id: 7, version: 1, values: {} } }, table)).toEqual({
+  it("reads a new record's key", () => {
+    expect(readCreateAnswer({ saved: { id: "r-1", version: 1 } })).toEqual({
       kind: "saved",
-      record: { id: 7, version: 1, values: {} },
+      id: "r-1",
     });
+    expect(readCreateAnswer({ saved: { id: 7, version: 1 } })).toEqual({ kind: "saved", id: 7 });
   });
 
   it("reads a deletion, and either's refusal and rules change", () => {
     expect(readDeleteAnswer({ saved: {} })).toEqual({ kind: "saved" });
     const refused = { refused: { code: "stale_record", message: "This record changed." } };
     expect(readDeleteAnswer(refused)).toEqual({ kind: "refused", ...refused.refused });
-    expect(readCreateAnswer({ rulesChanged: true }, table)).toEqual({ kind: "rulesChanged" });
+    expect(readCreateAnswer({ rulesChanged: true })).toEqual({ kind: "rulesChanged" });
   });
 
   it("refuses an answer it can't read", () => {
-    expect(readCreateAnswer({ saved: { id: "", version: 1, values: {} } }, table)).toBeNull();
-    expect(readCreateAnswer({ saved: { id: "r-1", version: 0, values: {} } }, table)).toBeNull();
-    expect(readCreateAnswer({ saved: { id: "r-1", version: 1 } }, table)).toBeNull();
+    expect(readCreateAnswer({ saved: { id: "", version: 1 } })).toBeNull();
+    expect(readCreateAnswer({ saved: { id: "r-1", version: 0 } })).toBeNull();
+    expect(readCreateAnswer({ saved: { version: 1 } })).toBeNull();
     expect(readDeleteAnswer({ saved: true })).toBeNull();
     expect(readDeleteAnswer({})).toBeNull();
   });

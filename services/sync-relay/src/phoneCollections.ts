@@ -60,7 +60,6 @@ const isCount = (value: unknown): value is number =>
 
 type DescribedField = DatasetDescription["tables"][number]["fields"][number];
 
-// The desktop's new record (transactionalCollectionModel.ts initialValue): each field's default, or its empty value.
 const initialValue = (field: DescribedField): AppBackendJson =>
   field.type === "button"
     ? null
@@ -159,7 +158,6 @@ export function createPhoneCollections(options: {
             operation.fieldIds.includes(field.fieldId),
         )
       : undefined;
-  // The desktop's choice: the table's first create or delete that writes. Only in a table the phone reads.
   const writeOperation = (
     description: DatasetDescription,
     tableId: string,
@@ -172,11 +170,13 @@ export function createPhoneCollections(options: {
         )
       : undefined;
   // A new record's values, as the desktop sends them, or undefined when a required field would be empty: the desktop
-  // asks for that field first, and the phone has nowhere to ask.
+  // asks for that field first, and the phone has nowhere to ask. The phone then reads the record by its key.
   function createValues(description: DatasetDescription, tableId: string) {
     const create = writeOperation(description, tableId, "create");
     const table = description.tables.find((table) => table.tableId === tableId);
-    if (!create || !table) return undefined;
+    const key = table?.primaryKeyFieldId;
+    if (!create || !table || !key || !readOperation(description, tableId)?.fieldIds.includes(key))
+      return undefined;
     const values: Record<string, AppBackendJson> = {};
     for (const fieldId of create.fieldIds) {
       const field = table.fields.find((field) => field.fieldId === fieldId);
@@ -303,8 +303,6 @@ export function createPhoneCollections(options: {
       return { revision, revisionSha256, idempotencyKey };
     };
     const refusedHere = { refused: { code: "forbidden", message: RULES_DISALLOW } };
-    // One write, with the guard inside its commit too. A refusal and replaced rules are answers; a receipt is the
-    // caller's to read.
     const commit = async (
       datasetId: string,
       stamp: ReturnType<typeof stamped>,
@@ -376,17 +374,7 @@ export function createPhoneCollections(options: {
       const { receipt } = done;
       if (!receipt || !isRecordId(receipt.id) || !isCount(receipt.version))
         throw relayError("conflict", "This Collection's create gave an answer dohc can't show.");
-      // What the phone shows of it: the values it was given that the table's read shows.
-      const shown = readOperation(description, tableId)!.fieldIds;
-      return {
-        saved: {
-          id: receipt.id,
-          version: receipt.version,
-          values: Object.fromEntries(
-            Object.entries(create.values).filter(([fieldId]) => shown.includes(fieldId)),
-          ),
-        },
-      };
+      return { saved: { id: receipt.id, version: receipt.version } };
     }
     if (operation === "collectionDelete") {
       const body = args(input.args, [
