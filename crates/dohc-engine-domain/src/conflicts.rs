@@ -867,7 +867,7 @@ impl VersionedTextStore<'_> {
             }
             if matches!(input.resolution, ResolveConflictKind::ApplyIncoming)
                 && let Some(object_id) = revived_incoming_object_id(&conflict)
-                && !object_stored_as_text_file_in_tx(
+                && !object_stored_as_file_in_tx(
                     tx,
                     &conflict.workspace_id,
                     &conflict.target_version_id,
@@ -962,10 +962,11 @@ impl VersionedTextStore<'_> {
                             }
                         }
                         if let Some(binary_sha256) = conflict.incoming.binary_sha256.clone() {
+                            let revived = revived_incoming_object_id(&conflict);
                             let binary_input = WriteBinaryFile {
                                 workspace_id: conflict.workspace_id.clone(),
                                 version_id: conflict.target_version_id.clone(),
-                                object_id: input.object_id.clone(),
+                                object_id: revived.unwrap_or(&input.object_id).to_owned(),
                                 path: destination.clone(),
                                 binary_sha256: binary_sha256.clone(),
                                 moment_id: input.write_moment_id.clone(),
@@ -976,7 +977,11 @@ impl VersionedTextStore<'_> {
                                 materialize: Some(conflict_state_preimage(&conflict.current)),
                                 now_ms: input.now_ms,
                             };
-                            write_binary_file_in_tx(tx, &binary_input)?;
+                            write_binary_file_with_reuse_in_tx(
+                                tx,
+                                &binary_input,
+                                revived.is_some(),
+                            )?;
                             binary_write = Some(BinaryResolveWrite {
                                 path: destination,
                                 binary_sha256,
@@ -1118,11 +1123,12 @@ pub fn revived_incoming_object_id(conflict: &TextConflict) -> Option<&str> {
         .snapshot
         .as_ref()
         .map(|incoming| incoming.object_id.as_str())
+        .or(conflict.incoming.binary_object_id.as_deref())
 }
 
-/// Whether this machine ever stored `object_id` as a text file in the version.
+/// Whether this machine ever stored `object_id` as a file in the version.
 /// A parked editor change leaves only an object row.
-fn object_stored_as_text_file_in_tx(
+fn object_stored_as_file_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
@@ -1130,7 +1136,7 @@ fn object_stored_as_text_file_in_tx(
 ) -> Result<bool, DomainError> {
     tx.query_row(
         "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2
-           AND object_id=?3 AND after_content_kind='text' AND after_blob_sha256 IS NOT NULL
+           AND object_id=?3 AND COALESCE(after_blob_sha256, after_binary_sha256) IS NOT NULL
            AND COALESCE(sync_record_only,0)=0)",
         params![workspace_id, version_id, object_id],
         |row| row.get(0),
@@ -1305,6 +1311,14 @@ pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
+    write_binary_file_with_reuse_in_tx(tx, input, false)
+}
+
+fn write_binary_file_with_reuse_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteBinaryFile,
+    revived: bool,
+) -> Result<(), DomainError> {
     validate_moment_metadata(
         input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
@@ -1409,7 +1423,9 @@ pub fn write_binary_file_in_tx(
             )
             .optional()
             .map_err(DomainError::sql_corrupt)?;
-        let dormant_received = input.metadata_origin == "sync" && crate::received_object_token(&input.object_id)
+        let dormant_received = (revived
+            || (input.metadata_origin == "sync"
+                && crate::received_object_token(&input.object_id)))
             && tx.query_row("SELECT EXISTS(SELECT 1 FROM file_objects WHERE workspace_id=?1 AND object_id=?3) AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) AND NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                 params![input.workspace_id, input.version_id, input.object_id], |row| row.get::<_, bool>(0)).map_err(DomainError::sql_corrupt)?;
         if object_exists.is_some() && !dormant_received {

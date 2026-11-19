@@ -1,9 +1,10 @@
 use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{
     BINARY_COMBINED_TEXT_REFUSAL, ConflictChoice, ConflictContentKind, ConflictFileState,
-    ConflictMetadata, ConflictStatus, DomainError, EngineStore, NoFaults, ResolveConflictKind,
-    ResolveTextConflict, TextConflict, TextSnapshot, VersionedTextStore, WriteBinaryFile,
-    WriteText, insert_text_conflict_if_absent, load_text_conflict_in_tx, write_binary_file_in_tx,
+    ConflictMetadata, ConflictStatus, DeleteTextFile, DomainError, EngineStore, NoFaults,
+    ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot, VersionedTextStore,
+    WriteBinaryFile, WriteText, insert_text_conflict_if_absent, load_text_conflict_in_tx,
+    write_binary_file_in_tx,
 };
 use dohc_engine_storage::blob::{binary_blob_count, get_binary_blob};
 use dohc_engine_storage::{
@@ -936,4 +937,67 @@ fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
         .expect("live destination head");
     assert_eq!(kind, "binary");
     assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
+}
+
+#[test]
+fn apply_incoming_after_deleting_a_binary_file_keeps_its_object() {
+    let (_scratch, mut store) = open_store();
+    let seed = write_binary_head(&mut store, "object-asset", "asset.bin", b"bin seed");
+    VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "asset.bin".to_owned(),
+                moment_id: "delete-asset".to_owned(),
+                request_id: None,
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_600,
+            },
+            &NoFaults,
+        )
+        .expect("delete binary file");
+    let incoming = b"bin changed elsewhere";
+    let sha = hydrate(&mut store, incoming);
+    let mut c = conflict(
+        "bin-revival",
+        "asset.bin",
+        ConflictFileState::binary("asset.bin", seed),
+        ConflictFileState::text("asset.bin", None),
+        ConflictFileState::binary_head(
+            "asset.bin",
+            sha.clone(),
+            i64::try_from(incoming.len()).expect("length"),
+            "object-asset",
+            "peer-moment",
+            2_700,
+        ),
+    );
+    c.metadata = ConflictMetadata::origin("sync");
+    store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
+        .expect("open conflict");
+
+    VersionedTextStore::new(&mut store)
+        .resolve_text_conflict_with(
+            &resolve_input("bin-revival", ResolveConflictKind::ApplyIncoming),
+            &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
+        )
+        .expect("apply the other side");
+
+    let head: (String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT a.object_id, s.binary_sha256 FROM path_aliases a                  JOIN snapshots s USING (workspace_id, version_id, object_id)                  WHERE a.workspace_id = ?1 AND a.version_id = 'main' AND a.path = 'asset.bin'",
+                params![WS],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read head");
+    assert_eq!(head, ("object-asset".to_owned(), sha));
 }

@@ -1548,7 +1548,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 materialization_changes.extend(result.materialization_changes);
             }
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
-            close_imported_conflict(tx, payload)?;
+            close_imported_conflict(tx, payload, false)?;
         }
         ImportedHeadDisposition::ReviewedSide => {
             let (shadow, preceding) = validated
@@ -1576,19 +1576,9 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                 lineage.reinstall_in_tx(tx, key, envelope.recorded_at_ms)?;
             }
             commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
-            if revived && payload.chosen_from == ResolveChoiceV1::Current {
-                // This machine's conflict holds the kept copy as its incoming side.
-                close_imported_conflict(
-                    tx,
-                    &ConflictResolveV1 {
-                        chosen_from: ResolveChoiceV1::Incoming,
-                        resolution: ResolutionV1::AppliedIncoming,
-                        ..payload.clone()
-                    },
-                )?;
-            } else {
-                close_imported_conflict(tx, payload)?;
-            }
+            // This machine's conflict holds the kept copy as its incoming side.
+            let named_mirrored = revived && payload.chosen_from == ResolveChoiceV1::Current;
+            close_imported_conflict(tx, payload, named_mirrored)?;
         }
         ImportedHeadDisposition::AlreadyResult => {
             for shadow in &validated.shadows {
@@ -1634,7 +1624,7 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             {
                 commit_imported_lineage(tx, payload, key.as_ref(), envelope.recorded_at_ms)?;
             }
-            close_imported_conflict(tx, payload)?;
+            close_imported_conflict(tx, payload, false)?;
         }
         ImportedHeadDisposition::Diverged => {
             for shadow in &validated.shadows {
@@ -2031,7 +2021,7 @@ fn classify_imported_head(
                 || same_object_and_projected_content(&current_live, &payload.result)
             {
                 ImportedHeadDisposition::AlreadyResult
-            } else if kept_text_write_reviews_incoming(tx, payload, &current_live)?
+            } else if receiver_holds_reviewed_incoming(tx, payload, &current_live)?
                 || (payload
                     .lineage_transition
                     .as_ref()
@@ -2091,13 +2081,12 @@ fn reviewed_note_moved_here(
     .map_err(SyncError::corrupt)
 }
 
-fn kept_text_write_reviews_incoming(
+fn receiver_holds_reviewed_incoming(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
     live: &HeadV1,
 ) -> Result<bool, SyncError> {
-    if payload.resolution != ResolutionV1::KeptCurrent
-        || payload.lineage_transition.is_some()
+    if payload.lineage_transition.is_some()
         || payload.effects.len() != 1
         || payload.effects[0].kind != EffectKindV1::Write
         || !payload
@@ -2115,27 +2104,20 @@ fn kept_text_write_reviews_incoming(
     {
         return Ok(false);
     }
-    let Some(row) = dohc_engine_domain::load_text_conflict_in_tx(
-        tx,
-        &payload.workspace_id,
-        &payload.conflict_id,
-    )
-    .map_err(map_local_domain_error)?
-    else {
-        return Ok(false);
-    };
-    if row.status != ConflictStatus::Open || row.target_version_id != payload.target_version_id {
-        return Ok(false);
-    }
-    let receiver_path = &payload.paths[payload.incoming.path_ref()];
-    let resolver_path = &payload.paths[payload.current.path_ref()];
-    Ok(row.path == *receiver_path
-        && row.current.path == *receiver_path
-        && row.incoming.path == *resolver_path
-        && head_from_conflict_side(&row.current, payload.incoming.path_ref(), None)?
-            == payload.incoming
-        && head_from_conflict_side(&row.incoming, payload.current.path_ref(), None)?
-            == payload.current)
+    let other_review_open: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM conflicts WHERE workspace_id=?1 \
+              AND target_version_id=?2 AND path=?3 AND status='open' AND conflict_id<>?4)",
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                payload.paths[payload.incoming.path_ref()],
+                payload.conflict_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!other_review_open)
 }
 
 fn imported_live_head(
@@ -2904,38 +2886,104 @@ fn reconcile_unbound_result_head(
 fn close_imported_conflict(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
+    named_mirrored: bool,
 ) -> Result<(), SyncError> {
-    let choice = match payload.chosen_from {
-        ResolveChoiceV1::Current => "current",
-        ResolveChoiceV1::Incoming => "incoming",
-        ResolveChoiceV1::Merged => "merged",
-    };
-    let resolution = match payload.resolution {
-        ResolutionV1::KeptCurrent => "kept-current",
-        ResolutionV1::AppliedIncoming => "applied-incoming",
-        ResolutionV1::AppliedMerged => "applied-merged",
-    };
-    let changed = tx
-        .execute(
-            "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
-         WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-            params![
-                payload.workspace_id,
-                payload.conflict_id,
-                choice,
-                resolution,
-                payload.effect_context.recorded_at_ms
-            ],
-        )
-        .map_err(SyncError::persist)?;
-    if changed > 0 {
-        crate::refusal_notices::clear_conflict_in_tx(
-            tx,
-            &payload.workspace_id,
-            &payload.conflict_id,
-        )?;
+    let mut closing = vec![(payload.conflict_id.clone(), named_mirrored)];
+    closing.extend(local_reviews_of_same_heads(tx, payload)?);
+    for (conflict_id, mirrored) in closing {
+        let (choice, resolution) = match (payload.resolution, mirrored) {
+            (ResolutionV1::KeptCurrent, false) | (ResolutionV1::AppliedIncoming, true) => {
+                ("current", "kept-current")
+            }
+            (ResolutionV1::AppliedIncoming, false) | (ResolutionV1::KeptCurrent, true) => {
+                ("incoming", "applied-incoming")
+            }
+            (ResolutionV1::AppliedMerged, _) => ("merged", "applied-merged"),
+        };
+        let changed = tx
+            .execute(
+                "UPDATE conflicts SET status='resolved',chosen_from=?3,resolution=?4,updated_at_ms=?5 \
+                 WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
+                params![
+                    payload.workspace_id,
+                    conflict_id,
+                    choice,
+                    resolution,
+                    payload.effect_context.recorded_at_ms
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        if changed > 0 {
+            crate::refusal_notices::clear_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)?;
+        }
     }
     Ok(())
+}
+
+fn local_reviews_of_same_heads(
+    tx: &Transaction<'_>,
+    payload: &ConflictResolveV1,
+) -> Result<Vec<(String, bool)>, SyncError> {
+    let heads = [&payload.current, &payload.incoming];
+    let [current_path, incoming_path] = heads.map(|head| payload.paths[head.path_ref()].as_str());
+    let [current_sha, incoming_sha] =
+        heads.map(|head| head.present().map_or("", |head| head.blob_sha256.as_str()));
+    let mut statement = tx
+        .prepare(
+            "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND target_version_id=?2 \
+              AND status='open' AND conflict_id<>?3 \
+              AND current_path IN (?4,?5) AND incoming_path IN (?4,?5) \
+              AND (current_exists=0 OR COALESCE(current_blob_sha256,current_binary_sha256) IN (?6,?7)) \
+              AND (incoming_exists=0 OR COALESCE(incoming_blob_sha256,incoming_binary_sha256) IN (?6,?7))",
+        )
+        .map_err(SyncError::corrupt)?;
+    let ids = statement
+        .query_map(
+            params![
+                payload.workspace_id,
+                payload.target_version_id,
+                payload.conflict_id,
+                current_path,
+                incoming_path,
+                current_sha,
+                incoming_sha
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    let same = |state: &ConflictFileState, head: &HeadV1| {
+        state.path == payload.paths[head.path_ref()]
+            && match head.present() {
+                None => !state.is_present(),
+                Some(head) => match head.content_kind {
+                    HeadContentKindV1::Text => state.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.object_id == head.object_id
+                            && snapshot.blob_sha256 == head.blob_sha256
+                    }),
+                    HeadContentKindV1::Binary => {
+                        state.binary_object_id.as_deref() == Some(head.object_id.as_str())
+                            && state.binary_sha256.as_deref() == Some(head.blob_sha256.as_str())
+                    }
+                },
+            }
+    };
+    let mut reviews = Vec::new();
+    for conflict_id in ids {
+        let Some(row) =
+            dohc_engine_domain::load_text_conflict_in_tx(tx, &payload.workspace_id, &conflict_id)
+                .map_err(map_local_domain_error)?
+        else {
+            continue;
+        };
+        if same(&row.current, &payload.current) && same(&row.incoming, &payload.incoming) {
+            reviews.push((conflict_id, false));
+        } else if same(&row.current, &payload.incoming) && same(&row.incoming, &payload.current) {
+            reviews.push((conflict_id, true));
+        }
+    }
+    Ok(reviews)
 }
 
 fn conflict_state_from_head(
@@ -5024,6 +5072,100 @@ mod tests {
             "{outcome:?}"
         );
         assert!(outcome.refusals.is_empty(), "{outcome:?}");
+    }
+
+    fn open_review(
+        tx: &Transaction<'_>,
+        conflict_id: &str,
+        current: ConflictFileState,
+        incoming: ConflictFileState,
+    ) -> Result<(), SyncError> {
+        insert_text_conflict_if_absent(
+            tx,
+            &TextConflict {
+                conflict_id: conflict_id.to_owned(),
+                workspace_id: "ws".to_owned(),
+                path: "doc.md".to_owned(),
+                target_version_id: "main".to_owned(),
+                source_version_id: "main".to_owned(),
+                created_at_ms: 15,
+                updated_at_ms: 15,
+                status: ConflictStatus::Open,
+                chosen_from: ConflictChoice::Current,
+                resolution: None,
+                metadata: ConflictMetadata::origin("sync"),
+                base: ConflictFileState::text("doc.md", None),
+                current,
+                incoming,
+            },
+        )
+        .map(drop)
+        .map_err(map_local_domain_error)
+    }
+
+    fn open_own_review(tx: &Transaction<'_>, payload: &ConflictResolveV1) -> Result<(), SyncError> {
+        let mut own_current = conflict_state_from_head(tx, payload, &payload.incoming)?;
+        let mut own_incoming = conflict_state_from_head(tx, payload, &payload.current)?;
+        for side in [&mut own_current, &mut own_incoming] {
+            if let Some(snapshot) = side.snapshot.as_mut() {
+                snapshot.latest_moment_id = format!("{}-here", snapshot.latest_moment_id);
+            }
+        }
+        open_review(tx, "own-review", own_current, own_incoming)
+    }
+
+    #[test]
+    fn a_decision_finds_this_computers_own_review_of_the_same_heads() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let payload = &built.validated.payload;
+        let dohc_engine_storage::TxnOutcome::Committed(reviews) = store
+            .write_with(&NoFaults, |tx| {
+                let bytes = b"picture bytes".to_vec();
+                let sha = put_binary_blob(tx, &bytes)?;
+                let binary = ConflictFileState::binary_head(
+                    "doc.md",
+                    sha,
+                    i64::try_from(bytes.len()).unwrap(),
+                    "object-picture",
+                    "picture-moment",
+                    15,
+                );
+                open_review(tx, "binary-review", binary.clone(), binary)?;
+                open_own_review(tx, payload)?;
+                local_reviews_of_same_heads(tx, payload)
+            })
+            .unwrap()
+        else {
+            panic!("the lookup did not commit");
+        };
+        assert_eq!(reviews, vec![("own-review".to_owned(), true)]);
+    }
+
+    #[test]
+    fn a_revived_decision_closes_each_review_here_with_the_copy_it_kept() {
+        let (_scratch, mut store, built) = text_keep_receiver_fixture();
+        let payload = &built.validated.payload;
+        store
+            .write_with(&NoFaults, |tx| {
+                open_own_review(tx, payload)?;
+                close_imported_conflict(tx, payload, true)
+            })
+            .unwrap();
+        let closed: Vec<(String, String, String)> = store
+            .read_with(|conn| {
+                conn.prepare("SELECT conflict_id,chosen_from,resolution FROM conflicts ORDER BY 1")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect()
+            })
+            .unwrap();
+        let kept = |conflict_id: &str| {
+            (
+                conflict_id.to_owned(),
+                "incoming".to_owned(),
+                "applied-incoming".to_owned(),
+            )
+        };
+        assert_eq!(closed, vec![kept(&payload.conflict_id), kept("own-review")]);
     }
 
     fn text_keep_head(store: &mut EngineStore) -> TextSnapshot {
