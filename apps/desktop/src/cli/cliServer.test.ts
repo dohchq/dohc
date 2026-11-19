@@ -2592,6 +2592,7 @@ describe("CLI socket server", () => {
           asked.push(`${workspaceId}/${runId}/${threadId}`);
           return refusal;
         },
+        selfTestReply: () => null,
       };
       return asked;
     }
@@ -2640,6 +2641,105 @@ describe("CLI socket server", () => {
           thread: cliThreadId(threadId),
         }),
       ).rejects.toThrow("Send nothingToReport in the thread this run was started for.");
+    });
+  });
+
+  // A runner self-test's reply goes to the self-test, never to chat. Only the
+  // request that proves it is the self-test's run names the run's agent.
+  describe("runner self-test reply", () => {
+    const SELF_TEST_THREAD = "self_test_check";
+
+    function selfTestRuns(): Array<{ workspaceId: string; runAgentId: string | null }> {
+      const asked: Array<{ workspaceId: string; runAgentId: string | null }> = [];
+      serverOptions.chatRuns = {
+        dispatchStateForThread: async () => {
+          throw new Error("Not read for a reply.");
+        },
+        retryStoppedRun: async () => false,
+        endRunQuietly: () => "not-running",
+        selfTestReply(workspaceId, { threadId, body, runAgentId }) {
+          if (threadId !== SELF_TEST_THREAD || body !== "dohc-runner-self-test:run_check")
+            return null;
+          asked.push({ workspaceId, runAgentId });
+          return `${threadId}_reply`;
+        },
+      };
+      return asked;
+    }
+
+    function replyAsAgent(thread: string, body = "dohc-runner-self-test:run_check") {
+      return invoke("reply", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        thread,
+        body,
+        attachments: [],
+        needsDecision: false,
+      });
+    }
+
+    async function chatThreadCount(): Promise<number> {
+      const channels = await store!.listChannels({ workspaceId: WORKSPACE_ID });
+      const threads = await Promise.all(
+        channels.map((channel) =>
+          store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: channel.id }),
+        ),
+      );
+      return threads.flat().length;
+    }
+
+    it("hands the self-test's reply to it and writes nothing to chat", async () => {
+      const asked = selfTestRuns();
+      dispatchedRun = "default";
+      dispatchedRunId = null;
+      const threadsBefore = await chatThreadCount();
+
+      await expect(replyAsAgent(SELF_TEST_THREAD)).resolves.toEqual({
+        threadId: SELF_TEST_THREAD,
+        messageId: `${SELF_TEST_THREAD}_reply`,
+      });
+      expect(asked).toEqual([{ workspaceId: WORKSPACE_ID, runAgentId: "default" }]);
+      expect(await chatThreadCount()).toBe(threadsBefore);
+    });
+
+    it("names no agent for a reply without the self-test's secret or from another run", async () => {
+      const asked = selfTestRuns();
+      dispatchedRun = "default";
+      dispatchedRunId = null;
+      callerRunSecret = "c".repeat(64);
+      await replyAsAgent(SELF_TEST_THREAD);
+      callerRunSecret = undefined;
+      await replyAsAgent(SELF_TEST_THREAD);
+      callerRunSecret = RUN_SECRET;
+      holdRun("run-real");
+      await replyAsAgent(SELF_TEST_THREAD);
+      expect(asked).toEqual([
+        { workspaceId: WORKSPACE_ID, runAgentId: null },
+        { workspaceId: WORKSPACE_ID, runAgentId: null },
+        { workspaceId: WORKSPACE_ID, runAgentId: null },
+      ]);
+    });
+
+    it("still writes a run's reply in a real thread to chat", async () => {
+      const asked = selfTestRuns();
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      const thread = await store!.startChannelThread({
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        channelId: general.id,
+        author: { kind: "human", displayName: "Sam" },
+        body: "Plan the trip.",
+      });
+      holdRun("run-real");
+
+      const reply = await replyAsAgent(cliThreadId(thread.thread.id), "Booked the hotel.");
+      expect(asked).toEqual([]);
+      expect(
+        (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.thread.id })).map(
+          (message) => message.body,
+        ),
+      ).toEqual(["Plan the trip.", "Booked the hotel."]);
+      expect(reply.threadId).toBe(cliThreadId(thread.thread.id));
     });
   });
 

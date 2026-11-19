@@ -1277,9 +1277,9 @@ export interface LinkedChatStore {
     wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
-    // Desktop's own thread in an agent DM, an automation's wake thread or the
-    // runner self-test, stays its own post instead of joining the DM's
-    // conversation. People, the CLI and MCP never set it.
+    // Desktop's own thread in an agent DM, such as an automation's wake thread,
+    // stays its own post instead of joining the DM's conversation. People, the
+    // CLI and MCP never set it.
     ownThread?: boolean;
     author: ChatWriteActor;
     // The sender's opaque relay user id (Better Auth user id). Caller supplies
