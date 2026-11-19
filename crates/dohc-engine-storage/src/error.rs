@@ -128,15 +128,17 @@ enum Cause {
     Busy,
     Full,
     Damaged,
+    Denied,
 }
 
 fn cause(source: &(dyn std::error::Error + 'static)) -> Option<Cause> {
     std::iter::successors(Some(source), |error| error.source()).find_map(|error| {
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull)
-        {
-            return Some(Cause::Full);
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                std::io::ErrorKind::StorageFull => return Some(Cause::Full),
+                std::io::ErrorKind::PermissionDenied => return Some(Cause::Denied),
+                _ => {}
+            }
         }
         match error
             .downcast_ref::<rusqlite::Error>()
@@ -149,6 +151,9 @@ fn cause(source: &(dyn std::error::Error + 'static)) -> Option<Cause> {
             rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
                 Some(Cause::Damaged)
             }
+            rusqlite::ErrorCode::CannotOpen
+            | rusqlite::ErrorCode::PermissionDenied
+            | rusqlite::ErrorCode::ReadOnly => Some(Cause::Denied),
             _ => None,
         }
     })
@@ -186,6 +191,9 @@ impl StorageError {
             Some(Cause::Damaged) => StorageError::StateCorrupt {
                 source: Some(Box::new(source)),
             },
+            Some(Cause::Denied) => StorageError::PermissionDenied {
+                source: Some(Box::new(source)),
+            },
             None => otherwise(Some(Box::new(source))),
         }
     }
@@ -199,19 +207,20 @@ impl StorageError {
     }
 
     pub(crate) fn classify_io(err: std::io::Error) -> Self {
-        if err.kind() == std::io::ErrorKind::PermissionDenied {
-            return StorageError::PermissionDenied {
-                source: Some(Box::new(err)),
-            };
-        }
         StorageError::backup(err)
     }
 
-    /// Whether SQLite refused this operation because the database was busy,
-    /// for a caller that keeps the raw `rusqlite::Error`, as the search
-    /// index does.
-    pub fn is_transient_lock(error: &rusqlite::Error) -> bool {
-        matches!(cause(error), Some(Cause::Busy))
+    /// The named cause of a raw SQLite failure, for a caller that keeps the
+    /// `rusqlite::Error`, as the search index does. `None` when the failure
+    /// is none of a busy database, a full disk, a damaged file, or a denied
+    /// open.
+    pub fn named_cause(error: &rusqlite::Error) -> Option<Self> {
+        Some(match cause(error)? {
+            Cause::Busy => StorageError::FileLocked,
+            Cause::Full => StorageError::DiskFull { shortfall: None },
+            Cause::Damaged => StorageError::StateCorrupt { source: None },
+            Cause::Denied => StorageError::PermissionDenied { source: None },
+        })
     }
 
     pub(crate) fn corrupt(source: impl std::error::Error + Send + Sync + 'static) -> Self {
@@ -247,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn every_wrapper_names_a_busy_database_a_full_disk_and_a_damaged_file() {
+    fn every_wrapper_names_a_busy_database_a_full_disk_a_damaged_file_and_a_denied_open() {
         let wrappers: [fn(rusqlite::Error) -> StorageError; 4] = [
             StorageError::persist,
             StorageError::corrupt,
@@ -260,10 +269,24 @@ mod tests {
             assert_eq!(wrap(sqlite(ffi::SQLITE_FULL)).code(), "disk-full");
             assert_eq!(wrap(sqlite(ffi::SQLITE_CORRUPT)).code(), "state-corrupt");
             assert_eq!(wrap(sqlite(ffi::SQLITE_NOTADB)).code(), "state-corrupt");
+            assert_eq!(
+                wrap(sqlite(ffi::SQLITE_CANTOPEN)).code(),
+                "permission-denied"
+            );
+            assert_eq!(wrap(sqlite(ffi::SQLITE_PERM)).code(), "permission-denied");
+            assert_eq!(
+                wrap(sqlite(ffi::SQLITE_READONLY)).code(),
+                "permission-denied"
+            );
         }
         assert_eq!(
             StorageError::classify_io(std::io::ErrorKind::StorageFull.into()).code(),
             "disk-full"
+        );
+        assert_eq!(
+            StorageError::corrupt(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .code(),
+            "permission-denied"
         );
         assert_eq!(
             StorageError::migration(rusqlite::Error::InvalidQuery).code(),

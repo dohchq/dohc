@@ -95,7 +95,10 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
     match error {
         RuntimeError::Search(SearchError::Storage(sqlite)) => {
-            StorageError::is_transient_lock(sqlite)
+            matches!(
+                StorageError::named_cause(sqlite),
+                Some(StorageError::FileLocked)
+            )
         }
         RuntimeError::Relay(RelayError::StoreBusy) => true,
         error => matches!(storage_failure(error), Some(StorageError::FileLocked)),
@@ -316,6 +319,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     }
     if let Some(refused) = storage_failure(error) {
         return storage_refusal(refused);
+    }
+    if let RuntimeError::Search(SearchError::Storage(sqlite)) = error
+        && let Some(named) = dohc_engine_storage::StorageError::named_cause(sqlite)
+    {
+        return storage_refusal(&named);
     }
     match error {
         RuntimeError::RecoveryImportRefused { reason } => {
@@ -980,6 +988,30 @@ mod tests {
                 ))),
                 "state-corrupt",
                 "engine: internal refusal: INTERNAL search-storage-core",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                    None,
+                ))),
+                "disk-full",
+                "engine: internal refusal: INTERNAL search-storage",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                    None,
+                ))),
+                "state-corrupt",
+                "engine: internal refusal: INTERNAL search-storage",
+            ),
+            (
+                RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    None,
+                ))),
+                "workspace operation failed",
+                "engine: internal refusal: INTERNAL search-storage",
             ),
             (
                 RuntimeError::Domain(DomainError::CaptureNotOwned),
