@@ -1020,7 +1020,7 @@ export function markNotices(
     );
     const keepKey = storage.db.prepare(
       `INSERT OR IGNORE INTO sync_relay_notice_mark_keys (recipient_user_id, notice_id, mark_key, applied_at_ms)
-       SELECT recipient_user_id, notice_id, ?, ? FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?`,
+       VALUES (?, ?, ?, ?)`,
     );
     const keyApplied = storage.db.prepare(
       "SELECT 1 FROM sync_relay_notice_mark_keys WHERE recipient_user_id = ? AND notice_id = ? AND mark_key = ?",
@@ -1033,7 +1033,7 @@ export function markNotices(
           repeated.push(key);
           continue;
         }
-        keys += Number(keepKey.run(key, input.nowMs, input.recipientUserId, noticeId).changes ?? 0);
+        keys += Number(keepKey.run(input.recipientUserId, noticeId, key, input.nowMs).changes ?? 0);
       }
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
       if (

@@ -90,18 +90,16 @@ const DISMISSAL_SCHEMA = {
 } as const;
 
 // The keys of the phone's marks this relay applied, so a mark the phone sends
-// again changes nothing. A key belongs to one recipient's notice row and goes
-// with it: a mark on a row the relay no longer holds changes nothing anyway. A
-// person keeps at most NOTICE_MARK_KEYS_KEPT keys, and the oldest go first.
+// again changes nothing. A key outlives its notice row, because a notice can be
+// posted again under the same ID after its row is swept. A person keeps at most
+// NOTICE_MARK_KEYS_KEPT keys, and the oldest go first.
 const MARK_KEY_SCHEMA = {
   [NOTICE_MARK_KEYS]: `CREATE TABLE sync_relay_notice_mark_keys (
-  recipient_user_id TEXT NOT NULL,
-  notice_id TEXT NOT NULL,
+  recipient_user_id TEXT NOT NULL CHECK (length(CAST(recipient_user_id AS BLOB)) BETWEEN 1 AND 1024),
+  notice_id TEXT NOT NULL CHECK (length(notice_id) BETWEEN 1 AND 1024),
   mark_key TEXT NOT NULL CHECK (length(mark_key) BETWEEN 1 AND ${NOTICE_MARK_KEY_MAX_CHARS}),
   applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms BETWEEN 0 AND 9007199254740991),
-  PRIMARY KEY (recipient_user_id, notice_id, mark_key),
-  FOREIGN KEY (recipient_user_id, notice_id)
-    REFERENCES sync_relay_notices(recipient_user_id, notice_id) ON DELETE CASCADE
+  PRIMARY KEY (recipient_user_id, notice_id, mark_key)
 ) STRICT`,
   idx_sync_relay_notice_mark_keys_age: `CREATE INDEX idx_sync_relay_notice_mark_keys_age
   ON sync_relay_notice_mark_keys(recipient_user_id, applied_at_ms)`,
