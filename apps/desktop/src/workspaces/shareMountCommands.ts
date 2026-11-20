@@ -79,6 +79,8 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
   // mount the owner may have restored, so the mount resumes. Decides for
   // itself whether the recheck is due; a refresh only says it saw one.
   recheckRemovedShares?(workspaceId: string): Promise<void>;
+  /** A copy whose record said its share ended has left a workspace. */
+  endedMountRemoved?(): void;
 }
 
 type ShareMountFilesLifecycleProjectionFactory = (
@@ -566,6 +568,9 @@ export function createShareMountCommands<WorkspaceSummary>(
           if (removal.kind === "missing") {
             throw new Error("This share is not added to this workspace.");
           }
+          const ended = registeredMounts.some(
+            (mount) => record(mount) && mount.shareId === shareId && mount.ended === true,
+          );
           if (removal.kind === "registry-only") {
             await dependencies
               .closeRelayWorkspace(mountStoreWorkspaceIdFor(workspace.workspaceId, shareId))
@@ -577,6 +582,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
               withoutShareMountRecords(mounts, shareId),
             );
+            if (ended) dependencies.endedMountRemoved?.();
             presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
               refreshNativeSurfaces: true,
             });
@@ -590,6 +596,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             workspaceId: workspace.workspaceId,
             shareId: removal.mount.shareId,
           });
+          if (ended) dependencies.endedMountRemoved?.();
           presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
             refreshNativeSurfaces: true,
           });

@@ -965,6 +965,47 @@ describe("share mount commands", () => {
     ]);
   });
 
+  it("says an ended copy left the workspace, and says nothing for a live one", async () => {
+    const copy = {
+      shareId: SHARE_ID,
+      label: "alex",
+      granterEmail: null,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+      grantedSelector: SELECTOR,
+    };
+    const live = harness();
+    live.dependencies.endedMountRemoved = vi.fn();
+    live.mounts = [copy];
+    await live.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID, assertCurrent });
+    expect(live.dependencies.endedMountRemoved).not.toHaveBeenCalled();
+
+    const ended = harness();
+    const endedMountRemoved = vi.fn(() => {
+      ended.events.push("ended-copy-removed");
+    });
+    ended.dependencies.endedMountRemoved = endedMountRemoved;
+    ended.mounts = [{ ...copy, ended: true }];
+    await ended.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID, assertCurrent });
+    expect(endedMountRemoved).toHaveBeenCalledOnce();
+    expect(ended.mounts).toEqual([]);
+    expect(ended.events.indexOf("ended-copy-removed")).toBeGreaterThan(
+      ended.events.indexOf("registry:0"),
+    );
+    expect(ended.events.indexOf("ended-copy-removed")).toBeLessThan(
+      ended.events.indexOf("notify:workspace-one"),
+    );
+
+    const damaged = harness();
+    damaged.dependencies.endedMountRemoved = vi.fn();
+    damaged.mounts = [
+      { ...copy, ended: true },
+      { ...copy, label: "duplicate" },
+    ];
+    await damaged.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID, assertCurrent });
+    expect(damaged.dependencies.endedMountRemoved).toHaveBeenCalledOnce();
+  });
+
   it("closes relay state and removes registry ownership even when folder cleanup fails", async () => {
     const h = harness();
     h.mounts = [
