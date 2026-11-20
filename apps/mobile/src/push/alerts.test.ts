@@ -375,4 +375,30 @@ describe("a tapped alert", () => {
     expect(open.state().currentWorkspaceId).toBe("ws-1");
     open.stop();
   });
+
+  it("keeps a workspace hidden that the person hid while the tap was reading the list", async () => {
+    const { server, signIn, listed } = tapping();
+    server.on("GET", "/sync/account/workspaces", listed(list));
+    server.on("PATCH", "/sync/account/workspaces/ws-1", {
+      status: 200,
+      body: { ok: true, showOnPhone: false },
+    });
+    const workspaces = createWorkspaceList(signIn);
+    workspaces.reload();
+    await vi.waitFor(() => expect(workspaces.state()).toMatchObject({ status: "ready" }));
+    const held = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => held.promise);
+    const tapped = openTap(signIn, data, () => 4, workspaces);
+    server.on("GET", "/sync/account/workspaces", listed([{ ...list[0], showOnPhone: false }]));
+    workspaces.setShowOnPhone("ws-1", false);
+    await vi.waitFor(() =>
+      expect(workspaces.state()).toMatchObject({
+        workspaces: [{ showOnPhone: false }],
+        pending: new Set(),
+      }),
+    );
+    held.resolve(listed(list));
+    expect(await tapped).toBe("home");
+    expect(workspaces.state()).toMatchObject({ workspaces: [{ showOnPhone: false }] });
+  });
 });

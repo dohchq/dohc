@@ -201,12 +201,11 @@ export async function openTap(
   signIn: SignIn,
   data: unknown,
   generation: () => number | null,
-  list: Pick<WorkspaceListStore, "listed"> | null,
+  list: Pick<WorkspaceListStore, "fresh"> | null,
 ) {
   try {
-    const workspaces = await listWorkspaces(signIn.client);
+    const workspaces = await (list ? list.fresh() : listWorkspaces(signIn.client));
     if (!signIn.isCurrent()) return null;
-    list?.listed(workspaces);
     return alertTarget(data, generation(), workspaces) ?? "home";
   } catch (error) {
     const problem = shownProblem(error);
