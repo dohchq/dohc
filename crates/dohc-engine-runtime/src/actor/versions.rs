@@ -261,7 +261,7 @@ struct SwitchProjection {
     inline_content: Option<Vec<u8>>,
 }
 
-fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
+pub(super) fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
     match state {
         ProjectionTargetState::Absent => Some(Preimage::Absent),
         ProjectionTargetState::Text { sha256 } | ProjectionTargetState::Binary { sha256 } => {

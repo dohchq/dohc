@@ -50,6 +50,8 @@ mod relay_materialization;
 mod search;
 #[path = "search_performance.rs"]
 mod search_performance;
+#[path = "secret_queued_jobs.rs"]
+mod secret_queued_jobs;
 #[path = "soak.rs"]
 mod soak;
 #[path = "switch_file_holds.rs"]

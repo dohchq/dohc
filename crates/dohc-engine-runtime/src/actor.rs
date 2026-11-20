@@ -75,6 +75,7 @@ pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
 };
+pub use secrets::SecretWriteDisk;
 pub use versioned::{
     BinaryWriteExecutionResult, MergeExecutionResult, RollbackExecutionResult,
     TextWriteExecutionResult, WriteConditions,
