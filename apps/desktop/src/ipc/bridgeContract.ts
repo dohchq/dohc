@@ -2707,6 +2707,9 @@ export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
 });
 export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;
 
+// A personal agent's id, as the relay names it.
+export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
+
 export const ChatMessageRecord = z
   .object({
     id: OPAQUE_ID,
@@ -2720,8 +2723,9 @@ export const ChatMessageRecord = z
     authorUserId: z.string().min(1).max(256).optional(),
     authorReported: ChatReportedAgentRecord.optional(),
     work: ChatWorkReportRecord.optional(),
-    // The agent in Settings that wrote it, which only main records.
-    authorAgentId: AgentId.optional(),
+    // The agent in Settings that wrote it, which only main records, or the
+    // personal agent the relay names on its post.
+    authorAgentId: z.union([AgentId, z.string().regex(PERSONAL_AGENT_ID)]).optional(),
     parentMessageId: OPAQUE_ID.optional(),
     origin: z.literal("cli").optional(),
     // Empty once the relay deleted the message.
@@ -8568,7 +8572,6 @@ export const agentsListeningOperations = {
 
 // The personal agents of the server account this computer is signed in to,
 // as main caches them from the relay. A removed agent is left out.
-export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
 export const PERSONAL_AGENT_REACH_LIMIT = 20;
 export const PersonalAgentLevel = z.enum(["view", "comment", "edit"]);
 export type PersonalAgentLevel = z.infer<typeof PersonalAgentLevel>;

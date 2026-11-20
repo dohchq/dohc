@@ -173,6 +173,19 @@ describe("the personal agents roster in main", () => {
     ).toEqual(["signed_out"]);
   });
 
+  it("says what it could not do when the relay is out of reach", async () => {
+    const relay = fakeRelay();
+    const { roster } = setup(relay);
+    await roster.read(false);
+
+    relay.offline = true;
+    const result = await roster.change(KEY, AGENT_ID, { kind: "reach", reach: [] });
+    expect(result).toEqual({
+      ok: false,
+      error: `dohc could not reach relay.test to change ${relayAgent().name}. Check your connection.`,
+    });
+  });
+
   it("ends the session when the relay refuses its token", async () => {
     const relay = fakeRelay();
     const { roster, unauthorized } = setup(relay);
