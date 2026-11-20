@@ -2166,7 +2166,11 @@ export interface SqliteDb {
   close(): void;
 }
 
+export type SyncRelayOpenPart = "lock" | "file" | "continuity" | "schema" | "purge";
+
 export interface OpenSyncRelayStorageOptions {
+  /** Called as each part of the open ends, in order, with the part's name. */
+  opened?: (part: SyncRelayOpenPart) => void;
   pushConfigured?: boolean;
   apnsConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
