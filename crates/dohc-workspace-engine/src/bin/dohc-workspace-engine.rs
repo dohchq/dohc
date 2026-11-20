@@ -238,6 +238,7 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
 
 // A system shutdown signals every process at once, and dohc's quit still
 // needs the engine. The engine ends when its owner closes its input or dies.
+// Tokio keeps a signal's handler for the rest of the process once registered.
 #[cfg(unix)]
 fn end_only_when_input_closes() -> io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -246,8 +247,7 @@ fn end_only_when_input_closes() -> io::Result<()> {
         SignalKind::interrupt(),
         SignalKind::hangup(),
     ] {
-        let mut stop = signal(kind)?;
-        tokio::spawn(async move { while stop.recv().await.is_some() {} });
+        drop(signal(kind)?);
     }
     Ok(())
 }
