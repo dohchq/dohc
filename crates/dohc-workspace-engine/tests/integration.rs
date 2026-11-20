@@ -70,5 +70,7 @@ mod rpc_write_surface;
 mod rpc_ydoc;
 #[path = "shadow_replay.rs"]
 mod shadow_replay;
+#[path = "stop_signal.rs"]
+mod stop_signal;
 #[path = "ydoc_replay_parity.rs"]
 mod ydoc_replay_parity;
