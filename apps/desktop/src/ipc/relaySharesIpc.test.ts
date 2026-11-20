@@ -200,6 +200,7 @@ function harness() {
     saveOwnerLiveRecoveryCopy,
     listOwnerLiveRecoveryPackages,
     sharesChanged,
+    receivedSharesChanged: vi.fn(),
     sendRendererActivity,
     reconcileReceivedShares,
   };
@@ -238,6 +239,7 @@ function harness() {
     warm,
     invoke,
     sharesChanged,
+    receivedSharesChanged: vi.fn(),
     sendRendererActivity,
     reconcileReceivedShares,
     unenrolled: () => {
@@ -1141,6 +1143,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.listRelayShares.channel,
       relayShareOperations.getRelayReceivedShare.channel,
       relayShareOperations.revokeRelayShare.channel,
+      relayShareOperations.leaveRelayShare.channel,
       relayShareOperations.undoRelayShare.channel,
       relayShareOperations.createRelayShareLink.channel,
       relayShareOperations.addRelayShareLink.channel,
@@ -1163,7 +1166,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.retuneRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(34);
+    expect(h.handlers.size).toBe(35);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -1413,6 +1416,7 @@ const ownerInputs = {
   listRelayShares: undefined,
   getRelayReceivedShare: { shareId: "share" },
   revokeRelayShare: { shareId: "share" },
+  leaveRelayShare: { shareId: "share", ended: false },
   undoRelayShare: { workspaceId, shareId: "share", undoId: "undo-1" },
   pollRelayShareDiscussionActivity: pollInput,
   cancelRelayShareDiscussionActivity: { pollId: pollInput.pollId },

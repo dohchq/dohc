@@ -1226,7 +1226,7 @@ export function listReceivedShareIdsPage(
   cursor?: SyncRelayReceivedInventoryCursor,
 ): SyncRelayReceivedInventoryPage {
   const removedIds = storage
-    .listRemovedSharesForRecipient(recipientUserId)
+    .listRemovedSharesInRecipientList(recipientUserId)
     .map((row) => row.shareId);
   const rows = storage.db
     .prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
