@@ -8046,17 +8046,15 @@ fn conservative_read_coordinate(
 
 /// How many of thread `t`'s deleted messages come after its first
 /// `read_count` messages in arrival order. A read count still counts every
-/// message, so an unread count takes these off. SQLite refuses an outer
-/// column in `OFFSET`, so each deleted message counts the messages before it.
+/// message, so an unread count takes these off. `message_order` is a
+/// message's zero-based arrival position: each insert takes the next one, and
+/// a delete keeps its row.
 fn deleted_unread_by_count(read_count: &str) -> String {
     format!(
         "(SELECT COUNT(*) FROM chat_messages d \
           WHERE d.workspace_id = t.workspace_id AND d.thread_id = t.thread_id \
             AND d.deleted_at_ms IS NOT NULL \
-            AND ({read_count} <= 0 OR \
-              (SELECT COUNT(*) FROM chat_messages b \
-               WHERE b.workspace_id = t.workspace_id AND b.thread_id = t.thread_id \
-                 AND b.message_order < d.message_order) >= {read_count}))"
+            AND d.message_order >= {read_count})"
     )
 }
 

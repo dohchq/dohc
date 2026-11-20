@@ -313,6 +313,24 @@ describe("ChatLane", () => {
     expect(shown).toEqual(["a", "b", "z"]);
   });
 
+  it("keeps the New divider at an account's place when its first unread message is deleted", async () => {
+    // Arrival is a, z, b at one time, and b is deleted. Only z is unread, and
+    // it shows after b, so the divider stays above b.
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 3, lastReadSequence: 2, unreadCount: 1 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({ id: "a", body: "Read" }),
+        message({ id: "z", body: "Unread z" }),
+        message({ id: "b", body: "", deletedAtMs: 50 }),
+      ],
+    });
+    render(lane());
+    const divider = await screen.findByTestId("chats-lane-new-divider");
+    expect(divider.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("b");
+  });
+
   it("counts arrivals while reading history and returns to the end on click", async () => {
     render(lane());
     await screen.findByText("Old message");

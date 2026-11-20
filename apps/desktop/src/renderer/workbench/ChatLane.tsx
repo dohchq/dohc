@@ -290,11 +290,14 @@ export function ChatLane(props: {
         const laneMessages = laneRead?.messages ?? [];
         if (lane && paintedRevision.current?.threadId !== lane.id) {
           // The read place counts deleted messages; the unread count doesn't.
+          // An account's place is by time, so its unread message can arrive
+          // before the place; then the divider stays at the place.
           const firstUnread =
             lane.unreadCount > 0
-              ? laneMessages
+              ? (laneMessages
                   .slice(lane.lastReadSequence)
-                  .find((message) => message.deletedAtMs === undefined)
+                  .find((message) => message.deletedAtMs === undefined) ??
+                laneMessages[lane.lastReadSequence])
               : undefined;
           setFirstUnreadMessageId(firstUnread?.id ?? null);
         }
