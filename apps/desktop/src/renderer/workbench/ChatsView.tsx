@@ -4145,7 +4145,14 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <ChatHeader
-          label={nav.thread.title}
+          label={
+            // The engine's title for a post with no title or first line, as
+            // when its first message is deleted, names a chat. A post names
+            // its Group instead.
+            nav.thread.title === "New chat" && nav.channel.kind === "channel"
+              ? `Post in #${nav.channel.name}`
+              : nav.thread.title
+          }
           testId="chats-thread"
           onBack={goBack}
           action={

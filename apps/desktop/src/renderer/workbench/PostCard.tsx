@@ -206,7 +206,8 @@ export function PostCard(props: {
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
   const time = formatChatTime(createdAtMs);
   const commentCount = Math.max(0, props.thread.messageCount - 1);
-  // A deleted post keeps its title, author and time, and shows nothing it held.
+  // A deleted post keeps its author and time, and shows nothing it held. A
+  // live post has no heading of its own, so neither does a deleted one.
   const deleted = message?.deletedAtMs !== undefined;
   const { heading, excerpt } =
     message && !deleted
@@ -326,24 +327,28 @@ export function PostCard(props: {
               {formatShortTime(createdAtMs)}
             </time>
           </span>
-          <span
-            data-testid="chats-post-title"
-            className={`mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
-              plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
-            }`}
-          >
-            <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
-          </span>
           {deleted ? (
-            <DeletedMessageLine testId="chats-post-deleted" className="mt-px" />
-          ) : excerpt ? (
-            <span
-              data-testid="chats-post-excerpt"
-              className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
-            >
-              <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
-            </span>
-          ) : null}
+            <DeletedMessageLine testId="chats-post-deleted" className="mt-0.5" />
+          ) : (
+            <>
+              <span
+                data-testid="chats-post-title"
+                className={`mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-ink ${
+                  plain ? "text-[14px] leading-[21px]" : "text-[14px] font-semibold leading-5"
+                }`}
+              >
+                <WorkLinkText text={heading} interactive={false} testId="chats-post-title" />
+              </span>
+              {excerpt ? (
+                <span
+                  data-testid="chats-post-excerpt"
+                  className="mt-px line-clamp-3 whitespace-pre-wrap break-words text-[13px] leading-5 text-muted"
+                >
+                  <WorkLinkText text={excerpt} interactive={false} testId="chats-post-excerpt" />
+                </span>
+              ) : null}
+            </>
+          )}
           {work || byEmoji.size > 0 || openDecision || commentCount > 0 ? (
             <div data-testid="chats-post-footer" className={FEED_META}>
               {work ? (

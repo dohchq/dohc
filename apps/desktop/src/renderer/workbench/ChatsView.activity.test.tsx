@@ -666,11 +666,18 @@ describe("ChatsView live activity refresh", () => {
     act(() => emitWorkspaceActivity());
 
     await screen.findByTestId("chats-message-deleted");
+    // The header names the post's Group, and the thread shows no heading.
     await waitFor(() =>
-      expect(screen.getByTestId("chats-thread-title").textContent).toBe("New chat"),
+      expect(screen.getByTestId("chats-thread-title").textContent).toBe("Post in #general"),
     );
-    expect(screen.getByTestId("chats-thread-post-title").textContent).toBe("New chat");
+    expect(screen.getByTestId("chats-thread-post-title").className).toBe("sr-only");
     expect(screen.getByTestId("chats-thread-view").textContent).not.toContain(words);
+
+    // Its card shows the author, the time and the deleted line, with no title.
+    await userEvent.click(screen.getByTestId("chats-thread-back"));
+    await screen.findByTestId("chats-post-deleted");
+    expect(screen.queryByTestId("chats-post-title")).toBeNull();
+    expect(screen.getByTestId("chats-post-card").textContent).not.toContain("New chat");
   });
 });
 

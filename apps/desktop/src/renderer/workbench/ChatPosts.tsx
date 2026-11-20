@@ -628,10 +628,11 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   const openingDecision = openingDeleted ? undefined : decisionsByMessage.get(openingMessage.id);
   const openingBookmark = bookmarkFor("message", openingMessage.id);
   const openingIsAgent = isAgentAuthor(openingMessage);
-  const hasExplicitTitle = !titleRepeatsFirstLine(
-    nav.thread.title,
-    openingMessage.body.split("\n", 1)[0] ?? "",
-  );
+  // A live post shows no heading, so a deleted one shows none either; its
+  // fallback title stays in the header bar.
+  const hasExplicitTitle =
+    !openingDeleted &&
+    !titleRepeatsFirstLine(nav.thread.title, openingMessage.body.split("\n", 1)[0] ?? "");
   const commentCount = messages.length - 1;
   const failedEnd = failedRun ? failedRunEnd(failedRun, runRecords, messages) : null;
   // Under the failed run's last post, its line takes the run's chip in. The
@@ -891,7 +892,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                       </button>
                     ) : null}
                     <CopyMessageLink messageId={comment.id} testId="chats-comment-copy-link" />
-                    {props.deleteAction?.(comment, "chats-comment-delete")}
                     <BookmarkAction
                       active={Boolean(commentBookmark)}
                       busy={bookmarkBusy.has(commentBookmarkKey)}
@@ -916,6 +916,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                       }
                       testId="chats-message-bookmark"
                     />
+                    {/* Last, so a reach for Bookmark can't land on Delete. */}
+                    {props.deleteAction?.(comment, "chats-comment-delete")}
                   </>
                 }
               />
@@ -1096,7 +1098,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                       messageId={openingMessage.id}
                       testId="chats-message-copy-link"
                     />
-                    {props.deleteAction?.(openingMessage, "chats-message-delete")}
                     <SaveAsFileActions
                       testIdPrefix="chats-message-bookmark"
                       bookmark={openingBookmark}
@@ -1120,6 +1121,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                           : undefined
                       }
                     />
+                    {props.deleteAction?.(openingMessage, "chats-message-delete")}
                   </>
                 }
               />
