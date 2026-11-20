@@ -59,6 +59,7 @@ import {
   isWorkspaceVisibilityPolicyPath,
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalRecovery,
+  SHARE_EDITING_NOT_READY_MESSAGE,
   engineStoreRefusalSentence,
   saveOnlyLiveDocuments,
 } from "../ipc/bridgeContract";
@@ -539,6 +540,7 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
+const SHARE_EDITING_NOT_READY_ROW = "share-editing-not-ready";
 
 // What a refresh that set a shared view's collision record aside tells the
 // person, whether the refresh then completed or failed.
@@ -2444,6 +2446,22 @@ export function DesktopWorkspaceShell(props: {
   } | null>(null);
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
   const shareViewWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
+  const shareEditingNotReady =
+    !!shareView?.editingNotReady && !shareViewDamaged && !shareViewEnded && !shareViewWritable;
+  const reportShareEditingNotReady = useCallback(
+    () =>
+      reportShellFailure({
+        message: SHARE_EDITING_NOT_READY_MESSAGE,
+        retry: retryRefusedSharedView,
+        kind: "share-editing-not-ready",
+        identity: SHARE_EDITING_NOT_READY_ROW,
+      }),
+    [reportShellFailure, retryRefusedSharedView],
+  );
+  useEffect(() => {
+    if (shareEditingNotReady) reportShareEditingNotReady();
+    else clearIdentity(SHARE_EDITING_NOT_READY_ROW);
+  }, [workspaceId, shareEditingNotReady, reportShareEditingNotReady, clearIdentity]);
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
   const shareViewWritableRef = useRef(shareViewWritable);
@@ -6726,6 +6744,10 @@ export function DesktopWorkspaceShell(props: {
               throw Object.assign(new Error(outcome.errorMessage), {
                 errorKind: outcome.errorKind,
               });
+            if (outcome.editingNotReady) {
+              reportShareEditingNotReady();
+              return "stale";
+            }
             reportShellError(
               "Couldn't refresh the shared view.",
               new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
