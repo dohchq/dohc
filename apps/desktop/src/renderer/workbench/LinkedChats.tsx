@@ -179,9 +179,15 @@ export function LinkedChatsPanel(props: {
   const currentThreadsKey = useRef(threadsKey);
   currentThreadsKey.current = threadsKey;
   const { notices } = props;
+  // The full load in flight. Activity while it reads marks it stale, so it
+  // reads again once it shows its answer, which predates that activity.
+  const threadsLoad = useRef<{ stale: boolean } | null>(null);
+  const rereadAfterLoad = useRef<() => void>(() => {});
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++threadsToken.current;
+    const load = { stale: false };
+    threadsLoad.current = load;
     const current = () =>
       token === threadsToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
@@ -212,9 +218,12 @@ export function LinkedChatsPanel(props: {
           fileObjectId: result.fileObjectId,
           threads: result.threads,
         });
+        threadsLoad.current = null;
+        if (load.stale) rereadAfterLoad.current();
         return;
       } catch (error) {
         if (!current()) return;
+        threadsLoad.current = null;
         fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
         return;
       }
@@ -227,6 +236,11 @@ export function LinkedChatsPanel(props: {
   // was asked for meanwhile. A file switch or a full reload drops its answer.
   const threadsReread = useRef({ reading: false, again: false });
   const rereadThreads = useCallback(async () => {
+    const load = threadsLoad.current;
+    if (load) {
+      load.stale = true;
+      return;
+    }
     const reread = threadsReread.current;
     if (reread.reading) {
       reread.again = true;
@@ -256,6 +270,7 @@ export function LinkedChatsPanel(props: {
     } while (reread.again);
     reread.reading = false;
   }, [filePath, readThreads, threadsKey]);
+  rereadAfterLoad.current = () => void rereadThreads();
   useEffect(() => {
     if (!filePath) return;
     return bridge().onWorkspaceActivity((event) => {

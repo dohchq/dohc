@@ -479,6 +479,24 @@ describe("LinkedChatsPanel live thread", () => {
       fireEvent.click(screen.getByText("Plant beans in May?"));
       await expectNewChatOpen();
     });
+
+    it("reads the list again when the delete's activity lands during the first read", async () => {
+      const first = deferred<{ fileObjectId: string; threads: (typeof untitled)[] }>();
+      bridgeMock.listFileChats.mockReturnValueOnce(first.promise);
+      bridgeMock.listFileChats.mockResolvedValue({
+        fileObjectId: "object-1",
+        threads: [{ ...untitled, title: "New chat" }],
+      });
+      render(
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="notes/plan.md" onError={vi.fn()} />,
+      );
+      await waitFor(() => expect(activity.size).toBe(1));
+      workspaceChanged();
+      // The first read answers with the list from before the delete.
+      await act(async () => first.resolve({ fileObjectId: "object-1", threads: [untitled] }));
+      await screen.findByText("New chat");
+      expect(screen.queryByText("Plant beans in May?")).toBeNull();
+    });
   });
 
   it("keeps a delete that lands while the thread's first read is still out", async () => {
