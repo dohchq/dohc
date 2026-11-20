@@ -93,6 +93,8 @@ import {
   ResumeRelayShareDiscussionResult,
   PromoteRelayShareGrantPayload,
   PromoteRelayShareGrantResult,
+  RetuneRelayShareGrantPayload,
+  RetuneRelayShareGrantResult,
   RevokeRelayShareGrantPayload,
   RevokeRelayShareGrantResult,
 } from "./bridgeContract";
@@ -590,6 +592,15 @@ export const relayShareOperations = {
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: PromoteRelayShareGrantPayload,
     result: PromoteRelayShareGrantResult,
+  },
+  retuneRelayShareGrant: {
+    capabilityId: "share.grant.access.set",
+    channel: "desktop:retune-relay-share-grant",
+    scope: "workspace",
+    guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
+    payload: RetuneRelayShareGrantPayload,
+    result: RetuneRelayShareGrantResult,
   },
   revokeRelayShareGrant: {
     capabilityId: "share.grant.revoke",

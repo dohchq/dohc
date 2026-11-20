@@ -38,14 +38,12 @@ struct ChatChannelCreateParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatChannelEnsureParams {
-    channel_id: String,
     now_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatChannelEnsureAgentParams {
-    channel_id: String,
     agent_id: String,
     name: String,
     now_ms: Option<i64>,
@@ -186,7 +184,6 @@ impl EngineService {
             "chats.channels.ensureGeneral",
             open.actor.chat_channel_ensure_general(
                 open.workspace_id.clone(),
-                params.channel_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
             ),
@@ -209,7 +206,6 @@ impl EngineService {
             "chats.channels.ensureAgent",
             open.actor.chat_channel_ensure_agent(
                 open.workspace_id.clone(),
-                params.channel_id,
                 params.agent_id,
                 params.name,
                 params.now_ms.unwrap_or(now_ms()?),

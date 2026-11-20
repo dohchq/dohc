@@ -3,11 +3,11 @@ import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ShareAccess, ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
+import { OpenSharedView, opensForLiveEditing, type MountedShare } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -89,7 +89,7 @@ export function ShareHandoffSurface(
     onRetryChats?: () => void;
     mountInto?: {
       workspaceId: string;
-      onMounted: (label: string, access: ShareAccess | null) => void;
+      onMounted: (mounted: MountedShare) => void;
     };
   } & ConnectionNoticeHost,
 ) {

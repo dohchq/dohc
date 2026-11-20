@@ -1151,7 +1151,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.noticeHead(this, recipientUserId);
   }
 
-  markNotices(input: noticeStorage.MarkNoticesInput): string[] {
+  markNotices(input: noticeStorage.MarkNoticesInput): { dismissed: string[]; repeated: string[] } {
     return noticeStorage.markNotices(this, input);
   }
 
@@ -1781,6 +1781,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
     const result = sharesStorage.retuneShareGrant(this, input);
+    if (result.ok) notifyDesktopReadiness(this, { shareId: result.grant.shareId });
+    return result;
+  }
+
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult {
+    const result = sharesStorage.retuneNamedShareGrant(this, input);
     if (result.ok) notifyDesktopReadiness(this, { shareId: result.grant.shareId });
     return result;
   }

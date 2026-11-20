@@ -93,11 +93,6 @@ export function pushChatResolver(
   };
 }
 
-/**
- * Whether the account's phone may show this thread: a workspace it owns
- * with Show on phone on, a thread with no hidden path, and neither fenced
- * nor deleted. A share never widens it. Synchronous, for the caller's transaction.
- */
 export function phoneCanShow(
   storage: StorageContext,
   userId: string,
@@ -113,7 +108,6 @@ export function phoneCanShow(
   );
 }
 
-/** Whether the message is an answer from the recipient's own agent. */
 export function isOwnAgentMessage(message: PushMessage, userId: string): boolean {
   return message.authorKind === "agent" && message.authorUserId === userId;
 }
@@ -213,7 +207,6 @@ export function chatMessageInterest(
     AND relay_admission IS NULL AND settlement_admission_json IS NULL LIMIT 1`)
     .get(message.workspaceId, message.threadId, message.relaySeq, recipient.userId);
   if (prior) return "reply";
-  // The recipient's own agent answering them in its chat. Only a phone alerts on this.
   return isOwnAgentMessage(message, recipient.userId) && access.channelKind === "agent"
     ? "agent"
     : null;

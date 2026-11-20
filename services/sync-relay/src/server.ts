@@ -158,7 +158,7 @@ import { serverLogLine } from "./serverLogWords";
 export { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { MAX_KEY_ENVELOPE_BYTES } from "./keyEnvelopeRoutes";
 export { ACCOUNT_NAME_LOOKUP_DEADLINE_MS } from "./accountDisplayName";
-export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_LINK_PAGE } from "./shareReadQueries";
+export { LINK_FRESHNESS_PAGE_BUDGET, MAX_RAW_ROWS_PER_SHARE_PAGE } from "./shareReadQueries";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
@@ -1653,6 +1653,7 @@ export function createSyncRelayHandler({
         route.route === "share-link-rotate" ||
         route.route === "share-link-retune" ||
         route.route === "share-grant-promote" ||
+        route.route === "share-grant-retune" ||
         route.route === "share-grant-revoke" ||
         route.route === "share-undo" ||
         route.route === "share-leave" ||

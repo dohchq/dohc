@@ -54,7 +54,7 @@ import {
 } from "../workspaces/engineYDocSessionIpc";
 import type {
   WorkspaceEngineCapture,
-  WorkspaceEngineYDocProviderSession,
+  WorkspaceEngineYDocOpenedSession,
   probeEngineStoreRefusal,
 } from "../workspaces/workspaceEngineCapture";
 import { EngineStoreRecoveryFailedError } from "../workspaces/engineStoreRebuild";
@@ -245,6 +245,7 @@ async function harness(
     initialUpdate: new Uint8Array(),
     path: "notes/a.md",
     contentKind: "richdoc",
+    lineageAtOpen: "existing",
     artifactAssets: [descriptor],
     settleNow: vi.fn(async () => {
       throw new Error("unused settlement");
@@ -256,7 +257,7 @@ async function harness(
       bytes: new Uint8Array([1, 2, 3]),
     })),
     close: vi.fn(async () => undefined),
-  } satisfies WorkspaceEngineYDocProviderSession;
+  } satisfies WorkspaceEngineYDocOpenedSession;
   const openYDocSession = vi.fn<WorkspaceEngineCapture["openYDocSession"]>(async () => provider);
   const ydoc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",

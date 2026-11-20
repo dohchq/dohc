@@ -469,6 +469,7 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
                 author_id: "user-cy".to_owned(),
                 replication_author_id: Some("user-cy".to_owned()),
                 author_kind: ChatActorKind::Human,
+                author_agent_id: None,
                 author_display_name: "Cy".to_owned(),
                 state: ChatReactionState::Added,
                 now_ms: 40,
@@ -530,7 +531,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     let stamp = ChatMessageAutomation {
         automation_id: "collection:object-tasks#stamp".to_owned(),
@@ -542,7 +543,7 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             author_owner_display_name: Some("Ice".to_owned()),
             automation,
             ..start_thread(
-                "gen-1",
+                "channel-general",
                 &format!("t-{message_id}"),
                 message_id,
                 "Done @ana",
@@ -564,14 +565,28 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         (
             StartChannelThread {
                 automation: Some(stamp.clone()),
-                ..start_thread("gen-1", "t-h", "m-h", "Hi", ChatActorKind::Human, 20)
+                ..start_thread(
+                    "channel-general",
+                    "t-h",
+                    "m-h",
+                    "Hi",
+                    ChatActorKind::Human,
+                    20,
+                )
             },
             "only an automation message names an automation",
         ),
         (
             StartChannelThread {
                 automation: Some(stamp.clone()),
-                ..start_thread("gen-1", "t-a", "m-a", "Hi", ChatActorKind::Agent, 20)
+                ..start_thread(
+                    "channel-general",
+                    "t-a",
+                    "m-a",
+                    "Hi",
+                    ChatActorKind::Agent,
+                    20,
+                )
             },
             "only an automation message names an automation",
         ),
@@ -642,7 +657,14 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             other => panic!("expected {expected:?}, got {other:?}"),
         }
     }
-    let human_owner = start_thread("gen-1", "t-o", "m-o", "Hi", ChatActorKind::Human, 20);
+    let human_owner = start_thread(
+        "channel-general",
+        "t-o",
+        "m-o",
+        "Hi",
+        ChatActorKind::Human,
+        20,
+    );
     let human_owner = StartChannelThread {
         author_owner_display_name: Some("Ice".to_owned()),
         ..human_owner
@@ -728,7 +750,14 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
 
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t-ada", "m-ada", "Hi", ChatActorKind::Human, 35),
+            &start_thread(
+                "channel-general",
+                "t-ada",
+                "m-ada",
+                "Hi",
+                ChatActorKind::Human,
+                35,
+            ),
             &NO_FAULTS,
         )
         .expect("ada posts");
@@ -842,7 +871,7 @@ fn local_writes_refuse_a_link_author() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     let refused = |result: Result<_, DomainError>| {
         matches!(
@@ -856,7 +885,7 @@ fn local_writes_refuse_a_link_author() {
         let start = StartChannelThread {
             author_user_id,
             ..start_thread(
-                "gen-1",
+                "channel-general",
                 "t-link",
                 "m-link",
                 "hello",
@@ -870,7 +899,14 @@ fn local_writes_refuse_a_link_author() {
     }
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "hello", ChatActorKind::Human, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m1",
+                "hello",
+                ChatActorKind::Human,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -907,11 +943,11 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
         0
     );
     chats
-        .ensure_general_channel(WS, "gen-revision", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("general");
 
     let mut opening = start_thread(
-        "gen-revision",
+        "channel-general",
         "thread-revision",
         "message-opening",
         "Choose",
@@ -958,6 +994,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
         author_id: "user-ada".to_owned(),
         replication_author_id: Some("user-ada".to_owned()),
         author_kind: ChatActorKind::Human,
+        author_agent_id: None,
         author_display_name: "Ada".to_owned(),
         state: ChatReactionState::Added,
         now_ms: 40,
@@ -1038,11 +1075,18 @@ fn send_message_reply_parent_must_exist_in_thread() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m0",
+                "opening",
+                ChatActorKind::Human,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -1069,13 +1113,20 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     // Agent authors so neither message auto-advances the cursor (a human's own
     // message catches the cursor up; agent messages are what unread surfaces).
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Agent, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m0",
+                "opening",
+                ChatActorKind::Agent,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -1168,7 +1219,7 @@ fn agent_thread(chats: &mut LinkedChatStore<'_>, thread_id: &str, messages: &[(&
     chats
         .start_channel_thread(
             &start_thread(
-                "gen-1",
+                "channel-general",
                 thread_id,
                 first_id,
                 "agent",
@@ -1193,7 +1244,7 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         agent_thread(&mut chats, "zero", &[("z0", 10)]);
         agent_thread(&mut chats, "full", &[("f0", 10), ("f1", 30)]);
@@ -1242,7 +1293,7 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     assert_eq!(thread_read_ops(&store), 2);
 
     let summaries = LinkedChatStore::new(&mut store)
-        .list_channel_threads(WS, "gen-1", None, 10)
+        .list_channel_threads(WS, "channel-general", None, 10)
         .expect("summaries");
     let unread = |thread_id: &str| {
         summaries
@@ -1287,7 +1338,7 @@ fn a_server_copy_seed_takes_no_local_count() {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         agent_thread(&mut chats, "t1", &[("m0", 10)]);
     }
@@ -1313,7 +1364,7 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         agent_thread(&mut chats, "t1", &[("m0", 100), ("m1", 300), ("m2", 200)]);
         chats
@@ -1344,12 +1395,12 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
             .list_channels(WS)
             .expect("channels")
             .into_iter()
-            .find(|summary| summary.channel.channel_id == "gen-1")
+            .find(|summary| summary.channel.channel_id == "channel-general")
             .map(|summary| summary.unread_count)
     };
     let summary = |store: &mut EngineStore| {
         let summary = LinkedChatStore::new(store)
-            .list_channel_threads(WS, "gen-1", None, 10)
+            .list_channel_threads(WS, "channel-general", None, 10)
             .expect("summaries")
             .remove(0);
         (
@@ -1439,7 +1490,7 @@ fn a_persons_send_moves_the_account_mark_and_an_agents_does_not() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     assert!(
         chats
@@ -1467,7 +1518,14 @@ fn a_persons_send_moves_the_account_mark_and_an_agents_does_not() {
     chats.send_message(&other, &NO_FAULTS).expect("other send");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t2", "s0", "mine", ChatActorKind::Human, 60),
+            &start_thread(
+                "channel-general",
+                "t2",
+                "s0",
+                "mine",
+                ChatActorKind::Human,
+                60,
+            ),
             &NO_FAULTS,
         )
         .expect("own start");
@@ -1488,7 +1546,7 @@ fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .ensure_general_channel(WS, 1, &NO_FAULTS)
             .expect("gen");
         chats
             .create_channel(
@@ -1564,7 +1622,7 @@ fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
             .collect::<Vec<_>>()
     };
     let totals = unread_by_channel(&mut store);
-    assert!(totals.contains(&("gen-1".to_owned(), 0)));
+    assert!(totals.contains(&("channel-general".to_owned(), 0)));
     assert!(totals.contains(&("joined-1".to_owned(), 1)));
 
     let mut chats = LinkedChatStore::new(&mut store);
@@ -1594,7 +1652,7 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     assert!(
         chats
@@ -1676,7 +1734,7 @@ fn a_signed_in_read_after_a_signed_out_message_publishes_the_newest_message_that
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     assert!(
         chats
@@ -1725,7 +1783,7 @@ fn an_account_mark_names_a_message_in_its_thread_and_journals_only_with_the_owne
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     agent_thread(&mut chats, "t1", &[("m0", 10), ("m1", 20)]);
     agent_thread(&mut chats, "t2", &[("n0", 30)]);
@@ -1766,7 +1824,7 @@ fn a_workspace_without_an_account_keeps_local_counts_and_journals_no_mark() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("gen");
     agent_thread(&mut chats, "t1", &[("m0", 100), ("m1", 50)]);
     let state = chats
@@ -1800,11 +1858,18 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     };
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .ensure_general_channel(WS, 1, &NO_FAULTS)
         .expect("general");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m1",
+                "opening",
+                ChatActorKind::Human,
+                2,
+            ),
             &NO_FAULTS,
         )
         .expect("thread");
@@ -1908,10 +1973,10 @@ fn authorless_message_and_derived_state_stay_local() {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+            .ensure_general_channel(WS, 10, &NO_FAULTS)
             .expect("general");
         let mut opening = start_thread(
-            "gen-1",
+            "channel-general",
             "local-thread",
             "local-message",
             "private before sign-in",
@@ -1958,6 +2023,7 @@ fn authorless_message_and_derived_state_stay_local() {
                     author_id: "user-ada".to_owned(),
                     replication_author_id: Some("user-ada".to_owned()),
                     author_kind: ChatActorKind::Human,
+                    author_agent_id: None,
                     author_display_name: "Ada".to_owned(),
                     state: ChatReactionState::Added,
                     now_ms: 21,
@@ -1990,12 +2056,12 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     for (t, m, ms) in [("t1", "m1", 100), ("t2", "m2", 101)] {
         chats
             .start_channel_thread(
-                &start_thread("gen-1", t, m, "body", ChatActorKind::Human, ms),
+                &start_thread("channel-general", t, m, "body", ChatActorKind::Human, ms),
                 &NO_FAULTS,
             )
             .expect("start");
@@ -2035,7 +2101,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
             .as_ref()
             .expect("hydrated channel")
             .channel_id,
-        "gen-1"
+        "channel-general"
     );
     assert!(page.items[0].parent_message.is_none());
     assert!(page.items[0].opening_message.is_none());
@@ -2088,11 +2154,18 @@ fn bookmark_generation_cas_stale_worker_loses() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m0",
+                "opening",
+                ChatActorKind::Human,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -2133,7 +2206,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
+        .ensure_agent_channel(WS, "default", "My agent", 10, &NO_FAULTS)
         .expect("agent");
     // Two triggers in two threads (a claim marks only same-thread pendings done).
     // An agent DM keeps one conversation, so each asks for its own thread.
@@ -2145,7 +2218,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
                 &StartChannelThread {
                     own_thread: true,
                     ..start_thread(
-                        "agent-1",
+                        "channel-agent-default",
                         thread_id,
                         message_id,
                         body,
@@ -2239,11 +2312,18 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
+            .ensure_agent_channel(WS, "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
         chats
             .start_channel_thread(
-                &start_thread("agent-1", "t1", "mA", "@agent", ChatActorKind::Human, 20),
+                &start_thread(
+                    "channel-agent-default",
+                    "t1",
+                    "mA",
+                    "@agent",
+                    ChatActorKind::Human,
+                    20,
+                ),
                 &NO_FAULTS,
             )
             .expect("start");
@@ -2294,11 +2374,18 @@ fn save_bookmark_rejects_unsafe_destination_path() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m0",
+                "opening",
+                ChatActorKind::Human,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -2327,11 +2414,18 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("gen");
     chats
         .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 100),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m0",
+                "opening",
+                ChatActorKind::Human,
+                100,
+            ),
             &NO_FAULTS,
         )
         .expect("start");
@@ -2433,9 +2527,16 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     let mut chats = LinkedChatStore::new(&mut store);
     for ws in [WS, OTHER_WS] {
         chats
-            .ensure_agent_channel(ws, "agent-x", "default", "My agent", 10, &NO_FAULTS)
+            .ensure_agent_channel(ws, "default", "My agent", 10, &NO_FAULTS)
             .expect("agent");
-        let mut start = start_thread("agent-x", "t-x", "m-x", "@agent", ChatActorKind::Human, 20);
+        let mut start = start_thread(
+            "channel-agent-default",
+            "t-x",
+            "m-x",
+            "@agent",
+            ChatActorKind::Human,
+            20,
+        );
         start.workspace_id = ws.to_owned();
         chats
             .start_channel_thread(&start, &NO_FAULTS)
@@ -2453,7 +2554,14 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
         .complete_dispatch(WS, "run-taken", 0, 23, &NO_FAULTS)
         .expect("complete");
     let start_y = {
-        let mut start = start_thread("agent-x", "t-y", "m-y", "@agent", ChatActorKind::Human, 24);
+        let mut start = start_thread(
+            "channel-agent-default",
+            "t-y",
+            "m-y",
+            "@agent",
+            ChatActorKind::Human,
+            24,
+        );
         start.workspace_id = WS.to_owned();
         // Its own thread, not t-x's conversation in the same agent DM.
         start.own_thread = true;
@@ -2505,7 +2613,7 @@ fn local_actor_key_commits_with_the_message_and_replays_its_original_admission()
     {
         let mut store = open(&db, 1);
         LinkedChatStore::new(&mut store)
-            .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+            .ensure_general_channel(WS, 10, &NO_FAULTS)
             .expect("channel");
     }
     for point in [
@@ -2513,7 +2621,7 @@ fn local_actor_key_commits_with_the_message_and_replays_its_original_admission()
         FaultPoint::StorageAfterCommitBeforeAck,
     ] {
         let mut input = start_thread(
-            "gen",
+            "channel-general",
             "key-thread",
             "key-opening",
             "Hello",
@@ -2582,9 +2690,16 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
     {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
-            .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+            .ensure_general_channel(WS, 10, &NO_FAULTS)
             .expect("channel");
-        let mut post = start_thread("gen", "t1", "m1", "Opened a PR", ChatActorKind::Agent, 20);
+        let mut post = start_thread(
+            "channel-general",
+            "t1",
+            "m1",
+            "Opened a PR",
+            ChatActorKind::Agent,
+            20,
+        );
         post.author_owner_display_name = Some("Ice".to_owned());
         post.author_reported = Some(reported.clone());
         let (_, opening) = chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
@@ -2616,7 +2731,7 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
         );
 
         let listed = chats
-            .list_channel_threads(WS, "gen", None, 10)
+            .list_channel_threads(WS, "channel-general", None, 10)
             .expect("posts");
         assert_eq!(
             listed[0]
@@ -2661,11 +2776,18 @@ fn only_a_valid_agent_report_is_kept() {
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
-        .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+        .ensure_general_channel(WS, 10, &NO_FAULTS)
         .expect("channel");
     chats
         .start_channel_thread(
-            &start_thread("gen", "t1", "m1", "Hello", ChatActorKind::Human, 20),
+            &start_thread(
+                "channel-general",
+                "t1",
+                "m1",
+                "Hello",
+                ChatActorKind::Human,
+                20,
+            ),
             &NO_FAULTS,
         )
         .expect("post");

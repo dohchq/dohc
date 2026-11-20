@@ -53,6 +53,13 @@ const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
 });
 const separator: ExplorerMenuEntry = { kind: "separator" };
 
+/** Whether a path is a registered share's folder, or anything inside it. */
+export function pathInShareMount(path: string, mountLabels: readonly string[]): boolean {
+  return mountLabels.some(
+    (label) => path === `shared-with-me/${label}` || path.startsWith(`shared-with-me/${label}/`),
+  );
+}
+
 export function explorerMenuEntries(
   scope: ExplorerMenuScope,
   platform: string,

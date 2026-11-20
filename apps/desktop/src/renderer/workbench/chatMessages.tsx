@@ -377,7 +377,8 @@ export function MessageReactions(props: {
     const group = byEmoji[at];
     if (!group) continue;
     group.records.push(record);
-    if (record.authorId === props.controls.viewerAuthorId) group.mine = true;
+    if (record.authorKind === "human" && record.authorId === props.controls.viewerAuthorId)
+      group.mine = true;
   }
 
   const toggle = (emoji: string, mine: boolean) => {

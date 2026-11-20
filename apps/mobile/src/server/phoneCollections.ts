@@ -1,24 +1,14 @@
+import type { DatasetColumnFieldType } from "@dohc/security-contract/dataset";
 import { accountOperations, each, isFields, text } from "./api";
 import type { ServerClient } from "./client";
 
 // The account operations for a workspace's transactional Collections (the relay's phoneCollections.ts): reads, a
 // change to one field of a record, and a new record or a deletion.
 
-export type CollectionFieldType =
-  | "text"
-  | "number"
-  | "checkbox"
-  | "date"
-  | "select"
-  | "multi-select"
-  | "url"
-  | "relation"
-  | "attachment";
-
 export interface CollectionField {
   readonly fieldId: string;
   readonly name: string;
-  readonly type: CollectionFieldType;
+  readonly type: DatasetColumnFieldType;
   /** A select's or a multi-select's choices, in order; empty for any other type. */
   readonly options: readonly string[];
   readonly editable: boolean;
@@ -129,7 +119,7 @@ export type RecordPage =
   /** Nothing in the Collection reads this table. */
   | { readonly status: "refused" };
 
-const TYPES: ReadonlySet<string> = new Set<CollectionFieldType>([
+const TYPES: ReadonlySet<string> = new Set<DatasetColumnFieldType>([
   "text",
   "number",
   "checkbox",
@@ -166,7 +156,7 @@ function readField(item: unknown): CollectionField | null {
     typeof item.reversible !== "boolean"
   )
     return null;
-  const type = item.type as CollectionFieldType;
+  const type = item.type as DatasetColumnFieldType;
   const choices = type === "select" || type === "multi-select";
   const options = choices ? each(item.options, (option) => (text(option) ? option : null)) : [];
   if (!options) return null;

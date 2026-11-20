@@ -77,6 +77,7 @@ const projectionUrl = pathToFileURL(
 const unregisterTsx = register();
 const {
   getDohcProseMirrorSchema,
+  getDohcYDocBodyFragment,
   markdownToYDoc,
   yDocToMarkdown,
 } = await import(projectionUrl);
@@ -1319,6 +1320,83 @@ function makeMarkedOracle() {
   };
 }
 
+// How the editor reads inline Markdown, for a shared corpus of paragraphs and
+// headings: each block's elements with their non-default attributes, and its
+// text as runs of one set of marks. The engine reads the same corpus and must
+// read each block the editor's way wherever it reads marks at all.
+function makeReaderParity() {
+  const random = rng(0x1d1e);
+  const pick = (pool) => pool[Math.floor(random() * pool.length)];
+  const phrase = (pool, max) =>
+    Array.from({ length: 1 + Math.floor(random() * max) }, () => pick(pool)).join("");
+  const DEFAULTS = { colspan: 1, rowspan: 1, loose: false, checked: false };
+  const reading = (node) => {
+    if (typeof node.toDelta === "function") {
+      const runs = [];
+      for (const { insert, attributes } of node.toDelta()) {
+        const marks = attributes ?? {};
+        const last = runs.at(-1);
+        if (last && JSON.stringify(last.m ?? {}) === JSON.stringify(marks)) last.x += insert;
+        else runs.push(Object.keys(marks).length ? { x: insert, m: marks } : { x: insert });
+      }
+      return runs;
+    }
+    const children = node.toArray().flatMap(reading);
+    const merged = [];
+    for (const child of children) {
+      const last = merged.at(-1);
+      if (last && "x" in last && "x" in child && JSON.stringify(last.m ?? {}) === JSON.stringify(child.m ?? {})) last.x += child.x;
+      else merged.push(child);
+    }
+    if (typeof node.getAttributes !== "function") return merged;
+    const attrs = Object.fromEntries(
+      Object.entries(node.getAttributes()).filter(([key, value]) => value != null && DEFAULTS[key] !== value),
+    );
+    return [{ t: node.nodeName, ...(Object.keys(attrs).length ? { a: attrs } : {}), ...(merged.length ? { c: merged } : {}) }];
+  };
+  const INLINE = [
+    "*", "*", "**", "_", "__", "~", "~~", "`", "``", "a", "b", "word", " ", " ",
+    "\n", ".", ",", "!", "?", "(", ")", "-", "#", "'", "\"", "é", "日本", "😀",
+    "[a](https://e.example)", "[b](u \"t\")", "[**c**](x.md)", "![alt](x.png)",
+    "![p](https://e.example/p.png \"t\")", "[", "]", "](", "![", "`code`",
+    "*em*", "**strong**", "~~del~~", "_u_", "__s__", "1.", "*a*b", "x_y_z",
+    "[`c`](u)", "[a `b` c](https://e.example)",
+  ];
+  const curated = [
+    "plain text", "*em* and **strong** and ***both***", "_em_ and __strong__",
+    "~~gone~~ and ~one~", "`code` and ``two `ticks` ``", "` padded `",
+    "[label](https://e.example/a)", "[label](rel/path.md \"Title\")",
+    "[**bold** label](https://e.example)", "![alt text](https://e.example/i.png)",
+    "![alt](i.png \"t\")", "text ![a](i.png) between ![b](j.png) images",
+    "**[link](https://e.example)** inside", "*a **b** c*", "**a *b* c**",
+    "a*b*c", "a_b_c", "snake_case_name", "*unclosed", "**unclosed *em*",
+    "`unclosed code", "[not a link]", "[a] (b)", "*a*b*", "**a**b**",
+    "line one\nline *two*", "# heading **bold**", "## `code` heading",
+    "### [link](https://e.example) heading", "***", "* * *", "*a\n*b",
+    "~~a~~~", "~~~a~~", "**`code`**", "[`code`](https://e.example)",
+    "Run `make` and see [`npm install`](https://docs.example/install).",
+    "Some **bold** and a [link](https://a.example).", "[a`]`](u)", "[``a`](u)",
+    "[`a](u)", "[``](u) `x](v)", "*see [`x`](u)*", "~~`gone`~~",
+  ];
+  const texts = [
+    ...curated,
+    ...Array.from({ length: 1500 }, (_, index) =>
+      `${index % 5 === 0 ? "# " : ""}${phrase(INLINE, index % 10 === 0 ? 40 : 12)}`),
+  ];
+  return {
+    seed: -5,
+    contentKind: "richdoc",
+    kind: "readerParity",
+    updates: [],
+    expected: {
+      cases: texts.map((markdown) => ({
+        markdown,
+        reading: getDohcYDocBodyFragment(markdownToYDoc(markdown)).toArray().flatMap(reading),
+      })),
+    },
+  };
+}
+
 // Clear old generated fixtures in the selected output directory only.
 for (const f of readdirSync(outputDir)) {
   if (f.endsWith(".json")) unlinkSync(join(outputDir, f));
@@ -1369,11 +1447,12 @@ emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
 emit(makeMarkedOracle());
+emit(makeReaderParity());
 
 writeFileSync(
   join(outputDir, "_manifest.json"),
   JSON.stringify({ fixtures: manifest }, null, 1),
 );
 console.log(
-  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle)`,
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${projectionFixtures.length} richdoc projection + 3 probes + marked oracle + reader parity)`,
 );

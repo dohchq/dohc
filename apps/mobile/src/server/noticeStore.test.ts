@@ -25,8 +25,18 @@ const ORIGIN = "https://dohc.example.com";
 interface Call {
   readonly path: string;
   readonly body: unknown;
+  readonly keys: readonly unknown[];
   answer(status: number, body?: unknown): void;
   offline(): void;
+}
+
+function withoutKeys(body: unknown): { body: unknown; keys: unknown[] } {
+  const marks = (body as { marks?: unknown } | undefined)?.marks;
+  if (!Array.isArray(marks)) return { body, keys: [] };
+  return {
+    body: { ...(body as object), marks: marks.map(({ key: _, ...mark }) => mark) },
+    keys: marks.map((mark: { key?: unknown }) => mark.key),
+  };
 }
 
 function fakeServer() {
@@ -36,7 +46,7 @@ function fakeServer() {
     new Promise((resolve, reject) => {
       const call: Call = {
         path: url.slice(ORIGIN.length),
-        body: init.body === undefined ? undefined : JSON.parse(init.body),
+        ...withoutKeys(init.body === undefined ? undefined : JSON.parse(init.body)),
         answer: (status, body) => resolve({ status, json: async () => body }),
         offline: () => reject(new TypeError("Network request failed")),
       };
@@ -461,6 +471,23 @@ describe("marks on the account's Notices", () => {
     expect(ids()).toEqual(["a"]);
   });
 
+  it("applies nothing for a mark the relay names as repeated, keeping another device's later change", async () => {
+    const { server, timers, store, ids } = setup();
+    store.resume();
+    const held = await reply(server, server.read(), [relayRow("a", { changeSeq: 2 })], {
+      replace: true,
+    });
+    store.mark("a", "dismissed");
+    const lost = await server.marks();
+    await reply(server, held, [relayRow("a", { changeSeq: 4 })], { nextCursor: "4" });
+    lost.offline();
+    (await timers.next()).done();
+    const retry = await server.marks();
+    expect(retry.keys).toEqual(lost.keys);
+    retry.answer(200, { ok: true, dismissed: [], repeated: lost.keys });
+    await vi.waitFor(() => expect(ids()).toEqual(["a"]));
+  });
+
   it("keeps a mark through a relaunch, and sends it then", async () => {
     const disk = keptDisk();
     const first = setup({ disk });
@@ -625,7 +652,7 @@ describe("marks on the account's Notices", () => {
     });
   });
 
-  it("sends a taken mark again after a relaunch when its removal never committed, undoing another device's change", async () => {
+  it("sends a taken mark again with its key after a relaunch when its removal never committed, and keeps another device's change", async () => {
     const disk = keptDisk();
     const first = setup({ disk });
     first.store.resume();
@@ -633,22 +660,42 @@ describe("marks on the account's Notices", () => {
     await vi.waitFor(() => expect(listed(disk)).toHaveLength(1));
     first.store.mark("a", "dismissed");
     const done = await first.server.marks();
+    const [key] = done.keys;
+    expect(key).toEqual(expect.any(String));
     disk.failCommits = { match: /notice_lists/, lands: false };
     done.answer(200, { ok: true, dismissed: ["a"] });
     await until(first.store, (state) => state.marks.problem === "unrecorded");
-    first.store.stop();
     disk.crash();
     disk.failCommits = null;
 
-    // Another device restored the row meanwhile. The phone can't tell the relay took its Done, and the relay can't
-    // tell a repeat, so the Done lands again: today's behaviour, until the relay ignores a mark made on an older row.
+    // Another device restored the row meanwhile. The Done goes again with the same key, and the relay, which applied
+    // that key, leaves the row restored and says so.
     const second = setup({ disk });
     second.store.resume();
     const sent = second.server.marks();
     await reply(second.server, second.server.read(), [relayRow("a", { changeSeq: 3 })], {
       replace: true,
     });
-    expect((await sent).body).toEqual({ marks: [{ noticeId: "a", mark: "dismissed" }] });
+    const again = await sent;
+    expect(again.body).toEqual({ marks: [{ noticeId: "a", mark: "dismissed" }] });
+    expect(again.keys).toEqual([key]);
+    again.answer(200, { ok: true, dismissed: [], repeated: [key] });
+    await vi.waitFor(() => expect(marked(disk)).toEqual([]));
+    expect(second.ids()).toEqual(["a"]);
+    expect(listed(disk)).toMatchObject([{ noticeId: "a", changeSeq: 3, dismissedAtMs: null }]);
+  });
+
+  it("sends each mark with its own key, and the same key on every try", async () => {
+    const { server, timers, store } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a"), relayRow("b")], { replace: true });
+    store.markAllRead();
+    const first = await server.marks();
+    expect(new Set(first.keys).size).toBe(2);
+    first.offline();
+    (await timers.next()).done();
+    const retry = await server.marks();
+    expect(retry.keys).toEqual(first.keys);
   });
 
   it("records a mark the server took though a 401 stops the store before that commit runs", async () => {
@@ -691,6 +738,26 @@ describe("marks on the account's Notices", () => {
   }
   const ONLY_Z = { marks: [{ noticeId: "z", mark: "read" }] };
 
+  it("records a mark the server took whose removal was backing off when a 401 stopped the store", async () => {
+    const disk = keptDisk();
+    const first = setup({ disk });
+    first.store.resume();
+    await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+    await vi.waitFor(() => expect(listed(disk)).toHaveLength(1));
+    void first.store.mark("a", "dismissed");
+    const done = await first.server.marks();
+    disk.failCommits = { match: /notice_lists/, lands: false };
+    done.answer(200, { ok: true, dismissed: ["a"] });
+    const backingOff = await first.timers.next();
+    expect(backingOff.ms).toBe(NOTICE_RETRY_MS);
+    expect(marked(disk)).toEqual([MARK_A]);
+    disk.failCommits = null;
+    void first.signOut();
+    first.store.stop();
+    await vi.waitFor(() => expect(marked(disk)).toEqual([]));
+    expect(await nextSignInSends(disk)).toEqual(ONLY_Z);
+  });
+
   it("records a mark the server took whose removal waited behind a save already on its way, though a 401 stops the store", async () => {
     const disk = keptDisk();
     const first = setup({ disk });
@@ -709,6 +776,29 @@ describe("marks on the account's Notices", () => {
     void first.signOut();
     first.store.stop();
     release();
+    await vi.waitFor(() => expect(marked(disk)).toEqual([]));
+    expect(await nextSignInSends(disk)).toEqual(ONLY_Z);
+  });
+
+  it("commits a taken mark's removal again when the commit on its way at a 401's stop fails", async () => {
+    const disk = keptDisk();
+    const first = setup({ disk });
+    first.store.resume();
+    await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+    await vi.waitFor(() => expect(listed(disk)).toHaveLength(1));
+    void first.store.mark("a", "dismissed");
+    const done = await first.server.marks();
+    const release = disk.holdCommits();
+    done.answer(200, { ok: true, dismissed: ["a"] });
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    void first.signOut();
+    first.store.stop();
+    disk.failCommits = { match: /DELETE FROM notice_marks/, lands: false };
+    release();
+    const releaseRetry = disk.holdCommits();
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    disk.failCommits = null;
+    releaseRetry();
     await vi.waitFor(() => expect(marked(disk)).toEqual([]));
     expect(await nextSignInSends(disk)).toEqual(ONLY_Z);
   });

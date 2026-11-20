@@ -79,6 +79,7 @@ import {
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   YdocOwnerDraftPendingError,
+  YdocUpdateNotRecordedError,
   YDOC_PENDING_MAX_BYTES,
   YDOC_PENDING_MAX_RECORDS,
   type EngineStoreRefusal,
@@ -560,6 +561,10 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
+export type WorkspaceEngineYDocOpenedSession = WorkspaceEngineYDocProviderSession & {
+  readonly lineageAtOpen: "existing" | "absent";
+};
+
 // The session this layer holds, which keeps the evict the public one drops.
 // `setTextAside` puts the text of a document whose file was deleted outside
 // dohc in Notices and answers a handle to that write, or null without a draft
@@ -706,7 +711,7 @@ export interface WorkspaceEngineCapture {
       readOnlyCause?: undefined,
       failure?: unknown,
     ) => void;
-  }): Promise<WorkspaceEngineYDocProviderSession>;
+  }): Promise<WorkspaceEngineYDocOpenedSession>;
   // Save it again: the person chose to write a document back to its file
   // after the file was deleted outside dohc. The engine refuses every other
   // save over a deleted file, so this is the one thing that brings it back.
@@ -2809,6 +2814,7 @@ export function createWorkspaceEngineCapture(
       durableNotified?: boolean;
       ownerOutbox?: boolean;
       sent: boolean;
+      mayHaveRecorded?: boolean;
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
       unanswered: { error: unknown } | null;
@@ -3034,6 +3040,7 @@ export function createWorkspaceEngineCapture(
         removePendingRecord(pending);
       }
       removePendingRecord(record);
+      checkpointEdited();
       // Caller-confirmed writes report their own refusal. Only lost editor
       // content, including dependent typing, needs a notice and recovery copy.
       if (refusedEditorRecords.length === 0) return false;
@@ -3323,6 +3330,11 @@ export function createWorkspaceEngineCapture(
               }
               if (lane === "owner-outbox") input.onOwnerEditQueued?.();
             },
+            onLocalUpdateUncertain: (id) => {
+              for (const record of pendingRecords) {
+                if (record.options.idempotencyKey === id) record.mayHaveRecorded = true;
+              }
+            },
             onLocalUpdateRefused: (id, error) => {
               for (const record of pendingRecords) {
                 if (record.options.idempotencyKey === id) {
@@ -3493,6 +3505,7 @@ export function createWorkspaceEngineCapture(
             const journaled = replay(record.update, {
               ...record.options,
               armSettle: replayArmed,
+              dropWhenUnrecorded: !record.editorVisible && !record.mayHaveRecorded,
             });
             onReplayArmed?.();
             await journaled;
@@ -3679,6 +3692,19 @@ export function createWorkspaceEngineCapture(
       let sent = false;
       const unanswered = (error: unknown): Error =>
         sent || record.sent ? keyedWriteUncertain(error) : keyedWriteNotRecorded(error);
+      const refused = async (error: unknown): Promise<unknown> => {
+        if (!hasRefusalInCauseChain(error, (cause) => cause instanceof YdocUpdateNotRecordedError))
+          return error;
+        if (checkpointContentKind !== "scene") {
+          try {
+            await flushCheckpoint();
+          } catch (cause) {
+            onError("Typing checkpoint", cause);
+            return keyedWriteUncertain(error);
+          }
+        }
+        return keyedWriteNotRecorded(error);
+      };
       for (let attempt = 0; ; attempt += 1) {
         if (canonicalDoc === null || closed) throw unanswered(closedError());
         const doc = canonicalDoc;
@@ -3688,12 +3714,12 @@ export function createWorkspaceEngineCapture(
           }
         } catch (error) {
           if (record.acknowledged) return;
-          if (record.refusal !== null) throw record.refusal.error;
+          if (record.refusal !== null) throw await refused(record.refusal.error);
           if (!sent && !record.sent) removePendingRecord(record);
           throw unanswered(error);
         }
         if (record.acknowledged) return;
-        if (record.refusal !== null) throw record.refusal.error;
+        if (record.refusal !== null) throw await refused(record.refusal.error);
         if (!pendingRecords.has(record)) {
           throw new YdocAdapterError(
             "lineage-changed",
@@ -3708,7 +3734,10 @@ export function createWorkspaceEngineCapture(
         try {
           sent = true;
           record.sent = true;
-          const journaled = generation.applyLocalUpdate(update, applyOptions);
+          const journaled = generation.applyLocalUpdate(update, {
+            ...applyOptions,
+            dropWhenUnrecorded: !record.mayHaveRecorded,
+          });
           armed();
           await journaled;
           acknowledge(record, doc);
@@ -3730,10 +3759,9 @@ export function createWorkspaceEngineCapture(
             await replaceRefusedHistory(generation, record);
             throw error;
           }
-          const refused = recordUpdateFailure(record, error);
-          if (refused && record.unanswered === null) {
+          if (recordUpdateFailure(record, error) && record.unanswered === null) {
             const editorVisible = refuseRecord(record, error);
-            if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
+            if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw await refused(error);
             if (editorVisible && canonicalDoc !== null)
               announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
           }
@@ -3748,13 +3776,13 @@ export function createWorkspaceEngineCapture(
             onError(`Y.Doc rebind of ${input.path}`, rebindError);
             if (record.acknowledged) return;
             const refusal = (record as PendingRecord).refusal;
-            if (refusal !== null) throw refusal.error;
+            if (refusal !== null) throw await refused(refusal.error);
             throw keyedWriteUncertain(error);
           }
           // Its generation was replaced, so nothing reads this doc now.
           retired?.destroy();
           const refusal = (record as PendingRecord).refusal;
-          if (refusal !== null) throw refusal.error;
+          if (refusal !== null) throw await refused(refusal.error);
           if (record.acknowledged) return;
           if (!pendingRecords.has(record)) {
             throw new YdocAdapterError(
@@ -5139,11 +5167,11 @@ export function createWorkspaceEngineCapture(
   function openSession(
     input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0],
     recordWrite?: false,
-  ): Promise<WorkspaceEngineYDocProviderSession>;
+  ): Promise<WorkspaceEngineYDocOpenedSession>;
   function openSession(
     input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0],
     recordWrite = false,
-  ): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
+  ): Promise<WorkspaceEngineYDocOpenedSession | RecordEditSession> {
     // ON THE CAPTURE CHAIN, deliberately. The version this session
     // binds to is read here and the registry entry is written at the end,
     // with a daemon round trip in between. Off the chain, a switch/merge/
@@ -5170,7 +5198,7 @@ export function createWorkspaceEngineCapture(
     });
 
     async function openYDocSessionTask(): Promise<
-      WorkspaceEngineYDocProviderSession | RecordEditSession
+      WorkspaceEngineYDocOpenedSession | RecordEditSession
     > {
       // This session's own place in the observation order, taken before
       // anything else runs: the registration door
@@ -6671,7 +6699,7 @@ export function createWorkspaceEngineCapture(
       } else if (absentHeadDisk === "empty" && updatesSeen === 0) {
         reportSaveState("saved", 0, "status");
       }
-      const publicSession: WorkspaceEngineYDocProviderSession = {
+      const publicSession: WorkspaceEngineYDocOpenedSession = {
         get nativeOwner() {
           return session.nativeOwner;
         },
@@ -6685,6 +6713,7 @@ export function createWorkspaceEngineCapture(
           return session.lineageClaimId;
         },
         contentKind: session.contentKind,
+        lineageAtOpen: lineage,
         get artifactAssets() {
           return session.artifactAssets ?? [];
         },

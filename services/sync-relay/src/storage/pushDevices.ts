@@ -24,7 +24,6 @@ export interface BindPushDeviceInput {
   token: string;
   environment: ApnsEnvironment;
   topic: string;
-  // The account's display name, which a mention of them uses.
   accountName?: string;
   nowMs: number;
 }
@@ -106,13 +105,12 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       existing.environment === input.environment &&
       existing.topic === input.topic
     ) {
-      if (existing.expiresAtMs !== input.sessionExpiresAtMs)
-        db.prepare(`UPDATE ${PUSH_SUBSCRIPTIONS} SET expires_at_ms = ?, updated_at_ms = max(updated_at_ms, ?)
+      db.prepare(`UPDATE ${PUSH_SUBSCRIPTIONS} SET expires_at_ms = ?, updated_at_ms = max(updated_at_ms, ?)
           WHERE kind = 'apns' AND session_id = ?`).run(
-          input.sessionExpiresAtMs,
-          input.nowMs,
-          input.sessionId,
-        );
+        input.sessionExpiresAtMs,
+        input.nowMs,
+        input.sessionId,
+      );
       return named({ ...existing, expiresAtMs: input.sessionExpiresAtMs });
     }
     endBindings(
@@ -155,6 +153,34 @@ export function bindPushDevice(storage: StorageContext, input: BindPushDeviceInp
       expiresAtMs: input.sessionExpiresAtMs,
     });
   });
+}
+
+export function readLivePushDevice(
+  storage: StorageContext,
+  generation: number,
+  nowMs: number,
+): PushDeviceRow | null {
+  const row = storage.db
+    .prepare(`SELECT ${COLUMNS} FROM ${PUSH_SUBSCRIPTIONS} s WHERE kind = 'apns' AND generation = ?
+      AND expires_at_ms > ? AND NOT EXISTS (SELECT 1 FROM ${PUSH_REVOKED_SESSIONS} r
+        WHERE r.session_id = s.session_id AND r.account_user_id = s.account_user_id AND r.expires_at_ms > ?)`)
+    .get(generation, nowMs, nowMs);
+  return row ? rowFrom(row) : null;
+}
+
+export function removeUnregisteredPushDevice(
+  storage: StorageContext,
+  generation: number,
+  unregisteredAtMs: number,
+): void {
+  storage.tx(() =>
+    endBindings(
+      storage,
+      "kind = 'apns' AND generation = ? AND updated_at_ms <= ?",
+      generation,
+      unregisteredAtMs,
+    ),
+  );
 }
 
 /** Ends the caller's phone binding only while it is still `generation`, so a late removal keeps a newer one. */

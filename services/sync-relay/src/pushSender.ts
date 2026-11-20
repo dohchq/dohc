@@ -1,12 +1,17 @@
-import { createCipheriv, createECDH, hkdfSync, randomBytes, sign } from "node:crypto";
+import { createCipheriv, createECDH, createHash, hkdfSync, randomBytes, sign } from "node:crypto";
 import { Resolver } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import type { ApnsClient } from "./apnsClient";
+import { apnsPayload, apnsText } from "./apnsPayload";
 import {
+  isOwnAgentMessage,
+  phoneCanShow,
   pushMessageAccess,
   pushPlainText,
   readPushMessage,
+  type ChatMessageReason,
   type PushMessage,
 } from "./chatMessageInterest";
 import type { PushConfig } from "./pushConfig";
@@ -17,9 +22,12 @@ import {
   claimPushDelivery,
   finishPushDelivery,
   nextPushDeliveryAt,
-  ownsPushLease,
+  readPushLease,
+  pausePushDelivery,
   type PushDelivery,
 } from "./storage/pushDeliveries";
+import { readLivePushDevice, removeUnregisteredPushDevice } from "./storage/pushDevices";
+import { noticeIsListed } from "./storage/notices";
 import {
   readPushSubscription,
   removePushSubscriptionGeneration,
@@ -28,6 +36,8 @@ import {
 
 const SEND_TIMEOUT_MS = 10_000;
 export const PUSH_DELIVERY_TTL_SECONDS = 60;
+export const PUSH_STREAMS = 4;
+export const APNS_PAUSE_MS = 20 * 60_000;
 const blocked = new BlockList();
 for (const [address, prefix] of [
   ["0.0.0.0", 8],
@@ -250,9 +260,40 @@ export type ResolvePushAlertLink = (
 ) => string | null;
 export const noPushAlertLink: ResolvePushAlertLink = () => null;
 
+function alertLabel(
+  { message, access }: { message: PushMessage; access: { place: string } },
+  reason: ChatMessageReason,
+  accountName: string | null,
+  forPhone: boolean,
+): string {
+  const part = forPhone ? apnsText : (text: string) => text;
+  const ownerName = part(pushPlainText(accountName, "Someone"));
+  const senderLabel = part(message.senderLabel);
+  const place = part(access.place);
+  const authorKind = message.authorKind;
+  const sender =
+    authorKind === "agent" || authorKind === "automation"
+      ? `${senderLabel} (${ownerName}'s ${authorKind})`
+      : message.authorUserId
+        ? ownerName
+        : forPhone
+          ? `${senderLabel} (via link)`
+          : senderLabel;
+  // A push names no share, so its words keep no file link.
+  return withholdChatFileLinks(
+    reason === "mention"
+      ? `${sender} mentioned you in ${place}`
+      : reason === "dm"
+        ? `${sender} sent you a message`
+        : `${sender} replied in ${place}`,
+    () => false,
+  );
+}
+
 export function createPushSender(options: {
   storage: StorageContext;
   config: PushConfig | undefined;
+  apns?: ApnsClient | undefined;
   sessionIsValid(
     session: { userId: string; sessionId: string },
     signal: AbortSignal,
@@ -263,14 +304,19 @@ export function createPushSender(options: {
   transport?: PushTransport;
   now?: () => number;
   onError?: () => void;
+  onApnsRefused?: () => void;
 }) {
-  const { storage, config } = options;
+  const { storage, config, apns } = options;
   const now = options.now ?? Date.now;
+  const enabled = Boolean(config || apns);
   let closed = false;
   let started = false;
-  let active: Promise<boolean> | undefined;
+  let pausedUntilMs = 0;
+  const inflight = new Set<Promise<unknown>>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let unobserve: (() => void) | undefined;
+  const drop = (delivery: PushDelivery) => finishPushDelivery(storage, delivery, "dropped", now());
+
   const current = (delivery: PushDelivery) => {
     if (delivery.installationId === null) return null;
     const subscription = readPushSubscription(storage, delivery.installationId);
@@ -282,22 +328,123 @@ export function createPushSender(options: {
       subscription.generation !== delivery.generation ||
       subscription.expiresAtMs <= now() ||
       subscription.vapidKeyId !== config?.keyId ||
-      !ownsPushLease(storage, delivery, now())
+      !readPushLease(storage, delivery, now())
     )
       return null;
     const access = pushMessageAccess(storage, message, delivery.userId);
     return access ? { subscription, message, access } : null;
   };
-  const attempt = async (): Promise<boolean> => {
-    if (!config || closed) return false;
-    // Phone alerts have no sender yet; they wait in the queue until they expire.
-    const delivery = claimPushDelivery(storage, now(), { native: false });
-    if (!delivery) return false;
+
+  const currentNative = (delivery: PushDelivery, client: ApnsClient) => {
+    const nowMs = now();
+    const binding = readLivePushDevice(storage, delivery.generation, nowMs);
+    const message = readPushMessage(storage, delivery.relaySeq);
+    const lease = readPushLease(storage, delivery, nowMs);
+    if (
+      !binding ||
+      !message ||
+      !lease ||
+      binding.userId !== delivery.userId ||
+      binding.topic !== client.config.topic ||
+      !client.config.environments.has(binding.environment) ||
+      !phoneCanShow(storage, delivery.userId, message.workspaceId, message.threadId)
+    )
+      return null;
+    const { noticeId } = lease;
+    const agentAlertWithdrawn =
+      (delivery.reason === "agent" || noticeId !== null) &&
+      (!isOwnAgentMessage(message, delivery.userId) ||
+        (noticeId !== null && !noticeIsListed(storage, delivery.userId, noticeId, nowMs)));
+    if (agentAlertWithdrawn) return null;
+    const access = pushMessageAccess(storage, message, delivery.userId);
+    return access ? { binding, message, access, noticeId } : null;
+  };
+
+  const attemptNative = async (
+    delivery: PushDelivery,
+    client: ApnsClient,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const before = storage.readTx(() => currentNative(delivery, client));
+    if (!before) return drop(delivery);
+    const stream = await client.open(before.binding.environment, signal);
+    const accountName = before.message.authorUserId
+      ? await options.lookupAccountName(before.message.authorUserId, signal)
+      : null;
+    signal.throwIfAborted();
+    const valid = await options.sessionIsValid(before.binding, signal);
+    signal.throwIfAborted();
+    const fresh = valid ? storage.readTx(() => currentNative(delivery, client)) : null;
+    const nowMs = now();
+    const expiration = Math.floor(
+      Math.min(nowMs + PUSH_DELIVERY_TTL_SECONDS * 1000, delivery.expiresAtMs) / 1000,
+    );
+    if (
+      !fresh ||
+      fresh.binding.sessionId !== before.binding.sessionId ||
+      expiration <= Math.floor(nowMs / 1000)
+    )
+      return drop(delivery);
+    const { binding, message, noticeId } = fresh;
+    const threadKey = createHash("sha256")
+      .update(JSON.stringify([binding.generation, message.workspaceId, message.threadId]))
+      .digest("base64url")
+      .slice(0, 22);
+    const response = await stream.send(
+      binding.token,
+      {
+        "apns-push-type": "alert",
+        "apns-priority": "10",
+        "apns-topic": client.config.topic,
+        "apns-expiration": String(expiration),
+        "apns-collapse-id": threadKey,
+      },
+      apnsPayload({
+        title: alertLabel(fresh, delivery.reason, accountName, true),
+        body: apnsText(message.body),
+        threadKey,
+        data: {
+          generation: binding.generation,
+          workspaceId: message.workspaceId,
+          threadId: message.threadId,
+          messageId: message.messageId,
+          deliveryId: delivery.deliveryId,
+          ...(noticeId === null ? {} : { noticeId }),
+        },
+      }),
+      signal,
+    );
+    if (response.status === 403) {
+      if (now() >= pausedUntilMs) options.onApnsRefused?.();
+      pausedUntilMs = now() + APNS_PAUSE_MS;
+      client.forgetToken();
+      return pausePushDelivery(storage, delivery, pausedUntilMs);
+    }
+    const { status, timestampMs } = response;
+    const gone = status === 410 && timestampMs !== null;
+    if (gone) removeUnregisteredPushDevice(storage, binding.generation, timestampMs);
+    finishPushDelivery(
+      storage,
+      delivery,
+      status === 200
+        ? "sent"
+        : status === 429 || status >= 500 || (status === 410 && !gone)
+          ? "retry"
+          : "dropped",
+      now(),
+    );
+  };
+
+  const attempt = async (delivery: PushDelivery): Promise<boolean> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     try {
+      if (delivery.installationId === null) {
+        await (apns ? attemptNative(delivery, apns, controller.signal) : drop(delivery));
+        return true;
+      }
       const before = storage.readTx(() => current(delivery));
-      if (!before) {
+      if (!config || !before) {
         finishPushDelivery(storage, delivery, "dropped", now());
         return true;
       }
@@ -328,24 +475,7 @@ export function createPushSender(options: {
         finishPushDelivery(storage, delivery, "dropped", now());
         return true;
       }
-      const ownerName = pushPlainText(accountName, "Someone");
-      const authorKind = fresh.message.authorKind;
-      const sender =
-        authorKind === "agent" || authorKind === "automation"
-          ? `${fresh.message.senderLabel} (${ownerName}'s ${authorKind})`
-          : fresh.message.authorUserId
-            ? ownerName
-            : fresh.message.senderLabel;
-      const place = fresh.access.place;
-      // A push names no share, so its words keep no file link.
-      const label = withholdChatFileLinks(
-        delivery.reason === "mention"
-          ? `${sender} mentioned you in ${place}`
-          : delivery.reason === "dm"
-            ? `${sender} sent you a message`
-            : `${sender} replied in ${place}`,
-        () => false,
-      );
+      const label = alertLabel(fresh, delivery.reason, accountName, false);
       const prepared = preparePushRequest(
         config,
         fresh.subscription,
@@ -380,7 +510,7 @@ export function createPushSender(options: {
       finishPushDelivery(
         storage,
         delivery,
-        error instanceof TypeError ? "dropped" : "retry",
+        delivery.installationId !== null && error instanceof TypeError ? "dropped" : "retry",
         now(),
       );
     } finally {
@@ -388,52 +518,64 @@ export function createPushSender(options: {
     }
     return true;
   };
-  const runOnce = (): Promise<boolean> => {
-    if (closed || !config) return Promise.resolve(false);
-    if (!active)
-      active = attempt().finally(() => {
-        active = undefined;
+  const nativeFromMs = () => (apns ? pausedUntilMs : Number.MAX_SAFE_INTEGER);
+  const claim = () => claimPushDelivery(storage, now(), { native: now() >= nativeFromMs() });
+  const track = (delivery: PushDelivery): Promise<unknown> => {
+    const run = attempt(delivery)
+      .catch(() => options.onError?.())
+      .finally(() => {
+        inflight.delete(run);
+        pump();
       });
-    return active;
+    inflight.add(run);
+    return run;
+  };
+  const runOnce = async (): Promise<boolean> => {
+    if (closed || !enabled) return false;
+    const delivery = claim();
+    if (!delivery) return false;
+    await track(delivery);
+    return true;
   };
   const schedule = (atMs: number | null): void => {
     if (timer) clearTimeout(timer);
     timer = undefined;
     if (closed || !started || atMs === null) return;
-    timer = setTimeout(tick, Math.max(0, atMs - now()));
+    timer = setTimeout(pump, Math.max(0, atMs - now()));
     timer.unref();
   };
-  const tick = (): void => {
+  function pump(): void {
+    if (timer) clearTimeout(timer);
     timer = undefined;
-    if (closed || !config) return;
-    void runOnce()
-      .catch(() => {
-        options.onError?.();
-        return false;
-      })
-      .then(() => {
-        if (!closed)
-          schedule(
-            storage.readTx(() => nextPushDeliveryAt(storage, now(), Number.MAX_SAFE_INTEGER)),
-          );
-      });
-  };
+    if (closed || !started) return;
+    try {
+      while (inflight.size < PUSH_STREAMS) {
+        const delivery = claim();
+        if (!delivery) break;
+        void track(delivery);
+      }
+      if (inflight.size < PUSH_STREAMS)
+        schedule(storage.readTx(() => nextPushDeliveryAt(storage, now(), nativeFromMs())));
+    } catch {
+      options.onError?.();
+    }
+  }
   return {
     runOnce,
     start() {
-      if (started || closed || !config) return;
+      if (started || closed || !enabled) return;
       started = true;
       unobserve = observeRelayWrites(storage, () => {
-        if (closed || active) return;
-        schedule(now());
+        if (!closed) schedule(now());
       });
-      tick();
+      pump();
     },
     async close() {
       closed = true;
       unobserve?.();
       if (timer) clearTimeout(timer);
-      await active;
+      await Promise.all(inflight);
+      await apns?.close();
     },
   };
 }

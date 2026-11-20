@@ -2717,7 +2717,9 @@ fn resolve_seed_conflict_with_faults(
             crate::prepare_local_conflict_resolve_v1_in_tx(tx, &input, conflict).map_err(map_error)
         },
         |tx, result, prepared| {
-            crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result).map_err(map_error)
+            crate::commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                .map(drop)
+                .map_err(map_error)
         },
     );
     if crash_after_commit {
@@ -3295,8 +3297,12 @@ fn assert_desktop_frontmatter_fold(index: usize, refuses: [bool; 2]) {
 
 #[test]
 fn nested1b_desktop_frontmatter_link() {
+    assert_desktop_frontmatter_fold(0, [false, false]);
+}
+#[test]
+fn nested1b_desktop_frontmatter_entity() {
     // Only the engine's own form folds; the file without it is held.
-    assert_desktop_frontmatter_fold(0, [true, false]);
+    assert_desktop_frontmatter_fold(2, [true, false]);
 }
 #[test]
 fn nested1b_desktop_frontmatter_setext_holds() {

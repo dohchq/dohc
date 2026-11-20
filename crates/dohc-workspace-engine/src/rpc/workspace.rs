@@ -24,7 +24,6 @@ use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::ActorHandle;
 use dohc_engine_runtime::FaultInjector;
-#[cfg(test)]
 use dohc_engine_runtime::LifecycleState;
 use dohc_engine_runtime::NoFaults;
 use dohc_engine_runtime::RelayConfiguration;
@@ -709,11 +708,23 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let work = OpenWork::new(ctx.progress.is_active());
-        let open = self.open_workspace(ctx, params, &work);
-        if !ctx.progress.is_active() {
-            return open.await;
-        }
-        report_while(&ctx.progress, || work.total(), open).await
+        let started = std::sync::OnceLock::new();
+        let open = self.open_workspace(ctx, params, &work, &started);
+        let opened = if ctx.progress.is_active() {
+            report_while(&ctx.progress, || work.total(), open).await
+        } else {
+            open.await
+        };
+        opened.map_err(|error| {
+            if started
+                .get()
+                .is_some_and(|actor: &ActorHandle| actor.lifecycle() == LifecycleState::Damaged)
+            {
+                WireError::new(ErrorCode::Internal, "state-corrupt")
+            } else {
+                error
+            }
+        })
     }
 
     async fn open_workspace(
@@ -721,6 +732,7 @@ impl EngineService {
         ctx: &RequestContext,
         params: Value,
         work: &OpenWork,
+        started: &std::sync::OnceLock<ActorHandle>,
     ) -> Result<Value, WireError> {
         let capture_author_supplied = params
             .as_object()
@@ -1021,8 +1033,9 @@ impl EngineService {
             });
             if open_guard.identity.is_some()
                 && let Some(probe) = capture_apply_probe
+                && let Ok((open, _)) = &opened
             {
-                probe.pause_open_install_if_armed();
+                probe.pause_open_install_if_armed(&open.actor);
             }
             Ok((opened, open_guard, local_state))
         });
@@ -1054,6 +1067,7 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
+        let _ = started.set(actor.clone());
         if let Some(reader) = self.reader_resolver.get() {
             actor
                 .configure_reader_resolver(reader.clone())
@@ -1960,6 +1974,92 @@ mod tests {
         );
     }
 
+    fn damage_a_page(db_path: &std::path::Path) {
+        let (root_page, page_size) = {
+            let conn = rusqlite::Connection::open(db_path).expect("open store");
+            conn.execute_batch(
+                "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
+            )
+            .expect("a table to damage");
+            let root_page: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("root page");
+            let page_size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .expect("page size");
+            (root_page.unsigned_abs(), page_size.unsigned_abs())
+        };
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(db_path)
+                .expect("store file");
+            file.seek(SeekFrom::Start((root_page - 1) * page_size))
+                .expect("seek");
+            file.write_all(&[0]).expect("no b-tree page type");
+            file.sync_all().expect("sync");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_the_page_check_stops_answers_state_corrupt() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db_path = scratch
+            .path()
+            .join(".dohc")
+            .join("engine")
+            .join("engine.db");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        let probe = capture_driver::CaptureApplyProbe::default();
+        service.capture_apply_probe = Some(probe.clone());
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "damaged-during-open",
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("a fresh workspace opens");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        damage_a_page(&db_path);
+
+        probe.pause_next_open_install();
+        let ctx = RequestContext::unbounded();
+        let (refused, stopped) = tokio::join!(service.workspace_open(&ctx, params), async {
+            let paused = tokio::time::timeout(
+                Duration::from_secs(30),
+                probe.wait_until_open_install_paused(),
+            )
+            .await;
+            let stopped = paused.is_ok()
+                && tokio::time::timeout(Duration::from_secs(30), async {
+                    let actor = probe.paused_open_actor().expect("the paused open's actor");
+                    while actor.lifecycle() != LifecycleState::Damaged {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok();
+            probe.release_open_install();
+            stopped
+        });
+        assert!(stopped, "the page check stops the paused open's actor");
+        let refused = refused.expect_err("an open whose store stopped serving fails");
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::Internal, "state-corrupt")
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_whose_pages_are_damaged_answers_state_corrupt_until_it_is_replaced() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -1983,69 +2083,49 @@ mod tests {
             serde_json::from_value(opened["workspace"].clone()).expect("handle");
         service.workspace_close(Some(handle)).await.expect("close");
 
-        let (root_page, page_size) = {
-            let conn = rusqlite::Connection::open(&db_path).expect("open store");
-            conn.execute_batch(
-                "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
-            )
-            .expect("a table to damage");
-            let root_page: i64 = conn
-                .query_row(
-                    "SELECT rootpage FROM sqlite_schema WHERE name = 'unread_pages'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("root page");
-            let page_size: i64 = conn
-                .pragma_query_value(None, "page_size", |row| row.get(0))
-                .expect("page size");
-            (root_page.unsigned_abs(), page_size.unsigned_abs())
-        };
-        {
-            use std::io::{Seek, SeekFrom, Write};
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&db_path)
-                .expect("store file");
-            file.seek(SeekFrom::Start((root_page - 1) * page_size))
-                .expect("seek");
-            file.write_all(&[0]).expect("no b-tree page type");
-            file.sync_all().expect("sync");
-        }
+        damage_a_page(&db_path);
 
-        let opened = service
+        match service
             .workspace_open(&RequestContext::unbounded(), params.clone())
             .await
-            .expect("the store serves before its pages are checked");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("handle");
-        let actor = service.open(Some(&handle)).expect("open").actor.clone();
-        let waited = std::time::Instant::now();
-        while actor.lifecycle() != LifecycleState::Damaged {
-            assert!(
-                waited.elapsed() < Duration::from_secs(30),
-                "the page check stops the actor"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        {
+            Ok(opened) => {
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened["workspace"].clone()).expect("handle");
+                let actor = service.open(Some(&handle)).expect("open").actor.clone();
+                let waited = std::time::Instant::now();
+                while actor.lifecycle() != LifecycleState::Damaged {
+                    assert!(
+                        waited.elapsed() < Duration::from_secs(30),
+                        "the page check stops the actor"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let refused = service
+                    .ensure_handle_allows_method(Some(&handle), "versionedText.read")
+                    .expect_err("a damaged store serves nothing");
+                assert_eq!(
+                    (refused.code, refused.message.as_str()),
+                    (ErrorCode::Internal, "state-corrupt")
+                );
+                service
+                    .ensure_handle_allows_method(Some(&handle), "workspace.close")
+                    .expect("a damaged store still closes");
+                service
+                    .workspace_close(Some(handle.clone()))
+                    .await
+                    .expect("a damaged store closes");
+                assert!(
+                    service.open(Some(&handle)).is_err(),
+                    "the closed handle is gone"
+                );
+            }
+            Err(refused) => assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (ErrorCode::Internal, "state-corrupt"),
+                "a page check that stops the open names the damage"
+            ),
         }
-        let refused = service
-            .ensure_handle_allows_method(Some(&handle), "versionedText.read")
-            .expect_err("a damaged store serves nothing");
-        assert_eq!(
-            (refused.code, refused.message.as_str()),
-            (ErrorCode::Internal, "state-corrupt")
-        );
-        service
-            .ensure_handle_allows_method(Some(&handle), "workspace.close")
-            .expect("a damaged store still closes");
-        service
-            .workspace_close(Some(handle.clone()))
-            .await
-            .expect("a damaged store closes");
-        assert!(
-            service.open(Some(&handle)).is_err(),
-            "the closed handle is gone"
-        );
 
         let refused = service
             .workspace_open(&RequestContext::unbounded(), params)

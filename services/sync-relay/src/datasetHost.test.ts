@@ -890,6 +890,27 @@ const collectionFile = (path = "registrations/dataset.json") => ({
 });
 const collectionMissing = { code: "app_collection_missing", statusCode: 410 };
 
+it("keeps an app working while the Collection's folder holds a dataset.json that names no Collection", async () => {
+  const f = await fixture();
+  await f.activate();
+  const publicationId = f.publish(),
+    link = f.link("friend");
+  const unnamed = {
+    path: "registrations/dataset.json",
+    text: JSON.stringify({ formatVersion: 1 }),
+  };
+  pushFile(f.storage, "dataset", null, unnamed);
+  await f.invoke(link, id(5), { name: "First" }, publicationId, "first");
+  f.advance(120_000);
+  await f.invoke(link, id(5), { name: "Still there" }, publicationId, "still-there");
+  pushFile(f.storage, "dataset", unnamed, null);
+  await f.invoke(link, id(5), { name: "Deleted" }, publicationId, "deleted");
+  f.advance(120_000);
+  await expect(
+    f.invoke(link, id(5), { name: "Refused" }, publicationId, "refused"),
+  ).rejects.toMatchObject(collectionMissing);
+});
+
 it("keeps an app working, on its own records only, when another Collection takes its moved Collection's old folder (#3186)", async () => {
   const f = await fixture();
   await f.activate();

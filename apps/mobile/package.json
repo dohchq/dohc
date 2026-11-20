@@ -15,6 +15,7 @@
     "@dohc/brand": "workspace:*",
     "@dohc/interface-words": "workspace:*",
     "@dohc/live-session-contract": "workspace:*",
+    "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "@fontsource-variable/inter": "^5.3.0",

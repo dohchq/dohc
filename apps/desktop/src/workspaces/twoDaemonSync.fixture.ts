@@ -35,7 +35,11 @@ import {
   WorkspaceDaemonRequester,
 } from "@dohc/workspace-engine-client";
 
-import { openLiveDaemonWorkspace, type CloseStep } from "../../e2e/helpers/daemonSeed";
+import {
+  openLiveDaemonWorkspace,
+  type CloseStep,
+  type LiveDaemonWorkspace,
+} from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
@@ -102,14 +106,31 @@ afterAll(async () => {
 }, 30_000);
 
 export interface LiveDaemonCapture {
+  workspace: LiveDaemonWorkspace["workspace"];
   capture: WorkspaceEngineCapture;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
   queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
+  // Rescan the folder and wait until capture has taken in what it found.
+  reconcileCapture(): Promise<void>;
   // What the desktop does first at quit.
   beginShutdown(): void;
   close(step?: CloseStep): Promise<void>;
+}
+
+function reconcileDaemonCapture(
+  workspace: LiveDaemonWorkspace,
+  workspaceId: string,
+): Promise<void> {
+  return workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) => {
+    const adapter = new VersionedLiveAdapter(client, handle, { workspaceId });
+    let capture = await adapter.reconcileCapture();
+    for (let attempt = 0; !capture.settled && attempt < 20; attempt++) {
+      capture = await adapter.flushCapture();
+    }
+    expect(capture.settled, "capture settles after a rescan").toBe(true);
+  });
 }
 
 export function pullCaptured(relay: EngineRelayWorkspaceClient, capture: WorkspaceEngineCapture) {
@@ -146,6 +167,7 @@ export async function openLiveDaemonCapture(input: {
     relay: input.relay,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -155,6 +177,7 @@ export async function openLiveDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(
@@ -224,6 +247,7 @@ export async function openJoinedDaemonCapture(input: {
     rustEngineSessions: workspace.sessions,
   });
   return {
+    workspace: workspace.workspace,
     capture,
     chats: workspace.chats,
     relay,
@@ -233,6 +257,7 @@ export async function openJoinedDaemonCapture(input: {
           workspaceId: input.workspaceId,
         }).queryCollectionRecords(query),
       ),
+    reconcileCapture: () => reconcileDaemonCapture(workspace, input.workspaceId),
     refusalNotices: () =>
       workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
         new WorkspaceDaemonRequester(client).request(

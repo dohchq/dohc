@@ -76,8 +76,10 @@ export function OverlayFrame(props: {
         tabIndex={-1}
         data-focus-surface="dialog"
         // The panel holds focus only until Tab reaches its controls, which
-        // show their own ring, so the whole dialog never wears one.
-        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0 outline-none`}
+        // show their own ring, so the whole dialog never wears one. The
+        // titlebar still drags the window under a dialog, so a panel that
+        // reaches it, as in a short zoomed window, opts out of the drag.
+        className={`${props.panelProps?.className ?? "dohc-pop-in"} titlebar-no-drag shrink-0 outline-none`}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}

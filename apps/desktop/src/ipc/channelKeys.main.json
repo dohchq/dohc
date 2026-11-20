@@ -207,6 +207,7 @@
   "retryOwnerLiveDelivery",
   "retryOwnerLiveShare",
   "retryShareHandoff",
+  "retuneRelayShareGrant",
   "retuneRelayShareLink",
   "revealAutomationHolds",
   "revealWorkspaceFolder",

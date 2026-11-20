@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
+import { ShellErrorReporter } from "./shell/useShellError";
 import { deferred } from "../testing/deferred";
 import type { GetRelayReceivedShareResult, ShareAccess } from "../ipc/bridgeContract";
 
@@ -72,7 +73,7 @@ describe("OpenSharedView", () => {
     if (reason) expect(start.disabled).toBe(true);
   }
 
-  it("keeps Back available while adding a share and ignores the late result after leaving", async () => {
+  it("keeps Back available while adding a share and reports the late result after leaving", async () => {
     const pending = deferred<{
       workspace: typeof SHARED_VIEW;
       mount: {
@@ -128,7 +129,92 @@ describe("OpenSharedView", () => {
     });
     expect(onOpened).not.toHaveBeenCalled();
     expect(onWorkspaceReady).not.toHaveBeenCalled();
+    expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      label: "granter",
+      access: null,
+      alreadyAdded: false,
+      left: true,
+    });
+  });
+
+  it("closes on a share this workspace already has", async () => {
+    bridgeMock.mountShare.mockResolvedValue({
+      workspace: { ...SHARED_VIEW, shareView: undefined, shareMounts: [] },
+      mount: { shareId: "share-1", label: "granter", status: "unchanged", changedPaths: 0 },
+      alreadyAdded: true,
+    });
+    const user = userEvent.setup();
+    const onMounted = vi.fn();
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        resolvedShare={{ shareId: "share-1", shareCode: "ordinary-received-share-code" }}
+        mountInto={{ workspaceId: "ws-host", onMounted }}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("open-share-start"));
+
+    await waitFor(() =>
+      expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+        label: "granter",
+        access: null,
+        alreadyAdded: true,
+        left: false,
+      }),
+    );
+    expect(screen.queryByTestId("open-share-error")).toBeNull();
+  });
+
+  it("reports a failure that lands after the dialog closed", async () => {
+    const pending = deferred<never>();
+    bridgeMock.mountShare.mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    const report = vi.fn();
+    const onMounted = vi.fn();
+    const { unmount } = render(
+      <ShellErrorReporter.Provider value={report}>
+        <OpenSharedView
+          onWorkspaceReady={() => {}}
+          onBack={() => {}}
+          resolvedShare={{
+            shareId: "share-1",
+            shareCode: "dohc-share:share-1:http://localhost:1788",
+          }}
+          mountInto={{ workspaceId: "ws-host", onMounted }}
+        />
+      </ShellErrorReporter.Provider>,
+    );
+
+    await user.click(await screen.findByTestId("open-share-start"));
+    unmount();
+    await act(async () => {
+      pending.reject(new Error("dohc could not reach the server."));
+    });
+
     expect(onMounted).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "dohc could not reach the server." }),
+    );
+    expect(report.mock.calls[0]![0].identity).toBe("share-add:share-1");
+
+    bridgeMock.mountShare.mockResolvedValue({
+      workspace: { ...SHARED_VIEW, shareView: undefined, shareMounts: [] },
+      mount: { shareId: "share-1", label: "granter", status: "updated", changedPaths: 1 },
+    });
+    await act(async () => report.mock.calls[0]![0].retry());
+
+    expect(bridgeMock.mountShare).toHaveBeenLastCalledWith({
+      workspaceId: "ws-host",
+      shareCode: "dohc-share:share-1:http://localhost:1788",
+    });
+    expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      label: "granter",
+      access: null,
+      alreadyAdded: false,
+      left: true,
+    });
   });
 
   it("keeps Back available while opening separately and ignores the late result after leaving", async () => {
@@ -213,13 +299,18 @@ describe("OpenSharedView", () => {
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onOpened).toHaveBeenCalledOnce();
-    expect(onMounted).toHaveBeenCalledWith("granter", "edit");
+    expect(onMounted).toHaveBeenCalledWith({
+      label: "granter",
+      access: "edit",
+      alreadyAdded: false,
+      left: false,
+    });
   });
 
   it("surfaces a mount failure in the dialog error slot", async () => {
     const user = userEvent.setup();
     bridgeMock.mountShare.mockRejectedValue(
-      new Error("This share is already added to this workspace."),
+      new Error("No share matches that code for your account."),
     );
     render(
       <OpenSharedView
@@ -236,7 +327,7 @@ describe("OpenSharedView", () => {
     await user.click(screen.getByTestId("open-share-start"));
 
     expect((await screen.findByTestId("open-share-error")).textContent).toContain(
-      "already added to this workspace",
+      "No share matches that code",
     );
   });
 

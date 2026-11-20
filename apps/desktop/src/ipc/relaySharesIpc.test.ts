@@ -1163,6 +1163,7 @@ describe("registered relay share handlers", () => {
       relayShareOperations.pauseRelayShareDiscussion.channel,
       relayShareOperations.resumeRelayShareDiscussion.channel,
       relayShareOperations.promoteRelayShareGrant.channel,
+      relayShareOperations.retuneRelayShareGrant.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
     expect(h.handlers.size).toBe(34);
@@ -1230,6 +1231,40 @@ describe("registered relay share handlers", () => {
       method: "POST",
       body: JSON.stringify({ paths: ["notes.md"], access: "view" }),
     });
+  });
+
+  it("changes a person's access through the authorized workspace, and refuses an answer it cannot read", async () => {
+    const h = harness();
+    const changed = {
+      grantId: "grant",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    };
+    h.request.mockResolvedValueOnce({ ok: true, ...changed });
+    const input = { workspaceId, shareId: "share", grantId: "grant", access: "edit" };
+
+    await expect(
+      h.invoke(relayShareOperations.retuneRelayShareGrant.channel, input),
+    ).resolves.toEqual(changed);
+    expect(h.request).toHaveBeenCalledWith(
+      h.credentials,
+      "/sync/shares/share/grants/grant/retune",
+      {
+        method: "POST",
+        body: JSON.stringify({ workspaceId: "workspace", access: "edit" }),
+      },
+    );
+
+    h.request.mockResolvedValueOnce({ ok: true, ...changed, status: "revoked" });
+    await expect(
+      h.invoke(relayShareOperations.retuneRelayShareGrant.channel, input),
+    ).rejects.toThrow();
+    await expect(
+      h.invoke(relayShareOperations.retuneRelayShareGrant.channel, { ...input, access: "owner" }),
+    ).rejects.toThrow();
   });
 
   it("rejects a shared view and unauthorized remote before relay mutation", async () => {
@@ -1439,6 +1474,7 @@ const ownerInputs = {
     expectedParentGrantId: "parent",
     expectedParentGeneration: 2,
   },
+  retuneRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant", access: "edit" },
   revokeRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant" },
   saveOwnerLiveRecoveryCopy: { workspaceId, path: "notes/a.md" },
   listOwnerLiveRecoveryPackages: { workspaceId },

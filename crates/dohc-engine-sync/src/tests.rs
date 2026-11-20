@@ -1281,7 +1281,7 @@ fn one_message_registers_more_than_one_reference_page_without_resending_acknowle
     ]).unwrap();
     body.push_str(&format!("@[work:{}]", "Z".repeat(43)));
     let channel = LinkedChatStore::new(&mut engine)
-        .ensure_general_channel("ws", "general", 2, &NoFaults)
+        .ensure_general_channel("ws", 2, &NoFaults)
         .unwrap();
     LinkedChatStore::new(&mut engine)
         .start_channel_thread(

@@ -5,7 +5,11 @@ import commonmark from "../../../ydoc-projection/src/fixtures/commonmark-edit-me
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { EngineRequestDeadlineError, EngineRequestError } from "../daemon/engineClient";
-import { DaemonRefusalError, isYdocUnsettledCloseRefusal } from "../live/daemonLiveAdapter";
+import {
+  DaemonRefusalError,
+  isYdocUnsettledCloseRefusal,
+  YdocUpdateNotRecordedError,
+} from "../live/daemonLiveAdapter";
 import type { JsonValue, Request, Response } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
@@ -8466,4 +8470,116 @@ describe("immutable original-record recovery", () => {
       source.destroy();
     },
   );
+});
+
+describe("a keyed write the busy engine refused", () => {
+  const busy = (): DaemonRefusalError =>
+    new DaemonRefusalError(
+      { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+      undefined,
+    );
+
+  it("is dropped when no send recorded it, and is never sent again", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const keys: string[] = [];
+    let busyAnswers = 0;
+    const refused = vi.fn();
+    const provider = await openEngineYdocProviderSession({
+      transport: {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: (handler) => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            keys.push(request.idempotencyKey ?? "");
+            if (busyAnswers > 0) {
+              busyAnswers -= 1;
+              throw busy();
+            }
+          }
+          return engine.sendRequest(request);
+        },
+      },
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      onRemoteUpdate() {},
+      onLocalUpdateRefused: refused,
+      scheduleSettle: settleScheduler().schedule,
+    });
+    const before = engine.recordedUpdates.length;
+    keys.length = 0;
+    busyAnswers = 2;
+    const agentUpdate = plaintextUpdate(provider.initialUpdate, (text) => text.insert(3, " agent"));
+    await expect(
+      provider.applyLocalUpdate(agentUpdate, {
+        idempotencyKey: "claim/1/0",
+        dropWhenUnrecorded: true,
+      }),
+    ).rejects.toBeInstanceOf(YdocUpdateNotRecordedError);
+    expect(refused).toHaveBeenCalledWith("claim/1/0", expect.any(YdocUpdateNotRecordedError));
+    expect(provider.doc.getText("plainText").toString()).toBe("abc");
+    await provider.applyLocalUpdate(agentUpdate, {
+      idempotencyKey: "claim/1/1",
+      dropWhenUnrecorded: true,
+    });
+    await expect(provider.settleNow()).resolves.toMatchObject({ content: "abc agent" });
+    await provider.close({ settle: false });
+    expect(keys).toEqual(["claim/1/0", "claim/1/0", "claim/1/1"]);
+    expect(engine.recordedUpdates.length - before).toBe(1);
+  });
+
+  it("is kept when an earlier send went unanswered, and its resend dedupes", async () => {
+    const engine = seedPlaintextEngine("abc");
+    const keys: string[] = [];
+    let answer: "lost" | "busy" | "engine" = "engine";
+    const refused = vi.fn();
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          keys.push(request.idempotencyKey ?? "");
+          if (answer === "busy") throw busy();
+          const response = await engine.sendRequest(request);
+          if (answer === "lost") {
+            answer = "busy";
+            throw new DaemonRefusalError(
+              { code: "INTERNAL", retry: "no", message: "answer lost after commit" },
+              undefined,
+            );
+          }
+          return response;
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+    });
+    session.onLocalUpdateRefused(refused);
+    const before = engine.recordedUpdates.length;
+    keys.length = 0;
+    answer = "lost";
+    try {
+      await expect(
+        session.applyLocalTextEdit(
+          { root: "plainText", index: 3, insert: "d" },
+          { idempotencyKey: "claim/1/0", dropWhenUnrecorded: true },
+        ),
+      ).rejects.toThrow("engine-store-busy");
+      expect(refused).not.toHaveBeenCalled();
+      expect(session.missingLocalState).toBe(true);
+      answer = "engine";
+      await session.resendMissingState();
+      expect(session.missingLocalState).toBe(false);
+      expect(keys).toEqual(["claim/1/0", "claim/1/0", "claim/1/0"]);
+      expect(engine.recordedUpdates.length - before).toBe(1);
+      await expect(session.settle()).resolves.toMatchObject({ content: "abcd" });
+    } finally {
+      await session.evict();
+      adapter.dispose();
+    }
+  });
 });

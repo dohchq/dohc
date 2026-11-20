@@ -1,7 +1,7 @@
 use super::{
     ChatActorKind, ChatReaction, ChatReactionState, LinkedChatStore, MAX_MESSAGE_PAGE, SetReaction,
     base32_lowercase_no_padding, bump_chat_conversation_revision, chat_after, collect, committed,
-    follow_thread_implicitly, insert_local_replication_op, is_js_trim_ws,
+    follow_thread_implicitly, insert_local_replication_op, is_agent_id, is_js_trim_ws,
     local_replication_coordinate, lookup_request, map_reaction_row, nfc, non_empty,
     normalize_display_name, normalize_replicated_chat_id, persisted_safe_integer, receipts,
     record_request, relay_log_has_authored_message, requested_name, require_thread,
@@ -19,15 +19,43 @@ const MAX_REACTION_EMOJI_UTF16_UNITS: usize = 32;
 const MAX_REACTION_AUTHOR_ID_UTF16_UNITS: usize = 200;
 
 /// Stable cross-peer reaction identity derived from the reaction cell key.
-pub fn reaction_id_for(message_id: &str, emoji: &str, author_id: &str) -> String {
+/// `author_agent_id` is empty for a reaction that names no agent.
+pub fn reaction_id_for(
+    message_id: &str,
+    emoji: &str,
+    author_id: &str,
+    author_kind: ChatActorKind,
+    author_agent_id: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(message_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(emoji.as_bytes());
     hasher.update(b"\0");
     hasher.update(author_id.as_bytes());
+    if author_kind == ChatActorKind::Agent {
+        hasher.update(b"\0agent\0");
+        hasher.update(author_agent_id.as_bytes());
+    }
     let digest = hasher.finalize();
     format!("reaction_{}", base32_lowercase_no_padding(&digest[..16]))
+}
+
+/// The agent a reaction names, empty for none. Only an agent's reaction
+/// names one, by a valid id.
+pub fn normalize_reaction_agent_id(
+    author_kind: ChatActorKind,
+    author_agent_id: Option<&str>,
+) -> Result<&str, DomainError> {
+    match author_agent_id {
+        None => Ok(""),
+        Some(agent_id) if author_kind == ChatActorKind::Agent && is_agent_id(agent_id) => {
+            Ok(agent_id)
+        }
+        Some(_) => Err(DomainError::InvalidInput {
+            reason: "only an agent's reaction names its agent, by a valid id",
+        }),
+    }
 }
 
 /// Verbatim hostile-peer reaction validation. This mirrors the oracle's one
@@ -341,6 +369,7 @@ fn upsert_reaction_lww(
     emoji: &str,
     author_id: &str,
     author_kind: ChatActorKind,
+    author_agent_id: &str,
     author_display_name: &str,
     state: ChatReactionState,
     at_ms: i64,
@@ -350,11 +379,12 @@ fn upsert_reaction_lww(
     tx.execute(
         "INSERT INTO chat_reactions \
          (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
-          author_display_name,state,at_ms,origin_id,origin_seq) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
-         ON CONFLICT(workspace_id,message_id,emoji,author_id) DO UPDATE SET \
+          author_agent_id,author_display_name,state,at_ms,origin_id,origin_seq) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
+         ON CONFLICT(workspace_id,message_id,emoji,author_id,author_kind,author_agent_id) \
+         DO UPDATE SET \
            reaction_id=excluded.reaction_id,thread_id=excluded.thread_id,\
-           author_kind=excluded.author_kind,author_display_name=excluded.author_display_name,\
+           author_display_name=excluded.author_display_name,\
            state=excluded.state,at_ms=excluded.at_ms,origin_id=excluded.origin_id,\
            origin_seq=excluded.origin_seq \
          WHERE excluded.at_ms > chat_reactions.at_ms \
@@ -372,6 +402,7 @@ fn upsert_reaction_lww(
             emoji,
             author_id,
             author_kind.as_str(),
+            author_agent_id,
             author_display_name,
             state.as_str(),
             at_ms,
@@ -389,13 +420,22 @@ fn require_reaction_cell(
     message_id: &str,
     emoji: &str,
     author_id: &str,
+    author_kind: ChatActorKind,
+    author_agent_id: &str,
 ) -> Result<ChatReaction, DomainError> {
     conn.query_row(
         "SELECT reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
-                author_display_name, state, at_ms \
+                author_display_name, state, at_ms, author_agent_id \
          FROM chat_reactions WHERE workspace_id = ?1 AND message_id = ?2 \
-           AND emoji = ?3 AND author_id = ?4",
-        params![workspace_id, message_id, emoji, author_id],
+           AND emoji = ?3 AND author_id = ?4 AND author_kind = ?5 AND author_agent_id = ?6",
+        params![
+            workspace_id,
+            message_id,
+            emoji,
+            author_id,
+            author_kind.as_str(),
+            author_agent_id
+        ],
         map_reaction_row,
     )
     .optional()
@@ -422,6 +462,9 @@ impl<'a> LinkedChatStore<'a> {
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
         let author_id = normalize_reaction_author_id(&input.author_id)?;
+        let author_agent_id =
+            normalize_reaction_agent_id(input.author_kind, input.author_agent_id.as_deref())?
+                .to_owned();
         let replication_author_id = input
             .replication_author_id
             .as_deref()
@@ -454,6 +497,7 @@ impl<'a> LinkedChatStore<'a> {
             author_id.as_bytes(),
             replication_author_id.as_deref().unwrap_or("").as_bytes(),
             input.author_kind.as_str().as_bytes(),
+            author_agent_id.as_bytes(),
             requested_name(&input.author_display_name).as_bytes(),
             input.state.as_str().as_bytes(),
         ]);
@@ -478,6 +522,8 @@ impl<'a> LinkedChatStore<'a> {
                     &input.message_id,
                     &emoji,
                     &author_id,
+                    input.author_kind,
+                    &author_agent_id,
                 )
             });
         }
@@ -513,8 +559,16 @@ impl<'a> LinkedChatStore<'a> {
             let prior_at_ms: Option<i64> = tx
                 .query_row(
                     "SELECT at_ms FROM chat_reactions \
-                     WHERE workspace_id = ?1 AND message_id = ?2 AND emoji = ?3 AND author_id = ?4",
-                    params![input.workspace_id, input.message_id, emoji, author_id],
+                     WHERE workspace_id = ?1 AND message_id = ?2 AND emoji = ?3 \
+                       AND author_id = ?4 AND author_kind = ?5 AND author_agent_id = ?6",
+                    params![
+                        input.workspace_id,
+                        input.message_id,
+                        emoji,
+                        author_id,
+                        input.author_kind.as_str(),
+                        author_agent_id
+                    ],
                     |row| row.get(0),
                 )
                 .optional()
@@ -533,7 +587,13 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "chat reaction timestamp overflowed",
                 });
             }
-            let reaction_id = reaction_id_for(&input.message_id, &emoji, &author_id);
+            let reaction_id = reaction_id_for(
+                &input.message_id,
+                &emoji,
+                &author_id,
+                input.author_kind,
+                &author_agent_id,
+            );
             let (origin_id, origin_seq) =
                 local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
             upsert_reaction_lww(
@@ -545,6 +605,7 @@ impl<'a> LinkedChatStore<'a> {
                 &emoji,
                 &author_id,
                 input.author_kind,
+                &author_agent_id,
                 &author_display_name,
                 input.state,
                 at_ms,
@@ -552,7 +613,7 @@ impl<'a> LinkedChatStore<'a> {
                 origin_seq,
             )?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &thread_id)?;
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "reactionId": reaction_id,
                 "threadId": thread_id,
                 "messageId": input.message_id,
@@ -563,6 +624,9 @@ impl<'a> LinkedChatStore<'a> {
                 "state": input.state.as_str(),
                 "atMs": at_ms,
             });
+            if !author_agent_id.is_empty() {
+                payload["authorAgentId"] = serde_json::json!(author_agent_id);
+            }
             if replicate {
                 insert_local_replication_op(
                     tx,
@@ -593,6 +657,8 @@ impl<'a> LinkedChatStore<'a> {
                 &input.message_id,
                 &emoji,
                 &author_id,
+                input.author_kind,
+                &author_agent_id,
             )?;
             if let Some(mark) = &mark {
                 receipts::record_receipt(
@@ -630,7 +696,8 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \
-                            r.author_kind, r.author_display_name, r.state, r.at_ms \
+                            r.author_kind, r.author_display_name, r.state, r.at_ms, \
+                            r.author_agent_id \
                      FROM chat_reactions r \
                      JOIN chat_messages m ON m.workspace_id = r.workspace_id \
                        AND m.thread_id = r.thread_id AND m.message_id = r.message_id \

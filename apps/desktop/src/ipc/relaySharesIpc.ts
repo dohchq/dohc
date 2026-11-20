@@ -48,6 +48,7 @@ import {
   RelayShareDiscussionPageResponse,
   RelayShareDiscussionPauseResponse,
   RelayShareGrantPromotionResponse,
+  RelayShareGrantRetuneResponse,
   RelayShareGrantRevokeResponse,
   RelayShareLeaveResponse,
   RelayShareLinkCreateResponse,
@@ -60,6 +61,7 @@ import {
   RetuneRelayShareLinkResult,
   ResumeRelayShareDiscussionResult,
   RotateRelayShareLinkResult,
+  RetuneRelayShareGrantResult,
   RevokeRelayShareGrantResult,
   RevokeRelayShareLinkResult,
   UnblockRelayShareDiscussionPrincipalResult,
@@ -2015,6 +2017,42 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
+  const retuneRelayShareGrant: Handlers["retuneRelayShareGrant"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/retune`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  access: input.access,
+                }),
+              },
+            ),
+          ),
+        );
+        const parsed = RelayShareGrantRetuneResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RetuneRelayShareGrantResult.parse({
+          grantId: parsed.data.grantId,
+          access: parsed.data.access,
+          generation: parsed.data.generation,
+          status: parsed.data.status,
+          revokedAtMs: parsed.data.revokedAtMs,
+          parentGrantId: parsed.data.parentGrantId,
+        });
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
   const revokeRelayShareGrant: Handlers["revokeRelayShareGrant"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
       operation,
@@ -2126,6 +2164,7 @@ export function createRelaySharesIpcHandlers<
     pauseRelayShareDiscussion,
     resumeRelayShareDiscussion,
     promoteRelayShareGrant,
+    retuneRelayShareGrant,
     revokeRelayShareGrant,
   };
 }

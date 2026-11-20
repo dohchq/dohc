@@ -995,7 +995,10 @@ export interface SyncRelayStorage {
   ): import("@dohc/workspace-contracts/relay").RelayNoticePage;
   /** The recipient's Notice change head; zero for a list that never changed. */
   noticeHead(recipientUserId: string): number;
-  markNotices(input: import("./notices").MarkNoticesInput): string[];
+  markNotices(input: import("./notices").MarkNoticesInput): {
+    dismissed: string[];
+    repeated: string[];
+  };
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];
   readAutomationHost(
@@ -1846,6 +1849,13 @@ export interface SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult;
+  retuneNamedShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  }): ShareGrantTransitionResult;
   revokeShareGrant(input: {
     shareId: string;
     grantId: string;
@@ -2158,7 +2168,6 @@ export interface SqliteDb {
 
 export interface OpenSyncRelayStorageOptions {
   pushConfigured?: boolean;
-  // Phone alerts can be sent: messages and run Notices queue them.
   apnsConfigured?: boolean;
   liveTickets?: LiveTicketStoragePolicy;
   workspaceQuotaBytes?: number;

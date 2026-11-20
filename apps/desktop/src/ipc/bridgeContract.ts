@@ -5358,6 +5358,32 @@ export const RevokeRelayShareGrantPayload = z
   .strict();
 export type RevokeRelayShareGrantPayload = z.infer<typeof RevokeRelayShareGrantPayload>;
 
+export const RetuneRelayShareGrantPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+  })
+  .strict();
+export type RetuneRelayShareGrantPayload = z.infer<typeof RetuneRelayShareGrantPayload>;
+
+export const RetuneRelayShareGrantResult = z
+  .object({
+    grantId: OPAQUE_ID,
+    access: SHARE_ACCESS,
+    generation: z.number().int().min(1),
+    status: z.literal("active"),
+    revokedAtMs: z.null(),
+    parentGrantId: OPAQUE_ID.nullable(),
+  })
+  .strict();
+export type RetuneRelayShareGrantResult = z.infer<typeof RetuneRelayShareGrantResult>;
+
+export const RelayShareGrantRetuneResponse = RetuneRelayShareGrantResult.extend({
+  ok: z.literal(true),
+}).strict();
+
 const RelayShareNamedGrantTransitionBase = {
   grantId: OPAQUE_ID,
   access: SHARE_ACCESS,
@@ -6760,6 +6786,7 @@ export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
 export const MountShareResult = z.object({
   workspace: WorkspaceSummary,
   mount: ShareMountStatusRow,
+  alreadyAdded: z.literal(true).optional(),
 });
 export type MountShareResult = z.infer<typeof MountShareResult>;
 
@@ -6885,6 +6912,9 @@ export const ChatDispatchStateForThreadPayload = z
     threadId: OPAQUE_ID.nullable(),
     // An agent's chat's earlier posts, where a reply can wait for the agent too.
     postThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
+    // The conversation's other threads, when two devices started it before
+    // they synced. A run there is the conversation's too.
+    laneThreadIds: z.array(OPAQUE_ID).max(CHAT_DISPATCH_POST_THREADS_MAX).optional(),
   })
   .strict();
 export type ChatDispatchStateForThreadPayload = z.infer<typeof ChatDispatchStateForThreadPayload>;
@@ -6950,6 +6980,11 @@ export const ChatDispatchStateForThreadResult = z
     liveRunId: OPAQUE_ID.nullable(),
     // The message the live run answers, so its working line sits under it.
     liveTriggerMessageId: OPAQUE_ID.nullable(),
+    // The agent at work in the live run, so a group's chat can name it.
+    liveAgent: z
+      .object({ agentId: AgentId, name: z.string().min(1).max(1_000) })
+      .strict()
+      .optional(),
     pendingCount: z.number().int().nonnegative(),
     paused: z.boolean(),
     // The messages here and in the earlier posts asked for that wait for the

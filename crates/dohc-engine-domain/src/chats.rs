@@ -37,7 +37,10 @@ mod thread_projection;
 pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
-pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
+pub use reactions::{
+    is_reaction_emoji_verbatim, normalize_reaction_agent_id, normalize_reaction_author_id,
+    reaction_id_for,
+};
 pub use receipts::{
     ChatCoordinatePublication, ChatCoordinateState, ChatStageOutcome, ChatStagePublication,
     ChatStageReceipt, MAX_PUBLICATION_STAGE_KEYS,
@@ -65,6 +68,14 @@ pub const GENERAL_CHANNEL_NAME: &str = "general";
 /// Deterministic cross-machine wire id for the auto-created `general` channel,
 /// so independently minted rows converge as one channel under sync.
 pub const GENERAL_CHANNEL_WIRE_ID: &str = "channel_wire_general_v1";
+/// The channel id every computer gives the General chat it creates, so a
+/// link to General made on one of a person's computers opens on the others.
+/// It is never a wire id.
+pub const GENERAL_CHANNEL_ID: &str = "channel-general";
+/// An agent's chat's channel id is this prefix and the agent id.
+const AGENT_CHANNEL_ID_PREFIX: &str = "channel-agent-";
+/// The relay names a personal agent's chat with this prefix and the agent id.
+const PERSONAL_AGENT_CHANNEL_ID_PREFIX: &str = "personal-dm:";
 /// The default agent's chat's display name. Another agent's chat is named
 /// after that agent when it is created.
 pub const AGENT_CHANNEL_NAME: &str = "My agent";
@@ -497,6 +508,8 @@ pub struct ChatReaction {
     pub emoji: String,
     pub author_id: String,
     pub author_kind: ChatActorKind,
+    /// The agent in Settings that reacted. Only an agent's reaction has one.
+    pub author_agent_id: Option<String>,
     pub author_display_name: String,
     pub state: ChatReactionState,
     pub at_ms: i64,
@@ -941,9 +954,9 @@ pub struct StartChannelThread {
     pub message_id: String,
     pub title: Option<String>,
     pub lane: ChatThreadLane,
-    /// Desktop's own thread in an agent DM, an automation's wake thread or the
-    /// runner self-test, stays its own post instead of joining the DM's
-    /// conversation. People, the CLI and MCP never set it.
+    /// Desktop's own thread in an agent DM, such as an automation's wake thread,
+    /// stays its own post instead of joining the DM's conversation. People, the
+    /// CLI and MCP never set it.
     pub own_thread: bool,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
@@ -1052,6 +1065,8 @@ pub struct SetReaction {
     pub author_id: String,
     pub replication_author_id: Option<String>,
     pub author_kind: ChatActorKind,
+    /// See [`ChatReaction::author_agent_id`].
+    pub author_agent_id: Option<String>,
     pub author_display_name: String,
     pub state: ChatReactionState,
     pub now_ms: i64,
@@ -1402,6 +1417,32 @@ pub fn agent_channel_wire_id(agent_id: &str) -> String {
     } else {
         format!("{AGENT_CHANNEL_WIRE_ID}_{agent_id}")
     }
+}
+
+/// The channel id every computer gives one agent's chat. A personal agent's
+/// chat takes the id the relay gives it.
+pub fn agent_channel_id(agent_id: &str) -> String {
+    if agent_id.starts_with(PERSONAL_AGENT_ID_PREFIX) {
+        format!("{PERSONAL_AGENT_CHANNEL_ID_PREFIX}{agent_id}")
+    } else {
+        format!("{AGENT_CHANNEL_ID_PREFIX}{agent_id}")
+    }
+}
+
+/// The channel id every computer gives the chat a wire id names, if the wire
+/// id names General or an agent's chat.
+pub fn well_known_channel_id(wire_id: &str) -> Option<String> {
+    if wire_id == GENERAL_CHANNEL_WIRE_ID {
+        return Some(GENERAL_CHANNEL_ID.to_owned());
+    }
+    agent_id_for_channel_wire_id(wire_id).map(agent_channel_id)
+}
+
+/// Whether a channel id is one only General or an agent's chat may hold.
+pub fn is_well_known_channel_id(channel_id: &str) -> bool {
+    channel_id == GENERAL_CHANNEL_ID
+        || channel_id.starts_with(AGENT_CHANNEL_ID_PREFIX)
+        || channel_id.starts_with(PERSONAL_AGENT_CHANNEL_ID_PREFIX)
 }
 
 /// The agent whose chat a wire id names, if it names one.
@@ -3008,7 +3049,6 @@ impl<'a> LinkedChatStore<'a> {
     pub fn ensure_general_channel(
         &mut self,
         workspace_id: &str,
-        channel_id: &str,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatChannel, DomainError> {
@@ -3017,18 +3057,14 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
-        // Same replicated-id bounds create_channel applies: a well-known
-        // channel journals chat.channel.create too, and a control-bearing or
-        // over-long id would wedge every receiving replica.
-        let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
-        // Same reservation create_channel enforces: a LOCAL channel id equal
-        // to a well-known WIRE id would poison channel-wire lookups and
-        // thread payloads under sync.
-        refuse_reserved_channel_id(&channel_id)?;
         let ws = workspace_id.to_owned();
         let slug = channel_slug_for_name(GENERAL_CHANNEL_NAME);
         let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
-            if let Some(existing) = channel_by_slug(tx, &ws, &slug)? {
+            let existing = match channel_by_slug(tx, &ws, &slug)? {
+                Some(existing) => Some(existing),
+                None => channel_by_id(tx, &ws, GENERAL_CHANNEL_ID)?,
+            };
+            if let Some(existing) = existing {
                 // Backfill the well-known wire mapping so imported rows converge.
                 record_channel_wire_id(tx, &ws, GENERAL_CHANNEL_WIRE_ID, &existing.channel_id)?;
                 return Ok::<_, DomainError>(existing);
@@ -3037,7 +3073,7 @@ impl<'a> LinkedChatStore<'a> {
                 tx,
                 claims,
                 &ws,
-                &channel_id,
+                GENERAL_CHANNEL_ID,
                 GENERAL_CHANNEL_NAME,
                 &slug,
                 ChatChannelKind::Channel,
@@ -3056,7 +3092,6 @@ impl<'a> LinkedChatStore<'a> {
     pub fn ensure_agent_channel(
         &mut self,
         workspace_id: &str,
-        channel_id: &str,
         agent_id: &str,
         agent_name: &str,
         now_ms: i64,
@@ -3067,8 +3102,6 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
-        let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
-        refuse_reserved_channel_id(&channel_id)?;
         if !is_agent_id(agent_id) {
             return Err(DomainError::InvalidInput {
                 reason: "agent id is invalid",
@@ -3082,6 +3115,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let slug = agent_channel_slug(agent_id);
         let wire = agent_channel_wire_id(agent_id);
+        let channel_id = agent_channel_id(agent_id);
         let outcome = self.write_chat_with_claims(&ws, faults, |tx, claims| {
             if let Some(mut existing) = agent_channel(tx, &ws, agent_id)? {
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
@@ -7038,7 +7072,7 @@ fn active_reactions_for_messages(
     let mut stmt = conn
         .prepare_cached(
             "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \
-                    r.author_kind, r.author_display_name, r.state, r.at_ms \
+                    r.author_kind, r.author_display_name, r.state, r.at_ms, r.author_agent_id \
              FROM chat_reactions r \
              JOIN chat_messages m ON m.workspace_id = r.workspace_id \
                AND m.thread_id = r.thread_id AND m.message_id = r.message_id \
@@ -7407,9 +7441,13 @@ fn create_well_known_channel(
 }
 
 /// A local channel id may not be a well-known wire id: it would poison
-/// channel-wire lookups and thread payloads under sync.
+/// channel-wire lookups and thread payloads under sync. Nor may a group take
+/// the id General or an agent's chat has on every computer.
 fn refuse_reserved_channel_id(channel_id: &str) -> Result<(), DomainError> {
-    if channel_id == GENERAL_CHANNEL_WIRE_ID || agent_id_for_channel_wire_id(channel_id).is_some() {
+    if channel_id == GENERAL_CHANNEL_WIRE_ID
+        || agent_id_for_channel_wire_id(channel_id).is_some()
+        || is_well_known_channel_id(channel_id)
+    {
         return Err(DomainError::InvalidInput {
             reason: "channel id is reserved",
         });
@@ -7520,6 +7558,23 @@ fn wire_id_for_channel_id(
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
+}
+
+fn channel_by_id(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<Option<ChatChannel>, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, \
+                type, purpose, folder_path, agent_id \
+         FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
+        params![workspace_id, channel_id],
+        map_channel_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
 }
 
 fn channel_by_slug(
@@ -9383,6 +9438,7 @@ fn map_reaction_row(
     let author_display_name: String = row.get(6)?;
     let state: String = row.get(7)?;
     let at_ms: i64 = row.get(8)?;
+    let author_agent_id: String = row.get(9)?;
     Ok((|| {
         let author_kind = ChatActorKind::from_db(&author_kind)?;
         let state = ChatReactionState::from_db(&state)?;
@@ -9398,6 +9454,7 @@ fn map_reaction_row(
             emoji,
             author_id,
             author_kind,
+            author_agent_id: (!author_agent_id.is_empty()).then_some(author_agent_id),
             author_display_name,
             state,
             at_ms,

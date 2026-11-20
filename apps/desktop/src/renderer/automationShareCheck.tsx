@@ -93,6 +93,7 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
       setChecked({ key, warning, failed: false });
       return warning === null;
     },
+    forget: () => setChecked(null),
   };
 }
 
