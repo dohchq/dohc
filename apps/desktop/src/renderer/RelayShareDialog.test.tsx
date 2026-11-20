@@ -15,7 +15,11 @@ import {
   RelayShareDialog as ProductionRelayShareDialog,
   type RelayShareTarget,
 } from "./RelayShareDialog";
-import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
+import {
+  ShellErrorReporter,
+  ShellNoticeClear,
+  type ReportShellFailure,
+} from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 const RELAY_READS = "The sync relay serves the link, so it can read this content.";
@@ -6509,6 +6513,123 @@ describe("people and links on one surface", () => {
     );
     expect(within(kept).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(screen.getByTestId("share-person-access-ben").textContent).toBe("Can edit");
+  });
+
+  it("hands a level change refused after Share closed to the shell, with a Try again that a later success clears", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    const refusal = controllable<never>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(refusal.promise);
+    const report = vi.fn<ReportShellFailure>();
+    const clear = vi.fn<(identity: string) => void>();
+    const user = userEvent.setup();
+    const view = render(
+      <ShellErrorReporter.Provider value={report}>
+        <ShellNoticeClear.Provider value={clear}>
+          <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        </ShellNoticeClear.Provider>
+      </ShellErrorReporter.Provider>,
+    );
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    await waitFor(() => expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce());
+    view.unmount();
+    await act(async () => refusal.reject(new Error("relay down")));
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      message: "dohc could not change ana@dohc.test's access.",
+      cause: expect.any(Error),
+      identity: "share-access:ana",
+      retry: expect.any(Function),
+    });
+    expect(clear).not.toHaveBeenCalled();
+
+    bridgeMock.retuneRelayShareGrant.mockRejectedValueOnce(new Error("still down"));
+    await act(async () => report.mock.calls[0]![0].retry!());
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-ana",
+      grantId: "ana",
+      access: "edit",
+    });
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(report.mock.calls[1]![0]).toMatchObject({ identity: "share-access:ana" });
+
+    bridgeMock.retuneRelayShareGrant.mockResolvedValueOnce({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    await act(async () => report.mock.calls[1]![0].retry!());
+    expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(3);
+    expect(clear).toHaveBeenCalledExactlyOnceWith("share-access:ana");
+    expect(report).toHaveBeenCalledTimes(2);
+  });
+
+  it("says a refused level change under the person while Share is open, and tells the shell nothing", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    bridgeMock.retuneRelayShareGrant.mockRejectedValueOnce(new Error("relay down"));
+    const report = vi.fn<ReportShellFailure>();
+    const clear = vi.fn<(identity: string) => void>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <ShellNoticeClear.Provider value={clear}>
+          <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        </ShellNoticeClear.Provider>
+      </ShellErrorReporter.Provider>,
+    );
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    expect((await screen.findByTestId("share-person-error-ana")).textContent).toBe("relay down");
+    expect(report).not.toHaveBeenCalled();
+
+    bridgeMock.retuneRelayShareGrant.mockResolvedValueOnce({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    await waitFor(() => expect(clear).toHaveBeenCalledExactlyOnceWith("share-access:ana"));
+  });
+
+  it("drops a removal that finishes after Share moved to another selection", async () => {
+    const NOTES: RelayShareTarget = { kind: "paths", paths: ["docs/notes.md"] };
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([
+        invitedRow("ana", "ana@dohc.test"),
+        invitedRow("ben", "ben@dohc.test", {
+          selector: { paths: ["docs/notes.md"], versionId: null },
+        }),
+      ]),
+    );
+    const slow = controllable<{ undo: typeof UNDO }>();
+    bridgeMock.revokeRelayShareGrant.mockReturnValueOnce(slow.promise);
+    const user = userEvent.setup();
+    const view = render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await choosePersonOption(user, await screen.findByTestId("share-invited-ana"), "Remove access");
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledOnce();
+    view.rerender(<RelayShareDialog workspaceId="ws-1" target={NOTES} onClose={() => {}} />);
+    await choosePersonOption(user, await screen.findByTestId("share-invited-ben"), "Remove access");
+    await waitFor(() => expect(screen.queryByTestId("share-invited-ben")).toBeNull());
+    const reads = bridgeMock.listSharingAccess.mock.calls.length;
+
+    await act(async () => slow.resolve({ undo: UNDO }));
+    await act(async () => {});
+    expect(screen.queryByTestId("share-invited-ben")).toBeNull();
+    expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(reads);
   });
 
   it("hands a removal refused after Share closed to the shell, with Try again", async () => {

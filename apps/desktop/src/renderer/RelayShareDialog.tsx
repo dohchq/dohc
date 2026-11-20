@@ -224,6 +224,8 @@ export function RelayShareDialog(props: {
   const held = reason !== "unexplained";
   const scope = shareScope(props.workspaceId, props.target);
   const [invitedRevision, setInvitedRevision] = useState(0);
+  const scopeNow = useRef(scope);
+  scopeNow.current = scope;
   const [removedHere, setRemovedHere] = useState<GrantsOfScope>({ scope, grantIds: [] });
   const removedNow = grantsIn(removedHere, scope);
   const [invitedByCodeOnly, setInvitedByCodeOnly] = useState<GrantsOfScope>({
@@ -346,6 +348,7 @@ export function RelayShareDialog(props: {
                 ) : null}
                 {invitedPeople.map((person) => {
                   const removed = (gone: boolean) => {
+                    if (scopeNow.current !== scope) return;
                     setRemovedHere((current) => {
                       const others = grantsIn(current, scope).filter(
                         (grantId) => grantId !== person.grantId,

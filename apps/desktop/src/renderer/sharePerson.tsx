@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import { bridge } from "./bridge";
@@ -13,6 +13,11 @@ import {
   SharePersonRow,
 } from "./shareAccess";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
+import {
+  ShellErrorReporter,
+  ShellNoticeClear,
+  type ReportShellFailure,
+} from "./shell/useShellError";
 import { FieldError, SecondaryButton } from "./ui/controls";
 import type { MenuEntry } from "./ui/Menu";
 import { useRequestSequence } from "./useRequestSequence";
@@ -191,6 +196,37 @@ export function PersonRemovalError(props: {
   );
 }
 
+export const accessNoticeIdentity = (grantId: string) => `share-access:${grantId}`;
+
+function reportAccessChangeFailure(change: {
+  workspaceId: string;
+  person: Pick<SharedPerson, "shareId" | "grantId" | "name">;
+  access: ShareAccess;
+  cause: unknown;
+  report: ReportShellFailure;
+  clear: ((identity: string) => void) | null;
+}): void {
+  const { workspaceId, person, access, report, clear } = change;
+  const identity = accessNoticeIdentity(person.grantId);
+  report({
+    message: `dohc could not change ${person.name}'s access.`,
+    cause: change.cause,
+    identity,
+    retry: () =>
+      void bridge()
+        .retuneRelayShareGrant({
+          workspaceId,
+          shareId: person.shareId,
+          grantId: person.grantId,
+          access,
+        })
+        .then(
+          () => clear?.(identity),
+          (cause: unknown) => reportAccessChangeFailure({ ...change, cause }),
+        ),
+  });
+}
+
 export function PersonAccessRow(props: {
   testId: string;
   workspaceId: string;
@@ -208,6 +244,8 @@ export function PersonAccessRow(props: {
   const [asked, setAsked] = useState<ShareAccess | null>(null);
   const errorId = useId();
   const requests = useRequestSequence([workspaceId]);
+  const report = useContext(ShellErrorReporter);
+  const clearNotice = useContext(ShellNoticeClear);
   const automations = useAutomationShareCheck(workspaceId, target);
   const options = useMemo(() => {
     const offered = accessOptions(target).map(({ value, description }) => ({
@@ -244,6 +282,7 @@ export function PersonAccessRow(props: {
         grantId: person.grantId,
         access,
       });
+      clearNotice?.(accessNoticeIdentity(person.grantId));
       if (!current()) return;
       props.onAccessChanged({ access: changed.access, generation: changed.generation });
       setAsked(null);
@@ -251,6 +290,15 @@ export function PersonAccessRow(props: {
     } catch (cause) {
       if (current())
         setError(ipcErrorMessage(cause, `dohc could not change ${person.name}'s access.`));
+      else if (report && requests.isCutOff(token))
+        reportAccessChangeFailure({
+          workspaceId,
+          person,
+          access,
+          cause,
+          report,
+          clear: clearNotice,
+        });
     } finally {
       if (current()) setChanging(false);
     }
