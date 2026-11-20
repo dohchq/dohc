@@ -2497,6 +2497,7 @@ function SharingSpecimen(props: {
       style={{ width: props.width ?? SIDEBAR_DEFAULT_WIDTH }}
     >
       <SharingPanel
+        workspaceId="states"
         granted={props.granted}
         received={props.received}
         grantedSetup={props.grantedReason ? accessSetup(props.grantedReason) : ACCESS_UNEXPLAINED}

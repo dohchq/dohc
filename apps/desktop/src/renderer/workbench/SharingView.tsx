@@ -21,7 +21,9 @@ import {
 } from "react";
 import type { ShareAccess, ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useAutomationShareCheck } from "../automationShareCheck";
 import { accessOptions } from "../EmailShareForm";
+import { nextInvitationCopy } from "../invitationCopy";
 import { ipcErrorMessage } from "../ipcError";
 import { opensForLiveEditing } from "../OpenSharedView";
 import type { RelayShareTarget } from "../RelayShareDialog";
@@ -31,6 +33,7 @@ import {
   ShareAccessMenu,
   ShareOptionsMenu,
 } from "../shareAccess";
+import { accessNoticeIdentity } from "../sharePerson";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
@@ -94,7 +97,6 @@ export type OpenedShare = { shareId: string; shareCode: string; liveEditing: boo
 export type SharingLaneView =
   | AccessView
   | { status: "ready"; answer: AccessAnswer; moreFailed: true };
-const accessNoticeIdentity = (grantId: string) => `share-access:${grantId}`;
 // Whether a mount's skipped changes show, against what its record says:
 // shown on request, or hidden up to the generation a Dismiss covered.
 type SkipState = "shown" | number;
@@ -211,6 +213,8 @@ export function sharedItemKey(row: AccessShareRow): string {
 export const endedGroupKey = (lane: SharingLane) => `ended\0${lane}`;
 export const endConfirmKey = (shareId: string) => `end\0${shareId}`;
 export const removeConfirmKey = (grantId: string) => `remove\0${grantId}`;
+const accessConfirmKey = (grantId: string) => `access\0${grantId}`;
+const NEVER_CHECKED: RelayShareTarget = { kind: "version", versionId: "main" };
 export const leaveConfirmKey = (shareId: string) => `leave\0${shareId}`;
 
 function shareTargetOf(row: AccessShareRow): RelayShareTarget | null {
@@ -714,7 +718,7 @@ function Chevron(props: { open: boolean }) {
 }
 
 function ConfirmCard(props: {
-  testId: "sharing-end" | "sharing-leave";
+  testId: "sharing-end" | "sharing-leave" | "sharing-access";
   words: ReactNode;
   verb: string;
   running: string;
@@ -802,6 +806,7 @@ export type SharingActions = {
 type CopiedPart = "invitation" | "code";
 
 function PersonRow(props: {
+  workspaceId: string;
   grant: LeveledRow;
   item: string;
   title: string;
@@ -842,18 +847,70 @@ function PersonRow(props: {
   const browserLink = invitable({ ...grant, access: confirmedLevel(grant, props.change) });
   const invitation = props.invitations && browserLink;
   const invited = grant.via === "named";
+  const [copiedLast, setCopiedLast] = useState<CopiedPart>("invitation");
+  const newestCopyOf = (part: CopiedPart, what: CopyWhat) => async () => {
+    setCopiedLast(part);
+    const newest = nextInvitationCopy();
+    try {
+      const text = await actions.copy(grant, what);
+      return newest() ? text : null;
+    } catch (error) {
+      if (newest()) throw error;
+      return null;
+    }
+  };
   const invitationCopy = useCopy({
-    getText: () => actions.copy(grant, invitation ? "invitation" : "code"),
+    getText: newestCopyOf("invitation", invitation ? "invitation" : "code"),
     words: { copied: invited ? "Invitation copied" : "Share code copied" },
     sensitive: invitation ? BROWSER_INVITATION_SECRET : SHARE_CODE_SECRET,
   });
   const codeCopy = useCopy({
-    getText: () => actions.copy(grant, "code"),
+    getText: newestCopyOf("code", "code"),
     words: { copied: "Share code copied" },
     sensitive: SHARE_CODE_SECRET,
   });
-  const [copiedLast, setCopiedLast] = useState<CopiedPart>("invitation");
   const copied = copiedLast === "code" ? codeCopy : invitationCopy;
+
+  const automations = useAutomationShareCheck(props.workspaceId, props.target ?? NEVER_CHECKED);
+  const checks = useRequestSequence([grant.grantId]);
+  const [checking, setChecking] = useState(false);
+  const [wanted, setWanted] = useState<ShareAccess | null>(null);
+  const shareAt = (level: ShareAccess) => ({
+    recipientEmail: grant.recipientEmail,
+    recipientName: name,
+    access: level,
+    shareId: grant.shareId,
+  });
+  const accessKey = accessConfirmKey(grant.grantId);
+  const asking = props.confirmKey === accessKey;
+  const warning = asking && wanted ? (automations.noteFor(shareAt(wanted))?.warning ?? null) : null;
+  const forgetCheck = useRef(automations.forget);
+  forgetCheck.current = automations.forget;
+  const wasAsking = useRef(false);
+  useEffect(() => {
+    if (wasAsking.current && !asking) {
+      forgetCheck.current();
+      setWanted(null);
+    }
+    wasAsking.current = asking;
+  }, [asking]);
+  async function pickAccess(next: ShareAccess) {
+    if (next === access || writing || checking) return;
+    if (next !== "edit" || props.target?.kind !== "paths")
+      return actions.retune(grant, next, props.title);
+    const token = checks.next();
+    const current = () => checks.isCurrent(token);
+    setWanted(next);
+    setChecking(true);
+    const stopsNothing = await automations.mayShare(shareAt(next), current);
+    if (!current()) return;
+    setChecking(false);
+    if (stopsNothing) {
+      automations.forget();
+      setWanted(null);
+      actions.retune(grant, next, props.title);
+    } else actions.startEnd(accessKey);
+  }
   const menuActions: MenuEntry[] = [
     ...(copyable(grant)
       ? [
@@ -861,10 +918,7 @@ function PersonRow(props: {
             id: "copy-invitation",
             label: invited ? "Copy invitation" : "Copy code",
             testId: `sharing-person-copy-${grant.grantId}`,
-            onSelect: () => {
-              setCopiedLast("invitation");
-              invitationCopy.copy();
-            },
+            onSelect: () => invitationCopy.copy(),
           },
         ]
       : []),
@@ -874,10 +928,7 @@ function PersonRow(props: {
             id: "copy-code",
             label: "Copy share code",
             testId: `sharing-person-copy-code-${grant.grantId}`,
-            onSelect: () => {
-              setCopiedLast("code");
-              codeCopy.copy();
-            },
+            onSelect: () => codeCopy.copy(),
           },
         ]
       : []),
@@ -919,13 +970,11 @@ function PersonRow(props: {
                   access={shareAccessOf(access)}
                   options={options}
                   actions={menuActions}
-                  disabled={writing}
+                  disabled={writing || checking}
                   testId={`sharing-person-access-${grant.grantId}`}
                   width={288}
                   align="end"
-                  onPick={(next) => {
-                    if (next !== access) actions.retune(grant, next, props.title);
-                  }}
+                  onPick={(next) => void pickAccess(next)}
                 />
               </span>
             ) : (
@@ -967,9 +1016,20 @@ function PersonRow(props: {
           verb="Remove access"
           running="Removing…"
           busy={props.busy}
-          held={changing ? CHANGING_ACCESS : null}
+          held={changing || checking ? CHANGING_ACCESS : null}
           onCancel={actions.cancelEnd}
           onConfirm={() => actions.removePerson(grant, props.title)}
+        />
+      ) : null}
+      {warning !== null && wanted ? (
+        <ConfirmCard
+          testId="sharing-access"
+          words={warning}
+          verb={`Change to ${SHARE_ACCESS_WORDS[wanted]}`}
+          running="Changing…"
+          busy={writing}
+          onCancel={actions.cancelEnd}
+          onConfirm={() => actions.retune(grant, wanted, props.title)}
         />
       ) : null}
     </li>
@@ -980,6 +1040,7 @@ function ItemRow(props: {
   item: GrantedItem;
   open: boolean;
   onToggle: () => void;
+  workspaceId: string;
   waitingByShare: ReadonlyMap<string, WaitingChanges>;
   notSentWhileOpen: readonly string[];
   accessChanges: AccessChanges;
@@ -1145,6 +1206,7 @@ function ItemRow(props: {
             {item.people.map((grant) => (
               <PersonRow
                 key={grant.grantId}
+                workspaceId={props.workspaceId}
                 grant={grant}
                 item={item.name}
                 title={subject.title}
@@ -1765,6 +1827,7 @@ function Lane(props: {
 
 /** The panel for answers already in hand. The states page draws it. */
 export function SharingPanel(props: {
+  workspaceId: string;
   // null in a shared view: someone else's workspace grants nothing from here.
   granted: SharingLaneView | null;
   received: SharingLaneView;
@@ -1979,6 +2042,7 @@ export function SharingPanel(props: {
                   item={item}
                   open={open.has(item.key)}
                   onToggle={() => toggle(item.key)}
+                  workspaceId={props.workspaceId}
                   waitingByShare={props.waiting}
                   notSentWhileOpen={props.notSentWhileOpen}
                   accessChanges={props.accessChanges}
@@ -2316,6 +2380,7 @@ export function SharingView(props: {
 
   async function retune(grant: AccessShareRow, access: ShareAccess, title: string) {
     if (writing(grant)) return;
+    closeConfirm(accessConfirmKey(grant.grantId));
     const token = epoch.current();
     const identity = accessNoticeIdentity(grant.grantId);
     changeAccess(grant.grantId, (held) => ({ asked: access, answered: held?.answered ?? null }));
@@ -2520,6 +2585,7 @@ export function SharingView(props: {
   };
   return (
     <SharingPanel
+      workspaceId={workspaceId}
       granted={props.shareView ? null : granted.view}
       received={received.view}
       grantedSetup={setupFor("granted")}

@@ -7,12 +7,14 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
+import { automationShareWarning } from "../automationShareCheck";
 import { ShellErrorReporter, ShellNoticeClear } from "../shell/useShellError";
 import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import type { AccessFacts } from "./accessReason";
 import { SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
 type Lane = "granted" | "received";
+type AutomationStop = Parameters<typeof automationShareWarning>[0][number];
 const bridgeMock = {
   listSharingAccess:
     vi.fn<(input: { workspaceId: string; lane: Lane; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -29,6 +31,15 @@ const bridgeMock = {
     vi.fn<(input: { shareId: string; grantId: string }) => Promise<ShareCopyResult>>(),
   dismissShareSkips:
     vi.fn<(input: { workspaceId: string; shareId: string; generation: number }) => Promise<void>>(),
+  automationShareImpact:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        recipientEmail: string | null;
+        paths: string[];
+        access: "edit";
+      }) => Promise<{ stops: AutomationStop[] }>
+    >(),
   retuneRelayShareGrant:
     vi.fn<
       (input: {
@@ -105,6 +116,7 @@ beforeEach(() => {
   ])
     mock.mockReset();
   bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
+  bridgeMock.automationShareImpact.mockResolvedValue({ stops: [] });
   bridgeMock.getShareCopyDetails.mockResolvedValue({
     status: "active",
     shareCode: "dohc-share:share-1:https://relay.test",
@@ -1061,6 +1073,52 @@ describe("copying a share's code or invitation", () => {
     expect(reportFailure).not.toHaveBeenCalled();
   });
 
+  it("lets only the copy asked for last reach the clipboard, whichever lookup answers last", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    const slow = deferred<ShareCopyResult>();
+    bridgeMock.getShareCopyDetails
+      .mockResolvedValueOnce(INVITING)
+      .mockReturnValueOnce(slow.promise)
+      .mockResolvedValue(INVITING);
+    render(<CopyView />);
+    const [named] = await people(await rowOf("share-1"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
+    await userEvent.click(menuItem(await personMenu(named!), "Copy invitation"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledTimes(2));
+    await userEvent.click(menuItem(await personMenu(named!), "Copy share code"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
+    const detail = within(named!).getByTestId("sharing-person-detail");
+    await waitFor(() => expect(detail.textContent).toBe("Share code copied"));
+
+    await act(async () => slow.resolve(INVITING));
+    await act(async () => {});
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode);
+    expect(detail.textContent).toBe("Share code copied");
+    expect(reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("names the copy that ran on the person's line, also when Try again runs it from Notices", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    render(<CopyView />);
+    const [named] = await people(await rowOf("share-1"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
+    const detail = within(named!).getByTestId("sharing-person-detail");
+    await userEvent.click(menuItem(await personMenu(named!), "Copy invitation"));
+    await waitFor(() => expect(detail.textContent).toBe("Could not copy"));
+    const copyInvitationAgain = reportFailure.mock.calls[0]![0].retry as () => void;
+    await userEvent.click(menuItem(await personMenu(named!), "Copy share code"));
+    await waitFor(() => expect(detail.textContent).toBe("Share code copied"));
+
+    await act(async () => copyInvitationAgain());
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(INVITING.browserInvitationUrl));
+    await waitFor(() => expect(detail.textContent).toBe("Invitation copied"));
+    await waitFor(() =>
+      expect(within(named!).getByRole("status").textContent).toBe("Invitation copied"),
+    );
+  });
+
   it("copies by the level the relay confirmed for a person, not by an older listed one", async () => {
     answerWith({ granted: answer("granted", { rows: [granted()] }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
@@ -1504,6 +1562,87 @@ describe("Shared by me, by what is shared", () => {
     expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(who.textContent).toBe("sam@example.com can view"));
     expect(trigger.textContent).toBe("Can view");
+  });
+
+  it("asks before a change to Can edit that would stop an automation, in Share's words, and changes nothing until told", async () => {
+    const stops: AutomationStop[] = [
+      {
+        automationId: "collection:Trip#spend",
+        automationName: "Spend",
+        collectionPath: "Trip",
+        target: "Budget",
+        action: "change",
+      },
+    ];
+    const warning = automationShareWarning(stops, "sam@example.com")!;
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    const check = deferred<{ stops: AutomationStop[] }>();
+    bridgeMock.automationShareImpact.mockReturnValueOnce(check.promise);
+    bridgeMock.automationShareImpact.mockResolvedValue({ stops });
+    bridgeMock.retuneRelayShareGrant.mockResolvedValue({ access: "edit", generation: 2 });
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace-a",
+      recipientEmail: "sam@example.com",
+      paths: ["notes/product-plan.md"],
+      access: "edit",
+    });
+    expect(level).toHaveProperty("disabled", true);
+    expect(level.textContent).toBe("Can view");
+
+    await act(async () => check.resolve({ stops }));
+    const confirm = await within(person!).findByTestId("sharing-access-confirm");
+    expect(warning).toContain("sam@example.com");
+    expect(confirm.textContent).toBe(`${warning}CancelChange to Can edit`);
+    expect(level).toHaveProperty("disabled", false);
+    expect(level.textContent).toBe("Can view");
+    expect(bridgeMock.retuneRelayShareGrant).not.toHaveBeenCalled();
+
+    await userEvent.click(within(confirm).getByTestId("sharing-access-cancel"));
+    expect(screen.queryByTestId("sharing-access-confirm")).toBeNull();
+    expect(bridgeMock.retuneRelayShareGrant).not.toHaveBeenCalled();
+
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    const again = await within(person!).findByTestId("sharing-access-confirm");
+    await userEvent.click(within(again).getByTestId("sharing-access"));
+    await waitFor(() =>
+      expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "workspace-a",
+        shareId: "share-1",
+        grantId: "grant-1",
+        access: "edit",
+      }),
+    );
+    await waitFor(() => expect(level.textContent).toBe("Can edit"));
+    expect(screen.queryByTestId("sharing-access-confirm")).toBeNull();
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(2);
+  });
+
+  it("changes to Can edit at once when the check cannot run, and never checks a change to Can view", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted({ access: "view" })] }) });
+    bridgeMock.automationShareImpact.mockRejectedValueOnce(new Error("offline"));
+    bridgeMock.retuneRelayShareGrant
+      .mockResolvedValueOnce({ access: "edit", generation: 2 })
+      .mockResolvedValueOnce({ access: "view", generation: 3 });
+    render(<View />);
+    const [person] = await people(await grantedRow("share-1"));
+    const level = within(person!).getByTestId("sharing-person-access-grant-1");
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-edit"));
+    await waitFor(() => expect(level.textContent).toBe("Can edit"));
+    await waitFor(() => expect(level).toHaveProperty("disabled", false));
+    expect(screen.queryByTestId("sharing-access-confirm")).toBeNull();
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledOnce();
+
+    await userEvent.click(level);
+    await userEvent.click(screen.getByTestId("sharing-person-access-grant-1-view"));
+    await waitFor(() => expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledOnce();
   });
 
   it("keeps a change that is under way when its item closes or the list is switched, and ignores an older answer", async () => {
@@ -2370,6 +2509,51 @@ describe("Shared with me, by who shared", () => {
     rerender(<View mounts={[]} facts={RECONNECTING} />);
     await waitFor(() => expect(liveShareIds()).toEqual(["in-1", "in-2"]));
     expect(screen.queryByTestId("sharing-received-ended")).toBeNull();
+  });
+
+  it("keeps a removed ended copy under Ended when Sharing is left and opened again on a list read since", async () => {
+    let listing = answer("received", { rows: [received()], checkedAtMs: Date.now() - 60_000 });
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) =>
+      lane === "received" ? listing : answer(lane),
+    );
+    const { rerender } = render(
+      <View
+        mounts={[
+          {
+            shareId: "in-1",
+            label: "funnel",
+            granterEmail: "sam@example.com",
+            access: "view",
+            ended: true,
+          },
+        ]}
+      />,
+    );
+    await showLane("received");
+    await openEnded("received");
+    await userEvent.click(
+      within(screen.getByTestId("sharing-received-row")).getByRole("button", {
+        name: "Remove from workspace",
+      }),
+    );
+    await waitFor(() => expect(callbacks.onUnmount).toHaveBeenCalledOnce());
+
+    rerender(<View open={false} mounts={[]} />);
+    listing = answer("received", {
+      rows: [received({ status: "removed", selector: null, access: null })],
+      checkedAtMs: Date.now() + 60_000,
+    });
+    const refreshes = bridgeMock.requestAccessRefresh.mock.calls.length;
+    rerender(<View mounts={[]} />);
+    await showLane("received");
+    await screen.findByTestId("sharing-received-ended");
+    expect(bridgeMock.requestAccessRefresh.mock.calls.length).toBeGreaterThan(refreshes);
+    expect(screen.queryByTestId("sharing-sender")).toBeNull();
+    expect(screen.getByTestId("sharing-received-count").textContent).toBe("0");
+    await openEnded("received");
+    const ended = screen.getByTestId("sharing-received-row");
+    expect(ended.dataset.status).toBe("removed");
+    expect(within(ended).getByRole("button").textContent).toBe("Remove from list");
   });
 
   it("shows a copy's level from the list its actions go by, and from the copy's record only without one", async () => {
