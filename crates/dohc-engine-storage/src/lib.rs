@@ -90,9 +90,9 @@ pub use limits::{
 pub use materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, JobStatus,
     MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    RetainedDisplacement, RetainedSummary, cancel_pending_jobs_for_path, enqueue_delete_job,
-    enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
-    upsert_projection_job,
+    RetainedDisplacement, RetainedSummary, StagedDacl, cancel_pending_jobs_for_path,
+    enqueue_delete_job, enqueue_job, pending_switch_jobs_in, record_completed_job,
+    stamp_secret_capture_owned, upsert_projection_job,
 };
 pub use page_check::PagesDamaged;
 pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};
