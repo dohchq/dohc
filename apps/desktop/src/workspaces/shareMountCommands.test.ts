@@ -563,9 +563,44 @@ describe("share mount commands", () => {
     await Promise.resolve();
     expect(calls).toBe(1);
     releaseFirst();
-    await first;
-    await expect(second).rejects.toThrow("already added");
+    const added = await first;
+    expect(added.alreadyAdded).toBeUndefined();
+    await expect(second).resolves.toMatchObject({
+      alreadyAdded: true,
+      mount: {
+        shareId: added.mount.shareId,
+        label: added.mount.label,
+        status: "unchanged",
+        changedPaths: 0,
+      },
+    });
     expect(calls).toBe(1);
+  });
+
+  it("refuses to add again a share whose stored record it cannot read, and says where to remove it", async () => {
+    const h = harness();
+    const commands = createShareMountCommands(h.dependencies);
+    await commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent });
+    await h.dependencies.updateMounts(WORKSPACE.workspaceId, (mounts) =>
+      mounts.map((mount) => ({ ...mount, grantedSelector: { paths: "not-a-list" } as never })),
+    );
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+    ).rejects.toThrow("could not read its record. Remove it from Sharing");
+
+    await h.dependencies.updateMounts(WORKSPACE.workspaceId, (mounts) =>
+      mounts.map((mount) => ({ ...mount, label: "team/archive" })),
+    );
+    const unlisted = await commands
+      .mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })
+      .then(
+        () => null,
+        (error: Error) => error.message,
+      );
+    expect(unlisted).toBe(
+      "This share is already in this workspace, but dohc could not read its record.",
+    );
   });
 
   it("fails closed before relay access for invalid or cross-relay share codes", async () => {
