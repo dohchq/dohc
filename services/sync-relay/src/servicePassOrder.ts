@@ -2,8 +2,8 @@
  * Plans one pass of the live host over `targets`, at most `limit` visits, taking the turn up at `from`.
  *
  * `next()` gives the visit to make now, or undefined once the pass is over. A wanted target comes before the
- * turn, also when it became wanted during the pass, and at most half of a pass goes to wanted targets, so the
- * turn still reaches every target. A turn visit carries `turn`, where the turn stands once it is made. A wanted
+ * turn, also when it became wanted during the pass. A pass makes at most `floor(limit / 2)` wanted visits, so
+ * the turn still goes round. A turn visit carries `turn`, where the turn stands once it is made. A wanted
  * visit carries none. No target is visited twice in a pass.
  */
 export function passPlan<T>(

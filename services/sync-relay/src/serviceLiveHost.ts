@@ -3242,10 +3242,7 @@ export async function startServiceLiveHost(options: {
                 wanted.has(targetKey(target)),
               );
               const visit = async (target: ServiceActivationTarget) => {
-                // A mark buys one visit, and it is spent here, before the visit's work. A note still not ready after
-                // it, as while it backs off or its restore runs, goes back to its turn. An open that arrives during
-                // the visit marks the note again, and that mark stands for the next pass.
-                wanted.delete(targetKey(target));
+                const spentMark = wanted.delete(targetKey(target));
                 const timed: SlowPassTarget = {
                     object:
                       hosted
@@ -3286,6 +3283,9 @@ export async function startServiceLiveHost(options: {
                   );
                   timed.outcome = outcome.kind === "done" ? "done" : "pending";
                   noteWaiting(target, outcome);
+                  const visitCouldDoNothing =
+                    outcome.kind !== "done" && (await catchUp.get(target.workspaceId))?.hasMore;
+                  if (spentMark && visitCouldDoNothing) wanted.add(targetKey(target));
                 } finally {
                   timed.ms = Math.round(now() - startedAt);
                 }
