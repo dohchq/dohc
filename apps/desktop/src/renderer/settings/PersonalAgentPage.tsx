@@ -599,6 +599,11 @@ export function PersonalAgentPage(props: {
                         aria-label={`Remove ${name} from what ${agent.name} can reach`}
                         disabled={removing !== null}
                         onFocus={() => (focusedRemove.current = workspace.workspaceId)}
+                        // Focus a person moves away is theirs. Focus lost to Removing… or the row going isn't.
+                        onBlur={(event) => {
+                          if (event.currentTarget.isConnected && !event.currentTarget.disabled)
+                            focusedRemove.current = null;
+                        }}
                         onClick={() => void removeEnded(workspace)}
                       >
                         {removing === workspace.workspaceId ? "Removing…" : "Remove"}

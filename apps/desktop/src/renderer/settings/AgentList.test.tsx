@@ -815,8 +815,16 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
     undefined,
     expect.any(Function),
   );
-  // Once the relay drops it, the row goes, and its focused Remove hands focus to Change.
+  // Once the relay drops it, the row goes. A Remove the person left keeps no claim on focus.
   remove.focus();
+  await userEvent.click(page().getByText("Activity"));
+  expect(document.activeElement).toBe(document.body);
+  act(() => personalListener!({ accounts: [account()] }));
+  expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
+  expect(document.activeElement).toBe(document.body);
+  // A focused Remove hands focus to Change when its row goes.
+  act(() => personalListener!({ accounts: [joinedAccount()] }));
+  page().getByTestId("personal-agent-reach-remove").focus();
   act(() => personalListener!({ accounts: [account()] }));
   expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
   expect(document.activeElement).toBe(page().getByTestId("personal-agent-reach"));
