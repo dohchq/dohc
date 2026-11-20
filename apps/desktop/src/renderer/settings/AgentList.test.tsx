@@ -815,9 +815,11 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
     undefined,
     expect.any(Function),
   );
-  // Once the relay drops it, the row goes.
+  // Once the relay drops it, the row goes, and its focused Remove hands focus to Change.
+  remove.focus();
   act(() => personalListener!({ accounts: [account()] }));
   expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
+  expect(document.activeElement).toBe(page().getByTestId("personal-agent-reach"));
   expect(page().queryByTestId("personal-agent-joined-note")).toBeNull();
 });
 

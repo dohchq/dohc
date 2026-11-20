@@ -385,6 +385,24 @@ export function PersonalAgentPage(props: {
     );
     setRemoving(null);
   };
+  // A Remove that held focus goes with its row. Focus moves to the next Remove,
+  // else Change, else Agents, so it never drops to the page.
+  const page = useRef<HTMLElement>(null);
+  const focusedRemove = useRef<string | null>(null);
+  useEffect(() => {
+    const id = focusedRemove.current;
+    if (id === null || ended.some((workspace) => workspace.workspaceId === id)) return;
+    focusedRemove.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) return;
+    const find = (testId: string) =>
+      page.current?.querySelector<HTMLElement>(`[data-testid="${testId}"]:not(:disabled)`);
+    (
+      find("personal-agent-reach-remove") ??
+      find("personal-agent-reach") ??
+      find("agent-back")
+    )?.focus();
+  });
   const [menuOpen, setMenuOpen] = useState(false);
   const [reaching, setReaching] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -398,6 +416,7 @@ export function PersonalAgentPage(props: {
 
   return (
     <section
+      ref={page}
       data-testid="agent-page"
       data-agent-id={agent.agentId}
       data-status={agent.status}
@@ -579,6 +598,7 @@ export function PersonalAgentPage(props: {
                         data-testid="personal-agent-reach-remove"
                         aria-label={`Remove ${name} from what ${agent.name} can reach`}
                         disabled={removing !== null}
+                        onFocus={() => (focusedRemove.current = workspace.workspaceId)}
                         onClick={() => void removeEnded(workspace)}
                       >
                         {removing === workspace.workspaceId ? "Removing…" : "Remove"}
