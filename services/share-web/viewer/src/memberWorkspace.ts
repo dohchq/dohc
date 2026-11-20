@@ -90,10 +90,11 @@ function memberRemove(
   place: NamedChatPlace,
   moderates: boolean,
 ): NonNullable<ChatChannelClient["remove"]> {
+  const own = (message: NamedChatMessage) =>
+    message.authorKind === "human" && message.authorUserId === place.userId;
   return {
-    can: (message) =>
-      message.deletedAtMs === undefined &&
-      (moderates || (message.authorKind === "human" && message.authorUserId === place.userId)),
+    can: (message) => message.deletedAtMs === undefined && (moderates || own(message)),
+    own,
     run: (message, signal) => deleteNamedChatMessage(place, message, signal),
   };
 }

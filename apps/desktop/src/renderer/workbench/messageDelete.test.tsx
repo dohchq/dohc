@@ -227,7 +227,10 @@ describe("Delete on a message", () => {
 
     const dialog = screen.getByTestId("message-delete");
     expect(within(dialog).getByRole("heading").textContent).toBe("Delete this message?");
-    expect(dialog.textContent).toContain("People who already read it may keep a copy.");
+    expect(within(dialog).getByTestId("message-delete-quote").textContent).toBe("My plan");
+    expect(dialog.textContent).toContain(
+      "This deletes it for everyone it syncs to, and you can't undo it. People who already read it may keep a copy.",
+    );
     const confirm = screen.getByTestId("message-delete-confirm") as HTMLButtonElement;
     expect(document.activeElement).toBe(confirm);
     // The message stays as it is until the relay answers.
@@ -250,9 +253,23 @@ describe("Delete on a message", () => {
     await waitFor(() => expect(screen.queryByTestId("message-delete")).toBeNull());
   });
 
+  it("names the author and quotes the text of someone else's message", async () => {
+    stubMembers(async () => view("admin"));
+    renderChat([mine, { ...theirs, body: "Sam's plan:\n\nbring  seeds" }]);
+    await waitFor(() => expect(deleteIn("message-theirs")).not.toBeNull());
+    fireEvent.click(deleteIn("message-theirs")!);
+
+    const dialog = screen.getByTestId("message-delete");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Delete Sam's message?");
+    expect(within(dialog).getByTestId("message-delete-quote").textContent).toBe(
+      "Sam's plan: bring seeds",
+    );
+  });
+
   it.each([
     ["a refusal", "It is gone, or your role does not let you delete it."],
     ["no connection", "Deleting needs a connection."],
+    ["any other cause", "dohc could not reach the server."],
   ])("shows %s in the dialog with Try again", async (_case, words) => {
     const { deletes } = stubMembers(async () => view("member"));
     renderChat([mine]);
@@ -263,7 +280,9 @@ describe("Delete on a message", () => {
 
     const error = await screen.findByTestId("message-delete-error");
     expect(error.getAttribute("role")).toBe("alert");
-    expect(error.textContent).toBe(`Couldn't delete the message. ${words}`);
+    expect(error.textContent).toBe(`dohc could not delete the message. ${words}`);
+    // An icon marks it, so color isn't the only sign.
+    expect(error.querySelector("svg")).not.toBeNull();
     const retry = screen.getByTestId("message-delete-confirm") as HTMLButtonElement;
     expect(retry.textContent).toBe("Try again");
     expect(retry.disabled).toBe(false);

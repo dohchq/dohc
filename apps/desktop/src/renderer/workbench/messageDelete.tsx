@@ -9,16 +9,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import {
-  MESSAGE_DELETE_OFFLINE,
-  MESSAGE_DELETE_REFUSED,
-  type MembersResult,
-} from "@dohc/cli/members";
+import type { MembersResult } from "@dohc/cli/members";
+import { MESSAGE_DELETE_FAILED } from "@dohc/security-contract/workspace-members";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
-import { DangerButton, SecondaryButton } from "../ui/controls";
+import { DangerButton, FieldError, SecondaryButton } from "../ui/controls";
 import {
   ConfirmActions,
   ConfirmationCard,
@@ -29,9 +26,7 @@ import {
 } from "../ui/ConfirmDialog";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
-import { TOOLBAR_BUTTON } from "./chatMessages";
-
-const DELETE_FAILED = "Couldn't delete the message.";
+import { chatAuthorLabel, TOOLBAR_BUTTON } from "./chatMessages";
 
 type Role = Extract<MembersResult, { status: "ready" }>["view"]["viewer"]["role"];
 
@@ -99,7 +94,7 @@ export function useMessageDelete(input: {
   const { workspaceId, viewerAuthorId, enabled } = input;
   const workspaceRole = useContext(DeleteRole);
   const role = enabled ? workspaceRole : null;
-  const [asking, setAsking] = useState<ChatMessageRecord | null>(null);
+  const [asking, setAsking] = useState<{ message: ChatMessageRecord; own: boolean } | null>(null);
   const action = useCallback(
     (message: ChatMessageRecord, testId: string) => {
       if (role === null || message.deletedAtMs !== undefined) return null;
@@ -114,7 +109,7 @@ export function useMessageDelete(input: {
           data-testid={testId}
           aria-label="Delete message"
           title="Delete message"
-          onClick={() => setAsking(message)}
+          onClick={() => setAsking({ message, own })}
           className={TOOLBAR_BUTTON}
         >
           <Trash2 size={14} strokeWidth={1.9} aria-hidden />
@@ -125,9 +120,10 @@ export function useMessageDelete(input: {
   );
   const dialog = asking ? (
     <MessageDeleteDialog
-      key={asking.id}
+      key={asking.message.id}
       workspaceId={workspaceId}
-      message={asking}
+      message={asking.message}
+      own={asking.own}
       onClose={() => setAsking(null)}
     />
   ) : null;
@@ -137,6 +133,8 @@ export function useMessageDelete(input: {
 function MessageDeleteDialog(props: {
   workspaceId: string;
   message: ChatMessageRecord;
+  // The reader's own message keeps "this"; another's names its author.
+  own: boolean;
   onClose: () => void;
 }) {
   const id = useId();
@@ -175,16 +173,16 @@ function MessageDeleteDialog(props: {
       if (alive.current) props.onClose();
     } catch (cause) {
       if (!alive.current) return;
-      const words = ipcErrorMessage(cause, DELETE_FAILED);
+      // What failed leads, whatever the cause's words say.
+      const words = ipcErrorMessage(cause, MESSAGE_DELETE_FAILED);
       setFailure(
-        words === MESSAGE_DELETE_REFUSED || words === MESSAGE_DELETE_OFFLINE
-          ? `${DELETE_FAILED} ${words}`
-          : words,
+        words.startsWith(MESSAGE_DELETE_FAILED) ? words : `${MESSAGE_DELETE_FAILED} ${words}`,
       );
       setDeleting(false);
     }
   }
 
+  const quote = props.message.body.replace(/\s+/gu, " ").trim();
   return (
     <Overlay
       // While the delete runs, only its answer closes the dialog.
@@ -196,18 +194,30 @@ function MessageDeleteDialog(props: {
         <ConfirmationHead
           titleId={`${id}-title`}
           bodyId={`${id}-body`}
-          title="Delete this message?"
+          title={
+            props.own
+              ? "Delete this message?"
+              : `Delete ${chatAuthorLabel(props.message)}'s message?`
+          }
         >
-          <p className="m-0">People who already read it may keep a copy.</p>
+          {/* The dialog covers the message, so it shows what it deletes. */}
+          {quote ? (
+            <p
+              data-testid="message-delete-quote"
+              className="m-0 truncate border-l-2 border-line pl-2"
+            >
+              {quote}
+            </p>
+          ) : null}
+          <p className="m-0">
+            This deletes it for everyone it syncs to, and you can't undo it. People who already read
+            it may keep a copy.
+          </p>
         </ConfirmationHead>
         {failure ? (
-          <p
-            role="alert"
-            data-testid="message-delete-error"
-            className="m-0 text-[13px] text-danger"
-          >
+          <FieldError id={`${id}-error`} testId="message-delete-error">
             {failure}
-          </p>
+          </FieldError>
         ) : null}
         <ConfirmActions>
           <SecondaryButton

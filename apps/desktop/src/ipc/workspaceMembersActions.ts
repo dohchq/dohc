@@ -1,13 +1,10 @@
 import {
   type GroupRuleLevel,
-  WORKSPACE_MEMBER_ROUTES,
-} from "@dohc/security-contract/workspace-members";
-import {
   MESSAGE_DELETE_OFFLINE,
   MESSAGE_DELETE_REFUSED,
-  MembersResult,
-  type MembersRequest,
-} from "@dohc/cli/members";
+  WORKSPACE_MEMBER_ROUTES,
+} from "@dohc/security-contract/workspace-members";
+import { MembersResult, type MembersRequest } from "@dohc/cli/members";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";

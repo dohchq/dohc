@@ -1832,20 +1832,47 @@ describe("deleting a Group message", () => {
     await settledOpen();
     expect(deletes()).toHaveLength(1);
     await act(async () => deletes()[0]!.click());
-    expect(dialog()?.textContent).toContain("Delete this message?");
-    expect(document.activeElement?.textContent).toBe("Cancel");
+    expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete this message?");
+    expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Mine to take back");
+    expect(dialog()!.querySelector("#chat-delete-body")?.textContent).toContain(
+      "This deletes it for everyone it syncs to, and you can't undo it. People who already read it may keep a copy.",
+    );
+    // Delete takes focus, as on the desktop. A held Enter does nothing, and the arrows move between the buttons.
+    expect(document.activeElement).toBe(inDialog("Delete"));
+    const held = new KeyboardEvent("keydown", {
+      key: "Enter",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    inDialog("Delete").dispatchEvent(held);
+    expect(held.defaultPrevented).toBe(true);
+    await act(async () =>
+      inDialog("Delete").dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(inDialog("Cancel"));
     await act(async () => inDialog("Delete").click());
     await settle(() => dialog()?.querySelector('[role="alert"]') !== null);
-    expect(dialog()!.querySelector('[role="alert"]')?.textContent).toBe(
-      "Couldn't delete the message. It is gone, or your role does not let you delete it.",
+    const alert = dialog()!.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toBe(
+      "dohc could not delete the message. It is gone, or your role does not let you delete it.",
     );
+    expect(alert.classList.contains("chat-delete-error")).toBe(true);
+    expect(alert.querySelector(".icon")).not.toBeNull();
+    // Delete was disabled while it ran; Try again takes focus back.
+    expect(document.activeElement).toBe(inDialog("Try again"));
     await act(async () => inDialog("Try again").click());
     await settle(() => dialog() === null && !text().includes("Mine to take back"));
     expect(posts.filter((post) => "deleted" in post)).toEqual([
       { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
       { deleted: { shareId: "share", threadId: "t4", messageId: "m4" } },
     ]);
-    expect(groupPanel().textContent).toContain("Message deleted");
+    // The desktop's line: the Ban mark before the words.
+    const line = groupPanel().querySelector(".chat-deleted")!;
+    expect(line.textContent).toBe("Message deleted");
+    expect(line.querySelector(".icon circle")).not.toBeNull();
     expect(groupPanel().textContent).toContain("Plans start here");
     expect(deletes()).toHaveLength(0);
   });
@@ -1856,6 +1883,9 @@ describe("deleting a Group message", () => {
     await settledOpen();
     expect(deletes()).toHaveLength(2);
     await act(async () => deletes()[0]!.click());
+    // Another person's message names its author.
+    expect(dialog()!.querySelector("h2")?.textContent).toBe("Delete Ana's message?");
+    expect(dialog()!.querySelector(".chat-delete-quote")?.textContent).toBe("Plans start here");
     await act(async () => inDialog("Cancel").click());
     expect(dialog()).toBeNull();
     expect(posts.filter((post) => "deleted" in post)).toEqual([]);

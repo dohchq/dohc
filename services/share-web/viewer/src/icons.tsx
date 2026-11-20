@@ -138,6 +138,12 @@ const SHAPES = {
       <path d="M12 8h.01" />
     </>
   ),
+  ban: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M4.929 4.929 19.07 19.071" />
+    </>
+  ),
   alert: (
     <>
       <circle cx="12" cy="12" r="10" />

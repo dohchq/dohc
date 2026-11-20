@@ -1,4 +1,7 @@
-import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
+import {
+  MESSAGE_DELETE_FAILED,
+  type GroupRuleLevel,
+} from "@dohc/security-contract/workspace-members";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
@@ -4779,7 +4782,7 @@ async function dispatchWorkspace(
         });
       } catch (cause) {
         throw new CliCommandError(
-          `Couldn't delete the message. ${cause instanceof Error ? cause.message : String(cause)}`,
+          `${MESSAGE_DELETE_FAILED} ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
       return {

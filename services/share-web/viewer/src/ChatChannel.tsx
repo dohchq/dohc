@@ -23,6 +23,11 @@ import {
   type NamedChatMessage,
 } from "./namedChat";
 import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
+import {
+  MESSAGE_DELETE_FAILED,
+  MESSAGE_DELETE_OFFLINE,
+  MESSAGE_DELETE_REFUSED,
+} from "@dohc/security-contract/workspace-members";
 import "./namedChat.css";
 
 // One channel view for the named chat page and the link viewer.
@@ -34,7 +39,6 @@ const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
 const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
 const EMPTY = "No messages in this channel yet.";
-const DELETE_FAILED = "Couldn't delete the message.";
 
 /** A 401 or 404 ends the channel for this account; other failures leave it open. */
 export function ended(error: unknown): Ended | null {
@@ -91,6 +95,17 @@ function LinkHolderMark() {
   );
 }
 
+const isAgent = (message: NamedChatMessage) =>
+  message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
+
+// "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
+function authorName(message: NamedChatMessage): string {
+  const owner = isAgent(message) ? message.authorOwnerDisplayName : null;
+  return owner !== null && message.authorDisplayName === "Agent"
+    ? `${owner}'s agent`
+    : message.authorDisplayName;
+}
+
 /** A post or a chat message with its replies: how many, and how to open them. */
 interface Replies {
   count: number;
@@ -114,12 +129,10 @@ function ChatMessage({
     [message.body],
   );
   // An agent that joined with the link wears the agent mark, then the link mark.
-  const agent =
-    message.authorKind === "agent" || message.authorKind === "automation" || message.linkAgent;
+  const agent = isAgent(message);
   // A safe integer can lie outside the Date range; such a message shows without a time.
   const sent = new Date(message.createdAtMs),
     dated = !Number.isNaN(sent.getTime());
-  // "Agent" is dohc's word for an agent that gave no name. Such an agent goes by whose it is, as on the desktop.
   const owner = agent ? message.authorOwnerDisplayName : null,
     unnamed = owner !== null && message.authorDisplayName === "Agent";
   return (
@@ -132,9 +145,7 @@ function ChatMessage({
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">
-          {unnamed ? `${owner}'s agent` : message.authorDisplayName}
-        </span>
+        <span className="chat-author">{authorName(message)}</span>
         {message.authorKind === "link" && <LinkHolderMark />}
         {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
@@ -151,7 +162,10 @@ function ChatMessage({
         )}
       </p>
       {message.deletedAtMs !== undefined ? (
-        <p className="chat-body chat-body-omitted">Message deleted</p>
+        <p className="chat-deleted">
+          <Icon name="ban" size={13} />
+          Message deleted
+        </p>
       ) : html === null ? (
         <p className="chat-body chat-body-omitted">
           This message is too long to show in the browser.
@@ -176,11 +190,21 @@ function ChatMessage({
 /** A delete the reader asked for: asking, running, or refused with why. */
 type Removing = {
   message: NamedChatMessage;
+  // The reader's own message keeps "this"; another's names its author.
+  own: boolean;
   phase: "asking" | "deleting" | "failed";
   why: string | null;
 };
 
+const ARROW_STEP: Partial<Record<string, -1 | 1>> = {
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  ArrowRight: 1,
+  ArrowDown: 1,
+};
+
 // The message stays as it is until the relay answers, so a refusal has nothing to restore.
+// The card is the desktop's confirmation: a tile beside one text column, its keys included.
 function DeleteMessage({
   removing,
   cancel,
@@ -190,16 +214,24 @@ function DeleteMessage({
   cancel(): void;
   confirm(): void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null),
+    confirmButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     dialog.current?.showModal();
+    confirmButton.current?.focus();
     return () => dialog.current?.close();
   }, []);
-  const deleting = removing.phase === "deleting";
+  const deleting = removing.phase === "deleting",
+    failed = removing.phase === "failed";
+  // The confirm was disabled while the delete ran; Try again takes focus back.
+  useEffect(() => {
+    if (failed) confirmButton.current?.focus();
+  }, [failed]);
+  const quote = removing.message.body?.replace(/\s+/gu, " ").trim();
   return (
     <dialog
       ref={dialog}
-      className="download-card"
+      className="download-card chat-delete-dialog"
       aria-labelledby="chat-delete-title"
       aria-describedby="chat-delete-body"
       onCancel={(event) => {
@@ -207,27 +239,79 @@ function DeleteMessage({
         event.preventDefault();
         if (!deleting) cancel();
       }}
+      onKeyDown={(event) => {
+        // A held Enter never confirms: it may be the key that opened the dialog, repeating.
+        if (event.key === "Enter" && event.repeat) {
+          event.preventDefault();
+          return;
+        }
+        // The arrow keys move between the buttons, as in the desktop's dialogs.
+        const step = ARROW_STEP[event.key];
+        if (!step || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        const buttons = [
+          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+            ".chat-delete-actions button:enabled",
+          ),
+        ];
+        if (buttons.length === 0) return;
+        event.preventDefault();
+        const from = buttons.indexOf(event.target as HTMLButtonElement);
+        buttons[
+          from === -1
+            ? step === 1
+              ? 0
+              : buttons.length - 1
+            : (from + step + buttons.length) % buttons.length
+        ]!.focus();
+      }}
     >
-      <h2 id="chat-delete-title">Delete this message?</h2>
-      <p id="chat-delete-body">People who already read it may keep a copy.</p>
-      {removing.phase === "failed" && (
-        <p className="chat-delete-error" role="alert">
-          <Icon name="alert" size={14} />
-          <span>{removing.why ? `${DELETE_FAILED} ${removing.why}` : DELETE_FAILED}</span>
-        </p>
-      )}
-      <button
-        type="button"
-        autoFocus
-        className="handoff-button secondary"
-        disabled={deleting}
-        onClick={cancel}
-      >
-        Cancel
-      </button>
-      <button type="button" className="handoff-button danger" disabled={deleting} onClick={confirm}>
-        {deleting ? "Deleting…" : removing.phase === "failed" ? "Try again" : "Delete"}
-      </button>
+      <span className="tile bad">
+        <Icon name="trash" size={16} />
+      </span>
+      <div className="chat-delete-column">
+        <div>
+          <h2 id="chat-delete-title">
+            {removing.own
+              ? "Delete this message?"
+              : `Delete ${authorName(removing.message)}'s message?`}
+          </h2>
+          <div id="chat-delete-body" className="chat-delete-body">
+            {/* The dialog covers the message, so it shows what it deletes. */}
+            {quote ? <p className="chat-delete-quote">{quote}</p> : null}
+            <p>
+              This deletes it for everyone it syncs to, and you can't undo it. People who already
+              read it may keep a copy.
+            </p>
+          </div>
+        </div>
+        {failed && (
+          <p className="chat-delete-error" role="alert">
+            <Icon name="alert" size={12} />
+            <span>
+              {removing.why ? `${MESSAGE_DELETE_FAILED} ${removing.why}` : MESSAGE_DELETE_FAILED}
+            </span>
+          </p>
+        )}
+        <div className="chat-delete-actions">
+          <button
+            type="button"
+            className="handoff-button secondary"
+            disabled={deleting}
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+          <button
+            ref={confirmButton}
+            type="button"
+            className="handoff-button danger"
+            disabled={deleting}
+            onClick={confirm}
+          >
+            {deleting ? "Deleting…" : failed ? "Try again" : "Delete"}
+          </button>
+        </div>
+      </div>
     </dialog>
   );
 }
@@ -316,6 +400,8 @@ export interface ChatChannelClient {
   /** Where the reader can delete: their own messages, or any for the owner or an admin. The relay decides. */
   remove?: {
     can(message: NamedChatMessage): boolean;
+    /** Whether the reader wrote it. */
+    own(message: NamedChatMessage): boolean;
     run(message: NamedChatMessage, signal: AbortSignal): Promise<DeletedChatMessage>;
   };
   /** The body the relay stores, or null when it would refuse it. */
@@ -742,12 +828,7 @@ export function ChannelView({
       setRemoving({
         ...target,
         phase: "failed",
-        why:
-          status === 404
-            ? "It is gone, or your role does not let you delete it."
-            : status === 0
-              ? "Deleting needs a connection."
-              : null,
+        why: status === 404 ? MESSAGE_DELETE_REFUSED : status === 0 ? MESSAGE_DELETE_OFFLINE : null,
       });
     }
   };
@@ -871,7 +952,13 @@ export function ChannelView({
                     canReply={access === "read-write"}
                     {...(remove?.can(message)
                       ? {
-                          onDelete: () => setRemoving({ message, phase: "asking", why: null }),
+                          onDelete: () =>
+                            setRemoving({
+                              message,
+                              own: remove.own(message),
+                              phase: "asking",
+                              why: null,
+                            }),
                         }
                       : {})}
                   />

@@ -170,12 +170,6 @@ export const MembersResult = z.discriminatedUnion("status", [
     .strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
-// A message's Delete shows these after "Couldn't delete the message.", and
-// the CLI after its own words. The relay answers not-found to every refused
-// delete, so the refusal fits a message that is gone, someone else's, or one
-// a changed role no longer covers.
-export const MESSAGE_DELETE_REFUSED = "It is gone, or your role does not let you delete it.";
-export const MESSAGE_DELETE_OFFLINE = "Deleting needs a connection.";
 export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";
 
 // The desktop's Members words point at its page. A terminal has no page to
