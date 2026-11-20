@@ -9,6 +9,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { AccountGate, AccountProvider } from "../src/account/AccountProvider";
 import { demoMode } from "../src/demo";
+import { AlertTaps } from "../src/push/AlertTaps";
 import { sampleBuild } from "../src/sampleBuild";
 import { WarmEditor } from "../src/pages/WarmEditor";
 import { useTheme } from "../src/theme";
@@ -96,7 +97,10 @@ export default function RootLayout() {
     app
   ) : (
     <AccountProvider>
-      <AccountGate>{app}</AccountGate>
+      <AccountGate>
+        {app}
+        <AlertTaps />
+      </AccountGate>
     </AccountProvider>
   );
 }

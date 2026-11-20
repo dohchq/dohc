@@ -1,7 +1,6 @@
-import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { workspaceName } from "../chats/workspaceName";
@@ -11,8 +10,8 @@ import { phoneWrites } from "../server/phoneWrites";
 import { useTheme } from "../theme";
 import { outboxProblem } from "./Composer";
 import { ProblemLine } from "../account/ProblemLine";
-import { confirm } from "../confirm";
 import { blockedBy } from "./conversationWrites";
+import { DamagedKept } from "./DamagedKept";
 import { MessageRow } from "./MessageRow";
 import { recoveryRows, type RecoveryRow } from "./outboxMessages";
 import type { Author } from "./types";
@@ -42,7 +41,6 @@ export function OutboxRecovery() {
     }),
     [signIn],
   );
-  const [deleteFailed, setDeleteFailed] = useState(false);
   if (!phoneWrites) return <NotYet symbol="hammer" />;
 
   const { rows, unreadable } = state
@@ -77,20 +75,6 @@ export function OutboxRecovery() {
     return null;
   };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;
-  // The file stays until the person deletes it: nothing replaces a damaged file on its own. A failed delete says so in
-  // place, with Try again, which repeats the delete already confirmed, unless the sign-in has changed meanwhile.
-  const removeDamaged = () => {
-    setDeleteFailed(false);
-    outbox.deleteDamaged().catch(() => {
-      if (signIn.isCurrent()) setDeleteFailed(true);
-    });
-  };
-  const deleteDamaged = async () => {
-    const message = chatWords.deleteDamagedBody;
-    const title = chatWords.deleteDamagedTitle;
-    const label = chatWords.deleteDamagedConfirm;
-    if (await confirm({ title, message, confirm: label, destructive: true })) removeDamaged();
-  };
 
   return (
     <ScrollView
@@ -109,13 +93,7 @@ export function OutboxRecovery() {
       ) : null}
       {damaged ? (
         <View style={styles.inset}>
-          <Text style={[styles.text, { color: theme.muted }]}>{chatWords.outboxDamaged}</Text>
-          <View style={[styles.actions, styles.damaged]}>
-            <ActionPill label={confirmWords.delete} onPress={() => void deleteDamaged()} />
-          </View>
-          {deleteFailed ? (
-            <ProblemLine text={chatWords.deleteDamagedFailed} onRetry={removeDamaged} />
-          ) : null}
+          <DamagedKept outbox={outbox} live={isCurrent} />
         </View>
       ) : null}
       {empty ? (
@@ -190,5 +168,4 @@ const styles = StyleSheet.create({
   open: { flexDirection: "row", paddingLeft: 62, paddingTop: 6 },
   unreadable: { gap: 6, paddingTop: 14 },
   actions: { flexDirection: "row", gap: 8 },
-  damaged: { paddingTop: 8 },
 });

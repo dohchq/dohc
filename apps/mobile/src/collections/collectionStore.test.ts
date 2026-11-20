@@ -3,7 +3,14 @@ import { appTeardown } from "../apps/appStore";
 import { createScopedEnds } from "../pages/pageLive";
 import { createAccount } from "../server/account";
 import { signedIn } from "../server/testApps";
-import { deferred, memoryStore, testServer, type Answer, type Call } from "../server/testServer";
+import {
+  deferred,
+  memoryStore,
+  serveSessionEnd,
+  testServer,
+  type Answer,
+  type Call,
+} from "../server/testServer";
 import type { RecordValue } from "../server/phoneCollections";
 import {
   canUndo,
@@ -72,6 +79,7 @@ async function signedInStore(
   hook: (leave: () => Promise<void>, collections: WorkspaceCollections) => Promise<void>,
 ) {
   const server = testServer();
+  serveSessionEnd(server);
   const stored = { origin: server.origin, token: "tok", userId: "u-1", email: "a@example.com" };
   const stores = createScopedEnds();
   const teardown = appTeardown(stores);
