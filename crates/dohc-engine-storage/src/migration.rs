@@ -3770,6 +3770,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_reaction_agents.sql"),
         sets_user_version: None,
     },
+    // A file of a version, by its path. Capture, live notes and sync look a
+    // file up by path, and without this index each lookup read every file of
+    // the version, so a large import slowed with the square of its size.
+    Migration {
+        ordinal: 107,
+        id: "v2-snapshots-by-path",
+        sql: "CREATE INDEX snapshots_by_path ON snapshots(workspace_id, version_id, path);",
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5809,6 +5818,10 @@ mod tests {
                 "v2-chat-reaction-agents",
                 "51fd2921c68be05dd17448035cfd2662502da8e5b2387a9be390147681f72e8e",
             ),
+            (
+                "v2-snapshots-by-path",
+                "c27a48dbc124e26d73ead8e8758d08a9f4883ad0f17f66fcc7bc2155eab502bc",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -7163,6 +7176,31 @@ mod tests {
     /// belong to the default agent after the agent-ids migration, and every
     /// request and place keeps its state. The agent chat is the one the
     /// default agent's wire id names, whatever its slug.
+    #[test]
+    fn a_file_of_a_version_is_found_by_its_path_without_reading_the_version() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let plan = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "EXPLAIN QUERY PLAN SELECT object_id,blob_sha256 FROM snapshots                  WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+            )
+            .unwrap()
+            .query_map(["ws", "v", "a.md"], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let plan = plan(&conn);
+        assert!(
+            plan.len() == 1
+                && plan[0].starts_with("SEARCH snapshots USING INDEX snapshots_by_path")
+                && plan[0].contains("path=?"),
+            "{plan:?}"
+        );
+    }
+
     #[test]
     fn chat_reaction_agents_migration_keeps_reactions_and_gives_each_agent_its_own() {
         let dir = tempdir();

@@ -1192,7 +1192,7 @@ mod capture_file_hold_tests {
 
 /// Maximum work accepted by one capture batch actor command. Keeping both
 /// bounds here lets the actor serve queued interactive work between chunks.
-pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 256;
+pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 32;
 pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Capture-owned proof that a filesystem pathname still names the workspace
