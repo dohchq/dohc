@@ -234,13 +234,15 @@ export function registerSharedViewsIpcHandlers<
             latestPin.access !== input.from
           )
             return;
-          await setWorkspaceShareView(input.workspaceId, {
+          const narrowed: ShareViewIdentity = {
             ...latest,
             grantedSelector: { ...latestPin, access: input.access },
-            ...(input.editingNotReady ? { editingNotReady: true as const } : {}),
             unsavedPaths,
             unconfirmedChanges,
-          });
+          };
+          if (input.editingNotReady) narrowed.editingNotReady = true;
+          else delete narrowed.editingNotReady;
+          await setWorkspaceShareView(input.workspaceId, narrowed);
         },
       ),
     );
@@ -679,6 +681,7 @@ export function registerSharedViewsIpcHandlers<
           // current for the separate Edit proposal lane.
           let identityRecorded = false;
           let identityFailure: unknown;
+          let editStatedForCopyBelowEdit = false;
           if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
             let refreshedWorkspace = workspace;
             await warmCredentialCache().catch(() => undefined);
@@ -753,10 +756,13 @@ export function registerSharedViewsIpcHandlers<
                   info.statedShareId === current.shareView.shareId
                     ? recordedShareSelector(info.selector)?.access
                     : undefined;
+                editStatedForCopyBelowEdit = statedPin?.access === "edit" && widenedPin === null;
                 const nextShareView: ShareViewIdentity = {
                   ...current.shareView,
                   ...(widenedPin ? { grantedSelector: widenedPin } : {}),
-                  ...(identityFailure === undefined ? {} : { editingNotReady: true as const }),
+                  ...(editStatedForCopyBelowEdit && !identityRecorded
+                    ? { editingNotReady: true as const }
+                    : {}),
                   ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                   receivedIdentity: refreshReceivedReferencePin(
                     current.shareView.receivedIdentity,
@@ -770,7 +776,9 @@ export function registerSharedViewsIpcHandlers<
                 };
                 if (
                   (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
-                  (statedLevel !== undefined && statedLevel !== "edit")
+                  (statedLevel !== undefined &&
+                    statedLevel !== "edit" &&
+                    accessStatementsFor(workspace.workspaceId) === statementsBefore)
                 )
                   delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
@@ -857,10 +865,13 @@ export function registerSharedViewsIpcHandlers<
             notifyPull(changedSummary);
             return RefreshSharedViewResult.parse(outcome);
           }
-          const editingNotReady = identityFailure !== undefined && outcome.status !== "ended";
+          const editingNotReady =
+            (identityFailure !== undefined || (editStatedForCopyBelowEdit && !identityRecorded)) &&
+            outcome.status !== "ended";
           if (
             outcome.status !== "ended" &&
             !editingNotReady &&
+            !editStatedForCopyBelowEdit &&
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {
@@ -1062,6 +1073,19 @@ export function registerSharedViewsIpcHandlers<
                   currentShareView: () => operation.workspace.shareView,
                   assertCurrent: scoped.assertCurrent,
                 });
+                refreshNativeWorkspaceSurfaces();
+                notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+              }
+              const marked = operation.workspace.shareView;
+              if (
+                statedAccess !== "edit" &&
+                marked?.shareId === view.shareId &&
+                marked.editingNotReady &&
+                !marked.ended
+              ) {
+                const unmarked = { ...marked };
+                delete unmarked.editingNotReady;
+                await setWorkspaceShareView(workspace.workspaceId, unmarked);
                 refreshNativeWorkspaceSurfaces();
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
               }

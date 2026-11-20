@@ -2449,19 +2449,28 @@ export function DesktopWorkspaceShell(props: {
   const shareEditingNotReady =
     !!shareView?.editingNotReady && !shareViewDamaged && !shareViewEnded && !shareViewWritable;
   const reportShareEditingNotReady = useCallback(
-    () =>
+    (unasked = false) =>
       reportShellFailure({
         message: SHARE_EDITING_NOT_READY_MESSAGE,
         retry: retryRefusedSharedView,
         kind: "share-editing-not-ready",
         identity: SHARE_EDITING_NOT_READY_ROW,
+        noDismiss: true,
+        ...(unasked ? { repeat: true } : {}),
       }),
     [reportShellFailure, retryRefusedSharedView],
   );
   useEffect(() => {
-    if (shareEditingNotReady) reportShareEditingNotReady();
+    if (shareEditingNotReady) reportShareEditingNotReady(true);
     else clearIdentity(SHARE_EDITING_NOT_READY_ROW);
-  }, [workspaceId, shareEditingNotReady, reportShareEditingNotReady, clearIdentity]);
+  }, [
+    workspaceId,
+    shareEditingNotReady,
+    shareViewWritable,
+    shareViewEnded,
+    reportShareEditingNotReady,
+    clearIdentity,
+  ]);
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
   const shareViewWritableRef = useRef(shareViewWritable);
@@ -2476,9 +2485,11 @@ export function DesktopWorkspaceShell(props: {
       ? !shareView?.recipientUserId || needsReopenFor === shareView
         ? shareReopenMessage
         : "dohc can't read what this share grants. Open the share again to restore it."
-      : shareHadEditRef.current
-        ? "Your access to this share changed. Ask for Edit access, then return to this window."
-        : "This share does not have Edit access.";
+      : shareEditingNotReady
+        ? SHARE_EDITING_NOT_READY_MESSAGE
+        : shareHadEditRef.current
+          ? "Your access to this share changed. Ask for Edit access, then return to this window."
+          : "This share does not have Edit access.";
   const shareWriteRefusalRef = useRef(shareWriteRefusal);
   shareWriteRefusalRef.current = shareWriteRefusal;
   useEffect(() => {
@@ -3114,9 +3125,11 @@ export function DesktopWorkspaceShell(props: {
             ? "Your access to this share ended."
             : result.status === "needs-reopen"
               ? shareReopenMessage
-              : shareHadEditRef.current
-                ? "Your access to this share changed. Ask for Edit access, then return to this window."
-                : "This share does not have Edit access.";
+              : shareEditingNotReady && result.relayStatesMore
+                ? SHARE_EDITING_NOT_READY_MESSAGE
+                : shareHadEditRef.current
+                  ? "Your access to this share changed. Ask for Edit access, then return to this window."
+                  : "This share does not have Edit access.";
         shareViewEndedRef.current = result.status === "ended";
         shareViewWritableRef.current = false;
         shareWriteRefusalRef.current = message;
@@ -6740,14 +6753,15 @@ export function DesktopWorkspaceShell(props: {
               });
               return "stale";
             }
+            if (outcome.editingNotReady) {
+              if (!shareViewEndedRef.current && !shareViewWritableRef.current)
+                reportShareEditingNotReady(background);
+              return "stale";
+            }
             if (background)
               throw Object.assign(new Error(outcome.errorMessage), {
                 errorKind: outcome.errorKind,
               });
-            if (outcome.editingNotReady) {
-              reportShareEditingNotReady();
-              return "stale";
-            }
             reportShellError(
               "Couldn't refresh the shared view.",
               new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
@@ -6757,6 +6771,7 @@ export function DesktopWorkspaceShell(props: {
           }
           if (outcome.probed) return "current";
           clearIdentity(SHARE_COLLISION_RECORD_ROW);
+          if (!shareViewRef.current?.editingNotReady) clearIdentity(SHARE_EDITING_NOT_READY_ROW);
           if (outcome.collisionRecordQuarantined) {
             reportShellFailure({ message: collisionRecordSetAsideMessage(), tone: "warning" });
           }
