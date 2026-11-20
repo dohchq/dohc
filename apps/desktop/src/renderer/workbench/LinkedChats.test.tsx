@@ -72,16 +72,14 @@ function LinkedChatsPanel(
     Partial<Pick<PanelProps, "notices">>,
 ) {
   return (
-    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
-      <ReactionStoreProvider workspaceId={props.workspaceId}>
-        <ProductionLinkedChatsPanel
-          notices={notices}
-          accessContext={accessContext}
-          links={links}
-          {...props}
-        />
-      </ReactionStoreProvider>
-    </WorkspaceSessionProvider>
+    <ReactionStoreProvider workspaceId={props.workspaceId}>
+      <ProductionLinkedChatsPanel
+        notices={notices}
+        accessContext={accessContext}
+        links={links}
+        {...props}
+      />
+    </ReactionStoreProvider>
   );
 }
 
@@ -355,18 +353,33 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
 });
 
 describe("LinkedChatsPanel live thread", () => {
-  it("shows a comment deleted elsewhere while its thread is open", async () => {
-    const comment = (id: string, author: string, body: string, at: number) => ({
-      presentation: { group: "fixture", hue: null, self: false },
-      id,
-      threadId: "thread-1",
-      authorKind: "human" as const,
-      authorDisplayName: author,
-      body,
-      createdAtMs: at,
+  const comment = (id: string, author: string, body: string, at: number) => ({
+    presentation: { group: "fixture", hue: null, self: false },
+    id,
+    threadId: "thread-1",
+    authorKind: "human" as const,
+    authorDisplayName: author,
+    body,
+    createdAtMs: at,
+  });
+  const maya = comment("message-1", "Maya", "Plant beans in May?", 1_700_000_000_000);
+  const sam = comment("message-2", "Sam", "Spam from Sam", 1_700_000_060_000);
+  const samDeleted = { ...sam, body: "", deletedAtMs: 1_700_000_120_000 };
+  const workspaceChanged = () =>
+    act(() => {
+      for (const callback of activity) callback({ workspaceId: "workspace-1" });
     });
-    const maya = comment("message-1", "Maya", "Plant beans in May?", 1_700_000_000_000);
-    const sam = comment("message-2", "Sam", "Spam from Sam", 1_700_000_060_000);
+  const openPanel = () =>
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />,
+    );
+
+  it("shows a comment deleted elsewhere while its thread is open", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
     render(
       <LinkedChatsPanel
@@ -390,6 +403,75 @@ describe("LinkedChatsPanel live thread", () => {
     await within(chat).findByTestId("linked-chat-message-deleted");
     expect(chat.textContent).not.toContain("Spam from Sam");
     expect(chat.textContent).toContain("Plant beans in May?");
+  });
+
+  it("keeps a delete that lands while the thread's first read is still out", async () => {
+    // The first read holds the old words until its reactions answer.
+    const firstReactions = deferred<{ reactions: []; viewerAuthorId: string }>();
+    bridgeMock.listChatReactions.mockReturnValueOnce(firstReactions.promise);
+    bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await waitFor(() => expect(activity.size).toBe(1));
+
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    workspaceChanged();
+    // The panel still shows its loading state; the activity's read has answered.
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    await act(async () => firstReactions.resolve({ reactions: [], viewerAuthorId: "me" }));
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    expect(chat.textContent).not.toContain("Spam from Sam");
+  });
+
+  it("shows a sent comment once when a read already showed it", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya] });
+    const sent = deferred<{ message: typeof sam }>();
+    bridgeMock.sendChatMessage.mockReturnValue(sent.promise);
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Plant beans in May?");
+
+    fireEvent.change(screen.getByTestId("linked-chat-composer"), {
+      target: { value: "Spam from Sam" },
+    });
+    fireEvent.click(screen.getByTestId("linked-chat-send"));
+    // The comment saved, and another change's activity reads it before the send answers.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    workspaceChanged();
+    await within(chat).findByText("Spam from Sam");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await act(async () => sent.resolve({ message: sam }));
+
+    expect(within(chat).getAllByText("Spam from Sam")).toHaveLength(1);
+    // Two rows with one id would share a React key.
+    expect(errors.mock.calls.flat().join(" ")).not.toContain("same key");
+    errors.mockRestore();
+  });
+
+  it("reads once at a time while activity keeps coming, and shows each answer", async () => {
+    bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+
+    const held = deferred<{ messages: (typeof maya)[] }>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(held.promise);
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    for (let event = 0; event < 5; event += 1) {
+      workspaceChanged();
+      await act(async () => {});
+    }
+    // The first open read and one held read: activity during it waits.
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2);
+
+    await act(async () => held.resolve({ messages: [maya, samDeleted] }));
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    // One more read for the activity that came meanwhile, then none.
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3));
+    await act(async () => {});
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3);
   });
 });
 

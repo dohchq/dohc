@@ -12,7 +12,6 @@ import { publishAboutConversation, type AboutConversation } from "../workbench/a
 import { setChosenColors } from "../workbench/chosenColors";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import { ReactionStoreProvider } from "../workbench/reactionStore";
-import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import {
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
@@ -150,40 +149,38 @@ function publish(workspaceId: string, tabPath: string, entry: AboutConversation 
   return withdraw;
 }
 
-// The workspace shell provides the session and reaction store in production.
+// The workspace shell provides the reaction store in production.
 function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
   return (
-    <WorkspaceSessionProvider workspaceId={props.workspaceId ?? "workspace-a"}>
-      <ReactionStoreProvider workspaceId={props.workspaceId ?? "workspace-a"}>
-        <ShellAboutRail
-          wb={defaultWorkbenchState()}
-          mutateWb={() => undefined}
-          captureAvailable
-          captureDecided
-          focusedTabPath={GENERAL}
-          syncStatus={null}
-          workspaceId="workspace-a"
-          activeDocumentPath={null}
-          aboutTabOpen={false}
-          shareView={null}
-          searchChatTarget={null}
-          onSearchHitRead={() => undefined}
-          onSearchHitClosed={() => undefined}
-          openPathWithHeading={() => undefined}
-          onChatsThreadRead={() => undefined}
-          reportFailureMessage={() => undefined}
-          historyRevision={0}
-          openMoment={() => undefined}
-          openHistory={() => undefined}
-          linksRevision={0}
-          openPathAtLine={() => undefined}
-          openChatMention={() => undefined}
-          aboutNotices={notices}
-          accessContext={accessContext}
-          {...props}
-        />
-      </ReactionStoreProvider>
-    </WorkspaceSessionProvider>
+    <ReactionStoreProvider workspaceId={props.workspaceId ?? "workspace-a"}>
+      <ShellAboutRail
+        wb={defaultWorkbenchState()}
+        mutateWb={() => undefined}
+        captureAvailable
+        captureDecided
+        focusedTabPath={GENERAL}
+        syncStatus={null}
+        workspaceId="workspace-a"
+        activeDocumentPath={null}
+        aboutTabOpen={false}
+        shareView={null}
+        searchChatTarget={null}
+        onSearchHitRead={() => undefined}
+        onSearchHitClosed={() => undefined}
+        openPathWithHeading={() => undefined}
+        onChatsThreadRead={() => undefined}
+        reportFailureMessage={() => undefined}
+        historyRevision={0}
+        openMoment={() => undefined}
+        openHistory={() => undefined}
+        linksRevision={0}
+        openPathAtLine={() => undefined}
+        openChatMention={() => undefined}
+        aboutNotices={notices}
+        accessContext={accessContext}
+        {...props}
+      />
+    </ReactionStoreProvider>
   );
 }
 

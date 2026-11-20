@@ -30,8 +30,6 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
-import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
-import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
@@ -175,6 +173,15 @@ export function LinkedChatsPanel(props: {
   // workspace switch bumps both.
   const liveToken = useRef(0);
   const threadsToken = useRef(0);
+  // The open chat's message reads, numbered as they start. An answer older
+  // than the one shown is dropped, so a slow first read can't bring back a
+  // message deleted since.
+  const messageReads = useRef({ started: 0, shown: 0 });
+  // The one read of an open chat's messages, for opening it and for activity.
+  const readMessages = useCallback(
+    (threadId: string) => bridge().listChatMessages({ workspaceId, threadId }),
+    [workspaceId],
+  );
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
@@ -249,19 +256,23 @@ export function LinkedChatsPanel(props: {
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
+      const read = ++messageReads.current.started;
       setActiveThread(thread);
       setMessages([]);
       setMessagesLoading(true);
       try {
         const ticket = reactions.ticket();
         const [result, reactionResult] = await Promise.all([
-          bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+          readMessages(thread.id),
           bridge().listChatReactions({ workspaceId, threadId: thread.id }),
         ]);
         // What the server holds is news for every surface, still open or not.
         reactions.ingest([{ threadId: thread.id, ...reactionResult, ticket }]);
         if (token !== liveToken.current) return;
-        setMessages(result.messages);
+        if (read > messageReads.current.shown) {
+          messageReads.current.shown = read;
+          setMessages(result.messages);
+        }
         // Everything on screen is read. Reporting waits for the write to
         // land: the navigator refetches on that signal, and refetching earlier
         // would read the same count back.
@@ -286,7 +297,7 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props.onError, props.onThreadRead, reactions, workspaceId],
+    [props.onError, props.onThreadRead, reactions, readMessages, workspaceId],
   );
 
   // The chat this panel shows, and none once it unmounts.
@@ -447,7 +458,12 @@ export function LinkedChatsPanel(props: {
         return;
       }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      setMessages((current) => [...current, result.message]);
+      // A read after the save may already show it, maybe deleted since.
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id)
+          ? current
+          : [...current, result.message],
+      );
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -494,43 +510,45 @@ export function LinkedChatsPanel(props: {
   const activeThreadId = activeThread?.id ?? null;
   const activeChatThreadIds = useMemo(() => [activeThreadId], [activeThreadId]);
   // Another copy's delete, a pull or an agent changes the open chat without
-  // this panel. Each workspace activity reads its messages again, as the Chats
-  // view does. A message sent here while that read ran stays at the end.
-  const liveMessages = useWorkspaceQuery(useWorkspaceSession(), {
-    key: `linked-chat-messages:${workspaceId}:${activeThreadId ?? ""}`,
-    manual: true,
-    load: async () =>
-      activeThreadId === null
-        ? null
-        : (await bridge().listChatMessages({ workspaceId, threadId: activeThreadId })).messages,
-  });
-  const readLiveMessages = liveMessages.retry;
+  // this panel. Workspace activity reads its messages again, as the Chats view
+  // does: one read at a time, and one more after it if activity came meanwhile,
+  // so a steady stream of activity still shows each answer. A message sent here
+  // while a read ran stays at the end.
   useEffect(() => {
     if (activeThreadId === null) return;
-    let queued = false;
     let active = true;
+    let reading = false;
+    let again = false;
+    const readAgain = async () => {
+      reading = true;
+      do {
+        again = false;
+        const read = ++messageReads.current.started;
+        try {
+          const fresh = (await readMessages(activeThreadId)).messages;
+          if (!active || read <= messageReads.current.shown) continue;
+          messageReads.current.shown = read;
+          const ids = new Set(fresh.map((message) => message.id));
+          setMessages((current) => [
+            ...fresh,
+            ...current.filter((message) => !ids.has(message.id)),
+          ]);
+        } catch {
+          // The open chat keeps what it shows; the next activity reads again.
+        }
+      } while (again && active);
+      reading = false;
+    };
     const unsubscribe = bridge().onWorkspaceActivity((event) => {
-      if ((event.workspaceId !== undefined && event.workspaceId !== workspaceId) || queued) return;
-      queued = true;
-      queueMicrotask(() => {
-        queued = false;
-        if (active) void readLiveMessages();
-      });
+      if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+      if (reading) again = true;
+      else void readAgain();
     });
     return () => {
       active = false;
       unsubscribe();
     };
-  }, [activeThreadId, readLiveMessages, workspaceId]);
-  const freshMessages = liveMessages.value;
-  useEffect(() => {
-    if (!freshMessages) return;
-    const read = new Set(freshMessages.map((message) => message.id));
-    setMessages((current) => [
-      ...freshMessages,
-      ...current.filter((message) => !read.has(message.id)),
-    ]);
-  }, [freshMessages]);
+  }, [activeThreadId, readMessages, workspaceId]);
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,

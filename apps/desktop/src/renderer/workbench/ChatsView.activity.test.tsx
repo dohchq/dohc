@@ -679,6 +679,48 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-post-title")).toBeNull();
     expect(screen.getByTestId("chats-post-card").textContent).not.toContain("New chat");
   });
+
+  it("reads a deleted first line's title again at the next activity after a failed read", async () => {
+    const words = "I'll bring bean seeds on Saturday.";
+    const opening = message({ id: "message-1", body: words });
+    const reply = message({ id: "message-2", body: "Great, see you there.", createdAtMs: NOW + 1 });
+    const listed = (title: string, deletedAtMs?: number) => ({
+      threads: [
+        thread({
+          title,
+          messageCount: 2,
+          openingMessage: openingPreview({
+            bodySnippet: deletedAtMs === undefined ? words : "",
+            ...(deletedAtMs === undefined ? {} : { deletedAtMs }),
+          }),
+        }),
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue(listed(words));
+    bridgeMock.listChatMessages.mockImplementation(async () => ({ messages: [opening, reply] }));
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(words);
+
+    // The delete lands, and the title's read fails once.
+    bridgeMock.listChannelThreads.mockImplementation(async () => {
+      throw new Error("The engine is busy.");
+    });
+    bridgeMock.listChatMessages.mockImplementation(async () => ({
+      messages: [{ ...opening, body: "", deletedAtMs: NOW + 2 }, reply],
+    }));
+    act(() => emitWorkspaceActivity());
+    await screen.findByTestId("chats-message-deleted");
+    await waitFor(() => expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(screen.getByTestId("chats-thread-title").textContent).toBe(words);
+
+    bridgeMock.listChannelThreads.mockResolvedValue(listed("New chat", NOW + 2));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-thread-title").textContent).toBe("Post in #general"),
+    );
+  });
 });
 
 describe("ChatsView read cursors", () => {

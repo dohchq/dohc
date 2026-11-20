@@ -1830,9 +1830,11 @@ export function ChatsView(props: {
     },
   });
   const readOpeningTitle = openingTitle.retry;
+  // Each read of the messages tries again until the title lands, so a failed
+  // read recovers at the next activity.
   useEffect(() => {
     if (openingNowDeleted) void readOpeningTitle();
-  }, [openingNowDeleted, readOpeningTitle]);
+  }, [messages, openingNowDeleted, readOpeningTitle]);
   const freshThread = openingTitle.value;
   useEffect(() => {
     if (!freshThread) return;
