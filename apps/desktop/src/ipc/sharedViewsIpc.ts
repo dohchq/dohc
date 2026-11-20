@@ -315,7 +315,8 @@ export function registerSharedViewsIpcHandlers<
       rootPath,
       populate: async (created, authorityBinding) => {
         assertOpenIdentity();
-        await setWorkspaceShareView(created.workspaceId, {
+        const statedEdit = grantedSelector.access === "edit";
+        const shareView: ShareViewIdentity = {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
           granterEmail: info.granterEmail,
@@ -323,29 +324,37 @@ export function registerSharedViewsIpcHandlers<
           sharerName: info.sharerName,
           genericChatWritable: info.genericChatWritable,
           // Pin the selector the relay just stated, so later pulls enforce it
-          // instead of trusting the relay's selection each time.
-          grantedSelector,
+          // instead of trusting the relay's selection each time. A share
+          // stated at Edit is pinned at View until its identity is recorded.
+          grantedSelector: statedEdit ? { ...grantedSelector, access: "view" } : grantedSelector,
           receivedIdentity: info.receivedIdentity,
           // Persist the origin relay so a later refresh signed into a different
           // relay is skipped instead of misreading a 404 as "share ended".
           relayUrl: credentials.relayUrl,
           recipientUserId: credentials.userId,
-        });
+        };
+        await setWorkspaceShareView(created.workspaceId, shareView);
+        if (statedEdit) {
+          // Before the first pull: a share view that writes back needs its own
+          // sync identity, and the pull is what gives it the share cursor that
+          // makes local writes journal.
+          //
+          // Soft. Opening a share is a read, and a failure here costs the
+          // recipient editing, not what they were given: the copy opens at
+          // View, and a refresh that finds Edit records the identity and
+          // pins Edit.
+          const pinnedAtEdit = { ...shareView, grantedSelector };
+          const recorded = await workspaceAuthorities
+            .withBinding(authorityBinding, (lease) =>
+              recordShareViewIdentity({ ...canonicalWorkspaceFor(lease), shareView: pinnedAtEdit }),
+            )
+            .catch((error) => {
+              console.error("[desktop] share view identity:", error);
+              return false;
+            });
+          if (recorded) await setWorkspaceShareView(created.workspaceId, pinnedAtEdit);
+        }
         refreshNativeWorkspaceSurfaces();
-        // Before the first pull: a share view that writes back needs its own
-        // sync identity, and the pull is what gives it the share cursor that
-        // makes local writes journal.
-        //
-        // Soft, like the refresh site. Opening a share is a read, and a failure
-        // here costs the recipient the ability to send changes, not the ability
-        // to open what they were given. The first window refresh retries it.
-        await workspaceAuthorities
-          .withBinding(authorityBinding, (lease) =>
-            recordShareViewIdentity(canonicalWorkspaceFor(lease)),
-          )
-          .catch((error) => {
-            console.error("[desktop] share view identity:", error);
-          });
         const reconciled = await withStaleSensitiveWorkspaceOperation(created.rootPath, (lease) =>
           shareViewFiles.reconcile(
             lease,
@@ -847,7 +856,8 @@ export function registerSharedViewsIpcHandlers<
               ok: false,
               errorKind: "transient",
               changedPaths: outcome.changedPaths,
-              errorMessage: "dohc could not turn on editing for this share.",
+              errorMessage:
+                "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.",
               ...(outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
             });
           return RefreshSharedViewResult.parse(outcome);
