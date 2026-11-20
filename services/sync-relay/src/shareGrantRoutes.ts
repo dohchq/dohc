@@ -26,6 +26,7 @@ import {
   validateGroupShareSelector,
   validateShareSelector,
 } from "./shareFilter";
+import type { createShareInvitationEmailer } from "./shareInvitationEmail";
 import type { createShareSummaries } from "./shareSummaries";
 import type {
   SyncRelayShareGrantRow,
@@ -152,6 +153,7 @@ export function createShareGrantRoutes(
   namedGrantTransitionBody: ReturnType<typeof createShareSummaries>["namedGrantTransitionBody"],
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
   namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
+  emailShareInvitation: ReturnType<typeof createShareInvitationEmailer>,
   publicEditRelease?: PublicEditRelease,
   liveRooms: () => Pick<LiveRooms, "saveFirst"> | undefined = () => undefined,
 ) {
@@ -925,6 +927,7 @@ export function createShareGrantRoutes(
       if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
         throw relayError("invalid_chat", "chat is not shareable");
       }
+      const subjectName = normalizeShareLabel(input.subjectName);
       const createFor = (recipientUserId: string | null) =>
         storage.createShare({
           share: {
@@ -932,7 +935,7 @@ export function createShareGrantRoutes(
             workspaceId: route.workspaceId,
             granterUserId: actor.userId,
             selectorJson: JSON.stringify(selector),
-            labels: { subjectName: normalizeShareLabel(input.subjectName) },
+            labels: { subjectName },
             createdAtMs,
           },
           grant: {
@@ -952,6 +955,12 @@ export function createShareGrantRoutes(
       // An account being deleted counts as no account: its address gets the
       // pending invite any other address gets, and the reply stays the same.
       if (!resolved || !createFor(resolved)) createFor(null);
+      const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
+        route.workspaceId,
+        grantId,
+        selector,
+        access,
+      );
       return jsonResponse({
         ok: true,
         shareId,
@@ -959,9 +968,19 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
-        ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
+        ...browserInvitation,
         generation: 1,
         createdAtMs,
+        ...("kind" in selector
+          ? {}
+          : await emailShareInvitation({
+              inviterUserId: actor.userId,
+              recipientEmail: email.trim().toLowerCase(),
+              shareId,
+              subjectName,
+              access,
+              browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+            })),
       });
     }
     throw relayError("method_not_allowed");

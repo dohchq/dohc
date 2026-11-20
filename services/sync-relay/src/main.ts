@@ -23,6 +23,8 @@ import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
 import { createApnsClient } from "./apnsClient";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
+import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
+import { SHARE_INVITATION_EMAIL_TIMEOUT_MS } from "./shareInvitationEmail";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -517,6 +519,13 @@ const apnsConfig = (() => {
     fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid APNs configuration."}`);
   }
 })();
+const smtpSettings = (() => {
+  try {
+    return smtpSettingsFromEnv(process.env);
+  } catch (error) {
+    fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid SMTP configuration."}`);
+  }
+})();
 
 const documentProjection = projectionExecutable
   ? await startEngineProjection({
@@ -702,6 +711,13 @@ const relayApplication = createSyncRelayHandler({
     return new Map(result.rows.map((row) => [row.id, row.email]));
   },
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
+  ...(smtpSettings
+    ? {
+        sendShareInvitationEmail: createSmtpSender(smtpSettings, {
+          timeoutMs: SHARE_INVITATION_EMAIL_TIMEOUT_MS,
+        }),
+      }
+    : {}),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,

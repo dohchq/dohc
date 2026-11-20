@@ -26,6 +26,10 @@ import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { NOTICE_DISMISSED_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { noticeIdFrom } from "./storage/notices";
 import { deletionScope } from "./storage/accountDeletion";
+import {
+  admitShareInvitationEmail,
+  SHARE_INVITATION_EMAILS,
+} from "./storage/shareInvitationEmails";
 import type { StorageContext } from "./storage/context";
 import { createRelayDatasetHost } from "./datasetHost";
 import { deriveServiceHostBearer, authorizeServiceHostReplication } from "./serviceHostCredential";
@@ -738,6 +742,15 @@ async function fixture() {
       )
       .get(),
   ).toBeTruthy();
+  for (const inviterUserId of [deleted, "other"])
+    expect(
+      admitShareInvitationEmail(storage, {
+        inviterUserId,
+        nowMs: Date.now(),
+        limit: 50,
+        windowMs: 86_400_000,
+      }),
+    ).toEqual({ admitted: true });
   const manager = (afterPhase?: (phase: "fenced" | "runtime" | "sql") => void) =>
     createAccountDeletionRoute({
       storage,
@@ -801,6 +814,12 @@ async function fixture() {
           .prepare("SELECT 1 FROM dohc_dataset_automation_presses WHERE press_id='deleted-button'")
           .get(),
       ).toBeUndefined();
+      expect(
+        storage.db
+          .prepare(`SELECT inviter_user_id FROM ${SHARE_INVITATION_EMAILS}`)
+          .all()
+          .map((row) => row.inviter_user_id),
+      ).toEqual(["other"]);
       expect(storage.workspaceIsOwnedBy(otherWorkspace, "other")).toBe(true);
       expect(
         storage.db
