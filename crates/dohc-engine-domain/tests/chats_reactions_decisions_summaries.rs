@@ -1068,6 +1068,88 @@ fn a_resolve_receipt_keeps_no_poll_words_once_the_poll_is_deleted() {
 }
 
 #[test]
+fn a_start_receipt_keeps_no_deleted_opening_as_its_title() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let post = StartChannelThread {
+        body: "Quasar secret\nsecond line".to_owned(),
+        needs_decision: false,
+        ..keyed_post("post-key", "post-thread", "post-opening", 20)
+    };
+    let lane_opening = StartChannelThread {
+        body: "Pulsar secret".to_owned(),
+        needs_decision: false,
+        lane: ChatThreadLane::Chat,
+        ..keyed_post("lane-one", "lane-thread", "lane-opening", 30)
+    };
+    let lane_reply = StartChannelThread {
+        body: "Later words".to_owned(),
+        needs_decision: false,
+        lane: ChatThreadLane::Chat,
+        ..keyed_post("lane-two", "lane-other", "lane-reply", 40)
+    };
+    let mut chats = receipted(&mut store);
+    let (started, _) = chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    assert_eq!(started.title, "Quasar secret");
+    chats
+        .start_channel_thread(&lane_opening, &NO_FAULTS)
+        .expect("lane opening");
+    let (joined, _) = chats
+        .start_channel_thread(&lane_reply, &NO_FAULTS)
+        .expect("lane reply");
+    assert_eq!(
+        (joined.thread_id.as_str(), joined.title.as_str()),
+        ("lane-thread", "Pulsar secret"),
+        "the later start joins the lane an earlier request opened"
+    );
+    let recorded = [receipt(&store, "post-key"), receipt(&store, "lane-two")];
+    for (thread, message) in [
+        ("post-thread", "post-opening"),
+        ("lane-thread", "lane-opening"),
+    ] {
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread, message, 200)
+            })
+            .expect("delete");
+    }
+    for key in ["post-key", "lane-one", "lane-two"] {
+        let kept: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT result_json FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = ?2",
+                    params![WS, key],
+                    |row| row.get(0),
+                )
+            })
+            .expect("receipt result");
+        assert!(
+            !kept.contains("Quasar") && !kept.contains("Pulsar"),
+            "{key}: a start receipt keeps a deleted opening's words: {kept}"
+        );
+    }
+    assert_eq!(
+        [receipt(&store, "post-key"), receipt(&store, "lane-two")],
+        recorded,
+        "the receipts still say where their writes went"
+    );
+    let journal = local_journal(&store);
+    let mut chats = receipted(&mut store);
+    for (what, request, thread_id) in [
+        ("an untitled post", &post, "post-thread"),
+        ("a start in an existing lane", &lane_reply, "lane-thread"),
+    ] {
+        let (thread, _) = chats.start_channel_thread(request, &NO_FAULTS).expect(what);
+        assert_eq!(
+            (thread.thread_id.as_str(), thread.title.as_str()),
+            (thread_id, "New chat"),
+            "{what}: a retry replays a deleted opening as the title"
+        );
+    }
+    assert_eq!(local_journal(&store), journal);
+}
+
+#[test]
 fn each_keyed_chat_write_commits_its_receipt_with_the_write() {
     let scratch = ScratchDir::new().expect("scratch");
     let path = engine_db_path(&scratch).expect("db path");

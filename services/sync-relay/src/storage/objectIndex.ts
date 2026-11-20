@@ -263,7 +263,7 @@ export function findThreadCreateLane(
 }
 
 /** The thread's earliest admitted append still in the log, or null. A deleted message's appends are tombstones. */
-export function firstLiveAppendInThread(
+function firstLiveAppendInThread(
   storage: StorageContext,
   workspaceId: string,
   threadId: string,

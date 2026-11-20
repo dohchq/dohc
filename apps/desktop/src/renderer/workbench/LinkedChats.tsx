@@ -30,8 +30,6 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
-import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
-import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
@@ -170,6 +168,11 @@ export function LinkedChatsPanel(props: {
     (threadId: string) => bridge().listChatMessages({ workspaceId, threadId }),
     [workspaceId],
   );
+  // The one read of this file's chats, for loading the list and reading it again.
+  const readThreads = useCallback(
+    (path: string) => bridge().listFileChats({ workspaceId, path }),
+    [workspaceId],
+  );
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
@@ -191,7 +194,7 @@ export function LinkedChatsPanel(props: {
     setThreadsState({ status: "loading" });
     while (current()) {
       try {
-        const result = await bridge().listFileChats({ workspaceId, path: filePath });
+        const result = await readThreads(filePath);
         if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
           setThreadsState((state) =>
@@ -216,7 +219,50 @@ export function LinkedChatsPanel(props: {
         return;
       }
     }
-  }, [filePath, notices, threadsKey, workspaceId]);
+  }, [filePath, notices, readThreads, threadsKey]);
+
+  // A delete, a pull or an agent changes a listed chat's title without this
+  // panel. Workspace activity and opening a chat read the list again, without
+  // its loading state: one read at a time, and one more after it if another
+  // was asked for meanwhile. A file switch or a full reload drops its answer.
+  const threadsReread = useRef({ reading: false, again: false });
+  const rereadThreads = useCallback(async () => {
+    const reread = threadsReread.current;
+    if (reread.reading) {
+      reread.again = true;
+      return;
+    }
+    reread.reading = true;
+    do {
+      reread.again = false;
+      if (!filePath) break;
+      const token = threadsToken.current;
+      try {
+        const result = await readThreads(filePath);
+        if (
+          token !== threadsToken.current ||
+          currentThreadsKey.current !== threadsKey ||
+          isWorkspaceUpdatingResponse(result)
+        )
+          continue;
+        setThreadsState((current) =>
+          current.status === "ready" && current.key === threadsKey
+            ? { ...current, fileObjectId: result.fileObjectId, threads: result.threads }
+            : current,
+        );
+      } catch {
+        // The list keeps what it shows; the next activity reads again.
+      }
+    } while (reread.again);
+    reread.reading = false;
+  }, [filePath, readThreads, threadsKey]);
+  useEffect(() => {
+    if (!filePath) return;
+    return bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === undefined || event.workspaceId === workspaceId)
+        void rereadThreads();
+    });
+  }, [filePath, rereadThreads, workspaceId]);
 
   // File, tab or workspace switch: drop everything stale and reload. The file
   // that leaves About takes its Notices row with it. A tab switch counts even
@@ -225,6 +271,9 @@ export function LinkedChatsPanel(props: {
   const { tabPath } = props;
   useEffect(() => {
     liveToken.current += 1;
+    // A read still out for the last file keeps its own record, so it never
+    // swallows this file's.
+    threadsReread.current = { reading: false, again: false };
     setActiveThread(null);
     setMessages([]);
     setComposer("");
@@ -241,19 +290,10 @@ export function LinkedChatsPanel(props: {
     };
   }, [filePath, notices, refreshThreads, tabPath]);
 
-  // The opening message the open chat's title was read with: unknown until
-  // its first read shows, and null for a chat read with no messages.
-  const titleReadWith = useRef<{ threadId: string; opening: string | null | undefined } | null>(
-    null,
-  );
   const openThread = useCallback(
-    async (thread: ChatThreadRecord, focusMessageId?: string, readWithoutMessages = false) => {
+    async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       const read = ++messageReads.current.started;
-      titleReadWith.current = {
-        threadId: thread.id,
-        opening: readWithoutMessages ? null : undefined,
-      };
       setActiveThread(thread);
       setMessages([]);
       setMessagesLoading(true);
@@ -405,8 +445,7 @@ export function LinkedChatsPanel(props: {
           setComposer(trimmed);
           props.onError(ipcErrorMessage(error, "Could not post that comment."), error);
         }
-        // The chat was created untitled, so its title came before the comment.
-        void openThread(thread, undefined, true);
+        void openThread(thread);
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not comment on this file."), error);
@@ -545,50 +584,16 @@ export function LinkedChatsPanel(props: {
   }, [activeThreadId, readMessages, workspaceId]);
 
   // An untitled chat shows its opening message's first line, and "New chat"
-  // once that message is deleted. When the opening message the heading was
-  // read with changes, the chat's title is read again.
-  const shownOpening =
-    activeThread === null || messagesLoading
-      ? undefined
-      : messages[0]?.threadId === activeThread.id
-        ? `${messages[0].id}:${messages[0].deletedAtMs !== undefined}`
-        : null;
-  const freshTitle = useWorkspaceQuery(useWorkspaceSession(), {
-    key: `linked-chat-title:${workspaceId}:${filePath}:${activeThreadId}`,
-    manual: true,
-    load: async () => {
-      if (!filePath || activeThreadId === null) return null;
-      const result = await bridge().listFileChats({ workspaceId, path: filePath });
-      if (isWorkspaceUpdatingResponse(result)) return null;
-      return result.threads.find((thread) => thread.id === activeThreadId) ?? null;
-    },
-  });
-  const readTitle = freshTitle.retry;
+  // once that message is deleted. The list it was opened from, or a search,
+  // can predate its messages, so opening it reads the list again, and its
+  // heading takes the title the list holds.
   useEffect(() => {
-    const readWith = titleReadWith.current;
-    if (shownOpening === undefined || readWith?.threadId !== activeThreadId) return;
-    const before = readWith.opening;
-    readWith.opening = shownOpening;
-    if (before !== undefined && before !== shownOpening) void readTitle();
-  }, [activeThreadId, readTitle, shownOpening]);
-  const freshThread = freshTitle.value;
-  useEffect(() => {
-    if (!freshThread) return;
-    const { id, title } = freshThread;
-    setActiveThread((current) =>
-      current?.id === id && current.title !== title ? { ...current, title } : current,
-    );
-    setThreadsState((current) =>
-      current.status === "ready"
-        ? {
-            ...current,
-            threads: current.threads.map((thread) =>
-              thread.id === id ? { ...thread, title } : thread,
-            ),
-          }
-        : current,
-    );
-  }, [freshThread]);
+    if (activeThreadId !== null) void rereadThreads();
+  }, [activeThreadId, rereadThreads]);
+  const listedTitle =
+    threadsState.status === "ready" && threadsState.key === threadsKey
+      ? threadsState.threads.find((thread) => thread.id === activeThreadId)?.title
+      : undefined;
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
@@ -637,7 +642,7 @@ export function LinkedChatsPanel(props: {
             data-testid="linked-chat-title"
             className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
           >
-            {activeThread.title}
+            {listedTitle ?? activeThread.title}
           </span>
         </div>
         <ChatMessageList

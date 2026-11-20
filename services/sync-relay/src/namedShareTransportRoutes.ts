@@ -132,7 +132,6 @@ export function createNamedShareTransportRoutes(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "messageDeleted"
-    | "threadFirstMessageDeleted"
     | "deletedMessageCount"
     | "appendLogBatch"
     | "appendBrowserChatBatch"
@@ -496,8 +495,6 @@ export function createNamedShareTransportRoutes(
         objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
         messageDeleted: (threadId, messageId) =>
           storage.messageDeleted(share.workspaceId, threadId, messageId),
-        threadFirstMessageDeleted: (threadId) =>
-          storage.threadFirstMessageDeleted(share.workspaceId, threadId),
       };
       const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {

@@ -280,9 +280,6 @@ export interface ChatShareThreadResolver extends ShareFileChatResolver {
   // Whether the relay deleted this message. A deleted message's attachments
   // are withheld, as its copies drop them.
   messageDeleted(threadId: string, messageId: string): boolean;
-  // Whether the relay deleted the thread's first message. A reader then
-  // reads the thread's create with no title.
-  threadFirstMessageDeleted(threadId: string): boolean;
 }
 
 export function isChatChannelSelector(
@@ -1422,27 +1419,20 @@ export function filterOpForShare(
   );
 }
 
-// Two ops repeat a deleted message's words: a thread's title often repeats
-// its first message's first line, and a decision names its poll's choices.
-// Once the relay deletes the message, a reader reads the thread with no title,
-// which each copy replaces with its fallback, and the decision with no
-// choices. Only reads drop them: the stored ops keep them, so a retry and the
-// owner's journal still match.
+// A decision names its poll's choices. Once the relay deletes the poll's
+// message, a reader reads the decision with no choices. Only reads drop them:
+// the stored op keeps them, so a retry and the owner's journal still match.
+// A thread's title is the one a person typed, so it stays.
 function withoutDeletedWords(
   decision: ShareOpDecision,
   opKind: string,
   chat: ChatShareThreadResolver | undefined,
 ): ShareOpDecision {
-  if (!decision.allowed || !chat) return decision;
+  if (opKind !== "chat.decision.set" || !decision.allowed || !chat) return decision;
   const served = asRecord(decision.payload);
   const threadId = collectString(served?.threadId);
-  if (!served || !threadId) return decision;
-  if (opKind === "chat.thread.create")
-    return chat.threadFirstMessageDeleted(threadId)
-      ? { ...decision, payload: { ...served, title: "" } }
-      : decision;
-  const messageId = collectString(served.messageId);
-  if (opKind !== "chat.decision.set" || !messageId || !chat.messageDeleted(threadId, messageId))
+  const messageId = collectString(served?.messageId);
+  if (!served || !threadId || !messageId || !chat.messageDeleted(threadId, messageId))
     return decision;
   const { options: _options, chosenOption: _chosenOption, ...rest } = served;
   return { ...decision, payload: rest };

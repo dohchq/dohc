@@ -1979,9 +1979,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   messageDeleted(...args: Parameters<SyncRelayStorage["messageDeleted"]>) {
     return messageDeletesStorage.messageDeleted(this, ...args);
   }
-  threadFirstMessageDeleted(...args: Parameters<SyncRelayStorage["threadFirstMessageDeleted"]>) {
-    return messageDeletesStorage.threadFirstMessageDeleted(this, ...args);
-  }
   deletedMessageTimes(...args: Parameters<SyncRelayStorage["deletedMessageTimes"]>) {
     return messageDeletesStorage.deletedMessageTimes(this, ...args);
   }

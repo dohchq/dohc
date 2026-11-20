@@ -126,6 +126,17 @@ fn forget_poll(
     thread_id: &str,
     message_id: &str,
 ) -> Result<bool, DomainError> {
+    let removed = tx
+        .execute(
+            "DELETE FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
+            params![workspace_id, message_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+    // A receipt holds a poll's words only if the poll existed, so a message
+    // without one skips the scan of the workspace's receipts.
+    if removed == 0 {
+        return Ok(false);
+    }
     tx.execute(
         "UPDATE chat_stage_receipts \
          SET result_json = json_set(result_json, '$.options', json('[]'), '$.chosenOption', NULL) \
@@ -135,13 +146,7 @@ fn forget_poll(
         params![workspace_id, thread_id, message_id],
     )
     .map_err(DomainError::sql_persist)?;
-    let removed = tx
-        .execute(
-            "DELETE FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
-            params![workspace_id, message_id],
-        )
-        .map_err(DomainError::sql_persist)?;
-    Ok(removed > 0)
+    Ok(true)
 }
 
 /// The fields a deleted message's line keeps.

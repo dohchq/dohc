@@ -55,7 +55,6 @@ export function createShareReadQueries(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "messageDeleted"
-    | "threadFirstMessageDeleted"
     | "fetchLogPage"
     | "hasRefusedSettlement"
     | "fetchLogPageDescending"
@@ -123,8 +122,6 @@ export function createShareReadQueries(
       },
       messageDeleted: (threadId, messageId) =>
         storage.messageDeleted(workspaceId, threadId, messageId),
-      threadFirstMessageDeleted: (threadId) =>
-        storage.threadFirstMessageDeleted(workspaceId, threadId),
     };
   };
 

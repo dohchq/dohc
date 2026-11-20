@@ -409,6 +409,7 @@ describe("LinkedChatsPanel live thread", () => {
 
   it("reads an untitled thread's heading again when its opening comment is deleted", async () => {
     const opened = { ...searchThread, title: "Plant beans in May?" };
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [opened] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
     render(
       <LinkedChatsPanel
@@ -439,6 +440,47 @@ describe("LinkedChatsPanel live thread", () => {
     expect(chat.textContent).not.toContain("Plant beans in May?");
   });
 
+  describe("an untitled chat whose opening comment is deleted while it is closed", () => {
+    const untitled = { ...searchThread, title: "Plant beans in May?" };
+    const listPanel = async () => {
+      bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [untitled] });
+      render(
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="notes/plan.md" onError={vi.fn()} />,
+      );
+      await screen.findByText("Plant beans in May?");
+      // Another copy deletes the opening comment and this copy pulls it.
+      bridgeMock.listFileChats.mockResolvedValue({
+        fileObjectId: "object-1",
+        threads: [{ ...untitled, title: "New chat" }],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({
+        messages: [{ ...maya, body: "", deletedAtMs: 1_700_000_120_000 }, sam],
+      });
+    };
+    const expectNewChatOpen = async () => {
+      const chat = await screen.findByTestId("linked-chat-thread");
+      await within(chat).findByText("Spam from Sam");
+      await waitFor(() =>
+        expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+      );
+      expect(document.body.textContent).not.toContain("Plant beans in May?");
+    };
+
+    it("takes the list's title off the row once the delete's activity arrives", async () => {
+      await listPanel();
+      workspaceChanged();
+      await waitFor(() => expect(screen.queryByText("Plant beans in May?")).toBeNull());
+      fireEvent.click(screen.getByText("New chat"));
+      await expectNewChatOpen();
+    });
+
+    it("heads the chat with the engine's title when it opens before any activity", async () => {
+      await listPanel();
+      fireEvent.click(screen.getByText("Plant beans in May?"));
+      await expectNewChatOpen();
+    });
+  });
+
   it("keeps a delete that lands while the thread's first read is still out", async () => {
     // The first read holds the old words until its reactions answer.
     const firstReactions = deferred<{ reactions: []; viewerAuthorId: string }>();
@@ -446,7 +488,8 @@ describe("LinkedChatsPanel live thread", () => {
     bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
     openPanel();
     const chat = await screen.findByTestId("linked-chat-thread");
-    await waitFor(() => expect(activity.size).toBe(1));
+    // The file's list and the open chat each listen.
+    await waitFor(() => expect(activity.size).toBe(2));
 
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
     workspaceChanged();
@@ -669,8 +712,9 @@ describe("LinkedChatsPanel thread and file reads", () => {
     await screen.findByTestId("linked-chat-thread");
     await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1));
 
+    const listReads = bridgeMock.listFileChats.mock.calls.length;
     await act(async () => notices.report.mock.calls[0]![0].retry());
-    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(listReads + 1);
     await act(async () => {
       messagesRead.resolve({ messages: [message] });
       await messagesRead.promise;
