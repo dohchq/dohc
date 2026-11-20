@@ -1,5 +1,5 @@
 diff --git a/out/targets/appimage/appImageUtil.js b/out/targets/appimage/appImageUtil.js
-index 12f078abd42700857b239b0e53cd568c1b1836b7..0fd60ab98ca4ddd8d1607df99521df227f93aef4 100644
+index 12f078abd42700857b239b0e53cd568c1b1836b7..2b65c5850ce485bbf1bbaf2846e4085c2c59be2a 100644
 --- a/out/targets/appimage/appImageUtil.js
 +++ b/out/targets/appimage/appImageUtil.js
 @@ -209,28 +209,21 @@ for arg in "\${args[@]}" ; do
@@ -50,3 +50,19 @@ index 12f078abd42700857b239b0e53cd568c1b1836b7..0fd60ab98ca4ddd8d1607df99521df22
  ${eulaEnabled
          ? `if [ -z "$APPIMAGE_SILENT_INSTALL" ] ; then
    EULA_MARK_DIR="\${XDG_CONFIG_HOME:-$HOME/.config}/${config.ProductFilename}"
+diff --git a/templates/linux/after-remove.tpl b/templates/linux/after-remove.tpl
+index 302bc34061afa692327ef828189ead514f9c827b..20a541dc0ef803a4abba47b6c3379f40b44fd710 100644
+--- a/templates/linux/after-remove.tpl
++++ b/templates/linux/after-remove.tpl
+@@ -1,5 +1,11 @@
+ #!/bin/bash
+ 
++# rpm passes the number of copies left installed: 0 on an erase, 1 or more after an
++# upgrade, which runs the old package's after-remove last and would undo the new link.
++case "$1" in
++    [1-9]*) exit 0 ;;
++esac
++
+ # Delete the link to the binary
+ # update-alternatives --remove <name> <path>: 'path' must be the registered alternative binary,
+ # not the generic symlink — see https://man7.org/linux/man-pages/man1/update-alternatives.1.html

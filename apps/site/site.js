@@ -63,8 +63,14 @@ const downloadBuilds = {
     icon: "linux",
     matches: matchesBuild(".deb", "amd64"),
   },
-  // Ubuntu 24.04 and later refuse to start the AppImage, so it is the
-  // secondary Linux download, for other distributions.
+  "linux-rpm": {
+    platform: "linux",
+    label: "Linux",
+    detail: "x64, .rpm",
+    icon: "linux",
+    matches: matchesBuild(".rpm", "x86_64"),
+  },
+  // The portable Linux download. Ubuntu 24.04 and later refuse to start it.
   "linux-appimage": {
     platform: "linux",
     label: "Linux",
@@ -86,14 +92,12 @@ function detectedDesktopPlatform() {
     return "unknown";
   if (/Windows|Win32|Win64/i.test(fingerprint)) return "windows";
   if (/Macintosh|MacIntel|Mac OS/i.test(fingerprint)) return "mac";
-  if (/Linux|X11/i.test(fingerprint)) return "linux";
   return "unknown";
 }
 
 async function preferredDownloadKey() {
   const platform = detectedDesktopPlatform();
   if (platform === "windows") return "windows-x64";
-  if (platform === "linux") return "linux-x64";
   if (platform !== "mac") return null;
 
   const reportedArchitecture = `${navigator.userAgent ?? ""}`;

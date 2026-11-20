@@ -364,6 +364,11 @@ jobs:
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && matrix.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
         run: pnpm smoke:package:desktop
 
+      - name: Install rpmbuild
+        if: runner.os == 'Linux'
+        shell: bash
+        run: command -v rpmbuild || { sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm; }
+
       - name: Package desktop
         shell: bash
         env:
@@ -533,7 +538,7 @@ jobs:
                 ;;
             esac
             case "$name" in
-              latest*.yml|nightly*.yml|*.exe|*.AppImage|*.deb|*.blockmap)
+              latest*.yml|nightly*.yml|*.exe|*.AppImage|*.deb|*.rpm|*.blockmap)
                 return 0
                 ;;
               *)

@@ -1522,6 +1522,7 @@ main::before {
 .downloads-meta { margin-top: 24px; text-align: center; font: 400 12px/1.6 var(--font-mono); }
 .downloads-meta a { color: var(--muted); text-underline-offset: 4px; }
 .downloads-meta a:hover { color: var(--ink); }
+.downloads-note { max-width: 62ch; margin: 12px auto 0; color: var(--muted); text-wrap: pretty; }
 
 .ownership-summary {
   display: grid;
