@@ -4,6 +4,7 @@ use dohc_engine_protocol::limits::WireLimits;
 use dohc_engine_protocol::wire::{
     Envelope, Hello, PROTOCOL_VERSION, Request, decode_control, encode_control,
 };
+use rustix::process::{Pid, Signal, kill_process};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
@@ -50,9 +51,9 @@ fn stop_signals_leave_the_engine_answering_until_its_input_closes() {
     );
     assert!(matches!(read(&mut output), Envelope::HelloAck(_)));
 
-    let pid = i32::try_from(engine.id()).unwrap();
-    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+    let pid = Pid::from_child(&engine);
+    for signal in [Signal::TERM, Signal::INT, Signal::HUP] {
+        kill_process(pid, signal).unwrap();
     }
 
     send(
