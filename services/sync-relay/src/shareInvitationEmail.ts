@@ -62,17 +62,16 @@ export function createShareInvitationEmailer(options: {
           },
         };
       if (!ONE_MAILBOX.test(invitation.recipientEmail)) throw new Error("not one mailbox");
+      const message = shareInvitationMessage({
+        recipientEmail: invitation.recipientEmail,
+        inviterEmail,
+        subjectName: invitation.subjectName,
+        access: invitation.access,
+        browserInvitationUrl: invitation.browserInvitationUrl,
+        shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
+      });
       assertInTime();
-      await sendEmail(
-        shareInvitationMessage({
-          recipientEmail: invitation.recipientEmail,
-          inviterEmail,
-          subjectName: invitation.subjectName,
-          access: invitation.access,
-          browserInvitationUrl: invitation.browserInvitationUrl,
-          shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
-        }),
-      );
+      await sendEmail(message);
       return { invitationEmail: "sent" };
     };
     try {
