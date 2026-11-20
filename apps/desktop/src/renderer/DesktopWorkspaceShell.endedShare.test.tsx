@@ -7,6 +7,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { SHARE_EDITING_NOT_READY_MESSAGE } from "../ipc/bridgeContract";
 import { deferred } from "../testing/deferred";
 import { editorTabTestId } from "../testPins";
 
@@ -553,6 +554,84 @@ describe("ended Edit Collection shares", () => {
       expect(fullRefreshes()).toBe(1);
       fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
       await waitFor(() => expect(fullRefreshes()).toBe(2));
+      view.unmount();
+    });
+  });
+
+  describe("a share at View because editing could not be turned on", () => {
+    const NOT_READY_SHARE: Workspace = {
+      ...SHARE_VIEW,
+      shareView: { ...SHARE_VIEW.shareView!, editingNotReady: true },
+    };
+    const fullRefreshes = (bridge: ReturnType<typeof collectionBridge>) =>
+      (bridge.refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).filter(
+        ([payload]) => payload.trigger === "manual",
+      ).length;
+    const rowsSaying = (words: string) => {
+      if (!screen.queryByTestId("notice-center"))
+        fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      return screen.getByTestId("notice-center").textContent!.split(words).length - 1;
+    };
+
+    it("says so with Try again on the refresh, and stops once editing is on", async () => {
+      const bridge = collectionBridge();
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, NOT_READY_SHARE));
+      await screen.findByText("Retained task");
+      const notice = await screen.findByTestId("workspace-shell-error");
+      expect(notice.textContent).toContain(SHARE_EDITING_NOT_READY_MESSAGE);
+      expect(notice.textContent).not.toContain("refresh the shared view");
+      await act(async () => undefined);
+      const before = fullRefreshes(bridge);
+      fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(fullRefreshes(bridge)).toBe(before + 1));
+      expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(1);
+
+      view.rerender(shell(bridge, EDIT_SHARE));
+      expect(await screen.findByTestId("collection-new-record")).toBeTruthy();
+      await waitFor(() => expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(0));
+      view.unmount();
+    });
+
+    it("keeps one notice when a refresh answers that editing is still not on", async () => {
+      const bridge = collectionBridge();
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, NOT_READY_SHARE));
+      await screen.findByText("Retained task");
+      await screen.findByTestId("workspace-shell-error");
+      await act(async () => undefined);
+      bridge.refreshSharedView.mockResolvedValue({
+        ok: false,
+        errorKind: "transient",
+        changedPaths: 0,
+        errorMessage: SHARE_EDITING_NOT_READY_MESSAGE,
+        editingNotReady: true,
+      });
+      const before = fullRefreshes(bridge);
+      fireEvent.click(screen.getByTestId("shared-view-refresh"));
+      await waitFor(() => expect(fullRefreshes(bridge)).toBe(before + 1));
+      await waitFor(() =>
+        expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
+      );
+      expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(1);
+      expect(rowsSaying("refresh the shared view")).toBe(0);
+      view.unmount();
+    });
+
+    it("says it for a copy a refresh narrowed, and nothing for a share the relay states at View", async () => {
+      const bridge = collectionBridge();
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, SHARE_VIEW));
+      await screen.findByText("Retained task");
+      await act(async () => undefined);
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(0);
+
+      view.rerender(shell(bridge, NOT_READY_SHARE));
+      await waitFor(() => expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(1));
       view.unmount();
     });
   });

@@ -232,6 +232,7 @@ export interface ShareViewIdentity {
   // one part that follows a later statement from the relay, when that
   // statement names the same paths and version (`sharePinAtStatedLevel`).
   grantedSelector: ShareViewSelector;
+  editingNotReady?: true;
   ended?: boolean;
   // Ops this share's pulls skipped, and why. Durable on purpose: the cursor
   // has moved past them, so the content stays missing until the granter

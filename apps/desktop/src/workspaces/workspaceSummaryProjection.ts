@@ -86,6 +86,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? { sharerName: normalizeShareLabel(raw.sharerName, 320) }
         : {}),
       ...(damaged ? { damaged: true as const } : { access: level, genericChatWritable }),
+      ...(!damaged && level !== "edit" && raw.editingNotReady === true
+        ? { editingNotReady: true as const }
+        : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(raw.unsavedPaths !== undefined
         ? {
