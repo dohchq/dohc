@@ -67,7 +67,13 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import { settlementPending } from "./liveSettlement.js";
-import { childStderrLog, codeWord, serverLogLine, ServerLogError } from "./serverLogWords.js";
+import {
+  childStderrLog,
+  codeWord,
+  serverLogLine,
+  ServerLogError,
+  shortObjectId,
+} from "./serverLogWords.js";
 import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
 import { relayError } from "./errors.js";
 import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
@@ -876,7 +882,7 @@ export async function startServiceLiveHost(options: {
           if (repeated !== undefined) {
             try {
               console.error("Live document waited for its lock.", {
-                object: document.objectId.slice(0, 8),
+                object: shortObjectId(document.objectId),
                 waiter,
                 waitedMs,
                 ...(repeated ? { repeated } : {}),
@@ -3247,10 +3253,9 @@ export async function startServiceLiveHost(options: {
                 // the visit marks the note again, and that mark stands for the next pass.
                 wanted.delete(targetKey(target));
                 const timed: SlowPassTarget = {
-                    object:
-                      hosted
-                        .get(JSON.stringify([target.workspaceId, target.path]))
-                        ?.objectId.slice(0, 8) ?? null,
+                    object: shortObjectId(
+                      hosted.get(JSON.stringify([target.workspaceId, target.path]))?.objectId,
+                    ),
                     ms: 0,
                     outcome: "error",
                     settle: "none",
@@ -3266,7 +3271,7 @@ export async function startServiceLiveHost(options: {
                     passSignal,
                     settleTarget &&
                       (async (consumer, document, joined) => {
-                        timed.object ??= document.objectId.slice(0, 8);
+                        timed.object ??= shortObjectId(document.objectId);
                         const sent = consumer.settlesSent;
                         try {
                           const settled = await consumer.settleDrained(document, joined);
