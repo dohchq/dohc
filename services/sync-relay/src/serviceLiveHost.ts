@@ -9,7 +9,7 @@ import {
   type ServiceActivationTarget,
   type ServiceCatchUp,
 } from "./serviceActivationDriver";
-import { passOrder } from "./servicePassOrder";
+import { passPlan } from "./servicePassOrder";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
 import { untilAborted } from "./namedLiveFrameHost.js";
@@ -3238,7 +3238,7 @@ export async function startServiceLiveHost(options: {
                 const row = hosted.get(key);
                 if (!row || activation!.completed(row.target)) wanted.delete(key);
               }
-              const order = passOrder(targets, index, bounds.maxDocumentsPerPass, (target) =>
+              const plan = passPlan(targets, index, bounds.maxDocumentsPerPass, (target) =>
                 wanted.has(targetKey(target)),
               );
               const visit = async (target: ServiceActivationTarget) => {
@@ -3290,16 +3290,19 @@ export async function startServiceLiveHost(options: {
                   timed.ms = Math.round(now() - startedAt);
                 }
               };
-              // A wanted note that fails does not cost the others their turn in this pass.
-              for (const target of order.first) await step(() => visit(target));
-              await step(async () => {
-                for (const { target, next } of order.turn) {
-                  // The turn moves on before each visit. A failure ends the pass's turn, and the next pass
-                  // takes up after the note that failed, so one failing note cannot keep the others waiting.
-                  index = next;
-                  await visit(target);
+              let turnVisitFailed = false;
+              for (let next = plan.next(); next && !turnVisitFailed; next = plan.next()) {
+                const { target, turn } = next;
+                if (turn === undefined) await step(() => visit(target));
+                else {
+                  index = turn;
+                  turnVisitFailed = true;
+                  await step(async () => {
+                    await visit(target);
+                    turnVisitFailed = false;
+                  });
                 }
-              });
+              }
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
               // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
               // only by documents waiting out a backoff pushes and pulls the same way.
