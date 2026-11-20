@@ -1,7 +1,6 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
-import { runAccountOperation } from "./accountOperations";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
   AGENT_CHAT_WAIT_MAX_RESPONSE_BYTES,
