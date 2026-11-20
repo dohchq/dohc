@@ -672,6 +672,37 @@ it("shows the account owner beside an agent's name", async () => {
   expect(container.querySelector(".chat-owner")?.textContent).toBe("Alice's agent");
 });
 
+it("names the reader's own agent Your agent", async () => {
+  server({
+    history: () => ({
+      shareId,
+      channelWireId,
+      nextCursor: 10,
+      olderCursor: null,
+      messages: [
+        {
+          ...message(2, "Second", "Planner"),
+          authorKind: "agent",
+          authorUserId: "alice",
+          authorOwnerDisplayName: "Alice",
+        },
+        {
+          ...message(3, "Third", "Scout"),
+          authorKind: "agent",
+          authorUserId: "bob",
+          authorOwnerDisplayName: "Bob",
+        },
+      ],
+    }),
+  });
+  await render();
+  await opened();
+  expect([...container.querySelectorAll(".chat-owner")].map((owner) => owner.textContent)).toEqual([
+    "Your agent",
+    "Bob's agent",
+  ]);
+});
+
 it("names an agent with no name of its own once, by whose it is", async () => {
   server({
     history: () => ({

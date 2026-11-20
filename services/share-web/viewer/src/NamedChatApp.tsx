@@ -28,6 +28,7 @@ const ENDED: Record<Ended, string> = {
 function namedClient(channel: NamedChatChannel): ChatChannelClient {
   return {
     access: channel.access,
+    readerUserId: channel.userId,
     readHistory: (before, signal) => readNamedChatHistory(channel, before, signal),
     follow: (since, holdMs, signal) => followNamedChat(channel, since, holdMs, signal),
     post: (post, signal) => postNamedChatMessage(channel, post, signal),

@@ -52,6 +52,7 @@ import {
   isPersonalAgentId,
   personalAgentName,
   personalAgentsVersion,
+  personalRosterHolds,
   subscribeChosenColors,
 } from "./chosenColors";
 
@@ -93,13 +94,15 @@ export function chatAuthorLabel(
 
 // A personal agent can take any name, even its person's or someone else's, so
 // its post names whose agent it is beside that name, as a member's browser
-// does. The relay writes the person's name onto the post.
+// does. The relay writes the person's name onto the post. Your own roster's
+// agent is "Your agent", as the browser says to its own person.
 export function AgentPerson(props: {
   author: Pick<ChatMessageRecord, "authorKind"> &
     Partial<Pick<ChatMessageRecord, "authorAgentId" | "presentation" | "authorOwnerDisplayName">>;
   testId: string;
 }) {
   const { author } = props;
+  usePersonalAgentNames();
   const agentId = author.presentation?.agentId ?? author.authorAgentId;
   if (
     author.authorKind !== "agent" ||
@@ -110,7 +113,9 @@ export function AgentPerson(props: {
     return null;
   return (
     <span data-testid={props.testId} className="min-w-0 truncate text-[12px] text-muted">
-      {author.authorOwnerDisplayName}'s agent
+      {personalRosterHolds(agentId) === true
+        ? "Your agent"
+        : `${author.authorOwnerDisplayName}'s agent`}
     </span>
   );
 }
