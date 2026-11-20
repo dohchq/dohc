@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { readFile } from "node:fs/promises";
+import { access, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
@@ -12,7 +12,17 @@ import {
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createSuiteTestScratchSync, createTestScratch } from "./testTemp";
-import { engine, compiledRelayMain, pushUntilDrained } from "./twoDaemonSync.fixture";
+import {
+  engine,
+  compiledRelayMain,
+  openJoinedDaemonCapture,
+  openLiveDaemonCapture,
+  pullAndExpect,
+  pullCaptured,
+  pushUntilDrained,
+  writeAndCapture,
+  type LiveDaemonCapture,
+} from "./twoDaemonSync.fixture";
 
 describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
   let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>>;
@@ -97,6 +107,134 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
       } finally {
         await capture?.stop();
         await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "gives the server a live history for a note written as a file once a background start opens and closes it, and knows it has one the next time",
+    async () => {
+      const workspaceId = `two-daemon-background-live-${randomUUID()}`;
+      const root = await createTestScratch("dohc-background-live-");
+      const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const person = { kind: "human", humanId: "local-person" } as const;
+      // Markdown the editor would write differently, so an unchanged file proves the stored source was kept.
+      const text = "---\ntitle: x\n---\nTitle\n=====\n\n* one\n* two  \n";
+      const file = join(root, "agent.md");
+      const onDisk = async () => ({
+        bytes: await readFile(file),
+        modified: (await stat(file, { bigint: true })).mtimeNs,
+      });
+      let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+      let capture: WorkspaceEngineCapture | undefined;
+      // The relay's own test for a page a phone can edit (mainLiveLineageExists).
+      const serverHoldsLineage = (objectId: string) => {
+        const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+        try {
+          return (
+            relayDb
+              .prepare(
+                "SELECT 1 FROM sync_relay_log WHERE workspace_id=? AND op_kind='ydoc.update' AND json_extract(payload_json, '$.objectId')=? AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL LIMIT 1",
+              )
+              .get(workspaceId, objectId) !== undefined
+          );
+        } finally {
+          relayDb.close();
+        }
+      };
+      try {
+        owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+        capture = createWorkspaceEngineCapture({
+          ...owner.workspace,
+          rustEngineSessions: owner.sessions,
+        });
+        const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+        await relay.claim();
+        const { objectId } = await capture.writeAuthoredFile(file, text, person, {
+          createOnly: true,
+        });
+        await pushUntilDrained(relay);
+        expect(serverHoldsLineage(objectId)).toBe(false);
+        const written = await onDisk();
+        expect(written.bytes).toEqual(Buffer.from(text));
+
+        // What startLiveInBackground does once no editor holds the note: open with no window, then close.
+        const backgroundStart = async () => {
+          const session = await capture!.openYDocSession({
+            path: "agent.md",
+            contentKind: "richdoc",
+            onRemoteUpdate: () => undefined,
+          });
+          await session.close();
+          return session.lineageAtOpen;
+        };
+        expect(await backgroundStart()).toBe("absent");
+        expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
+        expect(serverHoldsLineage(objectId)).toBe(true);
+        // Nothing changed the text, so the close wrote no file.
+        expect(await onDisk()).toEqual(written);
+
+        // A later run starts the note again. The engine says it has the history, so main asks for no pass.
+        expect(await backgroundStart()).toBe("existing");
+        expect(await onDisk()).toEqual(written);
+      } finally {
+        await capture?.stop();
+        await owner?.close();
+      }
+    },
+    3 * REAL_DAEMON_DEADLINE_MS,
+  );
+
+  it(
+    "drops a page from the other computer when it is deleted in a file manager, whoever wrote it",
+    async () => {
+      const workspaceId = `two-daemon-outside-delete-${randomUUID()}`;
+      const relay = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+      const rootA = await createTestScratch("dohc-outside-delete-a-");
+      const rootB = await createTestScratch("dohc-outside-delete-b-");
+      const agent = { kind: "agent", agentId: "helper", onBehalfOf: "local:person" } as const;
+      const deletedOutside = async (daemon: LiveDaemonCapture, root: string, path: string) => {
+        await daemon.reconcileCapture();
+        await rm(join(root, path));
+        const [latest] = (await waitForPathMoments(daemon.capture, path, 2)).sort(
+          (a, b) => b.momentOrder - a.momentOrder,
+        );
+        expect(latest?.operation, `${path} is recorded as deleted`).toBe("delete");
+      };
+      const onDisk = (root: string, path: string) =>
+        access(join(root, path)).then(
+          () => true,
+          () => false,
+        );
+      let a: LiveDaemonCapture | undefined;
+      let b: LiveDaemonCapture | undefined;
+      try {
+        a = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay });
+        await a.relay.claim();
+        await a.chats.ensureGeneralChannel({ workspaceId });
+        await pushUntilDrained(a.relay);
+        await a.capture.writeAuthoredFile(join(rootA, "by-agent.md"), "from an agent\n", agent, {
+          createOnly: true,
+        });
+        await waitForPathMoments(a.capture, "by-agent.md", 1);
+        await writeAndCapture(a, rootA, "synced.md", "from the other computer\n");
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+
+        b = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay });
+        await pullAndExpect(b, rootB, "by-agent.md", "from an agent\n");
+        expect(await readFile(join(rootB, "synced.md"), "utf8")).toBe("from the other computer\n");
+
+        await deletedOutside(a, rootA, "by-agent.md");
+        await deletedOutside(b, rootB, "synced.md");
+        expect((await pushUntilDrained(a.relay)).pushed).toBeGreaterThan(0);
+        expect((await pushUntilDrained(b.relay)).pushed).toBeGreaterThan(0);
+        await pullCaptured(b.relay, b.capture);
+        await pullCaptured(a.relay, a.capture);
+        expect(await onDisk(rootB, "by-agent.md"), "the agent's page leaves B").toBe(false);
+        expect(await onDisk(rootA, "synced.md"), "the synced page leaves A").toBe(false);
+      } finally {
+        await Promise.allSettled([b?.close(), a?.close()]);
       }
     },
     3 * REAL_DAEMON_DEADLINE_MS,

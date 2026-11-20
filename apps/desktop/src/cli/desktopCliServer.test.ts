@@ -342,6 +342,7 @@ function fixture(
       })),
       retryStoppedRun: vi.fn(async () => false),
       endRunQuietly: vi.fn(() => "not-running" as const),
+      selfTestReply: vi.fn(() => null),
     },
     rememberPendingCliRunMessageLink: vi.fn(),
   };

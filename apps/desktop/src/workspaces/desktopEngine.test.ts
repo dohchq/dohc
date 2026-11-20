@@ -1044,6 +1044,51 @@ describe("desktop engine restart coordination", () => {
       await f.close();
     }
   });
+
+  it("passes captured notes to the background live start, and pauses it while the engine restarts", async () => {
+    const f = fixture();
+    const order: string[] = [];
+    // Pause stays pending: a start in flight may wait for the engine the restart holds back.
+    const paused = deferred();
+    const backgroundLiveStart = {
+      note: vi.fn(),
+      pause: vi.fn(async () => {
+        order.push("pause");
+        await paused.promise;
+      }),
+      resume: vi.fn(() => void order.push("resume")),
+    };
+    f.dependencies.backgroundLiveStart = backgroundLiveStart;
+    const relaunched = deferred();
+    try {
+      await f.engine.start();
+      f.engine.launchSettled();
+      await f.client.smokeClosed.promise;
+      const moment = {
+        workspaceId: "workspace",
+        paths: ["a.md"],
+        appliedCount: 1,
+        notOwnedCount: 0,
+      };
+      f.client.emit("capture.momentRecorded", moment);
+      // An announcement that left paths out is a reconcile, not notes to start.
+      f.client.emit("capture.momentRecorded", { ...moment, appliedCount: 3 });
+      expect(backgroundLiveStart.note.mock.calls).toEqual([["workspace", ["a.md"]]]);
+
+      const replacement = new Client();
+      f.setLaunch(async () => replacement);
+      vi.mocked(f.dependencies.notifyRenderer).mockImplementation(() => relaunched.resolve());
+      f.spawns[0]!.onExit!(1, null);
+      await relaunched.promise;
+      // Once before each daemon was published, at the first start and at the restart.
+      expect(order).toEqual(["pause", "resume", "pause", "resume"]);
+      replacement.emit("capture.momentRecorded", { ...moment, paths: ["b.md"] });
+      expect(backgroundLiveStart.note).toHaveBeenLastCalledWith("workspace", ["b.md"]);
+    } finally {
+      paused.resolve();
+      await f.close();
+    }
+  });
 });
 
 describe("desktop engine composed sessions and events", () => {

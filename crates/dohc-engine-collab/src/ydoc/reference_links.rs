@@ -152,7 +152,7 @@ impl Ydoc {
         for (index, text, source, offset, at) in splits {
             let len = text.len(&txn);
             text.remove_range(&mut txn, at - 1, len - (at - 1));
-            insert_md_paragraph(&mut txn, &body, index + 1, &source[offset..]);
+            insert_md_paragraph(&mut txn, &body, index + 1, &source[offset..], true);
         }
         for (text, edits) in replacements {
             // Apply from the end; Y.Doc offsets count UTF-16 code units.

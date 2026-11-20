@@ -4771,7 +4771,9 @@ export function ChatsView(props: {
                         {[...byEmoji.entries()].map(([emoji, count]) => {
                           const mine = itemReactions.some(
                             (reaction) =>
-                              reaction.emoji === emoji && reaction.authorId === itemViewer,
+                              reaction.emoji === emoji &&
+                              reaction.authorKind === "human" &&
+                              reaction.authorId === itemViewer,
                           );
                           return (
                             <FeedReactionPill

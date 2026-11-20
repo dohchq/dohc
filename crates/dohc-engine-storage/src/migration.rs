@@ -3763,6 +3763,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_TAKEN_ROWS_DDL,
         sets_user_version: None,
     },
+    // A person and each of their agents keep their own reaction.
+    Migration {
+        ordinal: 106,
+        id: "v2-chat-reaction-agents",
+        sql: include_str!("chat_reaction_agents.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5798,6 +5805,10 @@ mod tests {
                 "v2-owner-taken-rows",
                 "6b4424771e08b0385f39533f888ca71de00459be8518e3dbfb35f59d65051444",
             ),
+            (
+                "v2-chat-reaction-agents",
+                "51fd2921c68be05dd17448035cfd2662502da8e5b2387a9be390147681f72e8e",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -7152,6 +7163,60 @@ mod tests {
     /// belong to the default agent after the agent-ids migration, and every
     /// request and place keeps its state. The agent chat is the one the
     /// default agent's wire id names, whatever its slug.
+    #[test]
+    fn chat_reaction_agents_migration_keeps_reactions_and_gives_each_agent_its_own() {
+        let dir = tempdir();
+        let ctx = MigrationContext::current(1_000);
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-chat-reaction-agents");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 106);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_reactions \
+                 (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                  author_display_name, state, at_ms, origin_id, origin_seq) \
+             VALUES ('ws', 'r1', 't1', 'm1', '👍', 'user-1', 'human', 'Sam', 'added', 5, 'o', 1);",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let kept: (String, String, String, i64) = conn
+            .query_row(
+                "SELECT reaction_id, author_agent_id, state, at_ms FROM chat_reactions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, ("r1".into(), String::new(), "added".into(), 5));
+        for (reaction_id, kind, agent_id) in [
+            ("r2", "agent", ""),
+            ("r3", "agent", "codex"),
+            ("r4", "agent", "terminal"),
+        ] {
+            conn.execute(
+                "INSERT INTO chat_reactions \
+                     (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                      author_agent_id, author_display_name, state, at_ms, origin_id, origin_seq) \
+                 VALUES ('ws', ?1, 't1', 'm1', '👍', 'user-1', ?2, ?3, 'Agent', 'added', 6, 'o', 2)",
+                rusqlite::params![reaction_id, kind, agent_id],
+            )
+            .expect("each agent's reaction beside the person's");
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO chat_reactions \
+                     (workspace_id, reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                      author_agent_id, author_display_name, state, at_ms, origin_id, origin_seq) \
+                 VALUES ('ws', 'r5', 't1', 'm2', '👍', 'user-1', 'human', 'codex', 'Sam', 'added', 6, 'o', 3)",
+                [],
+            )
+            .is_err(),
+            "only an agent's reaction names an agent"
+        );
+    }
+
     #[test]
     fn agent_ids_migration_gives_existing_agent_work_to_the_default_agent() {
         let dir = tempdir();

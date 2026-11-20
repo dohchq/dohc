@@ -692,7 +692,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.channels.ensureGeneral",
-        json!({ "channelId": "channel-general", "nowMs": 11 }),
+        json!({ "nowMs": 11 }),
     )
     .await;
     let general_wire = call(
@@ -720,7 +720,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &mut id,
         "chats.channels.ensureAgent",
         json!({
-            "channelId": "channel-agent",
             "agentId": "default",
             "name": "My agent",
             "nowMs": 12,
@@ -728,6 +727,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(agent["kind"], json!("agent"));
+    assert_eq!(agent["channelId"], json!("channel-agent-default"));
 
     let channels = call(
         &transport,
@@ -2484,7 +2484,6 @@ async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
         &mut id,
         "chats.channels.ensureAgent",
         json!({
-            "channelId": "terminal-chat",
             "agentId": "terminal",
             "name": "Terminal",
             "nowMs": 2,
@@ -2497,7 +2496,7 @@ async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
         &mut id,
         "chats.threads.start",
         json!({
-            "channelId": "terminal-chat", "threadId": "dm", "messageId": "first",
+            "channelId": "channel-agent-terminal", "threadId": "dm", "messageId": "first",
             "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
             "body": "first", "nowMs": 10,
         }),
@@ -2543,7 +2542,7 @@ async fn an_agent_you_run_pages_its_persons_requests_under_its_own_reader() {
                 "threadId": "dm",
                 "messageId": "first",
                 "channel": {
-                    "id": "terminal-chat",
+                    "id": "channel-agent-terminal",
                     "kind": "agent",
                     "name": "Terminal",
                     "slug": "my-agent-terminal",

@@ -1164,6 +1164,7 @@ export function registerChatsIpcHandlers<
       authorId: reaction.author.authorId,
       authorKind: reaction.author.kind,
       authorDisplayName: reaction.author.displayName,
+      ...(reaction.author.agentId ? { authorAgentId: reaction.author.agentId } : {}),
     };
   }
 

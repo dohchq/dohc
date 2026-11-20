@@ -36,6 +36,7 @@ pub async fn retire_captured_path(
             input,
             root,
             false,
+            None,
             Arc::new(()),
             leases,
             faults,

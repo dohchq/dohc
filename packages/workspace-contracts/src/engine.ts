@@ -1096,11 +1096,14 @@ type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
 // authorUserId later fills authorId. displayName/kind render the
-// reaction ("<User>" / "<Agent>") without a separate lookup.
+// reaction ("<User>" / "<Agent>") without a separate lookup. A person and
+// each of their agents react on their own: an agent's reaction has kind
+// "agent" and, when it has one, the id of the agent in Settings.
 interface ChatReactionAuthor {
   authorId: string;
   kind: "human" | "agent";
   displayName: string;
+  agentId?: string;
 }
 
 // One reaction cell as the store returns it. `listReactions` returns only
@@ -1274,9 +1277,9 @@ export interface LinkedChatStore {
     wakeAgentIds?: string[];
     title?: string;
     lane?: ChatThreadLane;
-    // Desktop's own thread in an agent DM, an automation's wake thread or the
-    // runner self-test, stays its own post instead of joining the DM's
-    // conversation. People, the CLI and MCP never set it.
+    // Desktop's own thread in an agent DM, such as an automation's wake thread,
+    // stays its own post instead of joining the DM's conversation. People, the
+    // CLI and MCP never set it.
     ownThread?: boolean;
     author: ChatWriteActor;
     // The sender's opaque relay user id (Better Auth user id). Caller supplies
@@ -1439,7 +1442,8 @@ export interface LinkedChatStore {
   listMentionsForHandle(workspaceId: WorkspaceId, handle: string): Promise<ChatMentionRecord[]>;
   // --- Reactions ----------------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
-  // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
+  // set-membership CRDT cell keyed by (messageId, emoji, author.authorId,
+  // author.kind, author.agentId):
   // LWW-per-cell by (atMs, remove-wins tie), so the op is commutative and
   // re-applying is a no-op. It always persists locally. It journals a
   // `chat.reaction.set` op only when replicationAuthorId is present and
