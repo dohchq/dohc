@@ -57,6 +57,41 @@ describe("keyboard navigation", () => {
     expect(marked()).toBe(false);
   });
 
+  it("brings back the mark at Escape after Enter or Space opened something from a marked control", () => {
+    for (const name of ["Enter", " "]) {
+      press();
+      key("Tab");
+      key(name);
+      expect(marked(), name).toBe(false);
+      key("Escape");
+      expect(marked(), `${name}, then Escape`).toBe(true);
+    }
+    // Enter again inside the dialog still closes back to the ring.
+    key("Enter");
+    key("Enter");
+    key("Escape");
+    expect(marked()).toBe(true);
+  });
+
+  it("leaves the mark off at Escape when Enter came after a pointer press or another key", () => {
+    press();
+    key("Enter");
+    key("Escape");
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    press();
+    key("Escape");
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    key("a");
+    key("Escape");
+    expect(marked()).toBe(false);
+  });
+
   it("keeps the mark as it was for Delete, Backspace and Cmd+Backspace", () => {
     const keys: [string, string, KeyboardEventInit][] = [
       ["Delete", "Delete", {}],

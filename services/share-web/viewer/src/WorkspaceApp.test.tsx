@@ -1875,6 +1875,8 @@ describe("deleting a Group message", () => {
     expect(line.querySelector(".icon circle")).not.toBeNull();
     expect(groupPanel().textContent).toContain("Plans start here");
     expect(deletes()).toHaveLength(0);
+    // Its Delete has gone, so focus goes to the messages rather than the page.
+    expect(document.activeElement).toBe(groupPanel().querySelector(".chat-scroller"));
   });
 
   it("offers Delete on every message to the owner or an admin, and Cancel deletes nothing", async () => {
@@ -1890,6 +1892,13 @@ describe("deleting a Group message", () => {
     expect(dialog()).toBeNull();
     expect(posts.filter((post) => "deleted" in post)).toEqual([]);
     expect(text()).toContain("Plans start here");
+    // Escape hands focus back to the Delete that opened the dialog.
+    deletes()[1]!.focus();
+    await act(async () => deletes()[1]!.click());
+    expect(document.activeElement).toBe(inDialog("Delete"));
+    await act(async () => dialog()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(deletes()[1]);
   });
 
   it("removes a message another person deleted when the follow brings the delete", async () => {

@@ -8,7 +8,9 @@
 // shows where Enter acts (ui/ConfirmDialog.tsx).
 // Escape, Delete and Backspace keep the mark as it was, with or without a
 // modifier: they close or remove what has focus, so closing a menu or a tab
-// from the keyboard shows where focus went. With an empty set, focus never
+// from the keyboard shows where focus went. Escape also brings back a mark
+// that Enter or Space took away, so closing a dialog opened from a marked
+// control shows that control's ring again. With an empty set, focus never
 // shows.
 const NAVIGATION_KEYS = new Set([
   "Tab",
@@ -42,11 +44,28 @@ export function initKeyboardNavigation(root: Element = document.documentElement)
     if (root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE) !== on)
       root.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, on);
   };
+  // Enter or Space took the mark away, and Escape may bring it back.
+  let restore = false;
   const onKeyDown = (event: KeyboardEvent) => {
-    if (UNCHANGED_KEYS.has(event.key)) return;
-    mark(NAVIGATION_KEYS.has(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey);
+    if (UNCHANGED_KEYS.has(event.key)) {
+      if (event.key === "Escape" && restore) {
+        restore = false;
+        mark(true);
+      }
+      return;
+    }
+    const navigating =
+      NAVIGATION_KEYS.has(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey;
+    restore =
+      !navigating &&
+      (event.key === "Enter" || event.key === " ") &&
+      (restore || root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE));
+    mark(navigating);
   };
-  const onPointerDown = () => mark(false);
+  const onPointerDown = () => {
+    restore = false;
+    mark(false);
+  };
   // Capture on the window runs before any handler can stop the event or
   // move focus.
   window.addEventListener("keydown", onKeyDown, true);

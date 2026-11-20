@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { renderSafeMarkdown } from "./markdown";
 import { readDraft, writeDraft } from "./drafts";
@@ -209,18 +210,31 @@ function DeleteMessage({
   removing,
   cancel,
   confirm,
+  fallback,
 }: {
   removing: Removing;
   cancel(): void;
   confirm(): void;
+  // Takes focus when the control that opened the dialog has gone.
+  fallback: RefObject<HTMLElement | null>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     confirmButton = useRef<HTMLButtonElement>(null);
+  // The control that opened the dialog, read before the dialog takes focus.
+  const [opener] = useState(() => document.activeElement);
   useEffect(() => {
-    dialog.current?.showModal();
+    const current = dialog.current;
+    current?.showModal();
     confirmButton.current?.focus();
-    return () => dialog.current?.close();
-  }, []);
+    return () => {
+      current?.close();
+      // React removes the dialog before this runs, so the browser can't hand
+      // focus back. A deleted message has lost its Delete.
+      if (opener instanceof HTMLElement && opener !== document.body && opener.isConnected)
+        opener.focus();
+      else fallback.current?.focus();
+    };
+  }, [opener, fallback]);
   const deleting = removing.phase === "deleting",
     failed = removing.phase === "failed";
   // The confirm was disabled while the delete ran; Try again takes focus back.
@@ -815,7 +829,6 @@ export function ChannelView({
       if (controller.signal.aborted) return;
       receive([], false, [deleted]);
       setRemoving(null);
-      scroller.current?.focus();
     } catch (error) {
       if (controller.signal.aborted) return;
       const status = error instanceof NamedChatError ? error.status : 0;
@@ -1096,6 +1109,7 @@ export function ChannelView({
           removing={removing}
           cancel={() => setRemoving(null)}
           confirm={() => void confirmRemove()}
+          fallback={scroller}
         />
       )}
     </section>
