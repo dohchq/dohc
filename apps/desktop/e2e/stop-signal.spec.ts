@@ -30,7 +30,7 @@ function isRunning(pid: number): boolean {
 // ends, records no crash, and the engine stops with the edit in its store. The
 // next start opens the workspace with the edit and shows no notice.
 async function stopsCleanlyOn(
-  send: (pids: { group: number; main: number }) => void,
+  send: (pids: { group: number; main: number; engines: number[] }) => void,
   { finishesQuit }: { finishesQuit: boolean },
 ): Promise<void> {
   const temp = await createTempWorkspace();
@@ -61,7 +61,7 @@ async function stopsCleanlyOn(
     // The launched process leads dohc's group. Electron's main process is named by its own pid.
     const main = await app.evaluate(() => process.pid);
     const outputEnded = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
-    send({ group: pid, main });
+    send({ group: pid, main, engines });
     expect(await within(outputEnded, 60_000), "dohc ends on the signal").toBe(true);
     const report = await readFile(join(temp.homeDir, "crash-report.json"), "utf8").catch(
       () => null,
@@ -140,6 +140,17 @@ test.describe("stop signals", () => {
       await stopsCleanlyOn(({ group }) => process.kill(-group, signal), { finishesQuit });
     });
   }
+
+  test("SIGTERM sent to every dohc process, as a system shutdown does, ends dohc and keeps the saved work", async () => {
+    test.setTimeout(180_000);
+    await stopsCleanlyOn(
+      ({ group, engines }) => {
+        for (const engine of engines) process.kill(engine, "SIGTERM");
+        process.kill(-group, "SIGTERM");
+      },
+      { finishesQuit: false },
+    );
+  });
 
   test("SIGTERM sent to dohc alone quits dohc, stops the engine and keeps the saved work", async () => {
     test.setTimeout(180_000);
