@@ -548,8 +548,8 @@ export function useRelayShareLinkPane(props: {
   content: ReactNode;
   // The people who joined through these links, for the dialog's People list.
   people: ReactNode;
-  // The shares whose people `people` lists.
-  peopleShareIds: ReadonlySet<string>;
+  // The grants of the people `people` lists.
+  peopleGrantIds: ReadonlySet<string>;
   close: () => void;
 } {
   const agentDisconnects = useLinkAgentDisconnects(props.shareRemovals, props.disconnectedAgents);
@@ -2314,29 +2314,33 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  function renderPeople(group: LinkGroup) {
+  function peopleOf(group: LinkGroup) {
     const displayedDependentIds = new Set(
       group.rows.flatMap((row) =>
         row.status === "active" ? row.dependents.map((dependent) => dependent.grantId) : [],
       ),
     );
-    const independentPeople = props.people.answered(
-      independentGrants
-        .filter(
-          (grant) =>
-            grant.shareId === group.shareId &&
-            grant.recipientUserId !== null &&
-            !displayedDependentIds.has(grant.grantId),
-        )
-        .map(personOfGrant),
-    );
-    const linkedPeople = group.rows.flatMap((row) =>
-      row.status === "active"
-        ? row.dependents
-            .filter((dependent) => dependent.recipientUserId !== null)
-            .map((dependent) => ({ row, dependent }))
-        : [],
-    );
+    return {
+      independent: independentGrants.filter(
+        (grant) =>
+          grant.shareId === group.shareId &&
+          grant.recipientUserId !== null &&
+          !displayedDependentIds.has(grant.grantId),
+      ),
+      linked: group.rows.flatMap((row) =>
+        row.status === "active"
+          ? row.dependents
+              .filter((dependent) => dependent.recipientUserId !== null)
+              .map((dependent) => ({ row, dependent }))
+          : [],
+      ),
+    };
+  }
+
+  function renderPeople(group: LinkGroup) {
+    const drawn = peopleOf(group);
+    const independentPeople = props.people.answered(drawn.independent.map(personOfGrant));
+    const linkedPeople = drawn.linked;
     if (linkedPeople.length === 0 && independentPeople.length === 0) return null;
     const scopeGeneration = linkScopeGeneration.current;
     const refused = (actionKey: string) =>
@@ -2900,12 +2904,21 @@ export function useRelayShareLinkPane(props: {
     setMoreOpen(!moreOpen);
   }
 
-  const peopleGroups = props.visible
-    ? visibleLinkGroups
-        .filter((group) => eligibleShareIds.has(group.shareId))
-        .map((group) => renderPeople(group))
-        .filter((group) => group !== null)
+  const groupsWithPeople = props.visible
+    ? visibleLinkGroups.filter((group) => eligibleShareIds.has(group.shareId))
     : [];
+  const peopleGroups = groupsWithPeople
+    .map((group) => renderPeople(group))
+    .filter((group) => group !== null);
+  const peopleGrantIds = new Set(
+    groupsWithPeople.flatMap((group) => {
+      const drawn = peopleOf(group);
+      return [
+        ...drawn.independent.map((grant) => grant.grantId),
+        ...drawn.linked.map(({ dependent }) => dependent.grantId),
+      ];
+    }),
+  );
 
   return {
     content: props.visible ? (
@@ -3008,7 +3021,7 @@ export function useRelayShareLinkPane(props: {
       </section>
     ) : null,
     people: peopleGroups.length > 0 ? <>{peopleGroups}</> : null,
-    peopleShareIds: eligibleShareIds,
+    peopleGrantIds,
     close: closeDialog,
   };
 }

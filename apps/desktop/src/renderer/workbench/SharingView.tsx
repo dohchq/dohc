@@ -33,7 +33,7 @@ import {
   ShareAccessMenu,
   ShareOptionsMenu,
 } from "../shareAccess";
-import { accessNoticeIdentity } from "../sharePerson";
+import { accessNoticeIdentity, nextAccessChange } from "../sharePerson";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
@@ -819,7 +819,6 @@ function PersonRow(props: {
 }) {
   const { grant, actions } = props;
   const name = recipientOf(grant);
-  const nameId = useId();
   const access = levelNow(grant, props.change);
   const changing = changingAccess(props.change);
   const writing = writeUnderWay(props.change, props.busy);
@@ -922,7 +921,7 @@ function PersonRow(props: {
           },
         ]
       : []),
-    ...(copyable(grant) && browserLink
+    ...(copyable(grant) && invitation
       ? [
           {
             id: "copy-code",
@@ -955,7 +954,6 @@ function PersonRow(props: {
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="flex min-w-0 flex-wrap items-center justify-end">
             <span
-              id={nameId}
               data-testid="sharing-person-name"
               title={name}
               className="min-w-0 flex-1 basis-16 truncate pr-1 text-[13px] leading-7 text-ink"
@@ -966,7 +964,6 @@ function PersonRow(props: {
               <span className="-mr-2 flex shrink-0">
                 <ShareAccessMenu
                   label={`Access for ${name}`}
-                  describedBy={nameId}
                   access={shareAccessOf(access)}
                   options={options}
                   actions={menuActions}
@@ -2383,6 +2380,7 @@ export function SharingView(props: {
     closeConfirm(accessConfirmKey(grant.grantId));
     const token = epoch.current();
     const identity = accessNoticeIdentity(grant.grantId);
+    const turn = nextAccessChange(grant.grantId);
     changeAccess(grant.grantId, (held) => ({ asked: access, answered: held?.answered ?? null }));
     try {
       const changed = await bridge().retuneRelayShareGrant({
@@ -2391,6 +2389,7 @@ export function SharingView(props: {
         grantId: grant.grantId,
         access,
       });
+      turn.succeeded();
       clearNotice?.(identity);
       if (!epoch.isCurrent(token)) return;
       changeAccess(grant.grantId, (held) => ({

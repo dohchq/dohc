@@ -34,21 +34,23 @@ export type SharedPerson = {
 export type ChangedAccess = { access: ShareAccess; generation: number };
 
 export const isShareAccess = (access: string | null): access is ShareAccess =>
-  access !== null && access in SHARE_ACCESS_WORDS;
+  access !== null && Object.hasOwn(SHARE_ACCESS_WORDS, access);
 
 export type ListedPerson = SharedPerson & { generation: number | null };
 export type AnsweredPerson = SharedPerson & { generation: number };
 type LocalPerson = { person: AnsweredPerson; listed: boolean };
 type LocalPeople = {
   scope: string;
+  visit: number;
   byGrant: Readonly<Record<string, LocalPerson>>;
   retired: readonly string[];
 };
 
 const NO_LOCAL_PEOPLE: Readonly<Record<string, LocalPerson>> = {};
 const NO_RETIRED: readonly string[] = [];
-const noLocalPeople = (scope: string): LocalPeople => ({
+const noLocalPeople = (scope: string, visit = 0): LocalPeople => ({
   scope,
+  visit,
   byGrant: NO_LOCAL_PEOPLE,
   retired: NO_RETIRED,
 });
@@ -67,11 +69,13 @@ const isVersioned = (person: ListedPerson | undefined): person is AnsweredPerson
  */
 export function useLocalPeople(scope: string, listing: readonly ListedPerson[], read: boolean) {
   const [held, setHeld] = useState(() => noLocalPeople(scope));
-  const { byGrant, retired } = held.scope === scope ? held : noLocalPeople(scope);
+  const visiting = held.scope === scope ? held : noLocalPeople(scope, held.visit + 1);
+  if (visiting !== held) setHeld(visiting);
+  const { byGrant, retired, visit } = visiting;
   const newestListing = useRef(listing);
   newestListing.current = listing;
-  const scopeNow = useRef(scope);
-  scopeNow.current = scope;
+  const visitNow = useRef(visit);
+  visitNow.current = visit;
   useEffect(() => {
     if (!read) return;
     setHeld((current) => {
@@ -89,7 +93,7 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[], 
         }
       }
       return changed
-        ? { scope, byGrant: kept, retired: [...current.retired, ...leftOut] }
+        ? { ...current, byGrant: kept, retired: [...current.retired, ...leftOut] }
         : current;
     });
   }, [listing, read, scope]);
@@ -125,19 +129,22 @@ export function useLocalPeople(scope: string, listing: readonly ListedPerson[], 
     /** The grants that ended: retired here, or left out by a list that had held them. */
     retired,
     keep(person: AnsweredPerson) {
-      if (scopeNow.current !== scope) return;
+      if (visitNow.current !== visit) return;
       const listed = newestListing.current.some((known) => known.grantId === person.grantId);
       setHeld((current) => {
-        const now = current.scope === scope ? current : noLocalPeople(scope);
-        return { ...now, byGrant: { ...now.byGrant, [person.grantId]: { person, listed } } };
+        if (current.visit !== visit) return current;
+        return {
+          ...current,
+          byGrant: { ...current.byGrant, [person.grantId]: { person, listed } },
+        };
       });
     },
     retire(grantId: string) {
-      if (scopeNow.current !== scope) return;
-      setHeld((current) => {
-        const now = current.scope === scope ? current : noLocalPeople(scope);
+      if (visitNow.current !== visit) return;
+      setHeld((now) => {
+        if (now.visit !== visit) return now;
         return {
-          scope,
+          ...now,
           byGrant: Object.fromEntries(
             Object.entries(now.byGrant).filter(([kept]) => kept !== grantId),
           ),
@@ -198,21 +205,43 @@ export function PersonRemovalError(props: {
 
 export const accessNoticeIdentity = (grantId: string) => `share-access:${grantId}`;
 
+let accessChanges = 0;
+const newestAccessSuccess = new Map<string, number>();
+
+/**
+ * Takes a turn for one change of a grant's level, wherever it is made.
+ * `succeeded` records that it worked. `superseded` says a change of the same
+ * grant that began later has worked since, so this one's failure is no longer
+ * worth a Try again.
+ */
+export function nextAccessChange(grantId: string) {
+  const turn = ++accessChanges;
+  return {
+    succeeded: () => {
+      newestAccessSuccess.set(grantId, Math.max(turn, newestAccessSuccess.get(grantId) ?? 0));
+    },
+    superseded: () => (newestAccessSuccess.get(grantId) ?? 0) > turn,
+  };
+}
+
 function reportAccessChangeFailure(change: {
   workspaceId: string;
   person: Pick<SharedPerson, "shareId" | "grantId" | "name">;
   access: ShareAccess;
   cause: unknown;
+  turn: ReturnType<typeof nextAccessChange>;
   report: ReportShellFailure;
   clear: ((identity: string) => void) | null;
 }): void {
   const { workspaceId, person, access, report, clear } = change;
+  if (change.turn.superseded()) return;
   const identity = accessNoticeIdentity(person.grantId);
   report({
     message: `dohc could not change ${person.name}'s access.`,
     cause: change.cause,
     identity,
-    retry: () =>
+    retry: () => {
+      const turn = nextAccessChange(person.grantId);
       void bridge()
         .retuneRelayShareGrant({
           workspaceId,
@@ -221,9 +250,13 @@ function reportAccessChangeFailure(change: {
           access,
         })
         .then(
-          () => clear?.(identity),
-          (cause: unknown) => reportAccessChangeFailure({ ...change, cause }),
-        ),
+          () => {
+            turn.succeeded();
+            clear?.(identity);
+          },
+          (cause: unknown) => reportAccessChangeFailure({ ...change, cause, turn }),
+        );
+    },
   });
 }
 
@@ -270,6 +303,7 @@ export function PersonAccessRow(props: {
     if (busy || access === person.access) return;
     const token = requests.next();
     const current = () => requests.isCurrent(token);
+    const turn = nextAccessChange(person.grantId);
     setError(null);
     setAsked(access);
     setChanging(true);
@@ -282,6 +316,7 @@ export function PersonAccessRow(props: {
         grantId: person.grantId,
         access,
       });
+      turn.succeeded();
       clearNotice?.(accessNoticeIdentity(person.grantId));
       if (!current()) return;
       props.onAccessChanged({ access: changed.access, generation: changed.generation });
@@ -296,6 +331,7 @@ export function PersonAccessRow(props: {
           person,
           access,
           cause,
+          turn,
           report,
           clear: clearNotice,
         });

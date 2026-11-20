@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { useLocalPeople, type AnsweredPerson, type ListedPerson } from "./sharePerson";
+import {
+  isShareAccess,
+  useLocalPeople,
+  type AnsweredPerson,
+  type ListedPerson,
+} from "./sharePerson";
 
 const ana: AnsweredPerson = {
   shareId: "share-ana",
@@ -37,6 +42,33 @@ it("retires a person a list held once a list that was read leaves them out", () 
   hook.rerender({ scope: "plan", listing: [], read: true });
 
   expect(hook.result.current.retired).toEqual(["ana"]);
+});
+
+it("starts again when Share comes back to a selection, and drops the first visit's late answers", () => {
+  const hook = people("plan", [], true);
+  const firstVisit = hook.result.current;
+  act(() => firstVisit.keep(ana));
+  expect(hook.result.current.unlisted([])).toEqual([ana]);
+
+  hook.rerender({ scope: "budget", listing: [], read: true });
+  hook.rerender({ scope: "plan", listing: [], read: true });
+  expect(hook.result.current.unlisted([])).toEqual([]);
+
+  act(() => firstVisit.retire("ana"));
+  act(() => firstVisit.keep({ ...ana, access: "edit", generation: 2 }));
+  expect(hook.result.current.retired).toEqual([]);
+  expect(hook.result.current.unlisted([])).toEqual([]);
+
+  act(() => hook.result.current.keep(ana));
+  expect(hook.result.current.unlisted([])).toEqual([ana]);
+});
+
+it("takes only the three levels as a share's access, and no inherited name", () => {
+  expect(["view", "comment", "edit"].every(isShareAccess)).toBe(true);
+  expect(
+    ["toString", "constructor", "hasOwnProperty", "__proto__", "owner", ""].some(isShareAccess),
+  ).toBe(false);
+  expect(isShareAccess(null)).toBe(false);
 });
 
 it("drops an answer that arrives for a selection Share has left", () => {

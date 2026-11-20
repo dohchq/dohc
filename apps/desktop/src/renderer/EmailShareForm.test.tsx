@@ -92,6 +92,26 @@ describe("automation steps a share would stop", () => {
     expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(1);
   });
 
+  it("checks again before inviting the same address at Edit a second time", async () => {
+    bridgeMock.automationShareImpact.mockResolvedValue({ stops: [spend] });
+    const user = userEvent.setup();
+    render(<EmailShareForm workspaceId="ws-1" target={{ kind: "paths", paths: ["Trip"] }} />);
+    await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
+    await chooseAccess(user, "edit");
+    await user.click(screen.getByTestId("share-create"));
+    await screen.findByTestId("share-automation-warning");
+    await user.click(screen.getByTestId("share-create"));
+    await waitFor(() => expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce());
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledOnce();
+
+    await user.type(screen.getByTestId("share-email"), "ana@dohc.test");
+    expect(screen.queryByTestId("share-automation-warning")).toBeNull();
+    await user.click(screen.getByTestId("share-create"));
+    await screen.findByTestId("share-automation-warning");
+    expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
+  });
+
   it("drops a check still running when the share on screen changes, so Invite never makes the old one", async () => {
     const user = userEvent.setup();
     let answer: (value: { stops: [] }) => void = () => undefined;

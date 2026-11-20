@@ -1119,6 +1119,24 @@ describe("copying a share's code or invitation", () => {
     );
   });
 
+  it("offers one copy for a person who can edit on a server that makes no browser invitations", async () => {
+    answerWith({ granted: answer("granted", { rows: ROWS }) });
+    render(<CopyView />);
+    const [named] = await people(await rowOf("share-1"));
+    await waitFor(() => expect(bridgeMock.getShareCopyDetails).toHaveBeenCalledOnce());
+    await act(async () => {});
+    const menu = await personMenu(named!);
+    expect(
+      within(menu)
+        .getAllByRole("menuitem", { hidden: true })
+        .map((row) => row.textContent),
+    ).toEqual(["Copy invitation", "Remove access"]);
+    await userEvent.click(menuItem(menu, "Copy invitation"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("dohc-share:share-1:https://relay.test"),
+    );
+  });
+
   it("copies by the level the relay confirmed for a person, not by an older listed one", async () => {
     answerWith({ granted: answer("granted", { rows: [granted()] }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
@@ -2193,9 +2211,11 @@ describe("Shared by me, by what is shared", () => {
     expect(name.getAttribute("title")).toBe(address);
     expect(name.className.split(" ")).toContain("truncate");
     expect(name.className).not.toContain("break-all");
-    const trigger = within(person!).getByRole("button", { name: "Can edit" });
-    expect(trigger.getAttribute("aria-describedby")).toBe(name.id);
-    expect(name.id).not.toBe("");
+    const trigger = within(person!).getByRole("button", {
+      name: `Access for ${address}: Can edit`,
+    });
+    expect(trigger.textContent).toBe("Can edit");
+    expect(trigger.getAttribute("aria-describedby")).toBeNull();
   });
 
   it("keeps ended and damaged shares out of the list, in Ended", async () => {

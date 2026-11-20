@@ -62,6 +62,7 @@ type InvitationClick = {
 function useInvitation(
   person: Pick<ListedPerson, "shareId" | "grantId">,
   onEnded: () => void,
+  onCodeOnly: () => void,
 ): (part: InvitationPart) => Promise<string | null> {
   const { shareId, grantId } = person;
   const asked = useRef<InvitationClick | null>(null);
@@ -78,12 +79,14 @@ function useInvitation(
         if (details.status === "ended") {
           onEnded();
           click?.resolve(null);
-        } else
+        } else {
+          if (!details.browserInvitationUrl) onCodeOnly();
           click?.resolve(
             click.part === "code"
               ? details.shareCode
               : (details.browserInvitationUrl ?? details.shareCode),
           );
+        }
         return details.status;
       } catch (error) {
         if (!signal.aborted) click?.reject(error);
@@ -263,7 +266,7 @@ export function RelayShareDialog(props: {
     held ? [] : [...local.answered(invited.people), ...local.unlisted(invited.people)]
   ).filter(
     (person) =>
-      !linkPane.peopleShareIds.has(person.shareId) && !removedNow.includes(person.grantId),
+      !linkPane.peopleGrantIds.has(person.grantId) && !removedNow.includes(person.grantId),
   );
   const invitedFailed = !held && invited.failed;
 
@@ -373,6 +376,16 @@ export function RelayShareDialog(props: {
                         local.retire(person.grantId);
                         void loadInvited();
                       }}
+                      onCodeOnly={() => {
+                        if (scopeNow.current !== scope) return;
+                        if (!invitationCanBeBrowserLink(person.access, props.target)) return;
+                        setInvitedByCodeOnly((current) => {
+                          const known = grantsIn(current, scope);
+                          return known.includes(person.grantId)
+                            ? current
+                            : { scope, grantIds: [...known, person.grantId] };
+                        });
+                      }}
                       onAccessChanged={(changed) => {
                         local.keep({ ...person, ...changed });
                         reloadInvited();
@@ -423,12 +436,13 @@ function InvitedPersonRow(props: {
   shareRemovals: ShareRemovalNotices | undefined;
   shareCodeToo: boolean;
   onEnded: () => void;
+  onCodeOnly: () => void;
   onAccessChanged: (changed: ChangedAccess) => void;
   onRemoved: () => void;
   onRestored: () => void;
 }) {
   const { person, workspaceId, shareRemovals } = props;
-  const invitation = useInvitation(person, props.onEnded);
+  const invitation = useInvitation(person, props.onEnded, props.onCodeOnly);
   const invitationCopy = useCopy({
     getText: () => invitation("invitation"),
     words: { copied: "Invitation copied" },

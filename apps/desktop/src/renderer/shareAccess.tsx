@@ -29,7 +29,6 @@ export function ShareAccessMenu(props: {
   testId: string;
   width?: number;
   align?: "start" | "end";
-  describedBy?: string;
   onPick: (access: ShareAccess) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -57,7 +56,7 @@ export function ShareAccessMenu(props: {
           {...trigger}
           type="button"
           data-testid={props.testId}
-          aria-describedby={props.describedBy}
+          aria-label={`${props.label}: ${SHARE_ACCESS_WORDS[props.access]}`}
           disabled={props.disabled}
           className={ACCESS_TRIGGER}
         >

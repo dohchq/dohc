@@ -480,7 +480,7 @@ async function openSeparateLink(user: User) {
 }
 
 async function chooseLinkAccess(user: User, row: HTMLElement, name: AccessWords) {
-  await user.click(within(row).getByRole("button", { name: /^Can (view|comment|edit)$/ }));
+  await user.click(within(row).getByRole("button", { name: /: Can (view|comment|edit)$/ }));
   await user.click(await screen.findByRole("menuitemradio", { name, hidden: true }));
 }
 
@@ -515,9 +515,11 @@ async function addLinkWith(user: User, group: HTMLElement, name: AccessWords) {
 // An active, readable link: its access opens a menu, and its ••• menu ends
 // with Reset link and End link.
 async function expectActiveLinkControls(user: User, row: HTMLElement, access: AccessWords) {
-  expect(within(row).getByRole("button", { name: access }).getAttribute("aria-haspopup")).toBe(
-    "menu",
-  );
+  expect(
+    within(row)
+      .getByRole("button", { name: new RegExp(`: ${access}$`) })
+      .getAttribute("aria-haspopup"),
+  ).toBe("menu");
   expect((await linkOptions(user, row)).slice(-2)).toEqual(["Reset link", "End link"]);
 }
 
@@ -534,7 +536,7 @@ async function openOwnerComments(user: User, shareId: string) {
 // A person's other actions sit in their row's one menu, under the levels.
 async function choosePersonOption(user: User, row: HTMLElement, name: string) {
   await user.click(
-    within(row).getByRole("button", { name: /^(Can (view|comment|edit)$|Options for )/ }),
+    within(row).getByRole("button", { name: /(: Can (view|comment|edit)$|^Options for )/ }),
   );
   await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
 }
@@ -2631,7 +2633,7 @@ codex mcp login dohc-share`);
     await toggleComments(user, named);
     const namedGrant = await screen.findByTestId("share-independent-named-root");
     expect(
-      within(namedGrant).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+      within(namedGrant).getByRole("button", { name: /: Can (view|comment|edit)$/ }),
     ).toBeTruthy();
     expect(screen.queryByTestId("share-independent-pending-root")).toBeNull();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
@@ -2975,7 +2977,7 @@ codex mcp login dohc-share`);
 
     await openMoreLinks(user);
     const viewRow = await screen.findByTestId("share-link-row-view-link");
-    expect(within(viewRow).getByRole("button", { name: "Can view" })).toBeTruthy();
+    expect(within(viewRow).getByRole("button", { name: /: Can view$/ })).toBeTruthy();
     await chooseLinkAccess(user, viewRow, "Can comment");
     let confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
@@ -2985,7 +2987,7 @@ codex mcp login dohc-share`);
     await user.click(within(confirmation).getByRole("button", { name: "Cancel" }));
 
     const commentRow = screen.getByTestId("share-link-row-comment-link");
-    expect(within(commentRow).getByRole("button", { name: "Can comment" })).toBeTruthy();
+    expect(within(commentRow).getByRole("button", { name: /: Can comment$/ })).toBeTruthy();
     await chooseLinkAccess(user, commentRow, "Can view");
     confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
@@ -3026,7 +3028,7 @@ codex mcp login dohc-share`);
     expect(bridgeCalls()).toBe(callsBefore);
 
     const trigger = within(screen.getByTestId("share-link-row-view-link")).getByRole("button", {
-      name: "Can view",
+      name: "Access for this link: Can view",
     });
     trigger.focus();
     await user.keyboard("{ArrowDown}");
@@ -3441,7 +3443,7 @@ codex mcp login dohc-share`);
 
     const group = await screen.findByTestId("share-link-group-share-keyboard");
     const row = within(group).getByTestId("share-link-row-keyboard-link");
-    const retune = within(row).getByRole("button", { name: "Can view" });
+    const retune = within(row).getByRole("button", { name: /: Can view$/ });
     retune.focus();
     expect(document.activeElement).toBe(retune);
     await user.keyboard("{Enter}");
@@ -3481,9 +3483,11 @@ codex mcp login dohc-share`);
     await user.keyboard("{Enter}");
     expect(submit.textContent).toBe("Adding link…");
     expect(submit.disabled).toBe(true);
-    expect(within(row).getByRole("button", { name: "Can view" }).hasAttribute("disabled")).toBe(
-      true,
-    );
+    expect(
+      within(row)
+        .getByRole("button", { name: /: Can view$/ })
+        .hasAttribute("disabled"),
+    ).toBe(true);
     await user.click(options);
     for (const name of ["Add another link", "New separate link", "Reset link", "End link"]) {
       const item = screen.getByRole("menuitem", { name, hidden: true });
@@ -5429,7 +5433,7 @@ codex mcp login dohc-share`);
     const independent = await screen.findByTestId("share-independent-independent-1");
     expect(screen.queryByText("private inventory failure")).toBeNull();
     expect(
-      within(independent).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+      within(independent).getByRole("button", { name: /: Can (view|comment|edit)$/ }),
     ).toBeTruthy();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
   });
@@ -5484,7 +5488,7 @@ codex mcp login dohc-share`);
     expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
     const independent = await screen.findByTestId("share-independent-dependent-1");
     expect(
-      within(independent).getByRole("button", { name: /^Can (view|comment|edit)$/ }),
+      within(independent).getByRole("button", { name: /: Can (view|comment|edit)$/ }),
     ).toBeTruthy();
     expect(screen.queryByTestId("share-dependent-dependent-1")).toBeNull();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
@@ -6342,7 +6346,7 @@ codex mcp login dohc-share`);
     expect(document.activeElement).toBe(options);
     // At rest a link shows its level, Copy link when there is a link to copy, the menu and the disclosure.
     for (const name of [
-      "Can view",
+      "Access for this link: Can view",
       "Link options",
       "Link details",
       "Pause link comments",
@@ -6630,6 +6634,105 @@ describe("people and links on one surface", () => {
     await act(async () => {});
     expect(screen.queryByTestId("share-invited-ben")).toBeNull();
     expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(reads);
+  });
+
+  it("lists an invitation nobody has used on a share that also has a link, and removes it", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-linked" })],
+      independentGrants: [
+        independentGrant("joined", { shareId: "share-linked", recipientEmail: "joined@dohc.test" }),
+        independentGrant("pending", {
+          shareId: "share-linked",
+          recipientUserId: null,
+          recipientEmail: "new@dohc.test",
+        }),
+      ],
+    });
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([
+        invitedRow("joined", "joined@dohc.test", { shareId: "share-linked" }),
+        invitedRow("pending", "new@dohc.test", {
+          shareId: "share-linked",
+          recipientUserId: null,
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    const people = await screen.findByTestId("share-people");
+    await within(people).findByTestId("share-independent-joined");
+    const pending = await within(people).findByTestId("share-invited-pending");
+    expect(pending.textContent).toContain("new@dohc.testInvited, not signed in yet");
+    expect(within(people).queryByTestId("share-invited-joined")).toBeNull();
+    expect(within(people).queryByTestId("share-independent-pending")).toBeNull();
+
+    await choosePersonOption(user, pending, "Remove access");
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      shareId: "share-linked",
+      grantId: "pending",
+    });
+  });
+
+  it("stops offering Copy share code once a lookup shows this server makes no browser invitation", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test", { access: "edit" })]),
+    );
+    bridgeMock.getShareCopyDetails.mockResolvedValue({
+      status: "active",
+      shareCode: "dohc-share:share-ana:http://r.test",
+    });
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    expect(screen.getByTestId("share-copy-code-ana")).toBeTruthy();
+    await user.click(screen.getByTestId("share-copy-invitation-ana"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("dohc-share:share-ana:http://r.test"),
+    );
+
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    expect(screen.getByTestId("share-copy-invitation-ana")).toBeTruthy();
+    expect(screen.queryByTestId("share-copy-code-ana")).toBeNull();
+  });
+
+  it("files no notice for a cut-off level change that fails after a newer change to that person worked", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    const older = controllable<never>();
+    bridgeMock.retuneRelayShareGrant.mockReturnValueOnce(older.promise).mockResolvedValueOnce({
+      grantId: "ana",
+      access: "edit",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    const dialog = () => (
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+      </ShellErrorReporter.Provider>
+    );
+    const first = render(dialog());
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    await waitFor(() => expect(bridgeMock.retuneRelayShareGrant).toHaveBeenCalledOnce());
+    first.unmount();
+
+    render(dialog());
+    await user.click(await screen.findByTestId("share-person-access-ana"));
+    await user.click(await screen.findByTestId("share-person-access-ana-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("share-person-access-ana").textContent).toBe("Can edit"),
+    );
+
+    await act(async () => older.reject(new Error("relay down")));
+    expect(report).not.toHaveBeenCalled();
   });
 
   it("hands a removal refused after Share closed to the shell, with Try again", async () => {
@@ -7091,6 +7194,12 @@ describe("people and links on one surface", () => {
   it("lists the people invited to exactly this selection, each with one menu", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("link-1", { shareId: "share-linked" })],
+      independentGrants: [
+        independentGrant("on-link-share", {
+          shareId: "share-linked",
+          recipientEmail: "linked@dohc.test",
+        }),
+      ],
     });
     bridgeMock.listSharingAccess
       .mockResolvedValueOnce(
@@ -7150,7 +7259,21 @@ describe("people and links on one surface", () => {
       within(people)
         .getAllByRole("button")
         .map((button) => button.getAttribute("data-testid")),
-    ).toEqual(["share-person-access-ana", "share-person-access-ben"]);
+    ).toEqual([
+      "share-person-access-ana",
+      "share-person-access-ben",
+      "share-person-access-on-link-share",
+    ]);
+    expect(
+      within(people)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual([
+      "Access for ana@dohc.test: Can edit",
+      "Access for ben@dohc.test: Can view",
+      "Access for linked@dohc.test: Can comment",
+    ]);
+    expect(within(people).getByTestId("share-person-access-ana").textContent).toBe("Can edit");
     await user.click(within(people).getByTestId("share-person-access-ben"));
     expect(
       screen

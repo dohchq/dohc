@@ -116,6 +116,7 @@ export function EmailShareForm(props: {
     const token = requests.next();
     const current = () => requests.isCurrent(token);
     const asked = { ...share };
+    const warned = automations.noteFor(asked)?.warning != null;
     setError(null);
     if (automations.asks(asked)) {
       setPhase("checking");
@@ -136,6 +137,7 @@ export function EmailShareForm(props: {
       };
       const result = await bridge().createRelayShare(payload);
       if (current()) {
+        if (warned) automations.forget();
         setInvited({ result, share: asked });
         setEmail("");
         props.onCreated?.({
