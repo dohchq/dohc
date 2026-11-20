@@ -6,7 +6,7 @@ import { WorkLinkText } from "./workReferences";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
 import { PostFeedList } from "./PostFeedList";
-import { BookmarkAction, ThreadMessages } from "./ChatPosts";
+import { BookmarkAction, ThreadMessages, threadHeading } from "./ChatPosts";
 import { useMessageDelete } from "./messageDelete";
 import {
   ActionButton,
@@ -4147,16 +4147,7 @@ export function ChatsView(props: {
         onKeyDownCapture={onKeyDownCapture}
       >
         <ChatHeader
-          label={
-            // When a Group post's first message is deleted, the engine titles
-            // the post "New chat" unless someone named it. The header names
-            // its Group instead.
-            nav.channel.kind === "channel" &&
-            nav.thread.openingMessage?.deletedAtMs !== undefined &&
-            nav.thread.title === "New chat"
-              ? `Post in #${nav.channel.name}`
-              : nav.thread.title
-          }
+          label={threadHeading(nav)}
           testId="chats-thread"
           onBack={goBack}
           action={

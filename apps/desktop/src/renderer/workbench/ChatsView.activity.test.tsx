@@ -671,6 +671,8 @@ describe("ChatsView live activity refresh", () => {
       expect(screen.getByTestId("chats-thread-title").textContent).toBe("Post in #general"),
     );
     expect(screen.getByTestId("chats-thread-post-title").className).toBe("sr-only");
+    // A screen reader's heading names the post as the header does.
+    expect(screen.getByTestId("chats-thread-post-title").textContent).toBe("Post in #general");
     expect(screen.getByTestId("chats-thread-view").textContent).not.toContain(words);
 
     // Its card shows the author, the time and the deleted line, with no title.

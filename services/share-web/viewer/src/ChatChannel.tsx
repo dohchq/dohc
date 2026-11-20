@@ -293,8 +293,8 @@ function DeleteMessage({
             {/* The dialog covers the message, so it shows what it deletes. */}
             {quote ? <p className="chat-delete-quote">{quote}</p> : null}
             <p>
-              This deletes it for everyone it syncs to, and you can't undo it. People who already
-              read it may keep a copy.
+              Everyone loses it, and you can't undo this. People who already read it may keep a
+              copy.
             </p>
           </div>
         </div>

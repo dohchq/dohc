@@ -456,6 +456,16 @@ export function RunDetails(props: { run: ChatRunRecord; reported?: ChatReportedA
   );
 }
 
+// When a Group post's first message is deleted, the engine titles the post
+// "New chat" unless someone named it. The post is then named for its Group.
+export function threadHeading(nav: Extract<ChatsNav, { level: "thread" }>): string {
+  return nav.channel.kind === "channel" &&
+    nav.thread.openingMessage?.deletedAtMs !== undefined &&
+    nav.thread.title === "New chat"
+    ? `Post in #${nav.channel.name}`
+    : nav.thread.title;
+}
+
 export function BookmarkAction(props: {
   active: boolean;
   busy?: boolean;
@@ -1026,7 +1036,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                   : "sr-only"
               }
             >
-              <WorkLinkText text={nav.thread.title} interactive={hasExplicitTitle} />
+              <WorkLinkText text={threadHeading(nav)} interactive={hasExplicitTitle} />
             </h1>
             {/* A plain post is its body; the title above repeats it for the
               heading only. */}

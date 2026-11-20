@@ -210,8 +210,7 @@ function MessageDeleteDialog(props: {
             </p>
           ) : null}
           <p className="m-0">
-            This deletes it for everyone it syncs to, and you can't undo it. People who already read
-            it may keep a copy.
+            Everyone loses it, and you can't undo this. People who already read it may keep a copy.
           </p>
         </ConfirmationHead>
         {failure ? (
