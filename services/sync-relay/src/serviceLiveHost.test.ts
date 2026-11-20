@@ -8165,6 +8165,52 @@ it("keeps an opened note first for the next pass when its visit could do nothing
   releaseEditor();
 });
 
+it("goes on with the pass's visits after an opened note's catch-up fails, with passes held", async () => {
+  const polls = heldPolls(),
+    o = await idleHost({ polls, maxDocumentsPerPass: 3 });
+  const third = { ...o.other, objectId: "third-object", path: "docs/third.md" },
+    fourth = { ...o.other, objectId: "fourth-object", path: "docs/fourth.md" };
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate),
+    through = activate.getMockImplementation()!;
+  let openedNoteCatchUpFails = false;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    const [target, , , catchUp] = args;
+    if (target.path === o.sibling.path && openedNoteCatchUpFails) {
+      const failed = Promise.reject(new Error("Hosted pull failed."));
+      catchUp?.set(target.workspaceId, failed);
+      return failed.then(() => ({ kind: "pending" as const, reason: "held" }));
+    }
+    return [third.path, fourth.path].includes(target.path)
+      ? Promise.resolve({ kind: "pending" as const, reason: "held" })
+      : through.apply(this, args);
+  });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.update({
+    workspaces: o.workspaces,
+    documents: [o.sibling, o.other, third, fourth],
+    ...stay,
+  });
+  const calls = activate.mock.calls;
+  const paused = () => vi.waitFor(() => expect(polls.paused()).toBe(true));
+  const releaseEditor = o.editors.acquire(o.sibling);
+  await o.host.captureNative(o.binding());
+  await paused();
+  await polls.run(o.f);
+
+  openedNoteCatchUpFails = true;
+  const ready = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
+  await paused();
+  const from = calls.length;
+  await o.host.captureNative(o.binding());
+  await paused();
+  if (calls.length === from) await polls.run(o.f);
+  ready.mockRestore();
+  const visited = calls.slice(from, from + 3).map(([target]) => target.path);
+  expect(visited[0]).toBe(o.sibling.path);
+  expect(visited).toHaveLength(3);
+  releaseEditor();
+});
+
 // An editor's open waits for its turn behind the host's own work. The relay holds that open's place in its
 // connection limits until the open returns.
 // Proves: an open whose caller gives up while it waits behind an unload in the engine fails at once, before the

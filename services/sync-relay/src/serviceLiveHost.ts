@@ -3283,8 +3283,10 @@ export async function startServiceLiveHost(options: {
                   );
                   timed.outcome = outcome.kind === "done" ? "done" : "pending";
                   noteWaiting(target, outcome);
-                  const visitCouldDoNothing =
-                    outcome.kind !== "done" && (await catchUp.get(target.workspaceId))?.hasMore;
+                  const catchUpOfThisPass = await catchUp
+                    .get(target.workspaceId)
+                    ?.catch(() => undefined);
+                  const visitCouldDoNothing = outcome.kind !== "done" && catchUpOfThisPass?.hasMore;
                   if (spentMark && visitCouldDoNothing) wanted.add(targetKey(target));
                 } finally {
                   timed.ms = Math.round(now() - startedAt);
