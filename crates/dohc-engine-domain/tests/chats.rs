@@ -1781,6 +1781,124 @@ fn a_workspace_without_an_account_keeps_local_counts_and_journals_no_mark() {
     assert_eq!(thread_read_ops(&store), 0);
 }
 
+/// Threads read up to a local count, read by the account when `account`, and
+/// then each with messages the relay deleted.
+fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        agent_thread(&mut chats, "only", &[("o0", 10)]);
+        agent_thread(&mut chats, "first", &[("f0", 20), ("f1", 30)]);
+        agent_thread(&mut chats, "read", &[("r0", 40), ("r1", 50)]);
+        agent_thread(&mut chats, "partly", &[("p0", 60), ("p1", 70)]);
+        for (thread_id, messages) in [("file-a", ["fa0", "fa1"].as_slice()), ("file-b", &["fb0"])] {
+            chats
+                .create_thread(
+                    &CreateFileThread {
+                        workspace_id: WS.to_owned(),
+                        thread_id: thread_id.to_owned(),
+                        title: "About a file".to_owned(),
+                        linked_object_id: format!("object-{thread_id}"),
+                        linked_path_hint: None,
+                        now_ms: 5,
+                        request_id: thread_id.to_owned(),
+                    },
+                    &NO_FAULTS,
+                )
+                .expect("file thread");
+            for (at, message_id) in messages.iter().enumerate() {
+                chats
+                    .send_message(
+                        &agent_message(thread_id, message_id, 80 + at as i64),
+                        &NO_FAULTS,
+                    )
+                    .expect("file message");
+            }
+        }
+    }
+    set_local_count(&store, "read", 2);
+    set_local_count(&store, "partly", 1);
+    if account {
+        assert!(
+            LinkedChatStore::new(&mut store)
+                .seed_account_reads(WS, ACCOUNT, true, 100, &NO_FAULTS)
+                .expect("seed")
+        );
+    }
+    for (thread_id, message_id) in [
+        ("only", "o0"),
+        ("first", "f0"),
+        ("read", "r1"),
+        ("partly", "p0"),
+        ("file-a", "fa0"),
+        ("file-b", "fb0"),
+    ] {
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread_id, message_id, 200)
+            })
+            .expect("delete");
+    }
+    (scratch, store)
+}
+
+#[test]
+fn a_deleted_message_is_never_unread() {
+    for account in [false, true] {
+        let (_scratch, mut store) = store_with_deleted_messages(account);
+        let chats = LinkedChatStore::new(&mut store);
+        let mut threads: Vec<_> = chats
+            .list_channel_threads(WS, "gen-1", None, 10)
+            .expect("summaries")
+            .into_iter()
+            .map(|summary| {
+                (
+                    summary.thread.thread_id,
+                    summary.message_count,
+                    summary.last_read_sequence,
+                    summary.unread_count,
+                )
+            })
+            .collect();
+        threads.sort();
+        // A read place still counts every message, so the New divider and a
+        // mark up to the count keep their arrival-order indexes.
+        assert_eq!(
+            threads,
+            vec![
+                ("first".to_owned(), 2, 0, 1),
+                ("only".to_owned(), 1, 0, 0),
+                ("partly".to_owned(), 2, 1, 1),
+                ("read".to_owned(), 2, 2, 0),
+            ],
+            "account: {account}; counting a deleted message as unread -> a badge leads to a post with nothing to read"
+        );
+        let group = chats
+            .list_channels(WS)
+            .expect("channels")
+            .into_iter()
+            .find(|summary| summary.channel.channel_id == "gen-1")
+            .map(|summary| summary.unread_count);
+        assert_eq!(group, Some(2), "account: {account}");
+        let files: Vec<_> = chats
+            .list_unread_file_threads(WS, None, 10)
+            .expect("file threads")
+            .into_iter()
+            .map(|row| (row.thread_id, row.message_count, row.last_read_sequence))
+            .collect();
+        assert_eq!(
+            files,
+            vec![("file-a".to_owned(), 2, 0)],
+            "account: {account}"
+        );
+    }
+}
+
 #[test]
 fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -289,8 +289,13 @@ export function ChatLane(props: {
         if (!isCurrent()) return;
         const laneMessages = laneRead?.messages ?? [];
         if (lane && paintedRevision.current?.threadId !== lane.id) {
+          // The read place counts deleted messages; the unread count doesn't.
           const firstUnread =
-            lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
+            lane.unreadCount > 0
+              ? laneMessages
+                  .slice(lane.lastReadSequence)
+                  .find((message) => message.deletedAtMs === undefined)
+              : undefined;
           setFirstUnreadMessageId(firstUnread?.id ?? null);
         }
         const next: PaintedLane = {
