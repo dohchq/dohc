@@ -299,7 +299,7 @@ export function RelayShareDialog(props: {
       <div
         ref={bodyRef}
         data-testid="share-dialog-body"
-        className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "px-5 pb-5 pt-4" : "-mx-5 -my-1 px-5 py-1"}`}
+        className={`relative min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "px-5 pb-5 pt-4" : "-mx-5 -my-1 px-5 py-1"}`}
       >
         <div ref={contentRef} className="flex flex-col gap-3">
           <ShareSetup
