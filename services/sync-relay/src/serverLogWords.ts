@@ -61,6 +61,13 @@ export function engineRefusalWords(
   return `${word} (code ${wire}${shownMethod})`;
 }
 
+/** A note's short name for the server log: the first eight characters after its id's `object-`, or null for no id. */
+export function shortObjectId(objectId: string): string;
+export function shortObjectId(objectId: string | undefined): string | null;
+export function shortObjectId(objectId: string | undefined): string | null {
+  return objectId === undefined ? null : objectId.replace(/^object-/u, "").slice(0, 8);
+}
+
 /** A relay failure whose message holds only fixed words, code words and ids, so the server log shows it whole. */
 export class ServerLogError extends Error {
   override readonly name = "ServerLogError";

@@ -2,7 +2,7 @@ import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { EngineClientError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import { expect, it } from "vitest";
 import { RelayError } from "./errors";
-import { childStderrLog, serverLogLine, ServerLogError } from "./serverLogWords";
+import { childStderrLog, serverLogLine, ServerLogError, shortObjectId } from "./serverLogWords";
 
 const secret = "notes/secret plan.md";
 const refusal = (code: string, message: string, method?: string) =>
@@ -140,4 +140,13 @@ it("child stderr reporting that fails does not throw", () => {
     throw new Error("closed");
   });
   expect(() => forward(`${secret}\n`)).not.toThrow();
+});
+
+it("names a note by the eight characters after its id's prefix, so two notes' names differ", () => {
+  const first = `object-${"3".padEnd(64, "a")}`,
+    second = `object-${"3".padEnd(64, "b")}`;
+  expect(shortObjectId(first)).toBe("3aaaaaaa");
+  expect(shortObjectId(second)).toBe("3bbbbbbb");
+  expect(shortObjectId("no-prefix-here")).toBe("no-prefi");
+  expect(shortObjectId(undefined)).toBeNull();
 });
