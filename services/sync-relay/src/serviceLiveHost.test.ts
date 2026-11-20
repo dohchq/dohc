@@ -8040,10 +8040,11 @@ it("visits first, in the next pass, a note opened before the host had made it re
   const ready = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
   await paused();
   const from = calls.length;
-  await o.host.captureNative(o.binding());
+  const opening = o.host.captureNative(o.binding());
   // The open asks for a pass. One that has not started by itself is run here.
   await paused();
   if (calls.length === from) await polls.run(o.f);
+  await opening;
   ready.mockRestore();
   expect(calls[from]![0].path).toBe(o.sibling.path);
   release();
@@ -8097,9 +8098,10 @@ it("visits a note opened during a pass right after the visit under way, in that 
   const passUnderWay = polls.run(o.f);
   await thirdUnderWay;
   const ready = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
-  await o.host.captureNative(o.binding());
+  const opening = o.host.captureNative(o.binding());
   releaseThird();
   await passUnderWay;
+  await opening;
   ready.mockRestore();
   expect(calls.slice(from, from + 2).map(([target]) => target.path)).toEqual([
     third.path,
@@ -8149,9 +8151,10 @@ it("keeps an opened note first for the next pass when its visit could do nothing
   const ready = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
   await paused();
   const from = calls.length;
-  await o.host.captureNative(o.binding());
+  const opening = o.host.captureNative(o.binding());
   await paused();
   if (calls.length === from) await polls.run(o.f);
+  await opening;
   expect(calls[from]![0].path).toBe(o.sibling.path);
   expect((await pass())[0]).toBe(o.sibling.path);
 
@@ -8201,14 +8204,156 @@ it("goes on with the pass's visits after an opened note's catch-up fails, with p
   const ready = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
   await paused();
   const from = calls.length;
-  await o.host.captureNative(o.binding());
+  const opening = o.host.captureNative(o.binding());
   await paused();
   if (calls.length === from) await polls.run(o.f);
+  await opening;
   ready.mockRestore();
   const visited = calls.slice(from, from + 3).map(([target]) => target.path);
   expect(visited[0]).toBe(o.sibling.path);
   expect(visited).toHaveLength(3);
   releaseEditor();
+});
+
+const openWaitsBegun = () =>
+  vi.mocked(globalThis.setTimeout).mock.calls.filter(([, delay]) => delay === 10_000).length;
+
+it("does not hold an open that reloads a sleeping note, though the reload leaves it not ready, with passes held", async () => {
+  const polls = heldPolls(),
+    clock = manualClock(),
+    o = await idleHost({ polls, clock });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.hold(true);
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const asleep = vi.spyOn(ServiceActivationDriver.prototype, "dormant");
+  const notReady = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
+  const waitsForAVisit = openWaitsBegun();
+  const release = o.editors.acquire(o.sibling);
+  await o.host.captureNative(o.binding()).catch(() => undefined);
+  expect(asleep.mock.results[0]?.value).toBe(true);
+  expect(openWaitsBegun()).toBe(waitsForAVisit);
+  notReady.mockRestore();
+  release();
+});
+
+async function hostWithAPassStoppedInItsFirstVisit() {
+  const polls = heldPolls(),
+    o = await idleHost({ polls, maxDocumentsPerPass: 2 });
+  const third = { ...o.other, objectId: "third-object", path: "docs/third.md" },
+    fourth = { ...o.other, objectId: "fourth-object", path: "docs/fourth.md" };
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate),
+    through = activate.getMockImplementation()!;
+  let holdThird: { entered: () => void; released: Promise<void> } | undefined;
+  let openedNoteVisits = 0;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    const waiting = { kind: "pending" as const, reason: "held" };
+    if (args[0].path === o.sibling.path) openedNoteVisits++;
+    if (args[0].path === third.path && holdThird) {
+      holdThird.entered();
+      return holdThird.released.then(() => waiting);
+    }
+    return [third.path, fourth.path].includes(args[0].path)
+      ? Promise.resolve(waiting)
+      : through.apply(this, args);
+  });
+  await o.host.update({
+    workspaces: o.workspaces,
+    documents: [o.sibling, o.other, third, fourth],
+    ...stay,
+  });
+  const calls = activate.mock.calls;
+  const paused = () => vi.waitFor(() => expect(polls.paused()).toBe(true));
+  const pass = async () => {
+    await paused();
+    const from = calls.length;
+    await polls.run(o.f);
+    return calls.slice(from).map(([target]) => target.path);
+  };
+  const releaseEditor = o.editors.acquire(o.sibling);
+  await o.host.captureNative(o.binding());
+  let last = await pass();
+  for (let tries = 0; tries < 6 && last.at(-1) !== o.other.path; tries++) last = await pass();
+  expect(last.at(-1)).toBe(o.other.path);
+
+  let enteredThird!: () => void, releaseThird!: () => void;
+  const thirdUnderWay = new Promise<void>((resolve) => (enteredThird = resolve));
+  holdThird = {
+    entered: enteredThird,
+    released: new Promise<void>((resolve) => (releaseThird = resolve)),
+  };
+  await paused();
+  openedNoteVisits = 0;
+  const passUnderWay = polls.run(o.f);
+  await thirdUnderWay;
+  const notReady = vi.spyOn(ServiceActivationDriver.prototype, "completed").mockReturnValue(false);
+  const consumer = ServiceActivationDriver.prototype.consumer;
+  const refusesUntilVisited = vi
+    .spyOn(ServiceActivationDriver.prototype, "consumer")
+    .mockImplementation(function (this: ServiceActivationDriver, document) {
+      if (openedNoteVisits === 0 && document.objectId === o.sibling.objectId)
+        throw new Error("Service document activation is incomplete.");
+      return consumer.call(this, document);
+    });
+  return {
+    o,
+    openedNoteVisits: () => openedNoteVisits,
+    async finishPass() {
+      releaseThird();
+      await passUnderWay;
+      notReady.mockRestore();
+      refusesUntilVisited.mockRestore();
+      releaseEditor();
+    },
+  };
+}
+
+it("holds an open of a note the host has not made ready until the pass has visited the note, with passes held", async () => {
+  const { o, openedNoteVisits, finishPass } = await hostWithAPassStoppedInItsFirstVisit();
+  let visitsWhenOpened = -1;
+  const opening = o.host.captureNative(o.binding()).then((native) => {
+    visitsWhenOpened = openedNoteVisits();
+    return native;
+  });
+  await finishPass();
+  await expect(opening).resolves.toMatchObject({ coordinate: o.host.coordinate });
+  expect(visitsWhenOpened).toBe(1);
+});
+
+it("lets an open waiting for its note's visit go at once when its caller gives up, with passes held", async () => {
+  const { o, openedNoteVisits, finishPass } = await hostWithAPassStoppedInItsFirstVisit();
+  const gone = new AbortController(),
+    left = new Error("The browser left.");
+  const waitsForAVisit = openWaitsBegun();
+  const abandoned = o.host.captureNative(o.binding(), gone.signal).catch((error: unknown) => error);
+  try {
+    await vi.waitFor(() => expect(openWaitsBegun()).toBe(waitsForAVisit + 1));
+    gone.abort(left);
+    await expect(abandoned).resolves.toBe(left);
+    expect(openedNoteVisits()).toBe(0);
+  } finally {
+    await finishPass();
+  }
+});
+
+it("ends an open's wait for its note's visit at once when the note's owner stops it, with passes held", async () => {
+  const { o, openedNoteVisits, finishPass } = await hostWithAPassStoppedInItsFirstVisit();
+  let visitsWhenOpenEnded = -1;
+  const recordVisits = () => {
+    visitsWhenOpenEnded = openedNoteVisits();
+  };
+  const waitsForAVisit = openWaitsBegun();
+  const opening = o.host.captureNative(o.binding()).then(recordVisits, recordVisits);
+  let stopping: Promise<unknown> | undefined;
+  try {
+    await vi.waitFor(() => expect(openWaitsBegun()).toBe(waitsForAVisit + 1));
+    stopping = o.host.stop(o.document, () => "stopped" as const).catch(() => undefined);
+    await vi.waitFor(() => expect(visitsWhenOpenEnded).toBe(0), { timeout: 2_000 });
+  } finally {
+    await finishPass();
+  }
+  await Promise.all([opening, stopping]);
 });
 
 // An editor's open waits for its turn behind the host's own work. The relay holds that open's place in its
