@@ -41,6 +41,7 @@ export type ShareGrantTransitionRoute =
   | { route: "share-link-rotate"; shareId: string; grantId: string }
   | { route: "share-link-retune"; shareId: string; grantId: string }
   | { route: "share-grant-promote"; shareId: string; grantId: string }
+  | { route: "share-grant-retune"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-undo"; shareId: string }
   | { route: "share-revoke"; shareId: string };
@@ -116,6 +117,7 @@ export function createShareGrantRoutes(
     | "workspaceIsOwnedBy"
     | "rotateLinkGrant"
     | "retuneShareGrant"
+    | "retuneNamedShareGrant"
     | "promoteShareGrant"
     | "revokeShareGrant"
     | "revokeShare"
@@ -406,6 +408,58 @@ export function createShareGrantRoutes(
       });
     }
     if (route.route === "share-grant-promote") throw relayError("method_not_allowed");
+
+    if (route.route === "share-grant-retune" && request.method === "POST") {
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "workspaceId" && key !== "access")) {
+        throw badRequest("request body contains an unknown field");
+      }
+      const workspaceId = parseWorkspaceId(input.workspaceId);
+      const accessValidation = validateFileShareAccess(input.access);
+      if (!accessValidation.ok) {
+        throw relayError(accessValidation.code, accessValidation.message);
+      }
+      const access = accessValidation.access;
+      const owned = () => {
+        const share = storage.getShare(route.shareId);
+        const grant = storage.getShareGrant(route.grantId);
+        if (
+          !share ||
+          share.granterUserId !== actor.userId ||
+          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+          !grant ||
+          grant.shareId !== share.shareId ||
+          grant.principalKind === "link" ||
+          grant.status !== "active" ||
+          grant.revokedAtMs !== null
+        ) {
+          throw notFound();
+        }
+        requireShareWorkspace(share, workspaceId);
+        return { share, grant };
+      };
+      const { share, grant } = owned();
+      const result = await endAccess(
+        share.shareId,
+        grant.access === "edit" && access !== "edit",
+        () =>
+          storage.retuneNamedShareGrant({
+            shareId: share.shareId,
+            grantId: grant.grantId,
+            access,
+            changedAtMs: nowMs(),
+            guard: () => void owned(),
+          }),
+      );
+      if (!result.ok) throw notFound();
+      discussionActivity.wake(share.shareId);
+      discussionActivity.wakeLog(share.workspaceId);
+      return jsonResponse({
+        ok: true,
+        ...namedGrantTransitionBody(result.grant),
+      });
+    }
+    if (route.route === "share-grant-retune") throw relayError("method_not_allowed");
 
     if (route.route === "share-grant-revoke" && request.method === "POST") {
       const input = await readJsonObject(request);

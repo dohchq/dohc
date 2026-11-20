@@ -399,6 +399,68 @@ export function retuneShareGrant(
   });
 }
 
+export function retuneNamedShareGrant(
+  storage: StorageContext,
+  input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    guard: () => void;
+  },
+): ShareGrantTransitionResult {
+  return storage.tx(() => {
+    input.guard();
+    const grant = storage.getShareGrant(input.grantId);
+    const share = grant && storage.getShare(grant.shareId);
+    const selector = share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null;
+    const levels = selector && !("kind" in selector) ? linkAccessLevels(selector) : [];
+    const from = grant ? levels.indexOf(grant.access) : -1;
+    const to = levels.indexOf(input.access);
+    if (
+      !grant ||
+      !share ||
+      grant.shareId !== input.shareId ||
+      grant.principalKind === "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null ||
+      from < 0 ||
+      to < 0 ||
+      from === to
+    ) {
+      return { ok: false };
+    }
+    if (grant.parentGrantId !== null) {
+      const parent = storage.getShareGrant(grant.parentGrantId);
+      if (
+        !parent ||
+        parent.shareId !== grant.shareId ||
+        parent.principalKind !== "link" ||
+        parent.status !== "active" ||
+        parent.revokedAtMs !== null ||
+        to > levels.indexOf(parent.access)
+      ) {
+        return { ok: false };
+      }
+    }
+    const narrowing = to < from;
+    const covered = narrowing ? serviceHostEnrollmentsCoveredByShare(storage, grant.shareId) : [];
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
+           SET access = ?, generation = generation + 1
+           WHERE grant_id = ? AND status = 'active'`,
+      )
+      .run(input.access, grant.grantId);
+    if (narrowing) {
+      nextShareDiscussionRevision(storage, grant.shareId);
+      retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
+    }
+    forgetReplicaCurrentViewCaches(storage, share.workspaceId);
+    return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  });
+}
+
 type RevokeShareGrantInput = {
   shareId: string;
   grantId: string;

@@ -262,6 +262,7 @@ describe("main inventories", () => {
       "desktop:pause-relay-share-discussion",
       "desktop:resume-relay-share-discussion",
       "desktop:promote-relay-share-grant",
+      "desktop:retune-relay-share-grant",
       "desktop:revoke-relay-share-grant",
     ];
     const ownerRows = rows.filter((row) => channels.includes(row.channel));
