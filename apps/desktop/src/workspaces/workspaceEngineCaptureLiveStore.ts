@@ -686,6 +686,7 @@ export function createCaptureLiveStores(
   ): Promise<T> {
     return await sessions.run(workspace, async (binding) => await operation(adapterFor(binding)), {
       retryTransportErrors: true,
+      endRetriesAtQuit: true,
     });
   }
 

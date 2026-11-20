@@ -131,6 +131,12 @@ export interface EngineWorkspaceRunOptions {
    * a relay request.
    */
   abandonAtQuit?: boolean;
+  /**
+   * At quit, a failed attempt is final: the run stops retrying instead of
+   * waiting for a replacement daemon. An attempt already running finishes.
+   * Enable only for work with no accepted write to protect, such as a read.
+   */
+  endRetriesAtQuit?: boolean;
 }
 
 export interface EngineWorkspaceSessionsOptions {
@@ -717,6 +723,7 @@ export class EngineWorkspaceSessions {
             attempt,
             lastAttempt: attempt >= maxAttempts,
             backoff: retryAfterTransport,
+            endsAtQuit: options.endRetriesAtQuit === true,
             cause: error,
           });
           if (next === "stop") throw error;
@@ -998,6 +1005,7 @@ export class EngineWorkspaceSessions {
     delayMs?: number;
     // Ends the backoff early; the caller decides what that means.
     stop?: AbortSignal;
+    endsAtQuit?: boolean;
     cause: unknown;
   }): Promise<"retry" | "stop"> {
     const checkDeadline = (): void => {
@@ -1011,7 +1019,7 @@ export class EngineWorkspaceSessions {
     // attempt rather than spend the budget on a daemon that is not coming
     // back.
     //
-    // Only a bounded region. `beginShutdown` is a global flag, and its scope
+    // Only a bounded region or a read. `beginShutdown` is a global flag, and its scope
     // is the document open, which is safe to abandon because an opening
     // document is read-only and holds no edit. Work outside a region is the
     // opposite obligation: an already-open document retrying a journal write
@@ -1019,7 +1027,7 @@ export class EngineWorkspaceSessions {
     // retry discards the edit while `closeAllEngineYDocSessions` swallows the
     // failure. An open that cannot finish is abandoned; a write already
     // accepted is not.
-    const abandonable = this.activeBudget() !== undefined;
+    const abandonable = this.activeBudget() !== undefined || gate.endsAtQuit === true;
     if (this.shuttingDown && abandonable) {
       return "stop";
     }
@@ -1043,16 +1051,16 @@ export class EngineWorkspaceSessions {
       abandonable,
       gate.stop,
     );
-    // Same scope as before the wait: quit ends a bounded region's retries, and
-    // only a bounded region's.
-    if (this.shuttingDown && this.activeBudget() !== undefined) {
+    // Same scope as before the wait: quit ends the retries of a bounded region
+    // or a read, and only theirs.
+    if (this.shuttingDown && abandonable) {
       return "stop";
     }
     checkDeadline();
     return "retry";
   }
 
-  // `cancellable` marks a wait that quit may end: an abandonable region's.
+  // `cancellable` marks a wait that quit may end: an abandonable region's or a read's.
   // A wait for work that must not be abandoned runs its full backoff, because
   // the daemon it is waiting for is the one that has to answer.
   // `stop` ends any wait early.
@@ -1342,6 +1350,7 @@ export class EngineWorkspaceSessions {
           // relaunching, or it requested backoff itself. Anything else
           // re-opens at once, as it always has.
           backoff: daemonMayBeRelaunching(error) || requiresBackoff(error),
+          endsAtQuit: options.endRetriesAtQuit === true,
           cause: error,
         });
         if (next === "stop") break;
