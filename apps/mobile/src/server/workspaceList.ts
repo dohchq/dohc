@@ -103,12 +103,14 @@ export function createWorkspaceList(
         if (!reads.isLatest(request) || pending.size > 0) return;
         settle(workspaces, afterChanges && state.status === "ready" ? state.problem : null);
       },
-      (error: unknown) => {
-        const problem = shownProblem(error);
-        if (!reads.isLatest(request) || problem === null) return;
-        set(state.status === "ready" ? { ...state, problem } : { status: "failed", problem });
-      },
+      (error: unknown) => failed(request, error),
     );
+  }
+
+  function failed(request: number, error: unknown) {
+    const problem = shownProblem(error);
+    if (!reads.isLatest(request) || problem === null) return;
+    set(state.status === "ready" ? { ...state, problem } : { status: "failed", problem });
   }
 
   return {
@@ -120,7 +122,10 @@ export function createWorkspaceList(
     reload: () => read(false),
     async fresh() {
       const request = reads.next();
-      const workspaces = await listWorkspaces(signIn.client);
+      const workspaces = await listWorkspaces(signIn.client).catch((error: unknown) => {
+        failed(request, error);
+        throw error;
+      });
       if (reads.isLatest(request) && pending.size === 0) settle(workspaces, null);
       return state.status === "ready" ? state.workspaces : workspaces;
     },

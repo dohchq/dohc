@@ -376,6 +376,20 @@ describe("a tapped alert", () => {
     open.stop();
   });
 
+  it("shows the list's failure when a tap's read fails after the first read started", async () => {
+    const { server, signIn } = tapping();
+    const first = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => first.promise);
+    const workspaces = createWorkspaceList(signIn);
+    workspaces.reload();
+    server.on("GET", "/sync/account/workspaces", "offline");
+    expect(await openTap(signIn, data, () => 4, workspaces)).toBe("offline");
+    first.resolve({ status: 200, body: { ok: true, workspaces: list } });
+    await vi.waitFor(() =>
+      expect(workspaces.state()).toMatchObject({ status: "failed", problem: "offline" }),
+    );
+  });
+
   it("keeps a workspace hidden that the person hid while the tap was reading the list", async () => {
     const { server, signIn, listed } = tapping();
     server.on("GET", "/sync/account/workspaces", listed(list));
