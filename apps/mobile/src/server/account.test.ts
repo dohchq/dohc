@@ -726,6 +726,40 @@ describe("signing out", () => {
     expect(account.state().status).toBe("signed-in");
   });
 
+  it("shares one restore between two Try again presses, so a pending Sign out keeps its token until the server ends the session", async () => {
+    const { server, tokens } = setup();
+    const { pending, log } = memoryPending();
+    await pending.begin(SAVED);
+    const held = deferred<Answer>();
+    const kept: (StoredSignIn | null)[] = [];
+    server.on("GET", "/sync/account/sessions", () => {
+      kept.push(tokens.current());
+      return held.promise;
+    });
+    server.on("POST", "/sync/account/sessions/s-phone/revoke", () => {
+      kept.push(tokens.current());
+      return { status: 200, body: { ok: true, sessionId: "s-phone" } };
+    });
+    // As the keychain does, each read gives another object.
+    const load = async () => {
+      const found = await tokens.store.load();
+      return found && { ...found };
+    };
+    const account = createAccount({
+      store: { ...tokens.store, load },
+      fetch: server.fetch,
+      pendingSignOuts: pending,
+    });
+    await Promise.all([account.restore(), account.restore()]);
+    expect(account.state()).toMatchObject({ status: "signed-out", pendingSignOut: "running" });
+    await vi.waitFor(() => expect(kept).toHaveLength(1));
+    held.resolve(SESSIONS);
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+    expect(kept).toEqual([SAVED, SAVED]);
+    expect(tokens.log).toEqual(["clear"]);
+    expect(log).toEqual(["begin", "end"]);
+  });
+
   it("doesn't count a session list without this phone's session as ended", async () => {
     const { server, tokens, account } = setup();
     await account.restore();

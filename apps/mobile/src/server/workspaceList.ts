@@ -47,6 +47,8 @@ export interface WorkspaceListStore {
   state(): WorkspaceList;
   subscribe(listener: () => void): () => void;
   reload(): void;
+  /** Takes a list the server answered to another request, unless a Show on phone change waits. */
+  listed(workspaces: readonly AccountWorkspace[]): void;
   /** Changes Show on phone at once, then as the server answers. A workspace takes one change at a time. */
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
@@ -116,6 +118,11 @@ export function createWorkspaceList(
       return () => listeners.delete(listener);
     },
     reload: () => read(false),
+    listed(workspaces) {
+      if (pending.size > 0) return;
+      reads.next();
+      settle(workspaces, null);
+    },
     setShowOnPhone(workspaceId, showOnPhone) {
       if (state.status !== "ready" || pending.has(workspaceId)) return;
       const confirmed = state.workspaces.find(

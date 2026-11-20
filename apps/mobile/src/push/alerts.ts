@@ -8,6 +8,7 @@ import { isFields, listWorkspaces, type AccountWorkspace } from "../server/api";
 import type { SignIn } from "../server/account";
 import { ServerError, shownProblem } from "../server/client";
 import type { KeptStore } from "../server/keptStore";
+import type { WorkspaceListStore } from "../server/workspaceList";
 import { bindPushDevice, readPushDevice, removePushDevice } from "../server/pushDevices";
 import { readRegistration, saveRegistration } from "../server/pushRegistration";
 
@@ -63,6 +64,7 @@ export function createAlerts(options: {
   let fetching = false;
   let running = false;
   let again = false;
+  let choosing = false;
   const live = () => !controller.signal.aborted && signIn.isCurrent();
 
   function set(next: AlertsState) {
@@ -110,7 +112,7 @@ export function createAlerts(options: {
     } else if (status.enabled) {
       status = await removePushDevice(signIn.client, status.generation, controller.signal);
     }
-    if (!live()) return;
+    if (!live() || choosing) return;
     await save(wanted, status.available && status.enabled ? status.generation : null);
     ready({ on: want, denied: wanted && permission === "denied", problem: null });
   }
@@ -146,7 +148,8 @@ export function createAlerts(options: {
       if (requested !== null) {
         if (requested) await native.ask().catch(() => undefined);
         if (!live()) return;
-        await save(requested, generation);
+        choosing = true;
+        await save(requested, generation).finally(() => (choosing = false));
         if (!live()) return;
         requested = null;
       }
@@ -194,10 +197,16 @@ export function alertTarget(
   return entry?.showOnPhone && entry.canOpen ? { workspaceId, threadId, messageId } : null;
 }
 
-export async function openTap(signIn: SignIn, data: unknown, generation: () => number | null) {
+export async function openTap(
+  signIn: SignIn,
+  data: unknown,
+  generation: () => number | null,
+  list: Pick<WorkspaceListStore, "listed"> | null,
+) {
   try {
     const workspaces = await listWorkspaces(signIn.client);
     if (!signIn.isCurrent()) return null;
+    list?.listed(workspaces);
     return alertTarget(data, generation(), workspaces) ?? "home";
   } catch (error) {
     const problem = shownProblem(error);

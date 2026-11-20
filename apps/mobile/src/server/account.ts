@@ -297,6 +297,33 @@ export function createAccount(options: {
     await leave();
   }
 
+  let restoring: Promise<void> | null = null;
+  async function readSaved(): Promise<void> {
+    const current = { id: generation, signal: controller.signal };
+    const loaded = await write(() => store.load()).catch(() => null);
+    // A token this phone already signed out of is never signed in with again.
+    const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
+    const pending =
+      stored && options.pendingSignOuts
+        ? await options.pendingSignOuts.isPending(stored).catch(() => null)
+        : false;
+    if (current.id !== generation) {
+      // Signed out while the store was read: the token it held goes too.
+      if (stored) void endToken(stored.origin, stored.token);
+      return;
+    }
+    if (pending === null) return setState({ status: "unreadable" });
+    if (pending && stored) {
+      unrevoked = stored;
+      setState(signedOut(stored.origin, false));
+      void signOut().catch(() => undefined);
+      return;
+    }
+    setState(
+      stored ? { status: "signed-in", signIn: signedIn(stored, current) } : signedOut(null, false),
+    );
+  }
+
   return {
     state: () => state,
     subscribe(listener) {
@@ -304,32 +331,9 @@ export function createAccount(options: {
       return () => listeners.delete(listener);
     },
 
-    async restore() {
-      const current = { id: generation, signal: controller.signal };
-      const loaded = await write(() => store.load()).catch(() => null);
-      // A token this phone already signed out of is never signed in with again.
-      const stored = loaded && !unforgotten.has(loaded.token) ? loaded : null;
-      const pending =
-        stored && options.pendingSignOuts
-          ? await options.pendingSignOuts.isPending(stored).catch(() => null)
-          : false;
-      if (current.id !== generation) {
-        // Signed out while the store was read: the token it held goes too.
-        if (stored) void endToken(stored.origin, stored.token);
-        return;
-      }
-      if (pending === null) return setState({ status: "unreadable" });
-      if (pending && stored) {
-        unrevoked = stored;
-        setState(signedOut(stored.origin, false));
-        void signOut().catch(() => undefined);
-        return;
-      }
-      setState(
-        stored
-          ? { status: "signed-in", signIn: signedIn(stored, current) }
-          : signedOut(null, false),
-      );
+    restore() {
+      restoring ??= readSaved().finally(() => (restoring = null));
+      return restoring;
     },
 
     async signIn(origin, onCode) {

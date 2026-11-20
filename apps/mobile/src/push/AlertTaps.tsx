@@ -14,7 +14,7 @@ const none = { subscribe: () => () => undefined, state: () => UNAVAILABLE };
 export function AlertTaps() {
   const router = useRouter();
   const response = Notifications.useLastNotificationResponse();
-  const { state, alerts, chooseWorkspace } = useAccount();
+  const { state, alerts, workspaceList, chooseWorkspace } = useAccount();
   const signIn = state.status === "signed-in" ? state.signIn : null;
   const alertsState = useSyncExternalStore((alerts ?? none).subscribe, (alerts ?? none).state);
   const handled = useRef<string | null>(null);
@@ -28,28 +28,27 @@ export function AlertTaps() {
       return;
     handled.current = request.identifier;
     setFailed(null);
-    void openTap(signIn, request.content.data, () => alerts?.generation() ?? null).then(
-      (target) => {
-        if (handled.current !== request.identifier) return;
-        if (target === null || target === "offline" || target === "server-busy") {
-          handled.current = null;
-          return setFailed(target);
-        }
-        Notifications.clearLastNotificationResponse();
-        if (target === "home") return router.navigate("/home");
-        chooseWorkspace(target.workspaceId);
-        router.push({
-          pathname: "/chat/[id]",
-          params: {
-            id: target.threadId,
-            thread: "1",
-            workspace: target.workspaceId,
-            message: target.messageId,
-          },
-        });
-      },
-    );
-  }, [response, signIn, alerts, alertsState, attempt, chooseWorkspace, router]);
+    const generation = () => alerts?.generation() ?? null;
+    void openTap(signIn, request.content.data, generation, workspaceList).then((target) => {
+      if (handled.current !== request.identifier) return;
+      if (target === null || target === "offline" || target === "server-busy") {
+        handled.current = null;
+        return setFailed(target);
+      }
+      Notifications.clearLastNotificationResponse();
+      if (target === "home") return router.navigate("/home");
+      chooseWorkspace(target.workspaceId);
+      router.push({
+        pathname: "/chat/[id]",
+        params: {
+          id: target.threadId,
+          thread: "1",
+          workspace: target.workspaceId,
+          message: target.messageId,
+        },
+      });
+    });
+  }, [response, signIn, alerts, alertsState, attempt, workspaceList, chooseWorkspace, router]);
 
   if (!failed || !signIn) return null;
   return (

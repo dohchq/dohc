@@ -76,6 +76,7 @@ interface AccountValue {
   readonly livePages: ScopedEnds;
   /** The sign-in's alerts on an iPhone, or null. */
   readonly alerts: Alerts | null;
+  readonly workspaceList: WorkspaceListStore | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -293,6 +294,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       collections,
       livePages,
       alerts,
+      workspaceList: list,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {

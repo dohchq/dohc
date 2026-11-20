@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SignIn } from "../server/account";
 import { createServerClient } from "../server/client";
+import { createOpenWorkspace } from "../server/openWorkspace";
 import { pendingSignOuts, readRegistration, saveRegistration } from "../server/pushRegistration";
 import { keptDisk, type KeptDisk } from "../server/testKeptDisk";
 import { deferred, testServer, type Answer } from "../server/testServer";
+import { createReadCache } from "../server/workspaceData";
+import { createWorkspaceList } from "../server/workspaceList";
 import { alertTarget, createAlerts, openTap, type NativeAlerts, type Permission } from "./alerts";
 
 const TOKEN = "ab".repeat(32);
@@ -180,6 +183,33 @@ describe("alerts", () => {
     });
   });
 
+  it("keep alerts off when turned off while a new token binds", async () => {
+    const { server, store, device, alerts } = setup({ permission: "granted" });
+    await saveRegistration(store, OWNER, true, 1);
+    const bind = deferred<Answer>();
+    server.on("GET", PATH, on(1), on(1), on(2));
+    server.on("PUT", PATH, on(1), () => bind.promise);
+    server.on("DELETE", PATH, off);
+    await alerts.sync();
+    device.newToken("cd".repeat(32));
+    await vi.waitFor(() => expect(server.paths().at(-1)).toBe(`PUT ${PATH}`));
+    const writes = vi.spyOn(store, "transaction");
+    const turn = deferred<void>();
+    const held = store.transaction(() => turn.promise);
+    alerts.turnOff();
+    await vi.waitFor(() => expect(writes).toHaveBeenCalledTimes(2));
+    bind.resolve(on(2));
+    // The token's sync has the answer once it queues a save behind the choice, or ends without one.
+    await vi.waitFor(() => {
+      if (writes.mock.calls.length < 3) expect(alerts.state()).toMatchObject({ busy: false });
+    });
+    turn.resolve();
+    await held;
+    await vi.waitFor(() => expect(alerts.state()).toMatchObject({ on: false, busy: false }));
+    expect(server.paths().at(-1)).toBe(`DELETE ${PATH}`);
+    expect(await readRegistration(store, OWNER)).toMatchObject({ alerts: false, generation: null });
+  });
+
   it("save nothing once the sign-in ends during the prompt", async () => {
     const { server, store, device, alerts, end } = setup();
     server.on("GET", PATH, off);
@@ -304,8 +334,8 @@ describe("a tapped alert", () => {
       }),
     };
     const listed = (workspaces: unknown) => ({ status: 200, body: { ok: true, workspaces } });
-    const tap = () => openTap(signIn, data, () => 4);
-    return { server, listed, tap, end: () => (current = false) };
+    const tap = () => openTap(signIn, data, () => 4, null);
+    return { server, signIn, listed, tap, end: () => (current = false) };
   }
 
   it("opens only what the server lists now, waits offline, and drops a tap the sign-in outlived", async () => {
@@ -324,5 +354,25 @@ describe("a tapped alert", () => {
     end();
     held.resolve(listed(list));
     expect(await late).toBeNull();
+  });
+
+  it("opens its workspace on the phone, though the list the phone kept had it closed", async () => {
+    const { server, signIn, listed } = tapping();
+    server.on(
+      "GET",
+      "/sync/account/workspaces",
+      listed([{ ...list[0], canOpen: false }]),
+      listed(list),
+    );
+    const workspaces = createWorkspaceList(signIn);
+    const open = createOpenWorkspace({ signIn, list: workspaces, cache: createReadCache() });
+    open.subscribe(() => {});
+    workspaces.reload();
+    await vi.waitFor(() => expect(workspaces.state()).toMatchObject({ status: "ready" }));
+    expect(open.state().currentWorkspaceId).toBeNull();
+    expect(await openTap(signIn, data, () => 4, workspaces)).toMatchObject({ workspaceId: "ws-1" });
+    open.choose("ws-1");
+    expect(open.state().currentWorkspaceId).toBe("ws-1");
+    open.stop();
   });
 });
