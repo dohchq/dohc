@@ -158,6 +158,8 @@ fn passive_ingress(
 }
 
 async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    end_only_when_input_closes()?;
     if passive
         && (std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
             || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some())
@@ -231,6 +233,22 @@ async fn run_stdio(auth_token: String, passive: bool, replica: bool) -> Result<(
     // drain joins the watcher/files threads so the process exits clean.
     service.shutdown_all_capture().await;
     transport?;
+    Ok(())
+}
+
+// A system shutdown signals every process at once, and dohc's quit still
+// needs the engine. The engine ends when its owner closes its input or dies.
+#[cfg(unix)]
+fn end_only_when_input_closes() -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    for kind in [
+        SignalKind::terminate(),
+        SignalKind::interrupt(),
+        SignalKind::hangup(),
+    ] {
+        let mut stop = signal(kind)?;
+        tokio::spawn(async move { while stop.recv().await.is_some() {} });
+    }
     Ok(())
 }
 

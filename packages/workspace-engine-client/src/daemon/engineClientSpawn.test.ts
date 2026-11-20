@@ -10,13 +10,13 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function child() {
+function child({ exitsWhenInputCloses = true } = {}) {
   const value = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     exitCode: null as number | null,
-    signalCode: null,
+    signalCode: null as NodeJS.Signals | null,
     kill: vi.fn(),
   });
   const decoder = new FrameDecoder(1024 * 1024);
@@ -52,13 +52,18 @@ function child() {
           );
       }
   });
-  value.stdin.on("finish", () => {
-    value.exitCode = 0;
+  const exit = (code: number | null, signal: NodeJS.Signals | null) => {
+    value.exitCode = code;
+    value.signalCode = signal;
     value.stdout.end();
     value.stderr.end();
-    value.emit("exit", 0, null);
-    value.emit("close", 0, null);
+    value.emit("exit", code, signal);
+    value.emit("close", code, signal);
+  };
+  value.kill.mockImplementation((signal: NodeJS.Signals = "SIGTERM") => {
+    if (signal === "SIGKILL") exit(null, signal);
   });
+  if (exitsWhenInputCloses) value.stdin.on("finish", () => exit(0, null));
   return value;
 }
 
@@ -152,5 +157,25 @@ it.each([
   } finally {
     client.close();
     await client.waitForExit();
+  }
+});
+
+it("kills an engine that is still running 2 seconds after its input closes", async () => {
+  const engine = child({ exitsWhenInputCloses: false });
+  spawning.mockReturnValue(engine);
+  const client = await createEngineClient({
+    command: "owned-engine",
+    authToken: "owned-token",
+    protocolVersion: 2,
+    capabilities: ["core", "blobs"],
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    client.close();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(engine.kill.mock.calls).toEqual([["SIGKILL"]]);
+    await client.waitForExit();
+  } finally {
+    vi.useRealTimers();
   }
 });
