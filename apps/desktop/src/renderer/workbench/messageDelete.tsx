@@ -39,32 +39,36 @@ type Role = Extract<MembersResult, { status: "ready" }>["view"]["viewer"]["role"
 const DeleteRole = createContext<Role | null>(null);
 
 /**
- * Reads the reader's role when a workspace opens, and again when
- * `refreshKey` changes: the workspace reconnected, or the relay named a new
- * membership role. A failed read also tries again on each "current" event
- * from `shareAccessCurrent`, the shared view's access check. A workspace that
+ * Reads the reader's role once main admits this window's workspace, and again
+ * when `refreshKey` changes: the workspace reconnected, or the relay named a
+ * new membership role. Main refuses a read made before it admits the window.
+ * A failed read also tries again on each "current" event from
+ * `shareAccessCurrent`, the shared view's access check. A workspace that
  * never synced lists no Members, so it offers no Delete: deleting asks the
  * server to stop serving the text.
  */
 export function MessageDeleteRole(props: {
   workspaceId: string;
   refreshKey: string;
+  admitted: boolean;
   shareAccessCurrent?: EventTarget;
   children: ReactNode;
 }) {
-  const { workspaceId, refreshKey, shareAccessCurrent } = props;
+  const { workspaceId, refreshKey, admitted, shareAccessCurrent } = props;
   const members = useWorkspaceQuery(useWorkspaceSession(), {
     key: `message-delete:${workspaceId}`,
     load: () => bridge().workspaceMembers({ workspaceId, request: { action: "list" } }),
+    manual: !admitted,
   });
   const { retry } = members;
   // A new workspace starts its own read.
-  const readFor = useRef({ workspaceId, refreshKey });
+  const readFor = useRef({ workspaceId, refreshKey, admitted });
   useEffect(() => {
     const previous = readFor.current;
-    readFor.current = { workspaceId, refreshKey };
-    if (previous.workspaceId === workspaceId && previous.refreshKey !== refreshKey) void retry();
-  }, [workspaceId, refreshKey, retry]);
+    readFor.current = { workspaceId, refreshKey, admitted };
+    if (previous.workspaceId !== workspaceId || !admitted) return;
+    if (!previous.admitted || previous.refreshKey !== refreshKey) void retry();
+  }, [workspaceId, refreshKey, admitted, retry]);
   const failed = members.error !== null;
   useEffect(() => {
     if (!failed || !shareAccessCurrent) return;

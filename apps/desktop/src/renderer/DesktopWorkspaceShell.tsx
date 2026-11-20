@@ -681,6 +681,7 @@ function InvalidSitePathFallback({
 function WorkspaceReads(props: {
   workspaceId: string;
   deleteRoleKey: string;
+  admitted: boolean;
   shareAccessCurrent: EventTarget;
   children: ReactNode;
 }) {
@@ -689,6 +690,7 @@ function WorkspaceReads(props: {
       <MessageDeleteRole
         workspaceId={props.workspaceId}
         refreshKey={props.deleteRoleKey}
+        admitted={props.admitted}
         shareAccessCurrent={props.shareAccessCurrent}
       >
         {props.children}
@@ -8232,6 +8234,7 @@ export function DesktopWorkspaceShell(props: {
             <WorkspaceReads
               workspaceId={workspaceId}
               deleteRoleKey={deleteRoleKey}
+              admitted={workspaceIsReady}
               shareAccessCurrent={shareAccessCurrent}
             >
               <ShellErrorReporter.Provider value={reportShellFailure}>

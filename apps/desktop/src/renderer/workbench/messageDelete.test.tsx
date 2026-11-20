@@ -113,10 +113,15 @@ function Chat(props: { messages: ChatMessageRecord[]; enabled?: boolean }) {
   );
 }
 
-function chatIn(messages: ChatMessageRecord[], enabled?: boolean, refreshKey = "online") {
+function chatIn(
+  messages: ChatMessageRecord[],
+  enabled?: boolean,
+  refreshKey = "online",
+  admitted = true,
+) {
   return (
     <WorkspaceSessionProvider workspaceId="ws">
-      <MessageDeleteRole workspaceId="ws" refreshKey={refreshKey}>
+      <MessageDeleteRole workspaceId="ws" refreshKey={refreshKey} admitted={admitted}>
         <Chat messages={messages} enabled={enabled} />
       </MessageDeleteRole>
     </WorkspaceSessionProvider>
@@ -181,6 +186,24 @@ describe("Delete on a message", () => {
     shown.rerender(chatIn([mine, theirs], true, "online admin"));
     await waitFor(() => expect(deleteIn("message-theirs")).not.toBeNull());
     expect(workspaceMembers).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads the role once main admits the window's workspace", async () => {
+    // Until then main refuses the read, as it did for the owner's window
+    // opening a synced workspace.
+    let admitted = false;
+    const { workspaceMembers } = stubMembers(async () => {
+      if (!admitted) throw new Error("Members stopped because this window changed workspaces.");
+      return view("owner");
+    });
+    const shown = render(chatIn([mine, theirs], true, "online", false));
+    await Promise.resolve();
+    expect(deleteIn("message-theirs")).toBeNull();
+
+    admitted = true;
+    shown.rerender(chatIn([mine, theirs], true, "online", true));
+    await waitFor(() => expect(deleteIn("message-theirs")).not.toBeNull());
+    expect(workspaceMembers).toHaveBeenCalledTimes(1);
   });
 
   it("shows a deleted message as its author, time and line, with nothing it held", async () => {
