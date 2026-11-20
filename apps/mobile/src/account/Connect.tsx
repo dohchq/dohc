@@ -49,6 +49,8 @@ export function Connect() {
   const last = state.status === "signed-out" ? state : null;
   // A Sign out's delete failed: no sign-in starts until Try again, another Sign out, finishes it.
   const deleteFailed = deletion === "failed";
+  const pendingSignOut = last?.pendingSignOut ?? null;
+  const blocked = deleteFailed || pendingSignOut !== null;
   const [address, setAddress] = useState(last?.origin ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
@@ -64,7 +66,7 @@ export function Connect() {
   useEffect(() => () => account.cancelSignIn(), [account]);
 
   async function connect(value = address) {
-    if (deleteFailed) return;
+    if (blocked) return;
     const checked = check(value);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
@@ -135,6 +137,18 @@ export function Connect() {
             text={accountWords.signOutDeleteFailed}
             onRetry={() => void account.signOut().catch(() => undefined)}
           />
+        ) : null}
+        {pendingSignOut === "failed" && last?.origin ? (
+          <ProblemLine
+            text={accountWords.signOutUnfinished(serverName(last.origin))}
+            onRetry={() => void account.signOut().catch(() => undefined)}
+          />
+        ) : null}
+        {pendingSignOut === "running" ? (
+          <View style={styles.waiting} accessibilityRole="text" accessibilityLiveRegion="polite">
+            <ActivityIndicator color={theme.muted} />
+            <Text style={[styles.note, { color: theme.muted }]}>{accountWords.signingOut}</Text>
+          </View>
         ) : null}
         {phase.kind === "code" ? (
           <View style={styles.block}>
@@ -229,7 +243,7 @@ export function Connect() {
             ) : null}
             <Button
               label={busy ? accountWords.connecting : accountWords.connectServer}
-              disabled={busy || deleteFailed}
+              disabled={busy || blocked}
               onPress={() => void connect()}
             />
           </View>

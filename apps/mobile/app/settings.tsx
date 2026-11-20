@@ -2,15 +2,25 @@ import { accountWords, type ServerProblemKind } from "@dohc/interface-words/acco
 import { chatWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import { Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../src/account/AccountProvider";
 import { ProblemLine } from "../src/account/ProblemLine";
 import { AgentMark } from "../src/AgentMark";
+import type { Alerts } from "../src/push/alerts";
 import { workspaceName } from "../src/chats/workspaceName";
 import { confirm } from "../src/confirm";
 import { recoveryRows } from "../src/conversation/outboxMessages";
 import { useOutboxState } from "../src/conversation/useOutbox";
+import { OutboxError } from "../src/server/outbox";
 import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
 import {
@@ -101,7 +111,7 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
 function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
-  const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
+  const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone, alerts } = useAccount();
   const server = serverName(signIn.origin);
   const router = useRouter();
   const outboxState = useOutboxState(outbox);
@@ -140,11 +150,16 @@ function SettingsScreen() {
   // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count. When the
   // delete can't be made safe, the phone stays signed in and says so here, with Try again. If a 401 has signed the phone
   // out meanwhile, Settings is gone, and Connect shows the failure from the outbox's own state instead.
-  const [signOutFailed, setSignOutFailed] = useState(false);
+  const [signOutFailed, setSignOutFailed] = useState<string | null>(null);
   const leave = useCallback(() => {
-    setSignOutFailed(false);
-    account.signOut().catch(() => {
-      if (signIn.isCurrent()) setSignOutFailed(true);
+    setSignOutFailed(null);
+    account.signOut().catch((error: unknown) => {
+      if (signIn.isCurrent())
+        setSignOutFailed(
+          error instanceof OutboxError
+            ? accountWords.signOutFailed
+            : accountWords.signOutNotStarted,
+        );
     });
   }, [account, signIn]);
   const signOut = useCallback(async () => {
@@ -249,6 +264,8 @@ function SettingsScreen() {
           </>
         ) : null}
       </Section>
+
+      {alerts ? <AlertsSection alerts={alerts} server={server} /> : null}
 
       <Section title={accountWords.sessions}>
         <Loaded load={sessions.load} server={server} onRetry={sessions.reload}>
@@ -355,7 +372,7 @@ function SettingsScreen() {
       ) : null}
 
       <Section>
-        {signOutFailed ? <ProblemLine text={accountWords.signOutFailed} onRetry={leave} /> : null}
+        {signOutFailed ? <ProblemLine text={signOutFailed} onRetry={leave} /> : null}
         <Pressable
           accessibilityRole="button"
           onPress={() => void signOut()}
@@ -368,6 +385,50 @@ function SettingsScreen() {
         </Pressable>
       </Section>
     </ScrollView>
+  );
+}
+
+function AlertsSection({ alerts, server }: { alerts: Alerts; server: string }) {
+  const state = useSyncExternalStore(alerts.subscribe, alerts.state);
+  if (state.status === "loading") return null;
+  return (
+    <Section>
+      {state.status === "unavailable" ? (
+        <Row title={accountWords.alerts} detail={accountWords.alertsUnavailable(server)} />
+      ) : (
+        <>
+          {state.problem ? (
+            <ProblemLine
+              text={
+                state.problem === "kept"
+                  ? accountWords.alertsNotSaved
+                  : accountWords.problem(state.problem, server)
+              }
+              onRetry={alerts.retry}
+            />
+          ) : null}
+          <Row
+            title={accountWords.alerts}
+            detail={state.denied ? accountWords.alertsDenied : accountWords.alertsDetail}
+          >
+            {state.denied ? (
+              <RowAction
+                label={accountWords.openSettings}
+                disabled={false}
+                onPress={() => void Linking.openSettings()}
+              />
+            ) : (
+              <Switch
+                value={state.on}
+                disabled={state.busy}
+                onValueChange={(on) => (on ? alerts.turnOn() : alerts.turnOff())}
+                accessibilityLabel={accountWords.alerts}
+              />
+            )}
+          </Row>
+        </>
+      )}
+    </Section>
   );
 }
 

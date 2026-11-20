@@ -1,32 +1,43 @@
 /**
- * The targets one pass of the live host visits.
+ * Plans one pass of the live host over `targets`, at most `limit` visits, taking the turn up at `from`.
  *
- * A pass visits at most `limit` targets, in turn from `from`, so every target is reached however many there
- * are. A target someone is waiting for goes first: after a restart no note is ready, and the note a person
- * has open would otherwise wait for its turn behind every other. Wanted targets take at most half of a
- * pass. The rest still goes round in turn, so no stream of requests can keep another target from its turn.
- *
- * `first` are the wanted targets. `turn` are the rest, each with where the turn stands once it is visited.
- * The caller moves the turn on as it visits, so a pass that ends early loses no target its turn.
+ * `next()` gives the visit to make now, or undefined once the pass is over. A wanted target comes before the
+ * turn, also when it became wanted during the pass. A pass makes at most `floor(limit / 2)` wanted visits, so
+ * the turn still goes round. A turn visit carries `turn`, where the turn stands once it is made. A wanted
+ * visit carries none. No target is visited twice in a pass.
  */
-export function passOrder<T>(
+export function passPlan<T>(
   targets: readonly T[],
   from: number,
   limit: number,
   wanted: (target: T) => boolean,
-): { first: T[]; turn: Array<{ target: T; next: number }> } {
-  if (targets.length === 0) return { first: [], turn: [] };
-  const first = targets.filter(wanted).slice(0, Math.floor(limit / 2));
-  const turn: Array<{ target: T; next: number }> = [];
-  let next = from % targets.length;
-  for (
-    let seen = 0;
-    first.length + turn.length < Math.min(limit, targets.length) && seen < targets.length;
-    seen++
-  ) {
-    const target = targets[next]!;
-    next = (next + 1) % targets.length;
-    if (!first.includes(target)) turn.push({ target, next });
-  }
-  return { first, turn };
+): { next(): { target: T; turn?: number } | undefined } {
+  const visited = new Set<T>();
+  const visits = Math.min(limit, targets.length);
+  const wantedVisitsAllowed = Math.floor(limit / 2);
+  let wantedVisits = 0;
+  let cursor = targets.length === 0 ? 0 : from % targets.length;
+  let passedInTurn = 0;
+  return {
+    next() {
+      if (visited.size >= visits) return undefined;
+      if (wantedVisits < wantedVisitsAllowed) {
+        const target = targets.find((candidate) => !visited.has(candidate) && wanted(candidate));
+        if (target !== undefined) {
+          wantedVisits++;
+          visited.add(target);
+          return { target };
+        }
+      }
+      while (passedInTurn < targets.length) {
+        const target = targets[cursor]!;
+        cursor = (cursor + 1) % targets.length;
+        passedInTurn++;
+        if (visited.has(target)) continue;
+        visited.add(target);
+        return { target, turn: cursor };
+      }
+      return undefined;
+    },
+  };
 }

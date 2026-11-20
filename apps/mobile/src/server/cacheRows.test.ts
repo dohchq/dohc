@@ -15,7 +15,7 @@ import { createServerClient } from "./client";
 import { CACHE_FORMAT } from "./keptStore";
 import { createOpenWorkspace } from "./openWorkspace";
 import { keptDisk, type KeptDisk } from "./testKeptDisk";
-import { memoryStore, testServer, type Answer } from "./testServer";
+import { memoryStore, serveSessionEnd, testServer, type Answer } from "./testServer";
 import {
   cacheScope,
   createReadCache,
@@ -478,6 +478,7 @@ describe("emptying the cache", () => {
   };
 
   async function signedIn(server: ReturnType<typeof testServer>, disk: KeptDisk) {
+    serveSessionEnd(server);
     const { files, cache } = launch(disk);
     const account = createAccount({
       store: memoryStore(SAVED).store,

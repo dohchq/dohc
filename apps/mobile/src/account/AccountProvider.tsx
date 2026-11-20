@@ -1,3 +1,4 @@
+import { accountWords } from "@dohc/interface-words/account";
 import { fetch } from "expo/fetch";
 import {
   createContext,
@@ -8,7 +9,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { AppState, View } from "react-native";
+import { AppState, Platform, View } from "react-native";
 import {
   appTeardown,
   createAppRunner,
@@ -22,6 +23,8 @@ import {
   type WorkspaceCollections,
 } from "../collections/collectionStore";
 import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
+import { DamagedKept } from "../conversation/DamagedKept";
+import { useOutboxState } from "../conversation/useOutbox";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheRows } from "../server/cacheRows";
@@ -34,6 +37,9 @@ import {
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createOutbox, type Outbox, type OutboxState } from "../server/outbox";
 import { phoneWrites } from "../server/phoneWrites";
+import { pendingSignOuts } from "../server/pushRegistration";
+import { createAlerts, type Alerts } from "../push/alerts";
+import { clearAlertsAtSignOut, nativeAlerts } from "../push/nativeAlerts";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -42,6 +48,7 @@ import {
 } from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
+import { ProblemLine } from "./ProblemLine";
 import { secureSignInStore } from "./secureSignInStore";
 
 interface AccountValue {
@@ -67,6 +74,9 @@ interface AccountValue {
   readonly collections: WorkspaceCollections | null;
   /** Pages edited live, which end with their sign-in and workspace, as a running app does. */
   readonly livePages: ScopedEnds;
+  /** The sign-in's alerts on an iPhone, or null. */
+  readonly alerts: Alerts | null;
+  readonly workspaceList: WorkspaceListStore | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -116,7 +126,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     createAccount({
       store: secureSignInStore,
       fetch,
-      onSignOut: teardown.signOut((leave) => outbox.signOut(leave)),
+      onSignOut: teardown.signOut((leave, ending) => outbox.signOut(leave, ending)),
+      pendingSignOuts: pendingSignOuts(kept),
     }),
   );
   const state = useSyncExternalStore(account.subscribe, account.state);
@@ -242,6 +253,31 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     };
   }, [wakes]);
 
+  const alerts = useMemo(
+    () =>
+      signIn && Platform.OS === "ios"
+        ? createAlerts({
+            signIn,
+            store: kept,
+            native: nativeAlerts,
+            environment: __DEV__ ? "sandbox" : "production",
+          })
+        : null,
+    [signIn, kept],
+  );
+  useEffect(() => {
+    if (!alerts) return;
+    void alerts.sync();
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "active") void alerts.sync();
+    });
+    return () => {
+      subscription.remove();
+      alerts.stop();
+    };
+  }, [alerts]);
+  useEffect(() => (Platform.OS === "ios" ? clearAlertsAtSignOut(account) : undefined), [account]);
+
   const value = useMemo<AccountValue>(
     () => ({
       account,
@@ -257,6 +293,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       apps,
       collections,
       livePages,
+      alerts,
+      workspaceList: list,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => {
@@ -279,6 +317,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       apps,
       collections,
       livePages,
+      alerts,
       list,
       open,
     ],
@@ -301,13 +340,23 @@ export function useSignIn(): SignIn {
 
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
-  const { state, deletion } = useAccount();
+  const { account, state, deletion, outbox } = useAccount();
+  const damaged = useOutboxState(outbox)?.status === "damaged";
   // Once Connect shows, it stays while a Sign out's delete has failed, even if a sign-in finishes meanwhile, so the
   // failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
   const [onConnect, setOnConnect] = useState(false);
   const showConnect = state.status === "signed-out" || (onConnect && deletion !== "none");
   if (showConnect !== onConnect) setOnConnect(showConnect);
   if (state.status === "loading") return <View style={{ flex: 1, backgroundColor: theme.bg }} />;
+  if (state.status === "unreadable")
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.bg, justifyContent: "center", padding: 24 }}>
+        <ProblemLine text={accountWords.savedUnreadable} onRetry={() => void account.restore()} />
+        {damaged ? (
+          <DamagedKept outbox={outbox} live={() => true} onDeleted={() => void account.restore()} />
+        ) : null}
+      </View>
+    );
   if (showConnect) return <Connect />;
   return children;
 }
