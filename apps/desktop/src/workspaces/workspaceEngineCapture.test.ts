@@ -1907,6 +1907,7 @@ describe("workspaceEngineCapture batch capture", () => {
               keptFiles: [["native.md", "saved-native.md"]],
               retainedCopies: { count: 2, bytes: 20 },
               recoveryUnavailable: true,
+              secretKeyChecked: true,
               secretKeyUnavailable: "key-missing",
               heldFiles: [],
             });
@@ -2006,6 +2007,7 @@ describe("workspaceEngineCapture batch capture", () => {
           terminal: false,
           deferredWrites: [],
           recoveryUnavailable: watcherStatus.mock.calls.length === 1,
+          secretKeyChecked: true,
         };
       });
       const adoptions = vi.fn(async () => ({ adoptions: [], nextCursor: null }));
@@ -2056,6 +2058,63 @@ describe("workspaceEngineCapture batch capture", () => {
       }
     },
   );
+
+  it("keeps the secret key notice while a restarted engine has not checked the key", async () => {
+    vi.useFakeTimers();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const workspace = {
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID,
+    };
+    await openedLocalState(workspace);
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const liveStore = createCaptureLiveStores(workspace, sessions).store;
+    const statuses = [
+      { secretKeyChecked: true, secretKeyUnavailable: "key-missing" },
+      { secretKeyChecked: false },
+      { secretKeyChecked: true },
+    ];
+    const watcherStatus = vi.fn(async () => ({
+      running: true,
+      degraded: false,
+      terminal: false,
+      deferredWrites: [],
+      recoveryUnavailable: false,
+      ...statuses[Math.min(watcherStatus.mock.calls.length, statuses.length) - 1],
+    }));
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "watcherStatus") return watcherStatus;
+        if (property === "listPendingCollectionAdoptions")
+          return async () => ({ adoptions: [], nextCursor: null });
+        if (property === "flushCapture") return async () => undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const secretKey = vi.fn();
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      onSecretKeyUnavailable: secretKey,
+      onError: () => {},
+    });
+    try {
+      engine.start();
+      await engine.flush();
+      for (let poll = 1; poll < statuses.length; poll += 1) {
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+        await engine.flush();
+      }
+      expect(watcherStatus).toHaveBeenCalledTimes(statuses.length);
+      expect(secretKey.mock.calls).toEqual([["key-missing"], [null]]);
+    } finally {
+      await engine.stop();
+      await liveStore.close();
+      vi.useRealTimers();
+    }
+  });
 
   it("keeps the capture outcome while the engine is still updating, and reports a real failure", async () => {
     vi.useFakeTimers();

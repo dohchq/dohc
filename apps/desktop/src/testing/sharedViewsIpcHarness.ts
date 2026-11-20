@@ -55,6 +55,7 @@ export const ready: WatcherStatusResult = {
   degraded: false,
   noAtomicPlacement: false,
   recoveryUnavailable: false,
+  secretKeyChecked: true,
   deferredWrites: [],
   keptFiles: [],
   captureRecoveries: [],

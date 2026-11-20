@@ -5141,7 +5141,8 @@ export function createWorkspaceEngineCapture(
           await reportProtectedCopies();
           options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
-          options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
+          if (status.secretKeyChecked)
+            options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
           options.onOutsideChanges?.(outsideChangesOf(status));
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
