@@ -132,12 +132,12 @@ export interface EngineWorkspaceRunOptions {
    */
   abandonAtQuit?: boolean;
   /**
-   * At quit, a failed attempt to reach the daemon is final: a transport
-   * failure, a daemon that is down or relaunching, or a client that changed
-   * during the open ends the run with `EngineWorkspaceShuttingDownError`
-   * instead of waiting for a replacement daemon. An attempt already running
-   * finishes, and a store-busy refusal keeps its own wait, because a busy
-   * daemon answers. Enable only for a read that no write depends on.
+   * At quit, the run retries no more. A retry that quit cuts short, whether
+   * waiting or about to start, raises `EngineWorkspaceShuttingDownError`. A
+   * run that used up its tries before quit keeps its usual error, an attempt
+   * already running finishes, and a store-busy refusal keeps its own wait,
+   * because a busy daemon answers. Enable only for a read that no write
+   * depends on.
    */
   endRetriesAtQuit?: boolean;
 }
