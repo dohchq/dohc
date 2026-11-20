@@ -390,6 +390,21 @@ describe("a tapped alert", () => {
     );
   });
 
+  it("goes Home when a newer read overtakes a tap's read before the list has loaded", async () => {
+    const { server, signIn, listed } = tapping();
+    const tapRead = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => tapRead.promise);
+    const workspaces = createWorkspaceList(signIn);
+    const tapped = openTap(signIn, data, () => 4, workspaces);
+    const reload = deferred<Answer>();
+    server.on("GET", "/sync/account/workspaces", () => reload.promise);
+    workspaces.reload();
+    tapRead.resolve(listed(list));
+    expect(await tapped).toBe("home");
+    reload.resolve(listed(list));
+    await vi.waitFor(() => expect(workspaces.state()).toMatchObject({ status: "ready" }));
+  });
+
   it("keeps a workspace hidden that the person hid while the tap was reading the list", async () => {
     const { server, signIn, listed } = tapping();
     server.on("GET", "/sync/account/workspaces", listed(list));

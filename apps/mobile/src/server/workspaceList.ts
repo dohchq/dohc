@@ -127,7 +127,7 @@ export function createWorkspaceList(
         throw error;
       });
       if (reads.isLatest(request) && pending.size === 0) settle(workspaces, null);
-      return state.status === "ready" ? state.workspaces : workspaces;
+      return state.status === "ready" ? state.workspaces : [];
     },
     setShowOnPhone(workspaceId, showOnPhone) {
       if (state.status !== "ready" || pending.has(workspaceId)) return;
