@@ -230,6 +230,10 @@ export function createReceivedShareAcquisition(dependencies: {
       changesHere += 1;
       attempt = null;
     },
+    outdated(): void {
+      invalidation += 1;
+      attempt = null;
+    },
     retire,
     credentialsChanged(current: ReceivedScope | null, settled = true): void {
       retire();
@@ -272,9 +276,13 @@ export function createReceivedShareAcquisition(dependencies: {
       const scope = dependencies.scope();
       if (!scope) return Promise.resolve("unavailable");
       if (pending && same(scope, pending.scope)) {
-        return pending.changesHere === changesHere
-          ? pending.promise.then(() => "joined")
-          : pending.promise.then(() => acquisition.refresh());
+        if (pending.changesHere === changesHere) return pending.promise.then(() => "joined");
+        const queuedLifetime = lifetime;
+        return pending.promise.then(() =>
+          queuedLifetime === lifetime && same(dependencies.scope(), scope)
+            ? acquisition.refresh()
+            : "unavailable",
+        );
       }
       if (attempt && same(scope, attempt.scope) && nowMs() - attempt.atMs < 60_000)
         return Promise.resolve("paced");

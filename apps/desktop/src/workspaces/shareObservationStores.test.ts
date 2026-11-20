@@ -437,6 +437,45 @@ describe("account received observations", () => {
     expect(a.observation().freshness).toBe("fresh");
   });
 
+  it("reads again at once when the list is found out of date, and joins a read under way", async () => {
+    const h = harness();
+    const a = h.acquisition();
+    await a.refresh();
+    expect(await a.refresh()).toBe("paced");
+
+    a.outdated();
+    expect(a.observation().freshness).toBe("stale");
+    const again = deferred<unknown>();
+    h.list.mockImplementationOnce(() => again.promise);
+    const requested = a.refresh();
+    a.outdated();
+    const joined = a.refresh();
+    again.resolve(inventory());
+
+    expect(await requested).toBe("requested");
+    expect(await joined).toBe("joined");
+    expect(h.list).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts no read for a refresh that waited while the account changed", async () => {
+    const h = harness();
+    const a = h.acquisition();
+    const before = deferred<unknown>();
+    h.list.mockImplementationOnce(() => before.promise);
+    const underWay = a.refresh();
+    a.changedHere();
+    const queued = a.refresh();
+
+    const next = { userId: "other", relayUrl: "https://relay.test", generation: 2 };
+    h.switch(next);
+    a.credentialsChanged(next);
+    before.resolve(inventory());
+
+    await underWay;
+    expect(await queued).toBe("unavailable");
+    expect(h.list).toHaveBeenCalledOnce();
+  });
+
   it("checks the current generation again while reconciliation is waiting", async () => {
     const h = harness();
     let current: (() => boolean) | undefined;
