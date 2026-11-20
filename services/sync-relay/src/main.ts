@@ -78,6 +78,7 @@ import {
   type NamedLiveBrowserHttpLimits,
 } from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
+import type { SyncRelayOpenPart } from "./storage/types";
 import { createDeviceControl } from "./deviceControl";
 import { readOwnerAdmissionConfig, startOwnerAdmission } from "./ownerAdmissionConfig";
 import { liveValidation } from "./liveValidation.js";
@@ -541,12 +542,12 @@ const storageOptions = {
   pushConfigured: Boolean(pool && pushConfig),
   apnsConfigured: Boolean(pool && apnsConfig),
   ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}),
+  opened: (part: SyncRelayOpenPart) => startTimeline.done(`database ${part}`),
 };
 const deployment = deploymentConfig
   ? openRelayDeployment(deploymentConfig, storageOptions)
   : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
-startTimeline.done("database");
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
 const datasetDirectory =
   deployment?.datasetDirectory ?? (await mkdtemp(join(tmpdir(), "dohc-relay-datasets-")));

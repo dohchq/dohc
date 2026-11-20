@@ -377,6 +377,7 @@ export function openSyncRelayStorage(
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = FULL");
+    options.opened?.("file");
     if (
       !createOwner &&
       db.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()
@@ -384,7 +385,9 @@ export function openSyncRelayStorage(
       throw new Error("Use the configured relay deployment to open this database.");
     }
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
+    if (createOwner) options.opened?.("continuity");
     owner.write(() => initializeSyncRelaySchema(db));
+    options.opened?.("schema");
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
@@ -403,6 +406,7 @@ export function openSyncRelayStorage(
       owner,
     );
     storage.purgeExpiredShareRemovals(Date.now());
+    options.opened?.("purge");
     return storage;
   } catch (error) {
     try {
@@ -442,7 +446,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   constructor(
     readonly db: SqliteDb,
-    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets">>,
+    readonly options: Required<Omit<OpenSyncRelayStorageOptions, "liveTickets" | "opened">>,
     private readonly liveTickets: LiveTicketStoragePolicy | undefined,
     private readonly owner: RelayWriteOwner,
   ) {

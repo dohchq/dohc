@@ -368,6 +368,7 @@ export function validateRelayDeploymentMarker(
 
 export function openRelayDeployment(configPath: string, options: OpenSyncRelayStorageOptions = {}) {
   const { config, lock, side, stamp: confirmed, nonce } = acquireDeployment(configPath);
+  options.opened?.("lock");
   let transferred = false;
   try {
     if (normalized(realpathSync(config.relayPath)) !== normalized(config.relayPath))

@@ -71,6 +71,13 @@ afterAll(() => {
 const CHILD_TIMEOUT_MS = 45_000;
 
 describe("relay deployment continuity", () => {
+  it("names each part of the open as it ends, in order", () => {
+    const f = fixture(),
+      parts: string[] = [];
+    openRelayDeployment(f.configPath, { opened: (part) => parts.push(part) }).storage.close();
+    expect(parts).toEqual(["lock", "file", "continuity", "schema", "purge"]);
+  });
+
   it("reuses its private dataset root and reclaims crashed preview directories on restart", async () => {
     const f = fixture(),
       first = openRelayDeployment(f.configPath);
