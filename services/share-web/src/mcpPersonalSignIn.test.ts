@@ -2,6 +2,7 @@ import { inspect } from "node:util";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { PERSONAL_AGENT_JOINED_NOTE } from "@dohc/security-contract/workspace-members";
 import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { DiscussionActivityHub } from "../../sync-relay/src/discussionActivity";
 import {
@@ -325,9 +326,11 @@ it("offers None, View and Comment in a workspace its person joined, marked Membe
     [FUNDRAISER]: { offered: ["none", "view", "comment", "edit"], selected: "none" },
     [GARDEN]: { offered: ["none", "view", "comment"], selected: "comment" },
   });
-  expect(html).toContain('<bdi class="k" id="w-2">Garden</bdi><span class="sub">Member</span>');
-  expect(html).not.toContain('<span class="sub">Owner</span>');
-  expect(html).toContain('<p class="cap">Reads and posts with at most your access here.</p>');
+  expect(html).toContain(
+    '<span class="k"><bdi id="w-2">Garden</bdi><span class="pill">Member</span></span>',
+  );
+  expect(html).not.toContain('<span class="pill">Owner</span>');
+  expect(html).toContain(`<p class="cap">${PERSONAL_AGENT_JOINED_NOTE}</p>`);
 
   const edit = await s.choose(as, html, {
     as: "new",

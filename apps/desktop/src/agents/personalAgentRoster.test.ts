@@ -148,7 +148,7 @@ describe("the personal agents roster in main", () => {
     relay.holdReads = true;
     roster.revisionSeen(KEY, 9);
     await vi.waitFor(() => expect(relay.held).toHaveLength(1));
-    await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" });
+    await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" }, "rename Grok Bot");
     const renamedAt = pushed.length;
     expect(names(pushed.at(-1)!)).toEqual(["Iris"]);
 
@@ -164,25 +164,31 @@ describe("the personal agents roster in main", () => {
     const { roster } = setup(relay);
     await roster.read(false);
 
-    const removed = await roster.change(KEY, AGENT_ID, { kind: "remove" });
+    const removed = await roster.change(KEY, AGENT_ID, { kind: "remove" }, "remove Grok Bot");
     expect(removed.ok && removed.personalAgents.accounts[0]?.roster?.agents).toEqual([]);
-    const restored = await roster.change(KEY, AGENT_ID, { kind: "restore" });
+    const restored = await roster.change(KEY, AGENT_ID, { kind: "restore" }, "bring back Grok Bot");
     expect(
       restored.ok &&
         restored.personalAgents.accounts[0]?.roster?.agents.map((agent) => agent.status),
     ).toEqual(["signed_out"]);
   });
 
-  it("says what it could not do when the relay is out of reach", async () => {
+  it("says what the caller was doing when the relay is out of reach", async () => {
     const relay = fakeRelay();
     const { roster } = setup(relay);
     await roster.read(false);
 
     relay.offline = true;
-    const result = await roster.change(KEY, AGENT_ID, { kind: "reach", reach: [] });
+    const result = await roster.change(
+      KEY,
+      AGENT_ID,
+      { kind: "reach", reach: [] },
+      "remove Garden club from Sprout's reach",
+    );
     expect(result).toEqual({
       ok: false,
-      error: `dohc could not reach relay.test to change ${relayAgent().name}. Check your connection.`,
+      error:
+        "dohc could not reach relay.test to remove Garden club from Sprout's reach. Check your connection.",
     });
   });
 
@@ -192,7 +198,7 @@ describe("the personal agents roster in main", () => {
     await roster.read(false);
 
     relay.refuse = 401;
-    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" })).toEqual({
+    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" }, "sign out Grok Bot")).toEqual({
       ok: false,
       error: "Your server session expired. Sign in again, then retry.",
     });
@@ -204,9 +210,12 @@ describe("the personal agents roster in main", () => {
     const { roster } = setup(relay);
 
     expect(
-      await roster.change("https://server.test#https://relay.test#bo", AGENT_ID, {
-        kind: "sign-out",
-      }),
+      await roster.change(
+        "https://server.test#https://relay.test#bo",
+        AGENT_ID,
+        { kind: "sign-out" },
+        "sign out Grok Bot",
+      ),
     ).toEqual({
       ok: false,
       error: "Sign in to the account this agent belongs to, then try again.",

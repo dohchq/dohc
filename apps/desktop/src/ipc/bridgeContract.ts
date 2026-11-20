@@ -8659,6 +8659,8 @@ export const personalAgentsOperations = {
       accountKey: z.string().min(1),
       agentId: z.string().regex(PERSONAL_AGENT_ID),
       change: PersonalAgentChange,
+      // What the change does, in the words a failure names it by: "rename Sprout".
+      what: z.string().min(1).max(2_000),
     }),
     result: PersonalAgentChangeResult,
     guard: "trusted-sender",

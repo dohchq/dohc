@@ -52,6 +52,7 @@ import { RestrictedAgentsBand } from "../RestrictedMode";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { IconButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAgentsListening } from "../useAgentsListening";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { usePersonalAgents, type PersonalAgentsState } from "../usePersonalAgents";
@@ -697,6 +698,21 @@ export function AgentList(props: {
   const personalKnown =
     personal.state.status === "ready" &&
     personal.state.accounts.every((account) => account.roster !== null);
+  // Until each account's first roster answers or fails, a skeleton row holds
+  // the personal agents' place. A read again keeps the rows it has instead.
+  const personalLoading =
+    personal.state.status === "loading" ||
+    (personal.state.status === "ready" &&
+      personal.state.accounts.some(
+        (account) => account.roster === null && account.failure === null,
+      )) ? (
+      <SkeletonRows
+        rows={2}
+        label="Loading your agents…"
+        testId="personal-agents-loading"
+        className="px-4 py-4"
+      />
+    ) : null;
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
@@ -1072,24 +1088,22 @@ export function AgentList(props: {
   const changePersonal = async (
     entry: PersonalEntry,
     next: PersonalAgentChange,
-    failure: string,
+    what: string,
   ): Promise<boolean> => {
-    const result = await changePersonalAgent(entry.account, entry.agent, next, failure);
+    const result = await changePersonalAgent(entry.account, entry.agent, next, what);
     if (!result.ok)
       onError?.(result.error, undefined, async () => {
-        await changePersonal(entry, next, failure);
+        await changePersonal(entry, next, what);
       });
     return result.ok;
   };
   const removePersonal = async (entry: PersonalEntry) => {
     const { agent } = entry;
-    if (!(await changePersonal(entry, { kind: "remove" }, `dohc could not remove ${agent.name}.`)))
-      return;
+    if (!(await changePersonal(entry, { kind: "remove" }, `remove ${agent.name}`))) return;
     setRenaming((current) => (current === agent.agentId ? null : current));
     onNotice?.(
       `Removed ${agent.name}.`,
-      () =>
-        void changePersonal(entry, { kind: "restore" }, `dohc could not bring back ${agent.name}.`),
+      () => void changePersonal(entry, { kind: "restore" }, `bring back ${agent.name}`),
     );
   };
 
@@ -1228,11 +1242,7 @@ export function AgentList(props: {
                   name={agent.name}
                   problem={(value) => personalNameProblem(value, takenByOthers)}
                   onSave={(name) =>
-                    changePersonal(
-                      personalPage,
-                      { kind: "name", name },
-                      `dohc could not rename ${agent.name}.`,
-                    )
+                    changePersonal(personalPage, { kind: "name", name }, `rename ${agent.name}`)
                   }
                   onDone={() =>
                     setRenaming((current) => (current === agent.agentId ? null : current))
@@ -1242,7 +1252,7 @@ export function AgentList(props: {
             }
             onRename={() => setRenaming(agent.agentId)}
             onRemove={() => void removePersonal(personalPage)}
-            onChange={(next, failure) => changePersonal(personalPage, next, failure)}
+            onChange={(next, what) => changePersonal(personalPage, next, what)}
             onError={(message) => onError?.(message)}
             onBack={closePage}
             backRef={back}
@@ -1305,8 +1315,12 @@ export function AgentList(props: {
             >
               No agents yet.
             </p>
-          ) : null
-        ) : listed.length === 0 && entries.length === 0 ? null : (
+          ) : (
+            personalLoading
+          )
+        ) : listed.length === 0 && entries.length === 0 ? (
+          personalLoading
+        ) : (
           <div data-testid="agents" className="rounded-lg border border-line bg-panel">
             {listed.map((row) =>
               row.kind === "broken" ? (
@@ -1338,6 +1352,7 @@ export function AgentList(props: {
                 onOpen={() => openPage(entry.agent.agentId)}
               />
             ))}
+            {personalLoading}
           </div>
         )}
         <ArchivedAgents

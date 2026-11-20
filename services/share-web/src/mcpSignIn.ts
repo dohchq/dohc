@@ -9,6 +9,7 @@ import {
   isAgentRedirectUri,
   LINK_SECRET_PATTERN,
 } from "@dohc/security-contract/wire-patterns";
+import { PERSONAL_AGENT_JOINED_NOTE as JOINED_NOTE } from "@dohc/security-contract/workspace-members";
 import { isAgentHue, type AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { asRecord } from "@dohc/workspace-core";
@@ -204,6 +205,7 @@ button,input{font:inherit;color:inherit}
 .tick{flex:none;width:16px;height:16px;border:1.5px solid var(--subtle);border-radius:50%}
 .opt[aria-pressed=true] .tick{border:5px solid var(--accent)}
 .sub{color:var(--muted)}
+.pill{display:inline-block;margin-left:8px;padding:0 8px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font-size:11px;line-height:18px;vertical-align:1px}
 .seg{position:relative;display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
 .seg input{position:absolute;width:1px;height:1px;margin:0;opacity:0}
 .seg label{padding:3px 10px;border-radius:7px;color:var(--muted);font-size:12.5px;cursor:pointer}
@@ -500,9 +502,6 @@ const LEVEL_MEANINGS: Readonly<Record<PersonalLevel, string>> = {
 };
 const isLevel = (value: unknown): value is PersonalLevel =>
   (LEVELS as readonly unknown[]).includes(value);
-// In a workspace its person joined, an agent reads and posts at most: the
-// relay writes only in workspaces the person owns.
-const JOINED_NOTE = "Reads and posts with at most your access here.";
 type WorkspaceRole = "owner" | "admin" | "member";
 const ROLE_MARKS: Readonly<Record<WorkspaceRole, string | null>> = {
   owner: null,
@@ -765,8 +764,10 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
           })
           .join("");
         return (
-          `<div class="row"><bdi class="k" id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
-          (mark ? `<span class="sub">${mark}</span>` : "") +
+          // A joined workspace's mark sits beside its name, as on the desktop.
+          `<div class="row"><span class="k"><bdi id="${id}">${escapeHtml(workspace.name ?? workspace.workspaceId)}</bdi>` +
+          (mark ? `<span class="pill">${mark}</span>` : "") +
+          "</span>" +
           `<span class="seg" role="radiogroup" aria-labelledby="${id}">${radios}</span></div>`
         );
       })

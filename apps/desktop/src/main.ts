@@ -11521,8 +11521,8 @@ function registerIpcHandlers(): void {
 
   registerOperations(operationBoundary, personalAgentsOperations, {
     readPersonalAgents: ({ refresh }) => personalAgentRoster.read(refresh),
-    changePersonalAgent: ({ accountKey, agentId, change }) =>
-      personalAgentRoster.change(accountKey, agentId, change),
+    changePersonalAgent: ({ accountKey, agentId, change, what }) =>
+      personalAgentRoster.change(accountKey, agentId, change, what),
   });
 
   registerOperations(operationBoundary, agentRunStateOperations, {
