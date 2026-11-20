@@ -2101,13 +2101,17 @@ describe("workspaceEngineCapture batch capture", () => {
       onError: () => {},
     });
     try {
-      engine.start();
-      await engine.flush();
-      for (let poll = 1; poll < statuses.length; poll += 1) {
+      const poll = async () => {
         await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
         await engine.flush();
-      }
-      expect(watcherStatus).toHaveBeenCalledTimes(statuses.length);
+      };
+      engine.start();
+      await engine.flush();
+      await poll();
+      expect(watcherStatus).toHaveBeenCalledTimes(2);
+      expect(secretKey.mock.calls).toEqual([["key-missing"]]);
+      await poll();
+      expect(watcherStatus).toHaveBeenCalledTimes(3);
       expect(secretKey.mock.calls).toEqual([["key-missing"], [null]]);
     } finally {
       await engine.stop();
