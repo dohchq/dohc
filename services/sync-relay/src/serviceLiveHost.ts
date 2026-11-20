@@ -2261,18 +2261,17 @@ export async function startServiceLiveHost(options: {
         const wake = async (
           document: { workspaceId: string; objectId: string },
           callerSignal?: AbortSignal,
-        ) => {
+        ): Promise<"a pass will visit it" | "no visit to wait for"> => {
           const key = hostedKey(document);
-          if (!key) return;
+          if (!key) return "no visit to wait for";
           touch(key);
           if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) {
-            // Awake, and not ready yet: after a start no note is. The next pass takes this one first, so whoever
-            // is opening it does not wait for its turn behind every other note. A note that is ready gets no mark.
-            if (!activation!.completed(hosted.get(key)!.target) && !wanted.has(key)) {
+            if (activation!.completed(hosted.get(key)!.target)) return "no visit to wait for";
+            if (!wanted.has(key)) {
               wanted.add(key);
               nudgePass();
             }
-            return;
+            return "a pass will visit it";
           }
           await exclusive(
             () =>
@@ -2303,6 +2302,7 @@ export async function startServiceLiveHost(options: {
               }),
             callerSignal,
           );
+          return "no visit to wait for";
         };
         // A held-document read asks the engine for a workspace this daemon replicates,
         // and answers only while this registration and that attachment still stand.
@@ -4066,16 +4066,17 @@ export async function startServiceLiveHost(options: {
             // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
             const waitFor = <T>(work: Promise<T>) =>
               callerSignal ? untilAborted(work, callerSignal) : work;
-            await waitFor(wake(document, callerSignal));
+            const woke = await waitFor(wake(document, callerSignal));
             const key = hostedKey(document),
               target = key === undefined ? undefined : hosted.get(key)?.target;
-            const awakeAndNotReady =
+            const stillAwakeAndNotReady =
               key !== undefined &&
               target !== undefined &&
               !activation!.dormant(target) &&
               !unloading.has(key) &&
               !activation!.completed(target);
-            if (awakeAndNotReady) await waitFor(untilVisited(key, callerSignal));
+            if (woke === "a pass will visit it" && stillAwakeAndNotReady)
+              await waitFor(untilVisited(key, callerSignal));
             await waitFor(drain(document, callerSignal));
             callerSignal?.throwIfAborted();
             check();
