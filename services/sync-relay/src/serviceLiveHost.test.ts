@@ -503,14 +503,14 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
       passMs: 1500,
       workspaces,
       targets: [
-        { object: "object-w", ms: 1500, outcome: "pending", settle: "sent", materialized: true },
+        { object: "with-a-l", ms: 1500, outcome: "pending", settle: "sent", materialized: true },
       ],
     });
     expect(slow[1]![1]).toMatchObject({
       passMs: 1500,
       workspaces,
       targets: [
-        { object: "object-w", ms: 1500, outcome: "error", settle: "sent", materialized: null },
+        { object: "with-a-l", ms: 1500, outcome: "error", settle: "sent", materialized: null },
       ],
     });
     const shown = JSON.stringify(slow);
