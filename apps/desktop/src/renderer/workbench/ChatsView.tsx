@@ -4148,10 +4148,12 @@ export function ChatsView(props: {
       >
         <ChatHeader
           label={
-            // The engine's title for a post with no title or first line, as
-            // when its first message is deleted, names a chat. A post names
+            // When a Group post's first message is deleted, the engine titles
+            // the post "New chat" unless someone named it. The header names
             // its Group instead.
-            nav.thread.title === "New chat" && nav.channel.kind === "channel"
+            nav.channel.kind === "channel" &&
+            nav.thread.openingMessage?.deletedAtMs !== undefined &&
+            nav.thread.title === "New chat"
               ? `Post in #${nav.channel.name}`
               : nav.thread.title
           }

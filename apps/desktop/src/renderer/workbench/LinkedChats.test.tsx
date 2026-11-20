@@ -450,6 +450,28 @@ describe("LinkedChatsPanel live thread", () => {
     errors.mockRestore();
   });
 
+  it("keeps a sent comment's tombstone when a read showed its delete first", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya] });
+    const sent = deferred<{ message: typeof sam }>();
+    bridgeMock.sendChatMessage.mockReturnValue(sent.promise);
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Plant beans in May?");
+
+    fireEvent.change(screen.getByTestId("linked-chat-composer"), {
+      target: { value: "Spam from Sam" },
+    });
+    fireEvent.click(screen.getByTestId("linked-chat-send"));
+    // An admin deletes it before the send answers, and a read shows the delete.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    workspaceChanged();
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    await act(async () => sent.resolve({ message: sam }));
+
+    expect(chat.textContent).not.toContain("Spam from Sam");
+    expect(within(chat).getAllByTestId("linked-chat-message")).toHaveLength(2);
+  });
+
   it("reads once at a time while activity keeps coming, and shows each answer", async () => {
     bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
     openPanel();

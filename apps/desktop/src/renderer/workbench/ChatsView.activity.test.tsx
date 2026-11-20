@@ -680,6 +680,24 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-post-card").textContent).not.toContain("New chat");
   });
 
+  it("keeps a Group post's own title of New chat while its first message stands", async () => {
+    const opening = message({ id: "message-1", body: "A different opening line" });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [
+        thread({
+          title: "New chat",
+          messageCount: 1,
+          openingMessage: openingPreview({ bodySnippet: "A different opening line" }),
+        }),
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe("New chat");
+  });
+
   it("reads a deleted first line's title again at the next activity after a failed read", async () => {
     const words = "I'll bring bean seeds on Saturday.";
     const opening = message({ id: "message-1", body: words });
