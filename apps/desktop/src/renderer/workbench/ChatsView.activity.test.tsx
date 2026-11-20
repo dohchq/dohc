@@ -13,6 +13,7 @@ import {
   channel,
   thread,
   message,
+  openingPreview,
   personalFeedItem,
   bridgeMock,
   shareListing,
@@ -629,6 +630,47 @@ describe("ChatsView live activity refresh", () => {
 
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5 unread");
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["their own post", { authorDisplayName: "You", authorUserId: "user-me" }],
+    ["someone else's post, as a moderator", { authorDisplayName: "Sam", authorUserId: "user-sam" }],
+  ])("drops the deleted first line from the title of %s", async (_case, author) => {
+    const words = "I'll bring bean seeds on Saturday.";
+    const opening = message({ ...author, id: "message-1", body: words });
+    const reply = message({ id: "message-2", body: "Great, see you there.", createdAtMs: NOW + 1 });
+    const listed = (title: string, deletedAtMs?: number) => ({
+      threads: [
+        thread({
+          title,
+          messageCount: 2,
+          openingMessage: openingPreview({
+            ...author,
+            bodySnippet: deletedAtMs === undefined ? words : "",
+            ...(deletedAtMs === undefined ? {} : { deletedAtMs }),
+          }),
+        }),
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue(listed(words));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, reply] });
+    renderView(vi.fn(), vi.fn(), { initialNav: { level: "channel", channel: channel() } });
+    await userEvent.click(await screen.findByTestId("chats-post-card"));
+    expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(words);
+
+    // The delete lands: the engine's title falls back with the first line gone.
+    bridgeMock.listChannelThreads.mockResolvedValue(listed("New chat", NOW + 2));
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [{ ...opening, body: "", deletedAtMs: NOW + 2 }, reply],
+    });
+    act(() => emitWorkspaceActivity());
+
+    await screen.findByTestId("chats-message-deleted");
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-thread-title").textContent).toBe("New chat"),
+    );
+    expect(screen.getByTestId("chats-thread-post-title").textContent).toBe("New chat");
+    expect(screen.getByTestId("chats-thread-view").textContent).not.toContain(words);
   });
 });
 

@@ -1810,6 +1810,45 @@ export function ChatsView(props: {
     nav,
     refreshChannelBadges,
   ]);
+  // The open post keeps the thread it opened with. When its first message is
+  // deleted, the engine titles an untitled post "New chat", so the thread is
+  // read again for its title.
+  const openThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const openChannelId = nav.level === "thread" ? nav.channel.id : null;
+  const openingNowDeleted =
+    nav.level === "thread" &&
+    nav.thread.openingMessage?.deletedAtMs === undefined &&
+    messages[0]?.threadId === nav.thread.id &&
+    messages[0].deletedAtMs !== undefined;
+  const openingTitle = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `chats-opening-title:${workspaceId}:${openChannelId}:${openThreadId}`,
+    manual: true,
+    load: async () => {
+      if (openChannelId === null) return null;
+      const result = await bridge().listChannelThreads({ workspaceId, channelId: openChannelId });
+      return result.threads.find((entry) => entry.id === openThreadId) ?? null;
+    },
+  });
+  const readOpeningTitle = openingTitle.retry;
+  useEffect(() => {
+    if (openingNowDeleted) void readOpeningTitle();
+  }, [openingNowDeleted, readOpeningTitle]);
+  const freshThread = openingTitle.value;
+  useEffect(() => {
+    if (!freshThread) return;
+    setNav((current) =>
+      current.level === "thread" && current.thread.id === freshThread.id
+        ? {
+            ...current,
+            thread: {
+              ...current.thread,
+              title: freshThread.title,
+              openingMessage: freshThread.openingMessage,
+            },
+          }
+        : current,
+    );
+  }, [freshThread]);
   const latestRefresh = useRef(refreshForActivity);
   latestRefresh.current = refreshForActivity;
   // False once this view unmounts, so its notices' Try again reloads nothing.
