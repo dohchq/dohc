@@ -1274,11 +1274,7 @@ test("Comment handoff opens files without creating a second generic chat", async
       const workspaceId = workspace.workspaceId;
       let refusal = "answered";
       try {
-        await api.createFileChat({
-          workspaceId,
-          path: "docs/shared.md",
-          title: "Must not commit",
-        });
+        await api.createFileChat({ workspaceId, path: "docs/shared.md" });
       } catch (error) {
         refusal = error instanceof Error ? error.message : String(error);
       }
@@ -1393,11 +1389,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       const workspaceId = workspace.workspaceId;
       let refusal = "answered";
       try {
-        await api.createFileChat({
-          workspaceId,
-          path: "docs/shared.md",
-          title: "Must not commit",
-        });
+        await api.createFileChat({ workspaceId, path: "docs/shared.md" });
       } catch (error) {
         refusal = error instanceof Error ? error.message : String(error);
       }

@@ -1976,17 +1976,17 @@ fn a_deleted_poll_keeps_no_choices_or_answer() {
 }
 
 #[test]
-fn a_deleted_first_comment_takes_its_title_with_it() {
+fn a_file_chat_shows_no_deleted_words_once_its_first_comment_goes() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
-    let long = format!("{} tail", "a".repeat(198));
-    // The desktop titles a file's first comment with its first line, cut
-    // to 200 UTF-16 units. A title a person typed differs from it.
-    for (thread_id, title, body) in [
-        ("short", "Quasar plans", "  Quasar plans  \nmore"),
-        ("long", &*format!("{}…", "a".repeat(198)), &*long),
-        ("typed", "Launch notes", "Quasar plans"),
+    // A file chat a comment started has no title: it shows its first
+    // message's first line. A reply stamped at the same time with a lower id
+    // shows first, as one from a computer with an earlier clock can.
+    for (thread_id, title, reply_id) in [
+        ("held", "", "held-reply"),
+        ("sorts-first", "", "a-reply"),
+        ("typed", "Launch notes", "typed-reply"),
     ] {
         let mut chats = LinkedChatStore::new(&mut store);
         chats
@@ -2003,20 +2003,22 @@ fn a_deleted_first_comment_takes_its_title_with_it() {
                 &NO_FAULTS,
             )
             .expect("file thread");
+        let opening = format!("{thread_id}-opening");
         chats
             .send_message(
-                &send_msg(thread_id, &format!("{thread_id}-0"), None, body, 10),
+                &send_msg(thread_id, &opening, None, "  Quasar secret  \nmore", 10),
                 &NO_FAULTS,
             )
             .expect("first comment");
+        let reply_at = if thread_id == "sorts-first" { 10 } else { 20 };
         chats
             .send_message(
-                &send_msg(thread_id, &format!("{thread_id}-1"), None, "reply", 20),
+                &send_msg(thread_id, reply_id, None, "Reply", reply_at),
                 &NO_FAULTS,
             )
             .expect("reply");
         drop(chats);
-        erase(&mut store, thread_id, &format!("{thread_id}-0"));
+        erase(&mut store, thread_id, &opening);
     }
     let chats = LinkedChatStore::new(&mut store);
     let mut titles: Vec<_> = chats
@@ -2027,13 +2029,13 @@ fn a_deleted_first_comment_takes_its_title_with_it() {
         .collect();
     titles.sort();
     let untitled = dohc_engine_domain::chats::chat_thread_display_title("", None);
+    let expected = vec![
+        ("held".to_owned(), untitled),
+        ("sorts-first".to_owned(), "Reply".to_owned()),
+        ("typed".to_owned(), "Launch notes".to_owned()),
+    ];
     assert_eq!(
-        titles,
-        vec![
-            ("long".to_owned(), untitled.clone()),
-            ("short".to_owned(), untitled.clone()),
-            ("typed".to_owned(), "Launch notes".to_owned()),
-        ],
+        titles, expected,
         "a deleted first comment's words stay in its thread's title"
     );
     drop(chats);
@@ -2051,12 +2053,7 @@ fn a_deleted_first_comment_takes_its_title_with_it() {
         })
         .expect("search headers");
     assert_eq!(
-        headers,
-        vec![
-            ("long".to_owned(), untitled.clone()),
-            ("short".to_owned(), untitled),
-            ("typed".to_owned(), "Launch notes".to_owned()),
-        ],
+        headers, expected,
         "search still finds a deleted first comment by its thread's title"
     );
 }

@@ -114,6 +114,8 @@ struct ChatLinkedFileParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadCreateParams {
     thread_id: String,
+    /// Absent for an untitled thread.
+    #[serde(default)]
     title: String,
     linked_file: ChatLinkedFileParams,
     now_ms: Option<i64>,

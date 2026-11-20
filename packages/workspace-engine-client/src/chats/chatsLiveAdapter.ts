@@ -102,14 +102,18 @@ export class ChatsLiveAdapter {
 
   async createThread(input: {
     workspaceId: string;
-    title: string;
+    title?: string;
     linkedFile: { objectId: string; pathHint?: string };
   }): Promise<ChatThread> {
     this.assertWorkspace(input.workspaceId);
     const threadId = this.createId("thread");
     return this.request(
       CHATS_METHOD.threadCreate,
-      { threadId, title: input.title, linkedFile: input.linkedFile },
+      {
+        threadId,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        linkedFile: input.linkedFile,
+      },
       { idempotencyKey: threadId },
     );
   }

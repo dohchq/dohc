@@ -8,7 +8,7 @@ import type { AgentThreadLinesEvent, ChatThreadRecord } from "../../ipc/bridgeCo
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
 import { AgentThreadLinesProvider } from "./AgentThreadLines";
 import { deferred, type Deferred } from "../../testing/deferred";
-import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
+import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile } from "./About";
 import type { AccessContext } from "./accessReason";
@@ -72,14 +72,16 @@ function LinkedChatsPanel(
     Partial<Pick<PanelProps, "notices">>,
 ) {
   return (
-    <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel
-        notices={notices}
-        accessContext={accessContext}
-        links={links}
-        {...props}
-      />
-    </ReactionStoreProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ReactionStoreProvider workspaceId={props.workspaceId}>
+        <ProductionLinkedChatsPanel
+          notices={notices}
+          accessContext={accessContext}
+          links={links}
+          {...props}
+        />
+      </ReactionStoreProvider>
+    </WorkspaceSessionProvider>
   );
 }
 
@@ -403,6 +405,38 @@ describe("LinkedChatsPanel live thread", () => {
     await within(chat).findByTestId("linked-chat-message-deleted");
     expect(chat.textContent).not.toContain("Spam from Sam");
     expect(chat.textContent).toContain("Plant beans in May?");
+  });
+
+  it("reads an untitled thread's heading again when its opening comment is deleted", async () => {
+    const opened = { ...searchThread, title: "Plant beans in May?" };
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={opened}
+        onError={vi.fn()}
+      />,
+    );
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+    expect(screen.getByTestId("linked-chat-title").textContent).toBe("Plant beans in May?");
+
+    // The engine titles an untitled thread by its opening message, and "New
+    // chat" once that message is deleted.
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [{ ...opened, title: "New chat", path: "notes/plan.md" }],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [{ ...maya, body: "", deletedAtMs: 1_700_000_120_000 }, sam],
+    });
+    workspaceChanged();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+    );
+    expect(chat.textContent).not.toContain("Plant beans in May?");
   });
 
   it("keeps a delete that lands while the thread's first read is still out", async () => {
@@ -958,16 +992,36 @@ describe("LinkedChatsPanel comment on the file", () => {
     fireEvent.keyDown(composer, { key: "Enter" });
   }
 
-  it("starts the file's chat titled by the comment's first line, posts the comment, then opens it", async () => {
-    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+  it("starts the file's chat untitled, posts the comment, then heads it with the comment's first line", async () => {
+    // An untitled chat reads "New chat" until its first message lands.
+    bridgeMock.createFileChat.mockResolvedValue({ thread: { ...created, title: "New chat" } });
     bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1" } });
     renderPanel();
+    await screen.findByTestId("linked-chat-new");
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [{ ...created, path: "docs/plan.md" }],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          presentation: { group: "fixture", hue: null, self: true },
+          id: "m1",
+          threadId: "thread-new",
+          authorKind: "human",
+          authorDisplayName: "You",
+          body: "Tighten the intro\nIt runs long.",
+          createdAtMs: 2,
+        },
+      ],
+    });
     await writeComment("Tighten the intro\nIt runs long.");
-    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-title").textContent).toBe("Tighten the intro"),
+    );
     expect(bridgeMock.createFileChat).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
       path: "docs/plan.md",
-      title: "Tighten the intro",
     });
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
@@ -1012,14 +1066,6 @@ describe("LinkedChatsPanel comment on the file", () => {
     fireEvent.keyDown(screen.getByTestId("linked-chat-new-composer"), { key: "Escape" });
     expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
-  });
-});
-
-describe("commentTitle", () => {
-  it("cuts a long first line with no space before the …, on whole characters", () => {
-    expect(commentTitle(`${"a".repeat(198)} bbb\nmore`)).toBe(`${"a".repeat(198)}…`);
-    // A chat title holds 200 UTF-16 units. Each emoji takes two, and none is split.
-    expect(commentTitle("🎉".repeat(150))).toBe(`${"🎉".repeat(99)}…`);
   });
 });
 

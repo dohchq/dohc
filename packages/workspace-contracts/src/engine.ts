@@ -1243,9 +1243,10 @@ export interface LinkedChatStore {
   // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.
+  // An untitled thread shows its first message's first line.
   createThread(input: {
     workspaceId: WorkspaceId;
-    title: string;
+    title?: string;
     linkedFile: { objectId: WorkspaceObjectId; pathHint?: string };
   }): Promise<ChatThread>;
   createChannel(input: {

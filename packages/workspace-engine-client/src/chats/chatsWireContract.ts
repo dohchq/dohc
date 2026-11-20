@@ -182,7 +182,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
   threadId: string;
-  title: string;
+  title?: string;
   linkedFile: ChatsJsonObject & { objectId: string; pathHint?: string };
   nowMs?: number;
 };

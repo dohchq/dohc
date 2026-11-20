@@ -5821,3 +5821,158 @@ fn a_poll_before_or_after_the_delete_keeps_nothing() {
         .expect("decision rows");
     assert_eq!(kept, 0, "a deleted poll keeps its choices and answer");
 }
+
+#[test]
+fn a_file_chat_shows_no_deleted_words_on_any_copy() {
+    let (_scratch, _path, mut engine) = open_store();
+    // A comment starts an untitled file chat. One copy held the comment, one
+    // pulled only its tombstone, and on one a reply shows before it.
+    let mut ops = Vec::new();
+    for (seq, thread_id) in [(0, "held"), (2, "tombstoned"), (4, "sorts-first")] {
+        let opening = format!("{thread_id}-opening");
+        ops.push(envelope(
+            "peer",
+            seq,
+            "chat.thread.create",
+            json!({
+                "threadId": thread_id,
+                "title": "",
+                "createdAtMs": 10,
+                "linkedObjectId": format!("object-{thread_id}"),
+                "linkedAtMs": 10
+            }),
+        ));
+        ops.push(if thread_id == "tombstoned" {
+            envelope(
+                "peer",
+                seq + 1,
+                "chat.message.tombstone",
+                message_tombstone(&opening, thread_id),
+            )
+        } else {
+            envelope(
+                "peer",
+                seq + 1,
+                "chat.message.append",
+                message_append(&opening, thread_id, "Quasar secret\nmore"),
+            )
+        });
+        if thread_id == "sorts-first" {
+            ops.push(envelope(
+                "ana",
+                0,
+                "chat.message.append",
+                message_append("a-reply", thread_id, "Reply"),
+            ));
+        }
+        ops.push(envelope(
+            DELETE_ORIGIN,
+            seq / 2,
+            "chat.message.delete",
+            message_delete(&opening, thread_id),
+        ));
+    }
+    for op in &ops {
+        apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+    }
+    let untitled = dohc_engine_domain::chats::chat_thread_display_title("", None);
+    let expected = vec![
+        ("held".to_owned(), untitled.clone()),
+        ("sorts-first".to_owned(), "Reply".to_owned()),
+        ("tombstoned".to_owned(), untitled),
+    ];
+    let headers: Vec<_> = expected
+        .iter()
+        .map(|(thread_id, _)| (thread_id.clone(), thread_search_header(&engine, thread_id)))
+        .collect();
+    assert_eq!(
+        headers, expected,
+        "search finds the deleted comment's words"
+    );
+    let mut titles: Vec<_> = LinkedChatStore::new(&mut engine)
+        .list_threads("ws")
+        .expect("threads")
+        .into_iter()
+        .map(|thread| (thread.thread_id, thread.title))
+        .collect();
+    titles.sort();
+    assert_eq!(
+        titles, expected,
+        "a title shows the deleted comment's words"
+    );
+}
+
+#[test]
+fn a_poll_in_any_order_with_its_tombstone_and_delete_keeps_nothing() {
+    let poll = |state: &str| {
+        let mut payload = json!({
+            "threadId": "thread-imported",
+            "messageId": "message-gone",
+            "state": state,
+            "atMs": 40,
+            "options": ["Quasar", "Pulsar"]
+        });
+        if state == "resolved" {
+            payload["chosenOption"] = json!("Quasar");
+        }
+        envelope("ana", 0, "chat.decision.set", payload)
+    };
+    let tombstone = envelope(
+        "peer",
+        3,
+        "chat.message.tombstone",
+        message_tombstone("message-gone", "thread-imported"),
+    );
+    let delete = envelope(
+        DELETE_ORIGIN,
+        0,
+        "chat.message.delete",
+        message_delete("message-gone", "thread-imported"),
+    );
+    for state in ["open", "resolved"] {
+        let poll = poll(state);
+        for order in [
+            [&poll, &tombstone, &delete],
+            [&poll, &delete, &tombstone],
+            [&tombstone, &poll, &delete],
+            [&tombstone, &delete, &poll],
+            [&delete, &poll, &tombstone],
+            [&delete, &tombstone, &poll],
+        ] {
+            let (_scratch, _path, mut engine) = open_store();
+            imported_chat_fixture(&mut engine, "peer");
+            let kinds: Vec<_> = order.iter().map(|op| op.op_kind.as_str()).collect();
+            for op in order {
+                apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+            }
+            let kept: i64 = engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM chat_decisions WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .expect("decision rows");
+            assert_eq!(kept, 0, "{state} {kinds:?}: the poll keeps its choices");
+            let chats = LinkedChatStore::new(&mut engine);
+            let open: Vec<_> = chats
+                .list_threads("ws")
+                .expect("threads")
+                .into_iter()
+                .filter_map(|thread| thread.channel_id)
+                .flat_map(|channel| {
+                    chats
+                        .list_channel_threads("ws", &channel, None, 10)
+                        .expect("summaries")
+                })
+                .map(|summary| summary.open_decision_count)
+                .collect();
+            assert_eq!(
+                open,
+                vec![0],
+                "{state} {kinds:?}: the poll still counts as open"
+            );
+        }
+    }
+}

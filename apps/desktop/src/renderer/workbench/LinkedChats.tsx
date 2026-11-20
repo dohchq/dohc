@@ -30,6 +30,8 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
@@ -47,20 +49,6 @@ function ReadOnlyNotice({ reason }: { reason: string }) {
 }
 
 const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
-
-// A comment's chat takes its title from the comment's first line. A chat
-// title holds 200 UTF-16 units, so this cut counts those, on whole characters.
-const TITLE_MAX = 200;
-export function commentTitle(body: string): string {
-  const line = body.trim().split("\n", 1)[0]!.trim();
-  if (line.length <= TITLE_MAX) return line;
-  let kept = "";
-  for (const character of line) {
-    if (kept.length + character.length > TITLE_MAX - 1) break;
-    kept += character;
-  }
-  return `${kept.trimEnd()}…`;
-}
 
 const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
@@ -253,10 +241,19 @@ export function LinkedChatsPanel(props: {
     };
   }, [filePath, notices, refreshThreads, tabPath]);
 
+  // The opening message the open chat's title was read with: unknown until
+  // its first read shows, and null for a chat read with no messages.
+  const titleReadWith = useRef<{ threadId: string; opening: string | null | undefined } | null>(
+    null,
+  );
   const openThread = useCallback(
-    async (thread: ChatThreadRecord, focusMessageId?: string) => {
+    async (thread: ChatThreadRecord, focusMessageId?: string, readWithoutMessages = false) => {
       const token = ++liveToken.current;
       const read = ++messageReads.current.started;
+      titleReadWith.current = {
+        threadId: thread.id,
+        opening: readWithoutMessages ? null : undefined,
+      };
       setActiveThread(thread);
       setMessages([]);
       setMessagesLoading(true);
@@ -380,11 +377,7 @@ export function LinkedChatsPanel(props: {
       const token = ++liveToken.current;
       setSending(true);
       try {
-        const { thread } = await bridge().createFileChat({
-          workspaceId,
-          path: filePath,
-          title: commentTitle(trimmed),
-        });
+        const { thread } = await bridge().createFileChat({ workspaceId, path: filePath });
         if (token !== liveToken.current) return;
         setCommenting(null);
         setThreadsState((current) =>
@@ -412,7 +405,8 @@ export function LinkedChatsPanel(props: {
           setComposer(trimmed);
           props.onError(ipcErrorMessage(error, "Could not post that comment."), error);
         }
-        void openThread(thread);
+        // The chat was created untitled, so its title came before the comment.
+        void openThread(thread, undefined, true);
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not comment on this file."), error);
@@ -549,6 +543,52 @@ export function LinkedChatsPanel(props: {
       unsubscribe();
     };
   }, [activeThreadId, readMessages, workspaceId]);
+
+  // An untitled chat shows its opening message's first line, and "New chat"
+  // once that message is deleted. When the opening message the heading was
+  // read with changes, the chat's title is read again.
+  const shownOpening =
+    activeThread === null || messagesLoading
+      ? undefined
+      : messages[0]?.threadId === activeThread.id
+        ? `${messages[0].id}:${messages[0].deletedAtMs !== undefined}`
+        : null;
+  const freshTitle = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `linked-chat-title:${workspaceId}:${filePath}:${activeThreadId}`,
+    manual: true,
+    load: async () => {
+      if (!filePath || activeThreadId === null) return null;
+      const result = await bridge().listFileChats({ workspaceId, path: filePath });
+      if (isWorkspaceUpdatingResponse(result)) return null;
+      return result.threads.find((thread) => thread.id === activeThreadId) ?? null;
+    },
+  });
+  const readTitle = freshTitle.retry;
+  useEffect(() => {
+    const readWith = titleReadWith.current;
+    if (shownOpening === undefined || readWith?.threadId !== activeThreadId) return;
+    const before = readWith.opening;
+    readWith.opening = shownOpening;
+    if (before !== undefined && before !== shownOpening) void readTitle();
+  }, [activeThreadId, readTitle, shownOpening]);
+  const freshThread = freshTitle.value;
+  useEffect(() => {
+    if (!freshThread) return;
+    const { id, title } = freshThread;
+    setActiveThread((current) =>
+      current?.id === id && current.title !== title ? { ...current, title } : current,
+    );
+    setThreadsState((current) =>
+      current.status === "ready"
+        ? {
+            ...current,
+            threads: current.threads.map((thread) =>
+              thread.id === id ? { ...thread, title } : thread,
+            ),
+          }
+        : current,
+    );
+  }, [freshThread]);
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,

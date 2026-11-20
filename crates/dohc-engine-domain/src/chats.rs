@@ -1086,6 +1086,7 @@ pub struct ResolveDecision {
 pub struct CreateFileThread {
     pub workspace_id: String,
     pub thread_id: String,
+    /// Empty for an untitled thread.
     pub title: String,
     pub linked_object_id: String,
     pub linked_path_hint: Option<String>,
@@ -1827,7 +1828,7 @@ pub fn upsert_chat_search_index_row(
 }
 
 /// Maintain the message row and an untitled thread's derived header for a
-/// replicated message that was inserted in the current transaction.
+/// message, local or replicated, inserted in the current transaction.
 pub fn index_replicated_chat_message_search_rows(
     conn: &Connection,
     workspace_id: &str,
@@ -1903,18 +1904,6 @@ fn normalize_optional_thread_title(title: Option<&str>) -> Result<String, Domain
             Ok(normalized)
         }
     }
-}
-
-/// Required-title variant used by file-linked thread creation.
-fn normalize_thread_title(title: &str) -> Result<String, DomainError> {
-    let normalized = title.trim_matches(is_js_trim_ws);
-    if normalized.is_empty() || normalized.encode_utf16().count() > MAX_THREAD_TITLE_CHARS {
-        return Err(DomainError::chat(
-            "invalid-thread-title",
-            "Thread title is required.",
-        ));
-    }
-    Ok(normalized.to_owned())
 }
 
 fn normalize_attachment_object_id(object_id: &str) -> Result<String, DomainError> {
@@ -3298,7 +3287,9 @@ impl<'a> LinkedChatStore<'a> {
             "workspace_id must not be empty",
         )?;
         let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
-        let title = normalize_thread_title(&input.title)?;
+        // A comment starts its chat untitled, so the thread shows its first
+        // message and a delete of that message takes the words with it.
+        let title = normalize_optional_thread_title(Some(&input.title))?;
         let object_id = normalize_attachment_object_id(&input.linked_object_id)?;
         let path_hint = input
             .linked_path_hint
@@ -3361,7 +3352,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.workspace_id,
                 &thread_id_c,
                 CHAT_THREAD_HEADER_MESSAGE_ID,
-                &title_c,
+                &chat_thread_display_title(&title_c, None),
             )
             .map_err(DomainError::sql_persist)?;
             let mut payload = serde_json::json!({
@@ -3389,7 +3380,7 @@ impl<'a> LinkedChatStore<'a> {
             Ok::<_, DomainError>(ChatThread {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: thread_id_c.clone(),
-                title: title_c.clone(),
+                title: chat_thread_display_title(&title_c, None),
                 created_at_ms: input.now_ms,
                 updated_at_ms: input.now_ms,
                 lane: ChatThreadLane::Posts,
@@ -4049,16 +4040,15 @@ impl<'a> LinkedChatStore<'a> {
                     None,
                 )?;
             }
-            let message_search_text =
-                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
-            upsert_chat_search_index_row(
+            index_replicated_chat_message_search_rows(
                 tx,
                 &input.workspace_id,
                 &input.thread_id,
                 &input.message_id,
-                &message_search_text,
-            )
-            .map_err(DomainError::sql_persist)?;
+                &display_c,
+                input.author_kind.as_str(),
+                &body_c,
+            )?;
             let chain_depth = written_message_chain_depth(
                 tx,
                 &input.workspace_id,
@@ -4266,7 +4256,9 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            // A deleted poll is gone, so a retry fails as a fresh resolve does.
             let kept = self.store.read_with(|conn| {
+                require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)?;
                 receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)
             })?;
             if let Some(decision) = kept {

@@ -2179,10 +2179,20 @@ fn apply_decision(
             Some(chosen.to_owned())
         }
     };
-    // A deleted message keeps no poll.
-    if deleted_message(tx, &op.workspace_id, &p.message_id)
-        .map_err(|error| map_chat_rule(error, "chat decision target is invalid"))?
-        .is_some()
+    // A deleted message keeps no poll, whether its delete or its tombstone
+    // came first.
+    let tombstoned: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages \
+             WHERE workspace_id=?1 AND message_id=?2 AND deleted_at_ms IS NOT NULL)",
+            params![op.workspace_id, p.message_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if tombstoned
+        || deleted_message(tx, &op.workspace_id, &p.message_id)
+            .map_err(|error| map_chat_rule(error, "chat decision target is invalid"))?
+            .is_some()
     {
         return Ok(());
     }

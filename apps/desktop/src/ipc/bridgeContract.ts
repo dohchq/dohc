@@ -2838,10 +2838,11 @@ export const ListFileChatsResponse = z.union([
 ]);
 export type ListFileChatsResponse = z.infer<typeof ListFileChatsResponse>;
 
+// A comment starts its file's chat untitled: the chat shows its first
+// message's first line, so a delete of that message takes the words with it.
 export const CreateFileChatPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
-  title: z.string().min(1).max(200),
 });
 export type CreateFileChatPayload = z.infer<typeof CreateFileChatPayload>;
 
