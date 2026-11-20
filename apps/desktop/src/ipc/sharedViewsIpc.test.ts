@@ -1174,6 +1174,36 @@ describe("registered received-view handlers", () => {
       expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
     });
 
+    it("does not take an upgrade once the relay has said the share is gone, before the copy is ended", async () => {
+      const { h } = await pinnedAt("view");
+      h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+      const recording = deferred<{ identity: "recorded" }>();
+      h.recordIdentity.mockReturnValueOnce(recording.promise);
+      const ending = deferred<void>();
+      h.end.mockImplementationOnce(async () => ending.promise);
+      const refreshed = refresh(h);
+      await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
+      h.fetchAccess.mockRejectedValueOnce(new ShareUnavailableError());
+      const checked = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+        workspaceId: "existing",
+      });
+      await vi.waitFor(() => expect(h.end).toHaveBeenCalledOnce());
+      recording.resolve({ identity: "recorded" });
+      await refreshed;
+      expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      ending.resolve();
+      await checked;
+    });
+
+    it("gives the level read a time limit", async () => {
+      const { h } = await pinnedAt("view");
+      h.fetchInfo.mockResolvedValue({ ...info, selector: view });
+      await refresh(h);
+      expect(h.fetchInfo).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+
     it("does not take an upgrade from a reply that an access answer overtook", async () => {
       const { h } = await pinnedAt("view");
       const response = deferred<ShareViewInfo>();

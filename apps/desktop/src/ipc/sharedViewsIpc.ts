@@ -174,6 +174,7 @@ export function registerSharedViewsIpcHandlers<
   // Give a received share the sync identity used by its Edit proposal lane.
   // Run at open and on refresh so an older received share gains the identity
   // before it submits document changes.
+  const SHARE_INFO_READ_TIMEOUT_MS = 15_000;
   const accessStatements = new Map<string, number>();
   const accessStatementsFor = (workspaceId: string) => accessStatements.get(workspaceId) ?? 0;
 
@@ -683,6 +684,7 @@ export function registerSharedViewsIpcHandlers<
                     token: credentials.token,
                   },
                   shareId: workspace.shareView.shareId,
+                  signal: AbortSignal.timeout(SHARE_INFO_READ_TIMEOUT_MS),
                 });
                 const assertRefreshCurrent = () => {
                   operation.assertCurrent();
@@ -973,6 +975,10 @@ export function registerSharedViewsIpcHandlers<
                 scoped.assertCurrent();
                 if (!(error instanceof ShareUnavailableError)) return { status: "unverified" };
                 clearTimeout(timeout);
+                accessStatements.set(
+                  workspace.workspaceId,
+                  accessStatementsFor(workspace.workspaceId) + 1,
+                );
                 try {
                   await withStaleSensitiveWorkspaceOperation(workspace.rootPath, (lease) =>
                     shareViewFiles.end(
