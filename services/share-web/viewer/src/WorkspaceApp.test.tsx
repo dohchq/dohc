@@ -1837,7 +1837,7 @@ describe("deleting a Group message", () => {
     await act(async () => inDialog("Delete").click());
     await settle(() => dialog()?.querySelector('[role="alert"]') !== null);
     expect(dialog()!.querySelector('[role="alert"]')?.textContent).toBe(
-      "Couldn't delete the message. You can no longer delete it.",
+      "Couldn't delete the message. It is gone, or your role does not let you delete it.",
     );
     await act(async () => inDialog("Try again").click());
     await settle(() => dialog() === null && !text().includes("Mine to take back"));

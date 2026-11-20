@@ -744,7 +744,7 @@ export function ChannelView({
         phase: "failed",
         why:
           status === 404
-            ? "You can no longer delete it."
+            ? "It is gone, or your role does not let you delete it."
             : status === 0
               ? "Deleting needs a connection."
               : null,

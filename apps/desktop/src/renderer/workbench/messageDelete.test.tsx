@@ -251,7 +251,7 @@ describe("Delete on a message", () => {
   });
 
   it.each([
-    ["a refusal", "You can no longer delete it."],
+    ["a refusal", "It is gone, or your role does not let you delete it."],
     ["no connection", "Deleting needs a connection."],
   ])("shows %s in the dialog with Try again", async (_case, words) => {
     const { deletes } = stubMembers(async () => view("member"));
