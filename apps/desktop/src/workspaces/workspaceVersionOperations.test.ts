@@ -206,7 +206,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
   private dropHeadAfter: string | null = null;
 
-  /// Model a resolution the engine recorded but could not place on disk.
   dropHeadAfterBinaryResolve(path: string): void {
     this.dropHeadAfter = path;
   }

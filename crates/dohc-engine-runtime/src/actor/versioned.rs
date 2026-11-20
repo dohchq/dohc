@@ -727,9 +727,6 @@ impl ActorHandle {
         self.run(move |store, cache| {
             let outcome =
                 conflict_resolve_on_store(store, &input, None, &leases, faults.as_ref(), &token);
-            // Resolution can replace or archive a lineage; the tuple probe
-            // already misses on every such outcome (the claim id changes or
-            // the marker is deleted), but the reset hooks are unconditional.
             cache.clear();
             outcome
         })
@@ -738,7 +735,7 @@ impl ActorHandle {
 
     /// Resolve and index a text conflict with the workspace root owned by the
     /// calling session, then place the result in that root. The flag is false
-    /// when a file the resolution changed could not be placed.
+    /// when a file the resolution queued could not be placed.
     pub async fn conflict_resolve_indexed(
         &self,
         input: ResolveTextConflict,
@@ -3247,8 +3244,6 @@ fn conflict_resolve_on_store(
     Ok(result)
 }
 
-/// Place each job the resolution queued, removals first. False when one ended
-/// without its bytes on disk.
 fn place_resolution(
     store: &EngineStore,
     root: &std::path::Path,
