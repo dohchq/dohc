@@ -1235,7 +1235,9 @@ mod tests {
                     metadata_summary: None,
                     metadata_correlation_id: None,
                     now_ms,
-                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                SecretDiskIntent::Materialize {
+                    check: &|_, _, _, _| Ok(dohc_engine_storage::Preimage::Absent),
                 },
                 &NoFaults,
             )

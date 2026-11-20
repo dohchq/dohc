@@ -56,6 +56,8 @@ mod rpc_received_ydoc;
 mod rpc_relay;
 #[path = "rpc_search_page.rs"]
 mod rpc_search_page;
+#[path = "rpc_secret_queued_jobs.rs"]
+mod rpc_secret_queued_jobs;
 #[path = "rpc_source_capture.rs"]
 mod rpc_source_capture;
 #[path = "rpc_switch_barriers.rs"]

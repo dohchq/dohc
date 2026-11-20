@@ -8,8 +8,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
-    materialize_one, materialize_secret_delete_one, materialize_secret_one, recover_displacements,
-    save_kept_displacement,
+    complete_secret_job_unrun, materialize_one, materialize_secret_delete_one,
+    materialize_secret_one, recover_displacements, save_kept_displacement,
 };
 use dohc_engine_storage::{
     Displacement, EngineStore, FaultInjector, JobStatus, MaterializationJob,
@@ -177,7 +177,9 @@ impl ActorHandle {
     /// Replay pending writes before a version fence scans the filesystem.
     /// Unlike startup replay, any attempted job failure is fatal: scanning
     /// stale disk bytes after a committed write failed to materialize could
-    /// capture those bytes back over the committed head.
+    /// capture those bytes back over the committed head. A protected job that
+    /// conflicts is settled, not failed: the file holds an edit newer than the
+    /// job, and the scan captures that edit.
     pub async fn materialize_replay_pending_for_fence(
         &self,
         root_dir: PathBuf,
@@ -333,6 +335,90 @@ fn secret_tip_exists(
                     coordinates.workspace_id,
                     coordinates.version_id,
                     coordinates.path
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
+/// A protected write that conflicts found an edit newer than its moment on
+/// disk. Capture owns that moment, so the next scan records the edit over it.
+fn keep_secret_edit(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    job: &MaterializationJob,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let Some(moment_id) = job.job_id.strip_prefix("secret-mat_") else {
+        return Ok(());
+    };
+    match store.write_with(faults, |tx| {
+        dohc_engine_storage::stamp_secret_capture_owned(tx, workspace_id, moment_id)
+    })? {
+        dohc_engine_storage::TxnOutcome::Committed(()) => Ok(()),
+        dohc_engine_storage::TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+/// Whether a protected delete of another spelling of the same disk entry, in
+/// the same version, still waits. A case-only rename's write expects the file
+/// that delete removes to be gone, so the write waits for it.
+fn alias_secret_delete_pending(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    coordinates: &SecretJobCoordinates,
+) -> Result<bool, RuntimeError> {
+    let spellings = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT j.target_path FROM materialization_jobs j \
+                 JOIN secret_moments m \
+                   ON j.workspace_id IN (m.workspace_id, '') AND m.moment_id = substr(j.job_id, 12) \
+                 WHERE j.status = 'pending' AND j.job_id GLOB 'secret-mat_*' \
+                   AND j.operation = 'delete' AND j.target_path <> ?3 \
+                   AND m.workspace_id = ?1 AND m.version_id = ?2",
+            )?;
+            statement
+                .query_map(
+                    params![coordinates.workspace_id, coordinates.version_id, coordinates.path],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(StorageError::corrupt_public)?;
+    let entry = dohc_engine_files::floor::path_collision_key(&coordinates.path);
+    Ok(spellings.iter().any(|spelling| {
+        dohc_engine_files::floor::path_collision_key(spelling) == entry
+            && dohc_engine_files::may_share_entry(root_dir, spelling, &coordinates.path)
+    }))
+}
+
+/// Whether a later protected moment on the same file still waits to reach the
+/// disk. That job writes the same tip against a newer preimage, so it alone runs.
+fn later_secret_job_pending(
+    store: &EngineStore,
+    coordinates: &SecretJobCoordinates,
+    moment_order: i64,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM materialization_jobs j \
+                 JOIN secret_moments m \
+                   ON j.workspace_id IN (m.workspace_id, '') AND m.moment_id = substr(j.job_id, 12) \
+                 WHERE j.status = 'pending' AND j.job_id GLOB 'secret-mat_*' \
+                   AND j.target_path = ?3 AND j.target_generation > ?4 \
+                   AND m.workspace_id = ?1 AND m.version_id = ?2 AND m.path = ?3 \
+                 LIMIT 1",
+                params![
+                    coordinates.workspace_id,
+                    coordinates.version_id,
+                    coordinates.path,
+                    moment_order
                 ],
                 |_| Ok(()),
             )
@@ -666,6 +752,49 @@ fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<Materializa
     first
 }
 
+/// Protected deletes run before protected writes to another spelling of the
+/// same path, so a case-only rename clears the old entry before the new
+/// spelling's write, whichever order its jobs were queued in.
+fn secret_alias_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<MaterializationJob> {
+    let mut writes: std::collections::HashMap<String, HashSet<&str>> = Default::default();
+    for job in &jobs {
+        if job.operation == MaterializationOperation::Write && job.job_id.starts_with("secret-mat_")
+        {
+            writes
+                .entry(dohc_engine_files::floor::path_collision_key(
+                    &job.target_path,
+                ))
+                .or_default()
+                .insert(&job.target_path);
+        }
+    }
+    let first: HashSet<String> = jobs
+        .iter()
+        .filter(|job| {
+            job.operation == MaterializationOperation::Delete
+                && job.job_id.starts_with("secret-mat_")
+                && writes
+                    .get(&dohc_engine_files::floor::path_collision_key(
+                        &job.target_path,
+                    ))
+                    .is_some_and(|spellings| {
+                        spellings
+                            .iter()
+                            .any(|spelling| *spelling != job.target_path)
+                    })
+        })
+        .map(|job| job.job_id.clone())
+        .collect();
+    if first.is_empty() {
+        return jobs;
+    }
+    let (mut ordered, others): (Vec<_>, Vec<_>) = jobs
+        .into_iter()
+        .partition(|job| first.contains(&job.job_id));
+    ordered.extend(others);
+    ordered
+}
+
 /// Whether a switch write meets a real folder at its path that stays. The
 /// folder gives way when no path `holds` holds lies inside it and it holds
 /// nothing but folders and files the OS writes, which go first, deepest
@@ -919,7 +1048,7 @@ fn replay_materializations(
             && (job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
-    let jobs = switch_parent_deletes_first(jobs);
+    let jobs = secret_alias_deletes_first(switch_parent_deletes_first(jobs));
     // Filter small replays in SQL; cache the full version only for larger batches.
     let cache_all_paths = jobs
         .iter()
@@ -1030,7 +1159,9 @@ fn replay_materializations(
                     }
                 } else {
                     let Some(coordinates) = secret_job_coordinates(store, &job)? else {
-                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                            summary.failed += 1;
+                        }
                         continue;
                     };
                     let active_version_id = VersionedTextStore::new(store)
@@ -1041,13 +1172,30 @@ fn replay_materializations(
                     }
                     let tip_present = secret_tip_exists(store, &coordinates)?;
                     match (job.operation, tip_present) {
-                        (MaterializationOperation::Write, false)
-                        | (MaterializationOperation::Delete, true) => {
+                        (MaterializationOperation::Write, false) => {
+                            if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                                summary.failed += 1;
+                            }
+                            continue;
+                        }
+                        (MaterializationOperation::Delete, true) => {
                             store.mark_materialization_complete(&job.job_id, now_ms)?;
                             continue;
                         }
                         (MaterializationOperation::Delete, false)
                         | (MaterializationOperation::Write, true) => {}
+                    }
+                    if later_secret_job_pending(store, &coordinates, job.target_generation)? {
+                        if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                            summary.failed += 1;
+                        }
+                        continue;
+                    }
+                    if job.operation == MaterializationOperation::Write
+                        && alias_secret_delete_pending(store, root_dir, &coordinates)?
+                    {
+                        summary.failed += 1;
+                        continue;
                     }
                     coordinates
                 };
@@ -1072,6 +1220,7 @@ fn replay_materializations(
                         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                             summary.completed += 1;
                         }
+                        Ok(JobOutcome::Conflict) if ordinary_secret => summary.completed += 1,
                         Ok(JobOutcome::Conflict | JobOutcome::Superseded)
                             if scope.file_outcomes_settled =>
                         {
@@ -1169,7 +1318,10 @@ fn replay_materializations(
                                 &plaintext_sha,
                             );
                         }
-                        if scope.file_outcomes_settled
+                        if ordinary_secret && matches!(outcome, Ok(JobOutcome::Conflict)) {
+                            keep_secret_edit(store, &coordinates.workspace_id, &job, faults)?;
+                            summary.completed += 1;
+                        } else if scope.file_outcomes_settled
                             && matches!(outcome, Ok(JobOutcome::Conflict | JobOutcome::Superseded))
                         {
                             summary.completed += 1;
