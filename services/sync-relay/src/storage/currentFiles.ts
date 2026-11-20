@@ -508,13 +508,13 @@ const BLOB_BYTE_LENGTH_PAGE = 16;
 
 export function currentFileBlobByteLengthQuery(
   selectorPaths: readonly string[],
-  afterPath = false,
+  pastCursor = false,
 ): {
   sql: string;
   selectorParams: string[];
 } {
   const selector = currentFileSelectorClause(selectorPaths);
-  const after = afterPath ? " AND sync_relay_current_files.path > ?" : "";
+  const after = pastCursor ? " AND sync_relay_current_files.path > ?" : "";
   return {
     sql: `SELECT sync_relay_current_files.path, CAST(blob.byte_length AS TEXT) AS byte_length
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
@@ -525,8 +525,8 @@ export function currentFileBlobByteLengthQuery(
          AND sync_relay_current_files.version_id = ?
          AND sync_relay_current_files.blob_sha256 = ?
          AND sync_relay_current_files.state_relay_seq > ?${selector.sql}${after}
-       -- The caller may skip hidden rule files with these bytes; a few rows keep
-       -- the cost, and its timing, the same however many folders share a rule.
+       -- A share link reads one page, so its cost and timing stay the same however
+       -- many hidden rule files share these bytes. A member's agent pages on.
        ORDER BY sync_relay_current_files.path
        LIMIT ${BLOB_BYTE_LENGTH_PAGE}`,
     selectorParams: selector.params,
