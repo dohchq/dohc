@@ -1146,6 +1146,12 @@ describe("owner relay share discussion IPC contract", () => {
       ok: true,
       ...revoked,
     });
+    const joinedThroughLink = { ...revoked, parentGrantId: "link-grant-1" };
+    expect(RevokeRelayShareGrantResult.parse(joinedThroughLink)).toEqual(joinedThroughLink);
+    expect(RelayShareGrantRevokeResponse.parse({ ok: true, ...joinedThroughLink })).toEqual({
+      ok: true,
+      ...joinedThroughLink,
+    });
     const { undo: _undo, ...withoutUndo } = revoked;
     for (const [schema, base] of [
       [RevokeRelayShareGrantResult, withoutUndo],

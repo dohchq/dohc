@@ -7661,6 +7661,7 @@ function createShareMountCommandsFor(binding: WorkspaceAuthorityBinding<Registry
       ),
     logError: (message, error) => console.error(`[desktop] ${message}`, error),
     recheckRemovedShares,
+    endedMountRemoved: () => receivedShareAcquisition.outdated(),
   });
 }
 

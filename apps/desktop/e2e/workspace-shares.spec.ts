@@ -208,17 +208,22 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await page.getByTestId("explorer-menu-item-share").click();
     const dialog = page.getByTestId("share-dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText("docs/plan.md");
+    await expect(dialog.getByTitle("docs/plan.md")).toHaveText("plan.md");
 
     await dialog.getByTestId("share-email").fill(RECIPIENT_EMAIL);
     await dialog.getByTestId("share-create").click();
 
-    const code = dialog.getByTestId("share-code");
-    await expect(code).toBeVisible();
-    const shareCode = (await code.textContent()) ?? "";
+    const invited = dialog.getByTestId("share-invited");
+    await expect(invited).toContainText(`Invited ${RECIPIENT_EMAIL}.`);
+    const shareCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      const copy = dialog.getByTestId("share-invitation-copy");
+      await copy.click({ timeout: remainingMs() });
+      await expect(copy).toHaveText("Invitation copied", { timeout: remainingMs() });
+      return desktop!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
     expect(shareCode.startsWith("dohc-share:")).toBe(true);
     const shareId = shareCode.split(":")[1]!;
-    await dialog.getByTestId("share-done").click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
     const recipientFetch = await relayJson(
       relay.baseUrl,
@@ -250,7 +255,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const confirm = page.getByTestId("sharing-end-confirm");
     await expect(confirm).toContainText(RECIPIENT_EMAIL);
     await confirm.getByTestId("sharing-end").click();
-    await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
+    await expect(row).toHaveCount(0);
+    await page.getByTestId("sharing-granted-ended-toggle").click();
+    await expect(row).toHaveAttribute("data-status", "revoked");
 
     const revokedFetch = await relayJson(
       relay.baseUrl,
@@ -381,20 +388,29 @@ confidentialTest.describe("View link lifecycle", () => {
         await page.getByTestId("explorer-menu-item-share").click();
         let dialog = page.getByTestId("share-dialog");
         await expect(dialog).toBeVisible();
-        await expect(dialog).toContainText("docs/shared.md");
+        await expect(dialog.getByTitle("docs/shared.md")).toHaveText("shared.md");
 
-        const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
-        await expect(linkAccess.getByRole("radio", { name: "Comment", exact: true })).toBeVisible();
-        await expect(linkAccess.getByRole("radio", { name: "View", exact: true })).toBeVisible();
+        const linkAccess = dialog.getByTestId("share-link-create-access");
+        await linkAccess.click();
+        await expect(
+          dialog.getByRole("menuitemradio", { name: "Can comment", exact: true }),
+        ).toBeVisible();
+        await expect(
+          dialog.getByRole("menuitemradio", { name: "Can view", exact: true }),
+        ).toBeVisible();
         await expect(dialog).toContainText(
           "If files are added to this selection later, the link includes them.",
         );
         await expect(dialog).toContainText(
           "The sync relay serves the link, so it can read this content.",
         );
-        await expect(dialog).toContainText("Anyone with the link can open it without an account.");
+        await expect(dialog).toContainText(
+          "Anyone with the link can read this without an account.",
+        );
+        await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+        await dialog.getByRole("button", { name: "Link details", exact: true }).click();
         const oneTimeUrl = await dialog.getByTestId("share-link-url").textContent();
         if (oneTimeUrl === null) throw new Error("The Share dialog did not expose the link.");
         const oldUrl = new URL(oneTimeUrl);
@@ -519,11 +535,14 @@ confidentialTest.describe("View link lifecycle", () => {
         const linkRow = linkRows.first();
         const linkRowTestId = await linkRow.getAttribute("data-testid");
         expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
+        await linkRow.getByRole("button", { name: "Link details", exact: true }).click();
         await expect(linkRow).toContainText(/Used .+ · Created /u);
         await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText(
           "Can view",
         );
-        await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await expect(dialog.getByRole("menuitem", { name: "New separate link" })).toBeVisible();
+        await page.keyboard.press("Escape");
         await expect(linkAccess).toHaveCount(0);
         const reachableRetuneTargets = await dialog
           .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })

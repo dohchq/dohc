@@ -226,8 +226,15 @@ import {
 import type { PresencePeer } from "../collab/presenceChannel";
 import {
   SharingPanel,
+  endConfirmKey,
+  endedGroupKey,
+  leaveConfirmKey,
+  removeConfirmKey,
+  sharedItemKey,
   type ShareMount,
   type SharingActions,
+  type SharingLane,
+  type SharingLaneView,
   type SkipView,
 } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
@@ -2244,6 +2251,7 @@ const SHARING_RECEIVED: AccessAnswer = {
       shareId: "in-funnel",
       grantId: "in-1",
       via: "received",
+      granterUserId: "sam",
       sharerName: "Sam",
       granterEmail: "sam@hollis.studio",
       recipientUserId: "me",
@@ -2256,6 +2264,7 @@ const SHARING_RECEIVED: AccessAnswer = {
       shareId: "in-research",
       grantId: "in-2",
       via: "received",
+      granterUserId: "sam",
       sharerName: "Sam",
       granterEmail: "sam@hollis.studio",
       recipientUserId: "me",
@@ -2263,6 +2272,19 @@ const SHARING_RECEIVED: AccessAnswer = {
       subjectName: "research",
       selector: { kind: "chat", channelWireId: "wire-research" },
       access: "read-only",
+    }),
+    aboutGrant({
+      shareId: "in-itinerary",
+      grantId: "in-4",
+      via: "received",
+      granterUserId: "kim",
+      sharerName: null,
+      granterEmail: "kim@example.com",
+      recipientUserId: "me",
+      recipientEmail: null,
+      subjectName: "itinerary.md",
+      selector: { paths: ["trip/itinerary.md"], versionId: null },
+      access: "edit",
     }),
   ],
 };
@@ -2276,6 +2298,7 @@ const SHARING_UNKNOWN: Partial<AccessAnswer> = {
 };
 const SHARING_MOUNTS: ShareMount[] = [
   { shareId: "in-funnel", label: "funnel", granterEmail: "sam@hollis.studio", access: "view" },
+  { shareId: "in-itinerary", label: "itinerary", granterEmail: "kim@example.com", access: "edit" },
 ];
 const SHARING_SKIPPED = {
   ops: [
@@ -2352,8 +2375,85 @@ const SHARING_DAMAGED: AccessAnswer = {
     }),
   ],
 };
+// A long address, an invitation nobody has used, a person who joined through
+// the link, and the link.
+const SHARING_CROWDED: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [
+    aboutGrant({
+      shareId: "share-venue",
+      grantId: "grant-venue-long",
+      recipientUserId: "alex",
+      recipientEmail: "alexandria.montgomery@hollis-studio.example",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+    }),
+    aboutGrant({
+      shareId: "share-venue",
+      grantId: "grant-venue-new",
+      recipientUserId: null,
+      recipientEmail: "nova@example.com",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-venue-link",
+      grantId: "grant-venue-link",
+      via: "link",
+      recipientUserId: null,
+      recipientEmail: null,
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-venue-link",
+      grantId: "grant-venue-joined",
+      via: "dependent",
+      recipientUserId: "tea",
+      recipientEmail: "tea@example.com",
+      selector: {
+        paths: ["venue/2026-07-08-meeting-notes-with-the-venue-team.md"],
+        versionId: null,
+      },
+      access: "view",
+    }),
+    aboutGrant({
+      shareId: "share-solo",
+      grantId: "grant-solo",
+      recipientUserId: "alex",
+      recipientEmail: "alexandria.montgomery@hollis-studio.example",
+      selector: { paths: ["venue/seating.md"], versionId: null },
+      access: "view",
+    }),
+  ],
+};
+const SHARING_CROWDED_GRANT = SHARING_CROWDED.rows[0] as AccessShareRow;
+// More shares can load, and the last one listed has shown no live grant yet.
+const SHARING_HELD: AccessAnswer = {
+  ...SHARING_GRANTED,
+  rows: [SHARING_GRANTED.rows[0]!, SHARING_GRANTED.rows.at(-1)!],
+  nextCursor: "page-2",
+};
+const SHARING_TRIP = SHARING_GRANTED.rows[1] as AccessShareRow;
+const SHARING_LINK_ABOVE_GRANT = SHARING_LINK_ABOVE.rows[0] as AccessShareRow;
 const SHARING_WAITING = new Map([
-  ["share-plan", { count: 2, senders: ["sam@hollis.studio"], oldestProposalId: "proposal-1" }],
+  [
+    "share-plan",
+    {
+      count: 2,
+      senders: ["sam@hollis.studio"],
+      oldestProposalId: "proposal-1",
+      oldestAtMs: SHARING_CHECKED_AT,
+    },
+  ],
 ]);
 const SHARING_ACTIONS: SharingActions = {
   retry: noop,
@@ -2362,8 +2462,12 @@ const SHARING_ACTIONS: SharingActions = {
   startEnd: noop,
   cancelEnd: noop,
   end: noop,
+  removePerson: noop,
+  retune: noop,
+  share: noop,
   mount: noop,
   unmount: noop,
+  openToEdit: noop,
   startLeave: noop,
   leave: noop,
   clear: noop,
@@ -2375,18 +2479,25 @@ const SHARING_ACTIONS: SharingActions = {
 const ready = (answer: AccessAnswer): AccessView => ({ status: "ready", answer });
 
 function SharingSpecimen(props: {
-  granted: AccessView;
-  received: AccessView;
+  granted: SharingLaneView | null;
+  received: SharingLaneView;
   grantedReason?: AccessReason;
   receivedReason?: AccessReason;
   conflictCount?: number;
-  confirmShareId?: string;
+  confirmKey?: string;
   mounts?: ShareMount[];
   skipView?: SkipView;
+  lane?: SharingLane;
+  open?: readonly string[];
+  width?: number;
 }) {
   return (
-    <div className="flex w-[280px] flex-col rounded-lg border border-line bg-panel">
+    <div
+      className="flex flex-col rounded-lg border border-line bg-panel"
+      style={{ width: props.width ?? SIDEBAR_DEFAULT_WIDTH }}
+    >
       <SharingPanel
+        workspaceId="states"
         granted={props.granted}
         received={props.received}
         grantedSetup={props.grantedReason ? accessSetup(props.grantedReason) : ACCESS_UNEXPLAINED}
@@ -2397,11 +2508,15 @@ function SharingSpecimen(props: {
         waiting={SHARING_WAITING}
         mounts={props.mounts ?? SHARING_MOUNTS}
         skipView={props.skipView ?? new Map()}
+        removedEndedCopies={new Map()}
         notSentWhileOpen={[]}
         invitations
-        confirmShareId={props.confirmShareId ?? null}
+        accessChanges={{}}
+        confirmKey={props.confirmKey ?? null}
         busyShareIds={new Set()}
         actions={SHARING_ACTIONS}
+        {...(props.lane ? { initialLane: props.lane } : {})}
+        {...(props.open ? { initialOpen: props.open } : {})}
       />
     </div>
   );
@@ -4503,18 +4618,126 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="sharing" title="Sharing" menusAtRest>
-        <Specimen label="both lists, a conflict, and changes waiting">
+        <Specimen label="Shared by me: what is shared, a conflict, and changes waiting">
           <SharingSpecimen
             granted={ready(SHARING_GRANTED)}
             received={ready(SHARING_RECEIVED)}
             conflictCount={2}
           />
         </Specimen>
-        <Specimen label="a link, and a person who can do more">
+        <Specimen label="Shared by me: an item open, with its people">
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            open={[sharedItemKey(SHARING_TRIP)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: a link, and a person who can do more">
           <SharingSpecimen
             granted={ready(SHARING_LINK_ABOVE)}
             received={ready({ ...SHARING_RECEIVED, rows: [] })}
             mounts={[]}
+            open={[sharedItemKey(SHARING_LINK_ABOVE_GRANT)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: a long name and address, an unused invitation, a joined person">
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: removing a person asks first">
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+            confirmKey={removeConfirmKey("grant-venue-joined")}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: more to load, and a share held until it does">
+          <SharingSpecimen
+            granted={ready(SHARING_HELD)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+          />
+        </Specimen>
+        <Specimen label={`the narrowest panel, ${SIDEBAR_MIN_WIDTH}px`}>
+          <SharingSpecimen
+            granted={ready(SHARING_CROWDED)}
+            received={ready(SHARING_RECEIVED)}
+            open={[sharedItemKey(SHARING_CROWDED_GRANT)]}
+            width={SIDEBAR_MIN_WIDTH}
+          />
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            lane="received"
+            width={SIDEBAR_MIN_WIDTH}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: only a link, which ends in Share">
+          <SharingSpecimen
+            granted={ready({ ...SHARING_LINK_ABOVE, rows: [SHARING_LINK_ABOVE_GRANT] })}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            open={[sharedItemKey(SHARING_LINK_ABOVE_GRANT)]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: the Ended group open">
+          <SharingSpecimen
+            granted={ready({
+              ...SHARING_GRANTED,
+              rows: [...SHARING_GRANTED.rows, ...SHARING_DAMAGED.rows],
+            })}
+            received={ready(SHARING_RECEIVED)}
+            open={[endedGroupKey("granted")]}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: ending a share asks first">
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            confirmKey={endConfirmKey("share-plan")}
+          />
+        </Specimen>
+        <Specimen label="Shared by me: keyboard focus on an item's actions">
+          <div data-force-state="focus-within" data-force-target='[role="group"]'>
+            <div
+              data-force-state="focus focus-visible"
+              data-force-target='[data-testid="sharing-granted-menu"]'
+            >
+              <SharingSpecimen
+                granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
+                received={ready({ ...SHARING_RECEIVED, rows: [] })}
+              />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="Shared with me: by who shared">
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            lane="received"
+          />
+        </Specimen>
+        <Specimen label="Shared with me: leaving a share asks first">
+          <SharingSpecimen
+            granted={ready(SHARING_GRANTED)}
+            received={ready(SHARING_RECEIVED)}
+            lane="received"
+            confirmKey={leaveConfirmKey("in-itinerary")}
+          />
+        </Specimen>
+        <Specimen label="Shared with me: the Ended group open, and skipped changes">
+          <SharingSpecimen
+            granted={ready({ ...SHARING_GRANTED, rows: [] })}
+            received={ready(SHARING_REMOVED)}
+            mounts={SHARING_REMOVED_MOUNTS}
+            lane="received"
+            open={[endedGroupKey("received")]}
           />
         </Specimen>
         <Specimen label="may be out of date">
@@ -4527,6 +4750,13 @@ function Pane(props: { theme: "light" | "dark" }) {
           <SharingSpecimen
             granted={ready({ ...SHARING_GRANTED, rows: [] })}
             received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+          />
+          <SharingSpecimen
+            granted={ready({ ...SHARING_GRANTED, rows: [] })}
+            received={ready({ ...SHARING_RECEIVED, rows: [] })}
+            mounts={[]}
+            lane="received"
           />
         </Specimen>
         <Specimen label="unknown: no cause dohc can name, and signed out">
@@ -4534,6 +4764,12 @@ function Pane(props: { theme: "light" | "dark" }) {
             granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })}
             received={ready({ ...SHARING_RECEIVED, ...SHARING_UNKNOWN })}
             receivedReason="signed-out"
+          />
+          <SharingSpecimen
+            granted={ready({ ...SHARING_GRANTED, ...SHARING_UNKNOWN })}
+            received={ready({ ...SHARING_RECEIVED, ...SHARING_UNKNOWN })}
+            receivedReason="signed-out"
+            lane="received"
           />
         </Specimen>
         <Specimen label="unknown: the workspace does not sync">
@@ -4545,53 +4781,24 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="loading, then failed reads: words in Notices">
           <SharingSpecimen granted={{ status: "loading" }} received={{ status: "failed" }} />
-        </Specimen>
-        <Specimen label="ending a share asks first">
           <SharingSpecimen
-            granted={ready(SHARING_GRANTED)}
-            received={ready({ ...SHARING_RECEIVED, rows: [] })}
-            confirmShareId="share-plan"
+            granted={{ status: "loading" }}
+            received={{ status: "failed" }}
+            lane="received"
           />
         </Specimen>
-        <Specimen label="keyboard focus on a row's actions">
-          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
-            <div
-              data-force-state="focus focus-visible"
-              data-force-target='[data-testid="sharing-granted-menu"]'
-            >
-              <SharingSpecimen
-                granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
-                received={ready({ ...SHARING_RECEIVED, rows: [] })}
-              />
-            </div>
-          </div>
-        </Specimen>
-        <Specimen label="keyboard focus on a row's code copy">
-          <div data-force-state="focus-within" data-force-target="[data-sharing-row-focus]">
-            <div
-              data-force-state="focus focus-visible"
-              data-force-target='[data-testid="sharing-copy-code"]'
-            >
-              <SharingSpecimen
-                granted={ready({ ...SHARING_GRANTED, rows: SHARING_GRANTED.rows.slice(0, 1) })}
-                received={ready({ ...SHARING_RECEIVED, rows: [] })}
-              />
-            </div>
-          </div>
-        </Specimen>
-        <Specimen label="a share dohc cannot read">
+        <Specimen label="Show more failed: the loaded rows stay, words in Notices">
           <SharingSpecimen
-            granted={ready(SHARING_DAMAGED)}
-            received={ready({ ...SHARING_RECEIVED, rows: [] })}
-            mounts={[]}
+            granted={{
+              status: "ready",
+              answer: { ...SHARING_GRANTED, nextCursor: "page-2" },
+              moreFailed: true,
+            }}
+            received={ready(SHARING_RECEIVED)}
           />
         </Specimen>
-        <Specimen label="removed shares still on this computer, and skipped changes">
-          <SharingSpecimen
-            granted={ready({ ...SHARING_GRANTED, rows: [] })}
-            received={ready(SHARING_REMOVED)}
-            mounts={SHARING_REMOVED_MOUNTS}
-          />
+        <Specimen label="a shared view: only Shared with me">
+          <SharingSpecimen granted={null} received={ready(SHARING_RECEIVED)} />
         </Specimen>
       </Section>
 

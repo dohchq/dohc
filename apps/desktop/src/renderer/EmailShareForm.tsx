@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { isComposingKey } from "./ui/keys";
 import type {
   CreateRelaySharePayload,
@@ -9,10 +9,11 @@ import { AutomationShareNote, useAutomationShareCheck } from "./automationShareC
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
-import { CopyField } from "./ui/CopyButton";
+import { PrimaryButton } from "./ui/controls";
+import { CopyButton } from "./ui/CopyButton";
+import { nextInvitationCopy } from "./invitationCopy";
 import { ShareAccessMenu } from "./shareAccess";
-import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
+import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
 const READS = "They can read only what you selected";
@@ -37,38 +38,67 @@ export function accessOptions(
   ];
 }
 
+const SEND_IT_YOURSELF = "Copy the invitation and send it to them.";
+
+export function invitationEmailNote(
+  result: Pick<CreateRelayShareResult, "invitationEmail" | "invitationEmailLimit">,
+): string {
+  const limit = result.invitationEmailLimit;
+  if (result.invitationEmail === "sent") return "dohc emailed them the invitation.";
+  if (result.invitationEmail === "failed")
+    return `The email could not be sent. ${SEND_IT_YOURSELF}`;
+  if (result.invitationEmail === "limit" && limit)
+    return `No email was sent: this account sent ${limit.sent} of ${limit.limit} invitation emails in the last ${limit.windowHours} hours. ${SEND_IT_YOURSELF}`;
+  return SEND_IT_YOURSELF;
+}
+
 export function EmailShareForm(props: {
   workspaceId: string;
   target: RelayShareTarget;
-  onDone: () => void;
+  // People whose invitation this form no longer offers to copy: their access
+  // was removed here, or it ended.
+  retiredGrantIds?: readonly string[];
   // A share was made, so whoever lists this selection's people shows them.
   onCreated?: (person: {
     shareId: string;
     grantId: string;
     name: string;
     access: ShareAccess;
+    browserInvitation: boolean;
   }) => void;
 }) {
   const [email, setEmail] = useState("");
   const [access, setAccess] = useState<ShareAccess>("view");
   const [phase, setPhase] = useState<"idle" | "checking" | "creating">("idle");
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<CreateRelayShareResult | null>(null);
+  const [made, setInvited] = useState<{
+    result: CreateRelayShareResult;
+    share: { recipientEmail: string; access: ShareAccess };
+  } | null>(null);
+  const invited = made && !props.retiredGrantIds?.includes(made.result.grantId) ? made : null;
   const emailId = useId();
+  const form = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLInputElement>(null);
   // RelayShareDialog keys this form by the canonical target, so changing the
   // target unmounts it and drops its pending work.
   const requests = useRequestSequence([props.workspaceId]);
   const automations = useAutomationShareCheck(props.workspaceId, props.target);
   useEffect(() => {
-    setCreated(null);
+    setInvited(null);
     setPhase("idle");
     setError(null);
   }, [props.workspaceId]);
+  useLayoutEffect(() => {
+    const focused = document.activeElement;
+    const free = focused === null || focused === document.body;
+    if (made && (free || form.current?.contains(focused))) field.current?.focus();
+  }, [made]);
 
   const busy = phase !== "idle";
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
   const share = { recipientEmail: email.trim(), access };
   const note = automations.noteFor(share);
+  const invitedNote = invited ? automations.noteFor(invited.share) : null;
   const options = useMemo(() => accessOptions(props.target), [props.target.kind]);
 
   // An edit during the automation check drops it, so Invite always acts on
@@ -86,6 +116,7 @@ export function EmailShareForm(props: {
     const token = requests.next();
     const current = () => requests.isCurrent(token);
     const asked = { ...share };
+    const warned = automations.noteFor(asked)?.warning != null;
     setError(null);
     if (automations.asks(asked)) {
       setPhase("checking");
@@ -106,12 +137,15 @@ export function EmailShareForm(props: {
       };
       const result = await bridge().createRelayShare(payload);
       if (current()) {
-        setCreated(result);
+        if (warned) automations.forget();
+        setInvited({ result, share: asked });
+        setEmail("");
         props.onCreated?.({
           shareId: result.shareId,
           grantId: result.grantId,
           name: result.recipientEmail,
           access: asked.access,
+          browserInvitation: result.browserInvitationUrl !== undefined,
         });
       }
     } catch (cause) {
@@ -122,123 +156,114 @@ export function EmailShareForm(props: {
   }
 
   return (
-    <>
-      {created === null ? (
-        <>
-          <div className="flex flex-col gap-1">
-            <label htmlFor={emailId} className="text-[12px] font-medium text-muted">
-              Invite by email
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id={emailId}
-                data-testid="share-email"
-                type="email"
-                value={email}
-                disabled={phase === "creating"}
-                onChange={(event) => {
-                  const next = event.currentTarget.value;
-                  edit(() => setEmail(next));
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !isComposingKey(event)) void createShare();
-                }}
-                placeholder="name@example.com"
-                spellCheck={false}
-                className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-              />
-              <ShareAccessMenu
-                label="Access"
-                access={access}
-                options={options}
-                disabled={phase === "creating"}
-                testId="share-access"
-                width={288}
-                align="end"
-                onPick={(next) => edit(() => setAccess(next))}
-              />
-              <PrimaryButton
-                type="button"
-                className="shrink-0"
-                data-testid="share-create"
-                disabled={!canSubmit}
-                onClick={() => void createShare()}
-              >
-                {phase === "checking"
-                  ? "Checking automations…"
-                  : phase === "creating"
-                    ? "Inviting…"
-                    : note?.warning
-                      ? "Invite anyway"
-                      : "Invite"}
-              </PrimaryButton>
-            </div>
-          </div>
-
-          {note?.warning ? <AutomationShareNote note={note} /> : null}
-        </>
-      ) : (
-        <>
-          {created.browserInvitationUrl && (
-            <>
-              <p className="m-0 text-xs leading-relaxed text-muted">
-                Send this browser invitation to {created.recipientEmail}. The recipient must sign in
-                with the invited account.
-              </p>
-              <CopyField
-                label="Copy browser invitation"
-                copiedLabel="Browser invitation copied"
-                sensitive={BROWSER_INVITATION_SECRET}
-                copyTestId="share-browser-invitation-copy"
-                getText={() => created.browserInvitationUrl ?? null}
-              >
-                <code
-                  data-testid="share-browser-invitation"
-                  data-grant-id={created.grantId}
-                  title={created.browserInvitationUrl}
-                >
-                  {created.browserInvitationUrl}
-                </code>
-              </CopyField>
-              <p className="m-0 text-xs leading-relaxed text-muted">
-                Browser editing lets them change shared Markdown files live when available. Other
-                files use changes you accept.
-              </p>
-            </>
-          )}
-          <p className="m-0 text-xs leading-relaxed text-muted">
-            Send this code to <span className="font-medium text-ink">{created.recipientEmail}</span>{" "}
-            — they paste it in dohc under “Open a share”.
-          </p>
-          <CopyField
-            copyTestId="share-code-copy"
-            getText={() => created.shareCode}
-            sensitive={SHARE_CODE_SECRET}
-          >
-            <code data-testid="share-code" title={created.shareCode}>
-              {created.shareCode}
-            </code>
-          </CopyField>
-          <p className="m-0 text-[11px] leading-relaxed text-subtle">
-            You can end this share anytime from Sharing.
-          </p>
-          <SecondaryButton
+    <div ref={form} className="flex flex-col">
+      <div className="flex flex-col gap-1">
+        <label htmlFor={emailId} className="text-[12px] font-medium text-muted">
+          Invite by email
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            ref={field}
+            id={emailId}
+            data-testid="share-email"
+            type="email"
+            value={email}
+            disabled={phase === "creating"}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              edit(() => setEmail(next));
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !isComposingKey(event)) void createShare();
+            }}
+            placeholder="name@example.com"
+            spellCheck={false}
+            className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+          />
+          <ShareAccessMenu
+            label="Access"
+            access={access}
+            options={options}
+            disabled={phase === "creating"}
+            testId="share-access"
+            width={288}
+            align="end"
+            onPick={(next) => edit(() => setAccess(next))}
+          />
+          <PrimaryButton
             type="button"
-            className="self-end"
-            data-testid="share-done"
-            onClick={props.onDone}
+            className="shrink-0"
+            data-testid="share-create"
+            disabled={!canSubmit}
+            onClick={() => void createShare()}
           >
-            Done
-          </SecondaryButton>
-        </>
-      )}
+            {phase === "checking"
+              ? "Checking automations…"
+              : phase === "creating"
+                ? "Inviting…"
+                : note?.warning
+                  ? "Invite anyway"
+                  : "Invite"}
+          </PrimaryButton>
+        </div>
+      </div>
 
-      {note?.failed ? <AutomationShareNote note={note} /> : null}
+      {note?.warning || note?.failed ? (
+        <div className="mt-2">
+          <AutomationShareNote note={note} />
+        </div>
+      ) : null}
       {error ? (
-        <p data-testid="share-error" role="alert" className="m-0 text-xs text-danger">
+        <p data-testid="share-error" role="alert" className="m-0 mt-2 text-xs text-danger">
           {error}
         </p>
       ) : null}
-    </>
+      <div
+        data-testid="share-invited"
+        className={invited ? "mt-2 flex min-h-6 flex-wrap items-center gap-2" : undefined}
+      >
+        <p role="status" className="m-0 min-w-48 flex-1 text-[12px] leading-4 text-muted">
+          {invited ? (
+            <>
+              Invited <span className="break-all text-ink">{invited.result.recipientEmail}</span>.{" "}
+              {invitationEmailNote(invited.result)}
+            </>
+          ) : null}
+        </p>
+        {invited ? (
+          <span className="flex shrink-0 items-center gap-2">
+            <CopyButton
+              key={invited.result.grantId}
+              label="Copy invitation"
+              copiedLabel="Invitation copied"
+              sensitive={INVITATION_SECRET}
+              testId="share-invitation-copy"
+              getText={() => {
+                nextInvitationCopy();
+                return invited.result.browserInvitationUrl ?? invited.result.shareCode;
+              }}
+            />
+            {invited.result.browserInvitationUrl !== undefined ? (
+              <CopyButton
+                key={`code:${invited.result.grantId}`}
+                label="Copy share code"
+                copiedLabel="Share code copied"
+                sensitive={SHARE_CODE_SECRET}
+                testId="share-code-copy"
+                getText={() => {
+                  nextInvitationCopy();
+                  return invited.result.shareCode;
+                }}
+              />
+            ) : null}
+          </span>
+        ) : null}
+      </div>
+      {invitedNote?.failed ? (
+        <div className="mt-2">
+          <AutomationShareNote note={invitedNote} />
+        </div>
+      ) : null}
+    </div>
   );
 }

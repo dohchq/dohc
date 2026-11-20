@@ -8480,10 +8480,17 @@ export function DesktopWorkspaceShell(props: {
                                   onUnmount: unmountShare,
                                   shareRemovals,
                                   sharesRevision,
-                                  reportError: reportShellError,
+                                  reportError: reportButtonError,
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
+                                  onShare: setShareTarget,
+                                  onOpenShare: ({ shareId, shareCode, liveEditing }) =>
+                                    setOpenShare({
+                                      resolvedShare: { shareId, shareCode },
+                                      liveEditing,
+                                      path: null,
+                                    }),
                                 }}
                                 selectedAppRoot={selectedAppRoot}
                                 openAppTab={openAppTab}
@@ -10034,14 +10041,6 @@ export function DesktopWorkspaceShell(props: {
                                 accessContext={accessContext}
                                 server={cloudStatus?.workspaceServerUrl ?? null}
                                 notSentWhileOpen={syncStatus?.notSentWhileOpen ?? []}
-                                onOpenSharing={(target) => {
-                                  setSharingFocus(target);
-                                  mutateWb((state) => ({
-                                    ...state,
-                                    activeView: SHARING_VIEW_ID,
-                                    sidebarVisible: true,
-                                  }));
-                                }}
                               />
                             </Suspense>
                           </Overlay>

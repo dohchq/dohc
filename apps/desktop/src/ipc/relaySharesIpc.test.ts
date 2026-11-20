@@ -297,6 +297,38 @@ describe("sync before live hosting", () => {
     expect(shareSent(h)).toBe(true);
   });
 
+  it.each([
+    [{ invitationEmail: "sent" }, { invitationEmail: "sent" }],
+    [{ invitationEmail: "failed" }, { invitationEmail: "failed" }],
+    [
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+      {
+        invitationEmail: "limit",
+        invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+      },
+    ],
+    [{ invitationEmail: "limit" }, { invitationEmail: "failed" }],
+    [{}, { invitationEmail: "unavailable" }],
+    [{ invitationEmail: "queued" }, { invitationEmail: "unavailable" }],
+  ])("says what the relay did about the invitation email: %j", async (answered, expected) => {
+    const h = harness();
+    h.request.mockResolvedValue({ shareId: "share", grantId: "grant", ...answered });
+    const created = await h.invoke(relayShareOperations.createRelayShare.channel, {
+      ...editShare,
+      access: "view",
+    });
+    expect(created).toEqual({
+      shareId: "share",
+      grantId: "grant",
+      shareCode: expect.any(String),
+      recipientEmail: editShare.recipientEmail,
+      ...expected,
+    });
+  });
+
   it("sends the share at 10 s when sync takes longer", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -1265,6 +1297,36 @@ describe("registered relay share handlers", () => {
     await expect(
       h.invoke(relayShareOperations.retuneRelayShareGrant.channel, { ...input, access: "owner" }),
     ).rejects.toThrow();
+  });
+
+  it.each([
+    ["a person invited by email", null],
+    ["a person who joined through a link", "link-grant"],
+  ])("ends the access of %s and hands back the Undo", async (_who, parentGrantId) => {
+    const h = harness();
+    const removed = {
+      grantId: "grant",
+      access: "view",
+      generation: 2,
+      status: "revoked",
+      revokedAtMs: 20,
+      parentGrantId,
+      undo: { undoId: "undo-1", expiresAtMs: 600_020 },
+    };
+    h.request.mockResolvedValueOnce({ ok: true, ...removed });
+
+    await expect(
+      h.invoke(relayShareOperations.revokeRelayShareGrant.channel, {
+        workspaceId,
+        shareId: "share",
+        grantId: "grant",
+      }),
+    ).resolves.toEqual(removed);
+    expect(h.request).toHaveBeenCalledWith(
+      h.credentials,
+      "/sync/shares/share/grants/grant/revoke",
+      { method: "POST", body: JSON.stringify({ workspaceId: "workspace" }) },
+    );
   });
 
   it("rejects a shared view and unauthorized remote before relay mutation", async () => {
