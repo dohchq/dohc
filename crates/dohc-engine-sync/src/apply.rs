@@ -2179,6 +2179,13 @@ fn apply_decision(
             Some(chosen.to_owned())
         }
     };
+    // A deleted message keeps no poll.
+    if deleted_message(tx, &op.workspace_id, &p.message_id)
+        .map_err(|error| map_chat_rule(error, "chat decision target is invalid"))?
+        .is_some()
+    {
+        return Ok(());
+    }
     let options_json = encode_poll_options(&options);
     let prior_thread_id = tx
         .query_row(

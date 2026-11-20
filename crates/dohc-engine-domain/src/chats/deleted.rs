@@ -2,12 +2,12 @@
 //! message's append into a `chat.message.tombstone` at the same coordinate and
 //! appends a `chat.message.delete` from a `relay:message-delete:` origin. A
 //! deleted message keeps its line, with its author and time and an empty body,
-//! and loses its mentions, attachments and search row. Replies keep pointing
-//! at it.
+//! and loses its mentions, attachments, poll and search row. Replies keep
+//! pointing at it.
 
 use super::{
     CHAT_THREAD_HEADER_MESSAGE_ID, bump_chat_conversation_revision, chat_thread_display_title,
-    mark_live_bookmarks_pending, upsert_chat_search_index_row,
+    is_js_trim_ws, mark_live_bookmarks_pending, upsert_chat_search_index_row,
 };
 use crate::error::DomainError;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -55,8 +55,9 @@ pub fn record_message_delete(
 }
 
 /// Clears a stored message the relay deleted: its body, work report, reported
-/// agent, mentions, attachments and search row. Returns false when the stored
-/// message is in another thread. A message not stored yet changes nothing.
+/// agent, mentions, attachments, poll and search row, and a title the desktop
+/// made from it. Returns false when the stored message is in another thread.
+/// A message not stored yet loses only a poll that arrived before it.
 pub fn erase_deleted_message(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -74,6 +75,7 @@ pub fn erase_deleted_message(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     let Some((stored_thread, stored_deleted)) = stored else {
+        forget_poll(tx, workspace_id, message_id)?;
         return Ok(true);
     };
     if stored_thread != thread_id {
@@ -82,6 +84,7 @@ pub fn erase_deleted_message(
     if stored_deleted.is_some() {
         return Ok(true);
     }
+    forget_comment_title(tx, workspace_id, thread_id, message_id)?;
     tx.execute(
         "UPDATE chat_messages SET body='', work=NULL, author_reported=NULL, deleted_at_ms=?3 \
          WHERE workspace_id=?1 AND message_id=?2",
@@ -104,9 +107,86 @@ pub fn erase_deleted_message(
         params![workspace_id, thread_id, message_id],
     )
     .map_err(DomainError::sql_persist)?;
+    forget_poll(tx, workspace_id, message_id)?;
     reindex_header_without(tx, workspace_id, thread_id, message_id)?;
+    mark_live_bookmarks_pending(tx, workspace_id, thread_id, deleted_at_ms)?;
     bump_chat_conversation_revision(tx, workspace_id, thread_id)?;
     Ok(true)
+}
+
+/// A poll's choices and answer repeat its words. Sync apply keeps no poll for
+/// a message deleted before it arrives.
+fn forget_poll(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    message_id: &str,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "DELETE FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
+        params![workspace_id, message_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// The desktop titles a file's first comment with its first line
+/// (`commentTitle` in `LinkedChats.tsx`). When the thread's first message is
+/// deleted, a title that matches it goes and the thread reads untitled. Any
+/// other title stays. Nothing renames a thread, so a match is that made title,
+/// or a typed one that repeats the deleted words.
+fn forget_comment_title(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<(), DomainError> {
+    let (title, first_message_id, first_body): (String, Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT title, m.message_id, m.body FROM chat_threads t \
+             LEFT JOIN (SELECT message_id, body FROM chat_messages \
+               WHERE workspace_id=?1 AND thread_id=?2 \
+               ORDER BY created_at_ms,message_id LIMIT 1) m \
+             WHERE t.workspace_id=?1 AND t.thread_id=?2",
+            params![workspace_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if title.is_empty()
+        || first_message_id.as_deref() != Some(message_id)
+        || first_body.is_none_or(|body| comment_title(&body) != title)
+    {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE chat_threads SET title='' WHERE workspace_id=?1 AND thread_id=?2",
+        params![workspace_id, thread_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// `commentTitle`: the first line, cut on whole characters to 200 UTF-16 units.
+fn comment_title(body: &str) -> String {
+    const TITLE_MAX: usize = 200;
+    let line = body
+        .trim_matches(is_js_trim_ws)
+        .split('\n')
+        .next()
+        .unwrap_or("")
+        .trim_matches(is_js_trim_ws);
+    if line.encode_utf16().count() <= TITLE_MAX {
+        return line.to_owned();
+    }
+    let mut kept = String::new();
+    let mut units = 0;
+    for character in line.chars() {
+        units += character.len_utf16();
+        if units > TITLE_MAX - 1 {
+            break;
+        }
+        kept.push(character);
+    }
+    format!("{}…", kept.trim_end_matches(is_js_trim_ws))
 }
 
 /// The fields a deleted message's line keeps.

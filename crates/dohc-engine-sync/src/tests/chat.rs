@@ -5762,3 +5762,62 @@ fn an_attachment_after_the_delete_adds_nothing() {
         );
     }
 }
+
+#[test]
+fn a_poll_before_or_after_the_delete_keeps_nothing() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    let poll = |message_id: &str| {
+        json!({
+            "threadId": "thread-imported",
+            "messageId": message_id,
+            "state": "resolved",
+            "atMs": 40,
+            "options": ["Quasar", "Pulsar"],
+            "chosenOption": "Quasar"
+        })
+    };
+    // One poll's choices arrive before its message and the delete; the
+    // other's arrive after the delete, from a copy that had not pulled it.
+    let ops = [
+        envelope("ana", 0, "chat.decision.set", poll("message-early")),
+        envelope(
+            DELETE_ORIGIN,
+            0,
+            "chat.message.delete",
+            message_delete("message-early", "thread-imported"),
+        ),
+        envelope(
+            "peer",
+            3,
+            "chat.message.append",
+            message_append("message-early", "thread-imported", "Which?"),
+        ),
+        envelope(
+            "peer",
+            4,
+            "chat.message.append",
+            message_append("message-late", "thread-imported", "Which?"),
+        ),
+        envelope(
+            DELETE_ORIGIN,
+            1,
+            "chat.message.delete",
+            message_delete("message-late", "thread-imported"),
+        ),
+        envelope("ana", 1, "chat.decision.set", poll("message-late")),
+    ];
+    for op in &ops {
+        apply_chat_envelope(&mut engine, op, &NoFaults).expect(&op.op_kind);
+    }
+    let kept: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_decisions WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("decision rows");
+    assert_eq!(kept, 0, "a deleted poll keeps its choices and answer");
+}

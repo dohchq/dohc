@@ -1909,6 +1909,227 @@ fn a_deleted_message_is_never_unread() {
     }
 }
 
+fn erase(store: &mut EngineStore, thread_id: &str, message_id: &str) {
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread_id, message_id, 200)
+        })
+        .expect("delete");
+}
+
+#[test]
+fn a_deleted_poll_keeps_no_choices_or_answer() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &StartChannelThread {
+                needs_decision: true,
+                options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
+                ..start_thread("gen-1", "t1", "poll", "Which?", ChatActorKind::Human, 10)
+            },
+            &NO_FAULTS,
+        )
+        .expect("poll");
+    chats
+        .send_message(&send_msg("t1", "answer", None, "Quasar", 20), &NO_FAULTS)
+        .expect("answer");
+    chats
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: WS.to_owned(),
+                thread_id: "t1".to_owned(),
+                message_id: "poll".to_owned(),
+                resolved_by_message_id: "answer".to_owned(),
+                chosen_option: Some("Quasar".to_owned()),
+                now_ms: 30,
+                request_id: "resolve".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("resolve");
+    drop(chats);
+    erase(&mut store, "t1", "poll");
+    let kept: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_decisions WHERE workspace_id=?1 AND message_id='poll'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("decision rows");
+    assert_eq!(kept, 0, "a deleted poll's choices and answer stay on disk");
+    let chats = LinkedChatStore::new(&mut store);
+    assert!(
+        chats
+            .list_thread_decisions(WS, "t1", None, 10)
+            .expect("decisions")
+            .is_empty(),
+        "a reader still lists the deleted poll"
+    );
+}
+
+#[test]
+fn a_deleted_first_comment_takes_its_title_with_it() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let long = format!("{} tail", "a".repeat(198));
+    // The desktop titles a file's first comment with its first line, cut
+    // to 200 UTF-16 units. A title a person typed differs from it.
+    for (thread_id, title, body) in [
+        ("short", "Quasar plans", "  Quasar plans  \nmore"),
+        ("long", &*format!("{}…", "a".repeat(198)), &*long),
+        ("typed", "Launch notes", "Quasar plans"),
+    ] {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .create_thread(
+                &CreateFileThread {
+                    workspace_id: WS.to_owned(),
+                    thread_id: thread_id.to_owned(),
+                    title: title.to_owned(),
+                    linked_object_id: format!("object-{thread_id}"),
+                    linked_path_hint: None,
+                    now_ms: 5,
+                    request_id: thread_id.to_owned(),
+                },
+                &NO_FAULTS,
+            )
+            .expect("file thread");
+        chats
+            .send_message(
+                &send_msg(thread_id, &format!("{thread_id}-0"), None, body, 10),
+                &NO_FAULTS,
+            )
+            .expect("first comment");
+        chats
+            .send_message(
+                &send_msg(thread_id, &format!("{thread_id}-1"), None, "reply", 20),
+                &NO_FAULTS,
+            )
+            .expect("reply");
+        drop(chats);
+        erase(&mut store, thread_id, &format!("{thread_id}-0"));
+    }
+    let chats = LinkedChatStore::new(&mut store);
+    let mut titles: Vec<_> = chats
+        .list_threads(WS)
+        .expect("threads")
+        .into_iter()
+        .map(|thread| (thread.thread_id, thread.title))
+        .collect();
+    titles.sort();
+    let untitled = dohc_engine_domain::chats::chat_thread_display_title("", None);
+    assert_eq!(
+        titles,
+        vec![
+            ("long".to_owned(), untitled.clone()),
+            ("short".to_owned(), untitled.clone()),
+            ("typed".to_owned(), "Launch notes".to_owned()),
+        ],
+        "a deleted first comment's words stay in its thread's title"
+    );
+    drop(chats);
+    let headers: Vec<(String, String)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT thread_id, text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id=?1 AND message_id=?2 ORDER BY thread_id",
+            )?;
+            stmt.query_map(
+                rusqlite::params![WS, dohc_engine_domain::CHAT_THREAD_HEADER_MESSAGE_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect()
+        })
+        .expect("search headers");
+    assert_eq!(
+        headers,
+        vec![
+            ("long".to_owned(), untitled.clone()),
+            ("short".to_owned(), untitled),
+            ("typed".to_owned(), "Launch notes".to_owned()),
+        ],
+        "search still finds a deleted first comment by its thread's title"
+    );
+}
+
+#[test]
+fn deleting_a_message_redraws_a_live_bookmark_and_leaves_a_snapshot() {
+    // A thread has one bookmark per person, so each mode gets its own store.
+    for (mode, redrawn) in [(BookmarkMode::Live, true), (BookmarkMode::Snapshot, false)] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        let mut store = open(&db, 1);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        chats
+            .start_channel_thread(
+                &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 10),
+                &NO_FAULTS,
+            )
+            .expect("start");
+        chats
+            .send_message(&send_msg("t1", "m1", None, "Quasar plans", 20), &NO_FAULTS)
+            .expect("send");
+        let saved = chats
+            .save_bookmark(
+                &SaveBookmark {
+                    workspace_id: WS.to_owned(),
+                    owner_user_id: "owner".to_owned(),
+                    target_kind: BookmarkTargetKind::Thread,
+                    target_id: "t1".to_owned(),
+                    mode,
+                    destination_path: "bookmarks/thread.md".to_owned(),
+                    now_ms: 30,
+                },
+                &NO_FAULTS,
+            )
+            .expect("save");
+        let ready = chats
+            .mark_bookmark_ready(
+                WS,
+                "owner",
+                &saved.bookmark_id,
+                saved.generation,
+                40,
+                None,
+                None,
+                &NO_FAULTS,
+            )
+            .expect("ready");
+        assert!(ready.applied);
+        drop(chats);
+        erase(&mut store, "t1", "m1");
+        let after: Vec<_> = LinkedChatStore::new(&mut store)
+            .list_bookmarks(WS, "owner", None)
+            .expect("bookmarks")
+            .into_iter()
+            .map(|bookmark| (bookmark.generation, bookmark.projection_state))
+            .collect();
+        let generation = ready.bookmark.generation;
+        let expected = if redrawn {
+            (generation + 1, "pending".to_owned())
+        } else {
+            (generation, "ready".to_owned())
+        };
+        assert_eq!(
+            after,
+            vec![expected],
+            "{mode:?}: a live bookmark keeps the deleted message's words, or a snapshot changes"
+        );
+    }
+}
+
 #[test]
 fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");
