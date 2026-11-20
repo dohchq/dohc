@@ -215,6 +215,7 @@ export function registerSharedViewsIpcHandlers<
     from: ShareAccess;
     access: ShareAccess;
     editingNotReady?: true;
+    levelReadOvertaken?(): boolean;
     currentShareView(): ShareViewIdentity | undefined;
     assertCurrent(): void;
   }): Promise<void> {
@@ -231,7 +232,8 @@ export function registerSharedViewsIpcHandlers<
             latest.shareId !== input.shareId ||
             !latestPin ||
             latest.ended ||
-            latestPin.access !== input.from
+            latestPin.access !== input.from ||
+            input.levelReadOvertaken?.()
           )
             return;
           const narrowed: ShareViewIdentity = {
@@ -682,6 +684,11 @@ export function registerSharedViewsIpcHandlers<
           let identityRecorded = false;
           let identityFailure: unknown;
           let editStatedForCopyBelowEdit = false;
+          let saysEditingNotReady = false;
+          // An access answer that arrives after this refresh asked for the level
+          // is newer than what the refresh reads. Such a refresh changes no pin
+          // and no marker, and its pull is not cached.
+          let levelReadOvertaken = () => false;
           if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
             let refreshedWorkspace = workspace;
             await warmCredentialCache().catch(() => undefined);
@@ -697,6 +704,8 @@ export function registerSharedViewsIpcHandlers<
                   workspace.shareView.grantedSelector,
                 )?.access;
                 const statementsBefore = accessStatementsFor(workspace.workspaceId);
+                levelReadOvertaken = () =>
+                  accessStatementsFor(workspace.workspaceId) !== statementsBefore;
                 const info = await fetchShareViewInfo({
                   relay: {
                     baseUrl: credentials.relayUrl,
@@ -747,22 +756,22 @@ export function registerSharedViewsIpcHandlers<
                   if (
                     identityRecorded &&
                     !current.shareView.ended &&
-                    pinnedLevel(current.shareView) === levelBeforeRead &&
-                    accessStatementsFor(workspace.workspaceId) === statementsBefore
+                    pinnedLevel(current.shareView) === levelBeforeRead
                   )
                     widenedPin = statedPin;
                 }
+                const overtaken = levelReadOvertaken();
+                if (overtaken) widenedPin = null;
                 const statedLevel =
                   info.statedShareId === current.shareView.shareId
                     ? recordedShareSelector(info.selector)?.access
                     : undefined;
                 editStatedForCopyBelowEdit = statedPin?.access === "edit" && widenedPin === null;
+                saysEditingNotReady = editStatedForCopyBelowEdit && !identityRecorded && !overtaken;
                 const nextShareView: ShareViewIdentity = {
                   ...current.shareView,
                   ...(widenedPin ? { grantedSelector: widenedPin } : {}),
-                  ...(editStatedForCopyBelowEdit && !identityRecorded
-                    ? { editingNotReady: true as const }
-                    : {}),
+                  ...(saysEditingNotReady ? { editingNotReady: true as const } : {}),
                   ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                   receivedIdentity: refreshReceivedReferencePin(
                     current.shareView.receivedIdentity,
@@ -775,21 +784,21 @@ export function registerSharedViewsIpcHandlers<
                   sharerName: info.sharerName,
                 };
                 if (
+                  identityRecorded ||
                   (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
-                  (statedLevel !== undefined &&
-                    statedLevel !== "edit" &&
-                    accessStatementsFor(workspace.workspaceId) === statementsBefore)
+                  (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)
                 )
                   delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
                 refreshedWorkspace = { ...current, shareView: nextShareView };
-                if (statedPin && !widening && levelAfterRead !== undefined) {
+                if (statedPin && !widening && levelAfterRead !== undefined && !overtaken) {
                   await narrowShareViewLevel({
                     workspaceId: workspace.workspaceId,
                     rootPath: workspace.rootPath,
                     shareId: workspace.shareView.shareId,
                     from: levelAfterRead,
                     access: statedPin.access,
+                    levelReadOvertaken,
                     currentShareView: () => operation.workspace.shareView,
                     assertCurrent: assertRefreshCurrent,
                   });
@@ -809,6 +818,7 @@ export function registerSharedViewsIpcHandlers<
               } catch (error) {
                 console.error("[desktop] share view enrolment:", error);
                 identityFailure = error;
+                saysEditingNotReady = true;
                 await narrowShareViewLevel({
                   workspaceId: workspace.workspaceId,
                   rootPath: workspace.rootPath,
@@ -865,13 +875,12 @@ export function registerSharedViewsIpcHandlers<
             notifyPull(changedSummary);
             return RefreshSharedViewResult.parse(outcome);
           }
-          const editingNotReady =
-            (identityFailure !== undefined || (editStatedForCopyBelowEdit && !identityRecorded)) &&
-            outcome.status !== "ended";
+          const editingNotReady = saysEditingNotReady && outcome.status !== "ended";
           if (
             outcome.status !== "ended" &&
             !editingNotReady &&
             !editStatedForCopyBelowEdit &&
+            !levelReadOvertaken() &&
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {

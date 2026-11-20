@@ -643,7 +643,7 @@ describe("ended Edit Collection shares", () => {
     it("keeps one row through background pulls that answer editing is still not on, and drops it when editing comes on", async () => {
       const bridge = collectionBridge();
       vi.stubGlobal("dohcDesktop", bridge);
-      const view = render(shell(bridge, SHARE_VIEW));
+      const view = render(shell(bridge, NOT_READY_SHARE));
       await screen.findByText("Retained task");
       await act(async () => undefined);
       bridge.refreshSharedView.mockResolvedValue({
@@ -763,6 +763,42 @@ describe("ended Edit Collection shares", () => {
       bridge.listWorkspaceFiles.mockResolvedValue(listing);
       view.rerender(shell(bridge, EDIT_SHARE));
       expect(await screen.findByTestId("collection-new-record")).toBeTruthy();
+      await act(async () => repaint.resolve(listing));
+      await waitFor(() =>
+        expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
+      );
+      expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(0);
+      view.unmount();
+    });
+
+    it("does not bring the notice back when a check cleared it while a refresh was repainting", async () => {
+      const bridge = collectionBridge();
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, NOT_READY_SHARE));
+      await screen.findByText("Retained task");
+      await screen.findByTestId("workspace-shell-error");
+      await act(async () => undefined);
+      expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(1);
+      bridge.refreshSharedView.mockResolvedValue({
+        ok: false,
+        errorKind: "transient",
+        changedPaths: 1,
+        errorMessage: SHARE_EDITING_NOT_READY_MESSAGE,
+        editingNotReady: true,
+      });
+      const listing = await bridge.listWorkspaceFiles({ workspaceId: SHARE_VIEW.workspaceId });
+      const repaint = deferred<typeof listing>();
+      const listed = bridge.listWorkspaceFiles.mock.calls.length;
+      bridge.listWorkspaceFiles.mockReturnValue(repaint.promise);
+      fireEvent.click(screen.getByTestId("shared-view-refresh"));
+      await waitFor(() =>
+        expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(listed),
+      );
+      bridge.listWorkspaceFiles.mockResolvedValue(listing);
+      view.rerender(shell(bridge, SHARE_VIEW));
+      await waitFor(() => expect(rowsSaying(SHARE_EDITING_NOT_READY_MESSAGE)).toBe(0));
       await act(async () => repaint.resolve(listing));
       await waitFor(() =>
         expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(

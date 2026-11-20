@@ -1034,6 +1034,146 @@ describe("registered received-view handlers", () => {
       expect(h.workspace.shareView).toMatchObject({ grantedSelector: view, editingNotReady: true });
     });
 
+    describe("a refresh whose level read an access check overtook", () => {
+      const comment = { ...view, access: "comment" as const };
+      const refresh = (h: Awaited<ReturnType<typeof harness>>) =>
+        h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+          workspaceId: "existing",
+          trigger: "background",
+        });
+      const check = (h: Awaited<ReturnType<typeof harness>>) =>
+        h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
+          workspaceId: "existing",
+        });
+      async function refreshing(pinned: typeof view | typeof comment, marked: boolean) {
+        const h = await harness();
+        h.workspace.shareView = {
+          ...h.workspace.shareView!,
+          grantedSelector: { ...pinned },
+          ...(marked ? { editingNotReady: true as const } : {}),
+        };
+        h.reconcile.mockImplementation(async (_lease, _target, _request, onCursorCommitted) => {
+          onCursorCommitted?.(42);
+          return { kind: "refresh", outcome };
+        });
+        const reply = deferred<ShareViewInfo>();
+        h.fetchInfo.mockReturnValueOnce(reply.promise);
+        const refreshed = refresh(h);
+        await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
+        return { h, reply, refreshed };
+      }
+
+      it("reads the level again on the next pull after it read View and a newer check found Edit", async () => {
+        const { h, reply, refreshed } = await refreshing(view, true);
+        h.fetchAccess.mockResolvedValueOnce("edit");
+        await check(h);
+        reply.resolve({ ...info, selector: view });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.workspace.shareView).toMatchObject({
+          grantedSelector: view,
+          editingNotReady: true,
+        });
+
+        h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+        await refresh(h);
+        expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+        expect(h.probeLog).not.toHaveBeenCalled();
+        expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
+        expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+      });
+
+      it("does not bring the notice back after it read Edit and a newer check found View", async () => {
+        vi.spyOn(console, "error").mockImplementation(() => undefined);
+        for (const answer of [
+          () => Promise.reject(new Error("store busy")),
+          async () => ({ identity: "not-required" as const }),
+        ]) {
+          const { h, reply, refreshed } = await refreshing(view, false);
+          h.recordIdentity.mockImplementation(answer);
+          h.fetchAccess.mockResolvedValueOnce("view");
+          await check(h);
+          reply.resolve({ ...info, selector: edit });
+          await expect(refreshed).resolves.toMatchObject({ ok: true });
+          expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+          expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+          expect(workspaceSummaryFor(h.workspace).shareView).not.toHaveProperty("editingNotReady");
+
+          await refresh(h);
+          expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+        }
+      });
+
+      it("does not lower the copy or drop its notice after it read View and a newer check found Edit", async () => {
+        const { h, reply, refreshed } = await refreshing(comment, true);
+        h.fetchAccess.mockResolvedValueOnce("edit");
+        await check(h);
+        reply.resolve({ ...info, selector: view });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.narrow).not.toHaveBeenCalled();
+        expect(h.workspace.shareView).toMatchObject({
+          grantedSelector: comment,
+          editingNotReady: true,
+        });
+      });
+
+      it("does not lower the copy when the newer check answers while the lowering saves unsent work", async () => {
+        const { h, reply, refreshed } = await refreshing(comment, true);
+        h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
+          assertCurrent();
+          h.fetchAccess.mockResolvedValueOnce("edit");
+          await check(h);
+          await commit(["docs/draft.md"], { paths: [], unchecked: false, checked: 0 });
+        });
+        reply.resolve({ ...info, selector: view });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.narrow).toHaveBeenCalledOnce();
+        expect(h.workspace.shareView!.grantedSelector).toEqual(comment);
+        expect(h.workspace.shareView).not.toHaveProperty("unsavedPaths");
+
+        h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+        await refresh(h);
+        expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+      });
+
+      it("does not raise a copy to Comment after a newer check answered", async () => {
+        const { h, reply, refreshed } = await refreshing(view, false);
+        h.fetchAccess.mockResolvedValueOnce("view");
+        await check(h);
+        reply.resolve({ ...info, selector: comment });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+      });
+
+      it("stops saying editing is not on once the identity is recorded, though a newer answer held the upgrade back, and turns editing on at the next pull", async () => {
+        const { h, reply, refreshed } = await refreshing(view, true);
+        const recording = deferred<{ identity: "recorded" }>();
+        h.recordIdentity.mockReturnValueOnce(recording.promise);
+        reply.resolve({ ...info, selector: edit });
+        await vi.waitFor(() => expect(h.recordIdentity).toHaveBeenCalledOnce());
+        h.fetchAccess.mockResolvedValueOnce("edit");
+        await check(h);
+        recording.resolve({ identity: "recorded" });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.workspace.shareView!.grantedSelector).toEqual(view);
+        expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+
+        h.fetchInfo.mockResolvedValue({ ...info, selector: edit });
+        await refresh(h);
+        expect(h.fetchInfo).toHaveBeenCalledTimes(2);
+        expect(h.workspace.shareView!.grantedSelector).toEqual(edit);
+      });
+
+      it("still takes a level read that no check overtook", async () => {
+        const { h, reply, refreshed } = await refreshing(view, true);
+        reply.resolve({ ...info, selector: view });
+        await expect(refreshed).resolves.toMatchObject({ ok: true });
+        expect(h.workspace.shareView).not.toHaveProperty("editingNotReady");
+        await refresh(h);
+        expect(h.fetchInfo).toHaveBeenCalledOnce();
+        expect(h.probeLog).toHaveBeenCalledOnce();
+      });
+    });
+
     it("stops saying editing is not on when the relay states View", async () => {
       const h = await harness();
       h.workspace.shareView = {

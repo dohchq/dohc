@@ -6754,7 +6754,11 @@ export function DesktopWorkspaceShell(props: {
               return "stale";
             }
             if (outcome.editingNotReady) {
-              if (!shareViewEndedRef.current && !shareViewWritableRef.current)
+              if (
+                shareViewRef.current?.editingNotReady &&
+                !shareViewEndedRef.current &&
+                !shareViewWritableRef.current
+              )
                 reportShareEditingNotReady(background);
               return "stale";
             }
