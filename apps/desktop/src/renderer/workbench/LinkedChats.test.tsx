@@ -12,6 +12,7 @@ import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./
 import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile } from "./About";
 import type { AccessContext } from "./accessReason";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 
 function stubAnimationFrames() {
   let nextId = 0;
@@ -71,14 +72,16 @@ function LinkedChatsPanel(
     Partial<Pick<PanelProps, "notices">>,
 ) {
   return (
-    <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel
-        notices={notices}
-        accessContext={accessContext}
-        links={links}
-        {...props}
-      />
-    </ReactionStoreProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ReactionStoreProvider workspaceId={props.workspaceId}>
+        <ProductionLinkedChatsPanel
+          notices={notices}
+          accessContext={accessContext}
+          links={links}
+          {...props}
+        />
+      </ReactionStoreProvider>
+    </WorkspaceSessionProvider>
   );
 }
 
@@ -101,7 +104,9 @@ const bridgeMock = {
   requestAccessRefresh: vi.fn(),
   readAgentThreadLines: vi.fn(),
   onAgentThreadLines: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
+const activity = new Set<(event: { workspaceId?: string }) => void>();
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
 // message into view after load.
@@ -114,6 +119,13 @@ beforeEach(() => {
     threads: [searchThread],
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  activity.clear();
+  bridgeMock.onWorkspaceActivity.mockImplementation(
+    (callback: (event: { workspaceId?: string }) => void) => {
+      activity.add(callback);
+      return () => activity.delete(callback);
+    },
+  );
   bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
   bridgeMock.getObjectAccess.mockImplementation(async (input: { ref: unknown }) => ({
     ref: input.ref,
@@ -340,6 +352,45 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
     }),
   );
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
+});
+
+describe("LinkedChatsPanel live thread", () => {
+  it("shows a comment deleted elsewhere while its thread is open", async () => {
+    const comment = (id: string, author: string, body: string, at: number) => ({
+      presentation: { group: "fixture", hue: null, self: false },
+      id,
+      threadId: "thread-1",
+      authorKind: "human" as const,
+      authorDisplayName: author,
+      body,
+      createdAtMs: at,
+    });
+    const maya = comment("message-1", "Maya", "Plant beans in May?", 1_700_000_000_000);
+    const sam = comment("message-2", "Sam", "Spam from Sam", 1_700_000_060_000);
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />,
+    );
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+
+    // The delete lands from the relay; main says the workspace changed.
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [maya, { ...sam, body: "", deletedAtMs: 1_700_000_120_000 }],
+    });
+    act(() => {
+      for (const callback of activity) callback({ workspaceId: "workspace-1" });
+    });
+
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    expect(chat.textContent).not.toContain("Spam from Sam");
+    expect(chat.textContent).toContain("Plant beans in May?");
+  });
 });
 
 describe("LinkedChatsPanel initialThread consumption", () => {
@@ -682,15 +733,17 @@ describe("LinkedChats reactions through the workspace store", () => {
   ) {
     return (
       <div key={testId} data-testid={testId}>
-        <ProductionLinkedChatsPanel
-          workspaceId="workspace-1"
-          filePath="docs/plan.md"
-          initialThread={initialThread}
-          onError={onError}
-          notices={notices}
-          accessContext={accessContext}
-          links={links}
-        />
+        <WorkspaceSessionProvider workspaceId="workspace-1">
+          <ProductionLinkedChatsPanel
+            workspaceId="workspace-1"
+            filePath="docs/plan.md"
+            initialThread={initialThread}
+            onError={onError}
+            notices={notices}
+            accessContext={accessContext}
+            links={links}
+          />
+        </WorkspaceSessionProvider>
       </div>
     );
   }

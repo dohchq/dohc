@@ -30,6 +30,8 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 // The composer's replacement when this person cannot comment. The shell
 // names the reason main refuses with; this is the same shape the Chats
@@ -491,6 +493,44 @@ export function LinkedChatsPanel(props: {
 
   const activeThreadId = activeThread?.id ?? null;
   const activeChatThreadIds = useMemo(() => [activeThreadId], [activeThreadId]);
+  // Another copy's delete, a pull or an agent changes the open chat without
+  // this panel. Each workspace activity reads its messages again, as the Chats
+  // view does. A message sent here while that read ran stays at the end.
+  const liveMessages = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `linked-chat-messages:${workspaceId}:${activeThreadId ?? ""}`,
+    manual: true,
+    load: async () =>
+      activeThreadId === null
+        ? null
+        : (await bridge().listChatMessages({ workspaceId, threadId: activeThreadId })).messages,
+  });
+  const readLiveMessages = liveMessages.retry;
+  useEffect(() => {
+    if (activeThreadId === null) return;
+    let queued = false;
+    let active = true;
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if ((event.workspaceId !== undefined && event.workspaceId !== workspaceId) || queued) return;
+      queued = true;
+      queueMicrotask(() => {
+        queued = false;
+        if (active) void readLiveMessages();
+      });
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [activeThreadId, readLiveMessages, workspaceId]);
+  const freshMessages = liveMessages.value;
+  useEffect(() => {
+    if (!freshMessages) return;
+    const read = new Set(freshMessages.map((message) => message.id));
+    setMessages((current) => [
+      ...freshMessages,
+      ...current.filter((message) => !read.has(message.id)),
+    ]);
+  }, [freshMessages]);
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
