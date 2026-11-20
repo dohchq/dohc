@@ -683,10 +683,11 @@ export function createCaptureLiveStores(
   // one must not answer for.
   async function runRawRead<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options: { endRetriesAtQuit?: boolean } = {},
   ): Promise<T> {
     return await sessions.run(workspace, async (binding) => await operation(adapterFor(binding)), {
       retryTransportErrors: true,
-      endRetriesAtQuit: true,
+      ...options,
     });
   }
 
@@ -725,8 +726,11 @@ export function createCaptureLiveStores(
     }
   }
 
-  async function runRead<T>(operation: (adapter: VersionedLiveAdapter) => Promise<T>): Promise<T> {
-    return await withDomainErrors(async () => await runRawRead(operation));
+  async function runRead<T>(
+    operation: (adapter: VersionedLiveAdapter) => Promise<T>,
+    options: { endRetriesAtQuit?: boolean } = {},
+  ): Promise<T> {
+    return await withDomainErrors(async () => await runRawRead(operation, options));
   }
 
   async function runMutation<T>(
@@ -1249,7 +1253,9 @@ export function createCaptureLiveStores(
       limit?: number;
       cursor?: HistoryCursor;
     }) {
-      const page = await runRead(async (adapter) => await adapter.readHistoryPage(input));
+      const page = await runRead(async (adapter) => await adapter.readHistoryPage(input), {
+        endRetriesAtQuit: true,
+      });
       return {
         ...page,
         moments: page.moments.map((moment) => momentSummaryFromWire(input.workspaceId, moment)),
@@ -1536,7 +1542,9 @@ export function createCaptureLiveStores(
     },
 
     async listPendingCollectionAdoptions(input = {}) {
-      return await runRead(async (adapter) => await adapter.listPendingCollectionAdoptions(input));
+      return await runRead(async (adapter) => await adapter.listPendingCollectionAdoptions(input), {
+        endRetriesAtQuit: true,
+      });
     },
 
     async reconcileCapture() {
@@ -1558,7 +1566,9 @@ export function createCaptureLiveStores(
     },
 
     async listKeptCopies() {
-      return await runRead(async (adapter) => await adapter.listKeptCopies());
+      return await runRead(async (adapter) => await adapter.listKeptCopies(), {
+        endRetriesAtQuit: true,
+      });
     },
 
     async saveKeptCopy(id: number) {

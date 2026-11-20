@@ -132,9 +132,12 @@ export interface EngineWorkspaceRunOptions {
    */
   abandonAtQuit?: boolean;
   /**
-   * At quit, a failed attempt is final: the run stops retrying instead of
-   * waiting for a replacement daemon. An attempt already running finishes.
-   * Enable only for work with no accepted write to protect, such as a read.
+   * At quit, a failed attempt to reach the daemon is final: a transport
+   * failure, a daemon that is down or relaunching, or a client that changed
+   * during the open ends the run with `EngineWorkspaceShuttingDownError`
+   * instead of waiting for a replacement daemon. An attempt already running
+   * finishes, and a store-busy refusal keeps its own wait, because a busy
+   * daemon answers. Enable only for a read that no write depends on.
    */
   endRetriesAtQuit?: boolean;
 }
@@ -252,8 +255,8 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
 }
 
 // Work that quit abandons: a bounded region asked to start after
-// `beginShutdown`, a run that would wait on a workspace's first open, or a run
-// marked `abandonAtQuit`. Each is refused before it reaches the daemon or
+// `beginShutdown`, a run that would wait on a workspace's first open, a run
+// marked `abandonAtQuit`, or a failed run marked `endRetriesAtQuit`. Each is refused before it reaches the daemon or
 // stops waiting, because the app is quitting and the work is abandonable.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
@@ -1029,7 +1032,7 @@ export class EngineWorkspaceSessions {
     // accepted is not.
     const abandonable = this.activeBudget() !== undefined || gate.endsAtQuit === true;
     if (this.shuttingDown && abandonable) {
-      return "stop";
+      return this.stopAtQuit(gate);
     }
     checkDeadline();
     if (!gate.backoff) return "retry";
@@ -1054,10 +1057,15 @@ export class EngineWorkspaceSessions {
     // Same scope as before the wait: quit ends the retries of a bounded region
     // or a read, and only theirs.
     if (this.shuttingDown && abandonable) {
-      return "stop";
+      return this.stopAtQuit(gate);
     }
     checkDeadline();
     return "retry";
+  }
+
+  private stopAtQuit(gate: { endsAtQuit?: boolean }): "stop" {
+    if (gate.endsAtQuit === true) throw new EngineWorkspaceShuttingDownError();
+    return "stop";
   }
 
   // `cancellable` marks a wait that quit may end: an abandonable region's or a read's.
@@ -1422,6 +1430,7 @@ export class EngineWorkspaceSessions {
           attempt,
           lastAttempt,
           backoff: true,
+          endsAtQuit: options.endRetriesAtQuit === true,
           cause: churn,
         });
         if (next === "stop") {

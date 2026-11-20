@@ -4147,9 +4147,15 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-read-quit");
       const client = new MockClient("handle-read-quit");
       const sleeping = deferred<void>();
+      let published = true;
       let attempts = 0;
       const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
+        {
+          currentClient: () => {
+            if (!published) throw new EngineDaemonUnavailableError("The engine is restarting.");
+            return client;
+          },
+        },
         {
           sleep: async () => {
             sleeping.resolve();
@@ -4157,18 +4163,16 @@ describe("EngineWorkspaceSessions", () => {
           },
         },
       );
-      const read = sessions.run(
-        workspace,
-        async () => {
-          attempts += 1;
-          throw transportFailure();
-        },
-        { retryTransportErrors: true, endRetriesAtQuit: true },
-      );
+      await sessions.run(workspace, async () => undefined);
+      published = false;
+      const read = sessions.run(workspace, async () => "unreachable", {
+        retryTransportErrors: true,
+        endRetriesAtQuit: true,
+      });
       await sleeping.promise;
       sessions.beginShutdown();
-      await expect(read).rejects.toBeInstanceOf(EngineClientError);
-      expect(attempts).toBe(1);
+      await expect(read).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      published = true;
       await expect(
         sessions.run(
           workspace,
@@ -4178,8 +4182,9 @@ describe("EngineWorkspaceSessions", () => {
           },
           { retryTransportErrors: true, endRetriesAtQuit: true },
         ),
-      ).rejects.toBeInstanceOf(EngineClientError);
-      expect(attempts).toBe(2);
+      ).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(attempts).toBe(1);
+      await sessions.closeWorkspace(workspace);
     });
 
     it("stops waiting for a run marked abandonAtQuit, so its workspace closes", async () => {
