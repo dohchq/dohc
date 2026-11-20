@@ -774,7 +774,7 @@ it("shows a workspace whose membership ended with Remove, and says why in a toas
   await openAgent("Grok Bot");
   const ended = page().getByTestId("personal-agent-reach-ended");
   expect(ended.textContent).toBe(
-    "Old clubReaches nothing here. If you rejoin, it gets Comment back.Membership endedRemove",
+    "Old clubReaches nothing here. If you rejoin, choose its reach again.Membership endedRemove",
   );
   let answer: (result: { ok: false; error: string }) => void = () => {};
   bridgeMock.changePersonalAgent.mockReturnValueOnce(

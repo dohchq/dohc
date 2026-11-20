@@ -150,7 +150,7 @@ function ChatMessage({
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">{authorName(message)}</span>
+        <span className="chat-author">{unnamed && yours ? "Your agent" : authorName(message)}</span>
         {message.authorKind === "link" && <LinkHolderMark />}
         {owner && !unnamed && (
           <span className="chat-owner">{yours ? "Your agent" : `${owner}'s agent`}</span>

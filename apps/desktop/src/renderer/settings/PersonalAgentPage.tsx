@@ -554,8 +554,6 @@ export function PersonalAgentPage(props: {
               })}
               {ended.map((workspace) => {
                 const name = workspace.name ?? "Unnamed workspace";
-                // The relay keeps the entry, so a person added back gets this level back.
-                const kept = REACH_SHOWN[shownLevel(workspace, level(workspace.workspaceId))];
                 return (
                   <div
                     key={workspace.workspaceId}
@@ -568,7 +566,7 @@ export function PersonalAgentPage(props: {
                         data-testid="personal-agent-reach-ended-note"
                         className="text-[12px] text-muted"
                       >
-                        Reaches nothing here. If you rejoin, it gets {kept.label} back.
+                        Reaches nothing here. If you rejoin, choose its reach again.
                       </span>
                     </span>
                     <span className={VALUE}>

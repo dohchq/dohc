@@ -692,6 +692,12 @@ it("names the reader's own agent Your agent", async () => {
           authorUserId: "bob",
           authorOwnerDisplayName: "Bob",
         },
+        {
+          ...message(4, "Fourth", "Agent"),
+          authorKind: "agent",
+          authorUserId: "alice",
+          authorOwnerDisplayName: "Alice",
+        },
       ],
     }),
   });
@@ -701,6 +707,8 @@ it("names the reader's own agent Your agent", async () => {
     "Your agent",
     "Bob's agent",
   ]);
+  // An own agent with no name of its own is named once, the same way.
+  expect(container.querySelectorAll(".chat-author")[2]?.textContent).toBe("Your agent");
 });
 
 it("names an agent with no name of its own once, by whose it is", async () => {
