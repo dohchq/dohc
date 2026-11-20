@@ -381,6 +381,7 @@ export const WorkspaceSummary = z.object({
       // grant could not be read. The banner states the level; it never
       // decides anything with it.
       access: SHARE_ACCESS.optional(),
+      editingNotReady: z.literal(true).optional(),
       genericChatWritable: z.boolean().optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
@@ -6667,6 +6668,9 @@ const RefreshSharedViewSuccessResult = z.object({
   refusedDetail: z.string().nullable(),
 });
 
+export const SHARE_EDITING_NOT_READY_MESSAGE =
+  "dohc could not turn on editing for this share. Choose Refresh, or return to this window, to try again.";
+
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
   probed: z.literal(true).optional(),
@@ -6681,6 +6685,7 @@ const RefreshSharedViewFailureResult = z.object({
   // This refresh set the record aside before it failed, so the person hears
   // of it all the same.
   collisionRecordQuarantined: z.boolean().optional(),
+  editingNotReady: z.literal(true).optional(),
 });
 
 export const RefreshSharedViewResult = z.discriminatedUnion("ok", [

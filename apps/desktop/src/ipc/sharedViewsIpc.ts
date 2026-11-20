@@ -5,6 +5,7 @@ import {
   RefreshSharedViewPayload,
   RefreshSharedViewResult,
   sharedViewAccessOperations,
+  SHARE_EDITING_NOT_READY_MESSAGE,
   type CheckSharedViewAccessResult,
   engineStoreRefusalRecovery,
 } from "./bridgeContract";
@@ -181,7 +182,7 @@ export function registerSharedViewsIpcHandlers<
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
   ): Promise<boolean> {
-    await warmCredentialCache();
+    await warmCredentialCache().catch(() => undefined);
     const credentials = currentCredentials();
     const grantedSelector = shareViewIdentitySelector({
       shareView: workspace.shareView,
@@ -213,6 +214,8 @@ export function registerSharedViewsIpcHandlers<
     shareId: string;
     from: ShareAccess;
     access: ShareAccess;
+    editingNotReady?: true;
+    levelReadOvertaken?(): boolean;
     currentShareView(): ShareViewIdentity | undefined;
     assertCurrent(): void;
   }): Promise<void> {
@@ -229,15 +232,19 @@ export function registerSharedViewsIpcHandlers<
             latest.shareId !== input.shareId ||
             !latestPin ||
             latest.ended ||
-            latestPin.access !== input.from
+            latestPin.access !== input.from ||
+            input.levelReadOvertaken?.()
           )
             return;
-          await setWorkspaceShareView(input.workspaceId, {
+          const narrowed: ShareViewIdentity = {
             ...latest,
             grantedSelector: { ...latestPin, access: input.access },
             unsavedPaths,
             unconfirmedChanges,
-          });
+          };
+          if (input.editingNotReady) narrowed.editingNotReady = true;
+          else delete narrowed.editingNotReady;
+          await setWorkspaceShareView(input.workspaceId, narrowed);
         },
       ),
     );
@@ -316,7 +323,8 @@ export function registerSharedViewsIpcHandlers<
       rootPath,
       populate: async (created, authorityBinding) => {
         assertOpenIdentity();
-        await setWorkspaceShareView(created.workspaceId, {
+        const statedEdit = grantedSelector.access === "edit";
+        const shareView: ShareViewIdentity = {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
           granterEmail: info.granterEmail,
@@ -324,29 +332,50 @@ export function registerSharedViewsIpcHandlers<
           sharerName: info.sharerName,
           genericChatWritable: info.genericChatWritable,
           // Pin the selector the relay just stated, so later pulls enforce it
-          // instead of trusting the relay's selection each time.
-          grantedSelector,
+          // instead of trusting the relay's selection each time. A share
+          // stated at Edit is pinned at View until its identity is recorded.
+          grantedSelector: statedEdit ? { ...grantedSelector, access: "view" } : grantedSelector,
+          ...(statedEdit ? { editingNotReady: true as const } : {}),
           receivedIdentity: info.receivedIdentity,
           // Persist the origin relay so a later refresh signed into a different
           // relay is skipped instead of misreading a 404 as "share ended".
           relayUrl: credentials.relayUrl,
           recipientUserId: credentials.userId,
-        });
+        };
+        await setWorkspaceShareView(created.workspaceId, shareView);
+        if (statedEdit) {
+          // Before the first pull: a share view that writes back needs its own
+          // sync identity, and the pull is what gives it the share cursor that
+          // makes local writes journal.
+          //
+          // Soft. Opening a share is a read, and a failure here costs the
+          // recipient editing, not what they were given: the copy opens at
+          // View, and a refresh that finds Edit records the identity and
+          // pins Edit.
+          const recorded = await workspaceAuthorities
+            .withBinding(authorityBinding, (lease) =>
+              recordShareViewIdentity({
+                ...canonicalWorkspaceFor(lease),
+                shareView: { ...shareView, grantedSelector },
+              }),
+            )
+            .catch((error) => {
+              console.error("[desktop] share view identity:", error);
+              return false;
+            });
+          const written = requireWorkspace(created.workspaceId).shareView;
+          if (
+            recorded &&
+            written?.shareId === parsed.shareId &&
+            !written.ended &&
+            recordedShareSelector(written.grantedSelector)?.access === "view"
+          ) {
+            const pinnedAtEdit = { ...written, grantedSelector };
+            delete pinnedAtEdit.editingNotReady;
+            await setWorkspaceShareView(created.workspaceId, pinnedAtEdit);
+          }
+        }
         refreshNativeWorkspaceSurfaces();
-        // Before the first pull: a share view that writes back needs its own
-        // sync identity, and the pull is what gives it the share cursor that
-        // makes local writes journal.
-        //
-        // Soft, like the refresh site. Opening a share is a read, and a failure
-        // here costs the recipient the ability to send changes, not the ability
-        // to open what they were given. The first window refresh retries it.
-        await workspaceAuthorities
-          .withBinding(authorityBinding, (lease) =>
-            recordShareViewIdentity(canonicalWorkspaceFor(lease)),
-          )
-          .catch((error) => {
-            console.error("[desktop] share view identity:", error);
-          });
         const reconciled = await withStaleSensitiveWorkspaceOperation(created.rootPath, (lease) =>
           shareViewFiles.reconcile(
             lease,
@@ -654,6 +683,12 @@ export function registerSharedViewsIpcHandlers<
           // current for the separate Edit proposal lane.
           let identityRecorded = false;
           let identityFailure: unknown;
+          let editStatedForCopyBelowEdit = false;
+          let saysEditingNotReady = false;
+          // An access answer that arrives after this refresh asked for the level
+          // is newer than what the refresh reads. Such a refresh changes no pin
+          // and no marker, and its pull is not cached.
+          let levelReadOvertaken = () => false;
           if (!workspace.shareView.ended && (input.trigger !== "background" || !cached)) {
             let refreshedWorkspace = workspace;
             await warmCredentialCache().catch(() => undefined);
@@ -669,6 +704,8 @@ export function registerSharedViewsIpcHandlers<
                   workspace.shareView.grantedSelector,
                 )?.access;
                 const statementsBefore = accessStatementsFor(workspace.workspaceId);
+                levelReadOvertaken = () =>
+                  accessStatementsFor(workspace.workspaceId) !== statementsBefore;
                 const info = await fetchShareViewInfo({
                   relay: {
                     baseUrl: credentials.relayUrl,
@@ -719,14 +756,22 @@ export function registerSharedViewsIpcHandlers<
                   if (
                     identityRecorded &&
                     !current.shareView.ended &&
-                    pinnedLevel(current.shareView) === levelBeforeRead &&
-                    accessStatementsFor(workspace.workspaceId) === statementsBefore
+                    pinnedLevel(current.shareView) === levelBeforeRead
                   )
                     widenedPin = statedPin;
                 }
-                const nextShareView = {
+                const overtaken = levelReadOvertaken();
+                if (overtaken) widenedPin = null;
+                const statedLevel =
+                  info.statedShareId === current.shareView.shareId
+                    ? recordedShareSelector(info.selector)?.access
+                    : undefined;
+                editStatedForCopyBelowEdit = statedPin?.access === "edit" && widenedPin === null;
+                saysEditingNotReady = editStatedForCopyBelowEdit && !identityRecorded && !overtaken;
+                const nextShareView: ShareViewIdentity = {
                   ...current.shareView,
                   ...(widenedPin ? { grantedSelector: widenedPin } : {}),
+                  ...(saysEditingNotReady ? { editingNotReady: true as const } : {}),
                   ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
                   receivedIdentity: refreshReceivedReferencePin(
                     current.shareView.receivedIdentity,
@@ -738,15 +783,22 @@ export function registerSharedViewsIpcHandlers<
                   subjectName: info.subjectName,
                   sharerName: info.sharerName,
                 };
+                if (
+                  identityRecorded ||
+                  (widenedPin?.access ?? pinnedLevel(current.shareView)) === "edit" ||
+                  (statedLevel !== undefined && statedLevel !== "edit" && !overtaken)
+                )
+                  delete nextShareView.editingNotReady;
                 await setWorkspaceShareView(workspace.workspaceId, nextShareView);
                 refreshedWorkspace = { ...current, shareView: nextShareView };
-                if (statedPin && !widening && levelAfterRead !== undefined) {
+                if (statedPin && !widening && levelAfterRead !== undefined && !overtaken) {
                   await narrowShareViewLevel({
                     workspaceId: workspace.workspaceId,
                     rootPath: workspace.rootPath,
                     shareId: workspace.shareView.shareId,
                     from: levelAfterRead,
                     access: statedPin.access,
+                    levelReadOvertaken,
                     currentShareView: () => operation.workspace.shareView,
                     assertCurrent: assertRefreshCurrent,
                   });
@@ -760,10 +812,26 @@ export function registerSharedViewsIpcHandlers<
                 refreshedWorkspace = currentShareViewWorkspace();
               }
             }
-            if (!identityRecorded)
-              await recordShareViewIdentity(refreshedWorkspace).catch((error) => {
+            if (!identityRecorded && identityFailure === undefined) {
+              try {
+                await recordShareViewIdentity(refreshedWorkspace);
+              } catch (error) {
                 console.error("[desktop] share view enrolment:", error);
-              });
+                identityFailure = error;
+                saysEditingNotReady = true;
+                await narrowShareViewLevel({
+                  workspaceId: workspace.workspaceId,
+                  rootPath: workspace.rootPath,
+                  shareId: workspace.shareView.shareId,
+                  from: "edit",
+                  access: "view",
+                  editingNotReady: true,
+                  currentShareView: () => operation.workspace.shareView,
+                  assertCurrent: () => operation.assertCurrent(),
+                });
+                refreshNativeWorkspaceSurfaces();
+              }
+            }
           }
           let outcome;
           let nextCursor: number | undefined;
@@ -807,10 +875,12 @@ export function registerSharedViewsIpcHandlers<
             notifyPull(changedSummary);
             return RefreshSharedViewResult.parse(outcome);
           }
-          const editingNotReady = identityFailure !== undefined && outcome.status !== "ended";
+          const editingNotReady = saysEditingNotReady && outcome.status !== "ended";
           if (
             outcome.status !== "ended" &&
             !editingNotReady &&
+            !editStatedForCopyBelowEdit &&
+            !levelReadOvertaken() &&
             workspace.shareView.recipientUserId &&
             workspace.shareView.relayUrl
           ) {
@@ -849,7 +919,8 @@ export function registerSharedViewsIpcHandlers<
               ok: false,
               errorKind: "transient",
               changedPaths: outcome.changedPaths,
-              errorMessage: "dohc could not turn on editing for this share.",
+              errorMessage: SHARE_EDITING_NOT_READY_MESSAGE,
+              editingNotReady: true,
               ...(outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
             });
           return RefreshSharedViewResult.parse(outcome);
@@ -1011,6 +1082,19 @@ export function registerSharedViewsIpcHandlers<
                   currentShareView: () => operation.workspace.shareView,
                   assertCurrent: scoped.assertCurrent,
                 });
+                refreshNativeWorkspaceSurfaces();
+                notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
+              }
+              const marked = operation.workspace.shareView;
+              if (
+                statedAccess !== "edit" &&
+                marked?.shareId === view.shareId &&
+                marked.editingNotReady &&
+                !marked.ended
+              ) {
+                const unmarked = { ...marked };
+                delete unmarked.editingNotReady;
+                await setWorkspaceShareView(workspace.workspaceId, unmarked);
                 refreshNativeWorkspaceSurfaces();
                 notifyRenderer({ workspaceId: workspace.workspaceId, summaryChanged: true });
               }
