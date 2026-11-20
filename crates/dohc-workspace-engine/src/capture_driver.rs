@@ -975,9 +975,20 @@ pub(crate) struct DriverStatus {
     deferred_writes: std::sync::Mutex<DeferredWrites>,
     collection_lease_held: std::sync::atomic::AtomicBool,
     collection_release_generation: std::sync::atomic::AtomicU64,
-    /// Why protected files can't be captured, as a stable code, until a run
-    /// loads the key or finishes clean.
-    secret_key_unavailable: std::sync::Mutex<Option<&'static str>>,
+    secret_key: std::sync::Mutex<SecretKeyStatus>,
+}
+
+/// What capture knows about the workspace's secret key since it opened the
+/// workspace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SecretKeyStatus {
+    /// No run has loaded the key, failed to, or finished clean yet.
+    #[default]
+    Unchecked,
+    /// The key loaded, or a clean run left no protected file waiting on it.
+    Clear,
+    /// Why protected files can't be captured, as a stable code.
+    Unavailable(&'static str),
 }
 
 /// The files layer (actor + watcher + loop) is up and driving.
@@ -1065,23 +1076,23 @@ impl DriverStatus {
         crate::lock(&self.deferred_writes).keys().cloned().collect()
     }
 
-    pub(crate) fn secret_key_unavailable(&self) -> Option<&'static str> {
-        *crate::lock(&self.secret_key_unavailable)
+    pub(crate) fn secret_key(&self) -> SecretKeyStatus {
+        *crate::lock(&self.secret_key)
     }
 
     /// Keep the reason from a failed key load until a run loads the key, or
     /// a clean run shows that no protected file is waiting on it. A busy
-    /// store says nothing new about the key, so it keeps the last reason.
+    /// store says nothing new about the key, so it keeps the last status.
     fn record_secret_key(&self, health: SecretKeyHealth, clean: bool) {
-        let mut reason = crate::lock(&self.secret_key_unavailable);
+        let mut status = crate::lock(&self.secret_key);
         match health {
             SecretKeyHealth::Unavailable(failure) => {
                 if let Some(code) = failure.code() {
-                    *reason = Some(code);
+                    *status = SecretKeyStatus::Unavailable(code);
                 }
             }
-            SecretKeyHealth::Loaded => *reason = None,
-            SecretKeyHealth::Untried if clean => *reason = None,
+            SecretKeyHealth::Loaded => *status = SecretKeyStatus::Clear,
+            SecretKeyHealth::Untried if clean => *status = SecretKeyStatus::Clear,
             SecretKeyHealth::Untried => {}
         }
     }
@@ -1237,6 +1248,9 @@ mod restart_schedule_tests;
 
 #[cfg(test)]
 mod supervision_tests;
+
+#[cfg(test)]
+mod secret_key_status_tests;
 
 /// Loop-level tests. These drive the real `drive_loop` against a scripted
 /// environment under paused time, so they observe what the loop actually

@@ -1429,6 +1429,9 @@ const WorkspaceResultSchemas = {
     // happen, but a file another program changes at that moment can be lost.
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
+    // False until capture has loaded the secret key, failed to, or finished
+    // a clean pass since the engine opened the workspace.
+    secretKeyChecked: Schema.Boolean,
     // Why protected files such as `.env` can't be captured, such as
     // `volume-shares-new-files` or `key-missing`. Absent while the key is fine.
     secretKeyUnavailable: Schema.optionalKey(Schema.NonEmptyString),

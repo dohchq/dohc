@@ -503,6 +503,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       phase: "ready",
       noAtomicPlacement: false,
       recoveryUnavailable: false,
+      secretKeyChecked: true,
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],

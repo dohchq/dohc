@@ -1676,7 +1676,7 @@ it.each([
     expect(row).toMatchObject({
       kind: "secret-key-unavailable",
       title: "History could not save protected files",
-      message,
+      message: `${message} Until then, History saves no changes to protected files. Once the key works, it saves only the text they have then.`,
       noDismiss: true,
       seen: false,
     });

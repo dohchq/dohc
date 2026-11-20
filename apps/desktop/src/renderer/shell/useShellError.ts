@@ -874,7 +874,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       push(
         {
           title: "History could not save protected files",
-          message: secretKeyWords(reason),
+          message: `${secretKeyWords(reason)} Until then, History saves no changes to protected files. Once the key works, it saves only the text they have then.`,
           details: [
             ["File", SECRET_KEY_FILE],
             ["Reason", reason],
