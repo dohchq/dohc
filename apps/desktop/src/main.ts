@@ -2306,7 +2306,7 @@ async function reconcileReceivedShares(
         onLookupError: (shareId, error) =>
           console.warn(`[desktop] received share lookup for ${shareId}:`, error),
       });
-      if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
+      if (changed) notifyRenderer({ workspaceId: entry.workspaceId, summaryChanged: true });
     } catch (error) {
       console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
     }

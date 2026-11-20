@@ -430,6 +430,130 @@ describe("ended Edit Collection shares", () => {
     }
   });
 
+  it("offers editing after the owner raises the level, once the person returns to the window", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(bridge, SHARE_VIEW));
+    await screen.findByText("Retained task");
+    await act(async () => undefined);
+    expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    const refreshes = () =>
+      (bridge.refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).map(
+        ([payload]) => payload.trigger,
+      );
+    const fullRefreshes = () => refreshes().filter((trigger) => trigger === "manual").length;
+    const returnToWindow = async () => {
+      const checks = bridge.checkSharedViewAccess.mock.calls.length;
+      const pulls = refreshes().length;
+      focusAfterMinimum();
+      await waitFor(() => {
+        expect(bridge.checkSharedViewAccess.mock.calls.length).toBe(checks + 1);
+        expect(refreshes().length).toBeGreaterThan(pulls);
+      });
+      await act(async () => undefined);
+    };
+    await returnToWindow();
+    expect(fullRefreshes()).toBe(0);
+
+    bridge.checkSharedViewAccess.mockResolvedValue({
+      status: "current",
+      access: "view",
+      relayStatesMore: true,
+    });
+    await returnToWindow();
+    await waitFor(() => expect(fullRefreshes()).toBe(1));
+    expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({
+      workspaceId: SHARE_VIEW.workspaceId,
+      trigger: "manual",
+    });
+    await waitFor(() =>
+      expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false),
+    );
+
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    view.rerender(shell(bridge, EDIT_SHARE));
+    expect(await screen.findByTestId("collection-new-record")).toBeTruthy();
+    expect(screen.getByTestId("share-changes-send")).toBeTruthy();
+    await returnToWindow();
+    expect(fullRefreshes()).toBe(1);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    view.unmount();
+  });
+
+  describe("the refresh a return asks for when the relay states more", () => {
+    const unchanged = {
+      ok: true as const,
+      status: "unchanged" as const,
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      refusedOps: 0,
+      refusedDetail: null,
+    };
+    async function viewShareTheRelayStatesMoreFor() {
+      const bridge = collectionBridge();
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+      vi.stubGlobal("dohcDesktop", bridge);
+      const view = render(shell(bridge, SHARE_VIEW));
+      await screen.findByText("Retained task");
+      await act(async () => undefined);
+      const fullRefreshes = () =>
+        (bridge.refreshSharedView.mock.calls as unknown as Array<[{ trigger?: string }]>).filter(
+          ([payload]) => payload.trigger === "manual",
+        ).length;
+      const first = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+      bridge.refreshSharedView.mockImplementation((async (payload: { trigger?: string }) =>
+        payload.trigger === "manual" && fullRefreshes() === 1
+          ? first.promise
+          : unchanged) as unknown as typeof bridge.refreshSharedView);
+      bridge.checkSharedViewAccess.mockResolvedValue({
+        status: "current",
+        access: "view",
+        relayStatesMore: true,
+      });
+      return { bridge, view, fullRefreshes, first };
+    }
+
+    it("is one at a time: a return while it is under way starts no second one", async () => {
+      const { bridge, view, fullRefreshes, first } = await viewShareTheRelayStatesMoreFor();
+      const checks = bridge.checkSharedViewAccess.mock.calls.length;
+      focusAfterMinimum();
+      await waitFor(() => expect(fullRefreshes()).toBe(1));
+      focusAfterMinimum();
+      await waitFor(() => expect(bridge.checkSharedViewAccess.mock.calls.length).toBe(checks + 2));
+      await act(async () => undefined);
+      expect(fullRefreshes()).toBe(1);
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+      await act(async () => first.resolve(unchanged));
+      await waitFor(() => expect(fullRefreshes()).toBe(2));
+      await act(async () => undefined);
+      expect(fullRefreshes()).toBe(2);
+      view.unmount();
+    });
+
+    it("offers Try again when it fails", async () => {
+      const { bridge, view, fullRefreshes, first } = await viewShareTheRelayStatesMoreFor();
+      focusAfterMinimum();
+      await waitFor(() => expect(fullRefreshes()).toBe(1));
+      bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "view" });
+      await act(async () =>
+        first.resolve({
+          ok: false,
+          errorKind: "transient",
+          changedPaths: 0,
+          errorMessage: "dohc could not turn on editing for this share.",
+        }),
+      );
+      const notice = await screen.findByTestId("workspace-shell-error");
+      expect(notice.textContent).toContain("dohc could not turn on editing for this share.");
+      expect(fullRefreshes()).toBe(1);
+      fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(fullRefreshes()).toBe(2));
+      view.unmount();
+    });
+  });
+
   it("shows the access-ended notice for a save after the owner stops sharing", async () => {
     const bridge = collectionBridge();
     bridge.readWorkspaceText.mockResolvedValue({

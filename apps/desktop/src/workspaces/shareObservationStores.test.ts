@@ -554,6 +554,109 @@ it("keeps every ended copy ended when a local removal supersedes live acquisitio
   }
 });
 
+describe("a mount's level after the received list is read", () => {
+  const credentials = {
+    userId: "friend",
+    email: "friend@test.dev",
+    relayUrl: "https://relay.test",
+    serverUrl: "https://account.test",
+    token: "secret",
+  };
+  const edit = { ...row(), access: "edit" };
+  function mounted(name: string, recipientEmail = credentials.email) {
+    const registry = createRegistryStore(join(directory, name, "workspaces.json"));
+    registry.register({
+      ...workspace,
+      shareMounts: [
+        {
+          shareId: "s",
+          label: "Notes",
+          granterEmail: null,
+          recipientEmail,
+          relayUrl: credentials.relayUrl,
+          grantedSelector: { paths: ["Notes"], versionId: null, access: "view" },
+        },
+      ],
+    });
+    const list = vi.fn(async (): Promise<unknown> => ({ received: [edit], removed: [] }));
+    let mono = 0;
+    const acquisition = createReceivedShareAcquisition({
+      store: createReceivedShareStore(join(directory, name, "received")),
+      scope: () => ({ ...credentials, generation: 1 }),
+      list,
+      logError: vi.fn(),
+      nowMs: () => mono,
+      onLive: async (inventory, _scope, isCurrent) => {
+        await reconcileRecipientSharesAfterLookup({
+          listing: readReceivedShareListing(inventory)!,
+          credentials,
+          currentEntry: () => registry.find("w"),
+          updateEntry: (reconcile) => registry.reconcileRecipientShares("w", reconcile),
+          isCurrent,
+          lookupShare: async () => ({ ok: true, ...edit }),
+        });
+      },
+    });
+    return {
+      list,
+      acquisition,
+      pinned: () => registry.find("w")?.shareMounts?.[0]?.grantedSelector,
+      advance: (ms: number) => {
+        mono += ms;
+      },
+    };
+  }
+
+  it("follows the level the list states, to Edit and back to View", async () => {
+    const h = mounted("follows");
+    await h.acquisition.refresh();
+    expect(h.pinned()).toEqual({ paths: ["Notes"], versionId: null, access: "edit" });
+    h.advance(60_000);
+    h.list.mockResolvedValue(inventory());
+    await h.acquisition.refresh();
+    expect(h.pinned()).toEqual({ paths: ["Notes"], versionId: null, access: "view" });
+    expect(h.list).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["the read fails", () => Promise.reject(new Error("offline"))],
+    ["the list is unfinished", async () => ({ received: [edit], removed: [], nextCursor: "n" })],
+    [
+      "the share ended",
+      async () => ({
+        received: [],
+        removed: [{ shareId: "s", grantId: "g", removedAtMs: 5, message: "Removed." }],
+      }),
+    ],
+    [
+      "the list states other paths",
+      async () => ({
+        received: [{ ...edit, selector: { paths: ["Notes", "Plans"], versionId: null } }],
+        removed: [],
+      }),
+    ],
+    [
+      "the list states a version",
+      async () => ({
+        received: [{ ...edit, selector: { paths: ["Notes"], versionId: "saved-version" } }],
+        removed: [],
+      }),
+    ],
+  ])("keeps the pinned level when %s", async (name, answer) => {
+    const h = mounted(name);
+    h.list.mockImplementation(answer);
+    await h.acquisition.refresh();
+    expect(h.pinned()).toEqual({ paths: ["Notes"], versionId: null, access: "view" });
+  });
+
+  it("keeps the pinned level of a mount another account added", async () => {
+    const h = mounted("other-account", "someone@test.dev");
+    await h.acquisition.refresh();
+    expect(h.list).toHaveBeenCalledOnce();
+    expect(h.pinned()).toEqual({ paths: ["Notes"], versionId: null, access: "view" });
+  });
+});
+
 it("retires an in-flight received listing before deletion and cannot recreate the account file", async () => {
   const scope = { userId: "friend", relayUrl: "https://relay.test", generation: 1 };
   const store = createReceivedShareStore(join(directory, "received"));

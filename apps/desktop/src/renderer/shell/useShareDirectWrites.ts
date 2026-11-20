@@ -92,7 +92,7 @@ export function useShareDirectWrites(input: {
             message:
               access === "ended"
                 ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
-                : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
+                : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then return to this window.`,
             retry: null,
             send: null,
           });
