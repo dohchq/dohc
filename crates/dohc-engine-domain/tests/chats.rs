@@ -1796,6 +1796,12 @@ fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
         agent_thread(&mut chats, "first", &[("f0", 20), ("f1", 30)]);
         agent_thread(&mut chats, "read", &[("r0", 40), ("r1", 50)]);
         agent_thread(&mut chats, "partly", &[("p0", 60), ("p1", 70)]);
+        // Equal times show as a, b, z, zz, in another order than they arrived.
+        agent_thread(
+            &mut chats,
+            "late",
+            &[("a", 75), ("z", 75), ("b", 75), ("zz", 75)],
+        );
         for (thread_id, messages) in [("file-a", ["fa0", "fa1"].as_slice()), ("file-b", &["fb0"])] {
             chats
                 .create_thread(
@@ -1823,6 +1829,7 @@ fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
     }
     set_local_count(&store, "read", 2);
     set_local_count(&store, "partly", 1);
+    set_local_count(&store, "late", 1);
     if account {
         assert!(
             LinkedChatStore::new(&mut store)
@@ -1835,6 +1842,7 @@ fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
         ("first", "f0"),
         ("read", "r1"),
         ("partly", "p0"),
+        ("late", "z"),
         ("file-a", "fa0"),
         ("file-b", "fb0"),
     ] {
@@ -1866,13 +1874,15 @@ fn a_deleted_message_is_never_unread() {
             })
             .collect();
         threads.sort();
-        // A read place still counts every message, so the New divider and a
-        // mark up to the count keep their arrival-order indexes.
+        // The read place is the arrival position of the first unread message
+        // that isn't deleted, in the order the thread shows: "late" shows
+        // a, b, z, zz, so its place is b's. With nothing unread, it is the count.
         assert_eq!(
             threads,
             vec![
-                ("first".to_owned(), 2, 0, 1),
-                ("only".to_owned(), 1, 0, 0),
+                ("first".to_owned(), 2, 1, 1),
+                ("late".to_owned(), 4, 2, 2),
+                ("only".to_owned(), 1, 1, 0),
                 ("partly".to_owned(), 2, 1, 1),
                 ("read".to_owned(), 2, 2, 0),
             ],
@@ -1884,7 +1894,7 @@ fn a_deleted_message_is_never_unread() {
             .into_iter()
             .find(|summary| summary.channel.channel_id == "gen-1")
             .map(|summary| summary.unread_count);
-        assert_eq!(group, Some(2), "account: {account}");
+        assert_eq!(group, Some(4), "account: {account}");
         let files: Vec<_> = chats
             .list_unread_file_threads(WS, None, 10)
             .expect("file threads")

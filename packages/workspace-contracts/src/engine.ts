@@ -866,8 +866,7 @@ export interface ChatChannelSummary extends ChatChannel {
 // messages read from the start of the thread; `revision` is server-owned and
 // bumps on every applied advance — callers may CAS on it but never write it.
 // On an owned workspace the account's read mark decides what is read, and
-// `lastReadSequence` counts the messages before the earliest unread one in
-// arrival order, so it indexes the first unread message.
+// `lastReadSequence` is the place ChannelThreadSummary describes.
 interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
@@ -903,7 +902,9 @@ export interface ChatThread {
 export interface ChannelThreadSummary {
   thread: ChatThread;
   messageCount: number;
-  // See ChatThreadReadState.lastReadSequence.
+  // The arrival position of the first unread message that isn't deleted, in
+  // the order the thread shows, so it indexes that message. The message count
+  // when nothing is unread.
   lastReadSequence: number;
   // Derived, never stored. Messages past the local count, or on an owned
   // workspace, messages after the account's read mark.

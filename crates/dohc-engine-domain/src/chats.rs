@@ -4523,6 +4523,7 @@ impl<'a> LinkedChatStore<'a> {
                                      (SELECT u.message_order FROM chat_messages u \
                                       WHERE u.workspace_id = t.workspace_id \
                                         AND u.thread_id = t.thread_id \
+                                        AND u.deleted_at_ms IS NULL \
                                         AND (a.last_read_message_id IS NULL \
                                           OR (u.created_at_ms, u.message_id) \
                                              > (a.last_read_created_at_ms, a.last_read_message_id)) \
@@ -4536,7 +4537,14 @@ impl<'a> LinkedChatStore<'a> {
                                      OR (m.created_at_ms, m.message_id) \
                                         > (a.last_read_created_at_ms, a.last_read_message_id))) \
                                 - {deleted_by_mark} END, \
-                                CASE WHEN ?8 IS NULL THEN {deleted_by_count} ELSE 0 END \
+                                CASE WHEN ?8 IS NULL THEN {deleted_by_count} ELSE 0 END, \
+                                CASE WHEN ?8 IS NULL THEN \
+                                (SELECT u.message_order FROM chat_messages u \
+                                 WHERE u.workspace_id = t.workspace_id \
+                                   AND u.thread_id = t.thread_id \
+                                   AND u.deleted_at_ms IS NULL \
+                                   AND u.message_order >= COALESCE(r.last_read_sequence, 0) \
+                                 ORDER BY u.created_at_ms, u.message_id LIMIT 1) END \
                          FROM chat_threads t \
                          LEFT JOIN chat_thread_read_state r \
                            ON r.workspace_id = t.workspace_id AND r.thread_id = t.thread_id \
@@ -4577,6 +4585,7 @@ impl<'a> LinkedChatStore<'a> {
                                     _ => None,
                                 };
                             let deleted_unread: i64 = row.get(18)?;
+                            let local_place: Option<i64> = row.get(19)?;
                             Ok(thread.map(|thread| {
                                 (
                                     thread,
@@ -4584,6 +4593,7 @@ impl<'a> LinkedChatStore<'a> {
                                     stored_read_sequence,
                                     account_read,
                                     deleted_unread,
+                                    local_place,
                                     open_decision_count,
                                     opening_message_id,
                                 )
@@ -4600,6 +4610,7 @@ impl<'a> LinkedChatStore<'a> {
                 stored_read_sequence,
                 account_read,
                 deleted_unread,
+                local_place,
                 open_decision_count,
                 opening_id,
             ) in page
@@ -4615,14 +4626,19 @@ impl<'a> LinkedChatStore<'a> {
                         reason: "channel summary read cursor is corrupt",
                     });
                 }
-                // An account's place counts the messages before its earliest
-                // unread one, so the New divider indexes that message. Both
-                // places count deleted messages; the unread count does not.
+                // The place is the arrival position of the earliest unread
+                // message that isn't deleted, in the order the thread shows,
+                // so the New divider indexes that message. Unread is after
+                // the account's mark, or past the local read count. With none, the
+                // place is the count.
                 let (last_read_sequence, unread_count) = match account_read {
                     Some((position, unread)) => (position.min(message_count), unread.min(message_count)),
                     None => {
                         let read = stored_read_sequence.min(message_count);
-                        (read, message_count - read - deleted_unread)
+                        (
+                            local_place.unwrap_or(message_count).min(message_count),
+                            message_count - read - deleted_unread,
+                        )
                     }
                 };
                 if !persisted_nonnegative_safe(open_decision_count) {
@@ -8085,6 +8101,7 @@ fn account_thread_position(
                   AND m.message_order < COALESCE( \
                     (SELECT u.message_order FROM chat_messages u \
                      WHERE u.workspace_id = ?1 AND u.thread_id = ?3 \
+                       AND u.deleted_at_ms IS NULL \
                        AND (a.last_read_message_id IS NULL \
                          OR (u.created_at_ms, u.message_id) \
                             > (a.last_read_created_at_ms, a.last_read_message_id)) \

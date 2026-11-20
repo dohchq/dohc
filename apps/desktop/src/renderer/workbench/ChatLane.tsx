@@ -289,18 +289,9 @@ export function ChatLane(props: {
         if (!isCurrent()) return;
         const laneMessages = laneRead?.messages ?? [];
         if (lane && paintedRevision.current?.threadId !== lane.id) {
-          // The read place counts deleted messages; the unread count doesn't.
-          // The divider starts at the place's message and moves down the lane,
-          // in the order it shows, past deleted ones.
+          // The read place indexes the first unread message that isn't deleted.
           const place = lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
-          const shown = [...laneMessages].sort(compareMessageOrder);
-          const firstUnread =
-            place &&
-            (shown
-              .slice(shown.indexOf(place))
-              .find((message) => message.deletedAtMs === undefined) ??
-              place);
-          setFirstUnreadMessageId(firstUnread?.id ?? null);
+          setFirstUnreadMessageId(place?.id ?? null);
         }
         const next: PaintedLane = {
           threadId: laneId,
