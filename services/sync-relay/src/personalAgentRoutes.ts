@@ -577,6 +577,7 @@ export function createPersonalAgentToolRoutes(input: {
         sha256,
         epochLogFloor: storage.getEpochLogFloor(workspaceId),
         visible: (path) => pathLevel(files, path) !== null,
+        pastHidden: true,
       });
     };
     const byteLength = reachedLength(reachIn(authority, workspaceId));

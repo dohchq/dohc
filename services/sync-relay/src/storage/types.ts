@@ -1765,6 +1765,7 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
     visible?: (path: string) => boolean;
+    pastHidden?: true;
   }): number | null;
   listLinkRevisionLogRows(input: {
     workspaceId: string;

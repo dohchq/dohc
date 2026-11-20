@@ -2521,6 +2521,24 @@ describe("a personal agent in a workspace its person joined", () => {
     await ok(await postIn({ filePath: "plans/a.md" }));
   });
 
+  it("downloads a file whose bytes many hidden files that sort before it also hold", async () => {
+    const f = await fixture();
+    joinCommunity(f);
+    await communityWrite(f, "hidden/access.yaml", HIDING_RULE);
+    for (let index = 0; index < 17; index += 1)
+      await communityWrite(f, `hidden/${String(index).padStart(2, "0")}.md`, "template");
+    const sha = await communityWrite(f, "plans/a.md", "template");
+    const agent = await signIn(f, { reach: BOTH_COMMENT });
+
+    const listed = await ok(await tool(f, agent, "files", { workspaceId: COMMUNITY }));
+    expect(listed.files).toEqual([
+      expect.objectContaining({ path: "plans/a.md", blobSha256: sha }),
+    ]);
+    const response = await tool(f, agent, "blob", { workspaceId: COMMUNITY, sha256: sha });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("template");
+  });
+
   it("withholds a file link its person can't read, in a Group, in Comments, and in a wait answered after a rule hid it", async () => {
     const f = await fixture();
     joinCommunity(f);

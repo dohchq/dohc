@@ -504,11 +504,17 @@ export function currentFileStateQuery(selectorPaths: readonly string[]): {
   };
 }
 
-export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[]): {
+const BLOB_BYTE_LENGTH_PAGE = 16;
+
+export function currentFileBlobByteLengthQuery(
+  selectorPaths: readonly string[],
+  afterPath = false,
+): {
   sql: string;
   selectorParams: string[];
 } {
   const selector = currentFileSelectorClause(selectorPaths);
+  const after = afterPath ? " AND sync_relay_current_files.path > ?" : "";
   return {
     sql: `SELECT sync_relay_current_files.path, CAST(blob.byte_length AS TEXT) AS byte_length
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
@@ -518,10 +524,11 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
        WHERE sync_relay_current_files.workspace_id = ?
          AND sync_relay_current_files.version_id = ?
          AND sync_relay_current_files.blob_sha256 = ?
-         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
+         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}${after}
        -- The caller may skip hidden rule files with these bytes; a few rows keep
        -- the cost, and its timing, the same however many folders share a rule.
-       LIMIT 16`,
+       ORDER BY sync_relay_current_files.path
+       LIMIT ${BLOB_BYTE_LENGTH_PAGE}`,
     selectorParams: selector.params,
   };
 }
@@ -769,23 +776,30 @@ export function currentFileBlobByteLength(
     epochLogFloor: number;
     /** Admits the bytes only through a file at a path this passes. */
     visible?: (path: string) => boolean;
+    /**
+     * Pages past every file `visible` refuses, for a reach that hides whole
+     * folders. Without it the search reads one page.
+     */
+    pastHidden?: true;
   },
 ): number | null {
-  const query = currentFileBlobByteLengthQuery(input.selectorPaths);
-  const rows = storage.db
-    .prepare(query.sql)
-    .iterate(
-      input.workspaceId,
-      input.versionId,
-      input.sha256,
-      input.epochLogFloor,
-      ...query.selectorParams,
-    );
-  for (const row of rows) {
-    if (input.visible && !input.visible(String(row.path))) continue;
-    return typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+  for (let afterPath: string | undefined; ;) {
+    const query = currentFileBlobByteLengthQuery(input.selectorPaths, afterPath !== undefined);
+    const rows = storage.db
+      .prepare(query.sql)
+      .all(
+        input.workspaceId,
+        input.versionId,
+        input.sha256,
+        input.epochLogFloor,
+        ...query.selectorParams,
+        ...(afterPath === undefined ? [] : [afterPath]),
+      );
+    const row = rows.find((candidate) => !input.visible || input.visible(String(candidate.path)));
+    if (row) return typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+    if (!input.pastHidden || rows.length < BLOB_BYTE_LENGTH_PAGE) return null;
+    afterPath = String(rows.at(-1)!.path);
   }
-  return null;
 }
 
 export function currentObjectPath(

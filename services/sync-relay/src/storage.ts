@@ -2412,6 +2412,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
     visible?: (path: string) => boolean;
+    pastHidden?: true;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }
