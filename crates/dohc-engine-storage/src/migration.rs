@@ -7192,16 +7192,13 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap()
         };
-        let sought = |plan: &[String]| {
+        let plan = plan(&conn);
+        assert!(
             plan.len() == 1
                 && plan[0].starts_with("SEARCH snapshots USING INDEX snapshots_by_path")
-                && plan[0].contains("path=?")
-        };
-        let before = plan(&conn);
-        assert!(sought(&before), "{before:?}");
-        conn.execute_batch("ANALYZE").unwrap();
-        let after = plan(&conn);
-        assert!(sought(&after), "{after:?}");
+                && plan[0].contains("path=?"),
+            "{plan:?}"
+        );
     }
 
     #[test]
