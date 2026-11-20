@@ -122,6 +122,7 @@ const COMPARED_TABLES: &[&str] = &[
     "materialization_retained",
     "materialization_displacement_reads",
     "materialization_staging_locations",
+    "materialization_staged_dacls",
     "ydoc_docs",
     "markdown_write_obligations",
     "markdown_write_obligation_notice_dismissals",

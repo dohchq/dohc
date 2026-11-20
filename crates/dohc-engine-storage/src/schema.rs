@@ -176,6 +176,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "materialization_retained",
     "materialization_displacement_reads",
     "materialization_staging_locations",
+    "materialization_staged_dacls",
     // Secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",

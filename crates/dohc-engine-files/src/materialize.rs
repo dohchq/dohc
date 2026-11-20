@@ -93,6 +93,12 @@
 //! MoveFileExW without replacement when hard links are unavailable.
 //! Secret paths retain their single bound replacement and are excluded.
 //!
+//! On Windows a staged file keeps its own DACL through the rename, so each
+//! staging folder is private on its own and a file that stays staged is made
+//! private after its DACL is saved. It gets that DACL back before it leaves.
+//! A file with other names, or that another account owns, is left as it is.
+//! `staged_dacl` describes the moments a file is still open as before.
+//!
 //! These guarantees cover process crashes. Power-loss protection follows the
 //! flush policy: every flush persists its file before the commits after it.
 //! On Apple silicon a file on the database's device takes a barrier, and the
@@ -134,6 +140,38 @@ use std::time::Duration;
 
 #[cfg(windows)]
 mod readonly_link;
+#[cfg(windows)]
+mod staged_dacl;
+#[cfg(not(windows))]
+mod staged_dacl {
+    use super::{EngineStore, MaterializeError};
+    use std::path::{Path, PathBuf};
+
+    pub(super) fn leave(
+        _: &EngineStore,
+        _: &Path,
+        _: i64,
+        leave: impl FnOnce() -> Result<bool, MaterializeError>,
+    ) -> Result<bool, MaterializeError> {
+        leave()
+    }
+
+    pub(super) fn keep_all_private(
+        _: &EngineStore,
+        _: &[PathBuf],
+        _: i64,
+    ) -> Result<(), MaterializeError> {
+        Ok(())
+    }
+
+    pub(super) fn saved_in(_: &EngineStore, _: &Path) -> Result<bool, MaterializeError> {
+        Ok(false)
+    }
+
+    pub(super) fn forget_folder(_: &EngineStore, _: &Path) -> Result<(), MaterializeError> {
+        Ok(())
+    }
+}
 
 /// Maximum bytes the pipeline will materialize or read back for comparison. A
 /// job's content came from a bounded blob; the on-disk comparison read is
@@ -1116,6 +1154,19 @@ fn materialize_one_ordinary_with(
 ) -> Result<JobOutcome, MaterializeError> {
     require_materialization_owner(store)?;
     let result = materialize_one_inner(store, root, job, options, conflict_only);
+    if matches!(&result, Ok(JobOutcome::Conflict))
+        || matches!(&result, Err(error) if !matches!(error, MaterializeError::Storage(_)))
+    {
+        let kept = (|| {
+            let root =
+                std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+            let dir = job_staging_dir(store, &root, &job.job_id, false)?;
+            staged_dacl::keep_all_private(store, &[dir], options.now_ms)
+        })();
+        if let Err(error) = kept {
+            eprintln!("staged file privacy: {error}");
+        }
+    }
     if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_)))
         || matches!(
             &result,
@@ -2276,6 +2327,10 @@ fn stage_target_same_volume(
     if walk_target_components(root, &dir, ensure_real_directory).is_err() {
         return Ok(Stage::CrossVolume);
     }
+    #[cfg(windows)]
+    if dohc_windows_files::ensure_private_staging_dir(&dir).is_err() {
+        return Ok(Stage::CrossVolume);
+    }
     let rel = dir
         .strip_prefix(root)
         .map_err(|_| MaterializeError::UnsafeTargetPath)?
@@ -2314,6 +2369,10 @@ fn job_staging_dir(
     let dir = root.join(path);
     if create {
         walk_target_components(root, &dir, ensure_real_directory)?;
+        #[cfg(windows)]
+        if let Err(err) = dohc_windows_files::ensure_private_staging_dir(&dir) {
+            eprintln!("staging folder privacy {}: {err}", dir.display());
+        }
     } else {
         ensure_target_symlink_free(root, &dir)?;
     }
@@ -2355,7 +2414,8 @@ fn all_staging_dirs(
 
 /// Called on the writer thread, so cleanup cannot race a pending job's rename.
 /// Only empty sibling staging directories can be removed; retained and kept
-/// sources keep their directory and its location rows reachable.
+/// sources keep their directory and its location rows reachable. A missing
+/// one whose files have saved DACLs keeps its rows, since it may come back.
 pub fn cleanup_staging_directory(
     store: &EngineStore,
     root: &Path,
@@ -2393,7 +2453,11 @@ fn cleanup_staging_directory_with_sync(
     let relative = relative.to_string_lossy().replace('\\', "/");
     match std::fs::remove_dir(&directory) {
         Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            if staged_dacl::saved_in(store, &directory)? {
+                return Ok(());
+            }
+        }
         Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => return Ok(()),
         Err(e) => return Err(MaterializeError::io(&directory, &e)),
     }
@@ -2401,6 +2465,7 @@ fn cleanup_staging_directory_with_sync(
     if let Some(parent) = directory.parent() {
         sync(parent)?;
     }
+    staged_dacl::forget_folder(store, &directory)?;
     store.forget_staging_directory(&relative)?;
     Ok(())
 }
@@ -2724,8 +2789,10 @@ fn return_displaced(
     staged: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<bool, MaterializeError> {
-    let returned = retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
-        place_attempt(options.replacer, staged, target)
+    let returned = staged_dacl::leave(store, staged, options.now_ms, || {
+        retry_while_locked(target, staged, options.backoff, RETURN_ATTEMPTS, || {
+            place_attempt(options.replacer, staged, target)
+        })
     })?;
     if returned {
         sync_parent_dir(store, target.parent(), options.policy)?;
@@ -2807,8 +2874,9 @@ fn swap_back(
     if let Some(aside) = aside {
         let conflict_path = conflict_sibling(target, &aside.job_id);
         let resolution = if !entry_exists(&aside.path)?
-            || std::fs::rename(&aside.path, &conflict_path).is_ok()
-        {
+            || staged_dacl::leave(store, &aside.path, options.now_ms, || {
+                Ok(std::fs::rename(&aside.path, &conflict_path).is_ok())
+            })? {
             DisplacementResolution::Discard
         } else {
             // The job's content stays at its displaced name. Its kept row
@@ -3004,7 +3072,14 @@ fn dispose_known(
     {
         #[cfg(unix)]
         crate::retained::retain_known(store, root, path, file, sha256, spec, now_ms)?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = (root, spec, file, sha256);
+            if std::fs::remove_file(path).is_err() {
+                staged_dacl::try_keep_private(store, path, now_ms)?;
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (store, root, spec, now_ms, file, sha256);
             let _ = std::fs::remove_file(path);
@@ -3598,8 +3673,8 @@ pub fn recover_displacements(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let (dirs, mut unavailable) = all_staging_dirs(store, &canonical_root)?;
-    for dir in dirs {
-        match recover_displacements_in(store, &canonical_root, &dir, workspace_id, options) {
+    for dir in &dirs {
+        match recover_displacements_in(store, &canonical_root, dir, workspace_id, options) {
             Ok(()) => {}
             Err(
                 error @ MaterializeError::Io {
@@ -3623,7 +3698,7 @@ pub fn recover_displacements(
     // One verdict for the entire sweep. A later healthy directory cannot clear
     // an earlier failure; a subsequent complete healthy sweep can.
     set_recovery_unavailable(&canonical_root, unavailable);
-    Ok(())
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 fn recover_displacements_in(
@@ -3796,7 +3871,8 @@ pub fn recover_path_displacements(
             conflict_if_pending(store, entry.job_id(), options.now_ms)?;
         }
     }
-    Ok(())
+    let (dirs, _) = all_staging_dirs(store, &canonical_root)?;
+    staged_dacl::keep_all_private(store, &dirs, options.now_ms)
 }
 
 /// What [`save_kept_displacement`] did with a kept file.
@@ -3930,11 +4006,17 @@ fn save_kept_displacement_with_cleanup(
                 continue;
             }
             #[cfg(windows)]
-            remove_placement_link(&kept, &copy).map_err(|err| MaterializeError::io(&kept, &err))?;
+            staged_dacl::leave(store, &kept, options.now_ms, || {
+                remove_placement_link(&kept, &copy)
+                    .map(|()| true)
+                    .map_err(|err| MaterializeError::io(&kept, &err))
+            })?;
             #[cfg(not(windows))]
             std::fs::remove_file(&kept).map_err(|err| MaterializeError::io(&kept, &err))?;
         } else {
-            match move_kept_copy(&kept, &copy, options) {
+            match staged_dacl::leave(store, &kept, options.now_ms, || {
+                move_kept_copy(&kept, &copy, options)
+            }) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(err) if names_too_long(&err) => return Ok(KeptCopySave::NoValidName),
@@ -7654,3 +7736,7 @@ mod tests {
 #[cfg(test)]
 #[path = "materialize/retention_tests.rs"]
 mod retention_tests;
+
+#[cfg(all(test, windows))]
+#[path = "materialize/staged_dacl_tests.rs"]
+mod staged_dacl_tests;

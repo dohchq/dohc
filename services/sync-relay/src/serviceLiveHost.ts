@@ -424,6 +424,7 @@ const HELD_READ_CANCEL_GRACE_MS = 15_000;
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
+const OPEN_AWAITS_VISIT_MS = 10_000;
 // An engine refusal of an open with one of these codes proves it holds no
 // handle for the store. Any other failure, an overloaded or expired request
 // included, may follow an open that made one.
@@ -668,6 +669,29 @@ export async function startServiceLiveHost(options: {
   const unloading = new Set<string>();
   // Notes an open asked for before the host had made them ready. A pass takes them first. See `passOrder`.
   const wanted = new Set<string>();
+  const opensAwaitingVisit = new Map<string, Set<() => void>>();
+  const endOpensAwaitingVisit = (key: string) => {
+    for (const end of [...(opensAwaitingVisit.get(key) ?? [])]) end();
+  };
+  const untilVisited = (key: string, callerSignal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      const opens = opensAwaitingVisit.get(key) ?? new Set();
+      opensAwaitingVisit.set(key, opens);
+      const end = () => {
+        clearTimeout(longestWait);
+        opens.delete(end);
+        if (opens.size === 0) opensAwaitingVisit.delete(key);
+        callerSignal?.removeEventListener("abort", end);
+        signal.removeEventListener("abort", end);
+        resolve();
+      };
+      const longestWait = setTimeout(end, OPEN_AWAITS_VISIT_MS);
+      longestWait.unref();
+      opens.add(end);
+      callerSignal?.addEventListener("abort", end, { once: true });
+      signal.addEventListener("abort", end, { once: true });
+      if (callerSignal?.aborted || signal.aborted) end();
+    });
   let generation = 0;
   const hostedKey = (document: { workspaceId: string; objectId: string }) => {
     for (const [key, row] of hosted)
@@ -1524,6 +1548,7 @@ export async function startServiceLiveHost(options: {
           idle.delete(key);
           unloading.delete(key);
           wanted.delete(key);
+          endOpensAwaitingVisit(key);
           keeping.delete(key);
           grantsEnded.delete(key);
           heldOf.delete(key);
@@ -1869,6 +1894,7 @@ export async function startServiceLiveHost(options: {
           const document = { workspaceId: row.target.workspaceId, objectId: row.objectId };
           const open = storage.serviceActivationRetirement(document);
           if (!open) return null;
+          endOpensAwaitingVisit(key);
           // An unfinished restore can change the generation whose held heads retirement reads.
           if (storage.serviceRestoreInProgress(document)) {
             if (!grantsEnded.has(key)) {
@@ -2235,18 +2261,17 @@ export async function startServiceLiveHost(options: {
         const wake = async (
           document: { workspaceId: string; objectId: string },
           callerSignal?: AbortSignal,
-        ) => {
+        ): Promise<"a pass will visit it" | "no visit to wait for"> => {
           const key = hostedKey(document);
-          if (!key) return;
+          if (!key) return "no visit to wait for";
           touch(key);
           if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) {
-            // Awake, and not ready yet: after a start no note is. The next pass takes this one first, so whoever
-            // is opening it does not wait for its turn behind every other note. A note that is ready gets no mark.
-            if (!activation!.completed(hosted.get(key)!.target) && !wanted.has(key)) {
+            if (activation!.completed(hosted.get(key)!.target)) return "no visit to wait for";
+            if (!wanted.has(key)) {
               wanted.add(key);
               nudgePass();
             }
-            return;
+            return "a pass will visit it";
           }
           await exclusive(
             () =>
@@ -2277,6 +2302,7 @@ export async function startServiceLiveHost(options: {
               }),
             callerSignal,
           );
+          return "no visit to wait for";
         };
         // A held-document read asks the engine for a workspace this daemon replicates,
         // and answers only while this registration and that attachment still stand.
@@ -3244,6 +3270,9 @@ export async function startServiceLiveHost(options: {
                 const row = hosted.get(key);
                 if (!row || activation!.completed(row.target)) wanted.delete(key);
               }
+              const visitable = new Set(targets.map(targetKey));
+              for (const key of [...opensAwaitingVisit.keys()])
+                if (!visitable.has(key)) endOpensAwaitingVisit(key);
               const plan = passPlan(targets, index, bounds.maxDocumentsPerPass, (target) =>
                 wanted.has(targetKey(target)),
               );
@@ -3295,6 +3324,7 @@ export async function startServiceLiveHost(options: {
                   if (spentMark && visitCouldDoNothing) wanted.add(targetKey(target));
                 } finally {
                   timed.ms = Math.round(now() - startedAt);
+                  endOpensAwaitingVisit(targetKey(target));
                 }
               };
               let turnVisitFailed = false;
@@ -3857,6 +3887,8 @@ export async function startServiceLiveHost(options: {
             callerSignal?: AbortSignal,
           ): Promise<T | "waiting"> {
             available();
+            const stopping = hostedKey(document);
+            if (stopping !== undefined) endOpensAwaitingVisit(stopping);
             const candidate = storage.retirableServiceActivation(document),
               attached = checked(document.workspaceId),
               driver = activation;
@@ -4034,7 +4066,17 @@ export async function startServiceLiveHost(options: {
             // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
             const waitFor = <T>(work: Promise<T>) =>
               callerSignal ? untilAborted(work, callerSignal) : work;
-            await waitFor(wake(document, callerSignal));
+            const woke = await waitFor(wake(document, callerSignal));
+            const key = hostedKey(document),
+              target = key === undefined ? undefined : hosted.get(key)?.target;
+            const stillAwakeAndNotReady =
+              key !== undefined &&
+              target !== undefined &&
+              !activation!.dormant(target) &&
+              !unloading.has(key) &&
+              !activation!.completed(target);
+            if (woke === "a pass will visit it" && stillAwakeAndNotReady)
+              await waitFor(untilVisited(key, callerSignal));
             await waitFor(drain(document, callerSignal));
             callerSignal?.throwIfAborted();
             check();

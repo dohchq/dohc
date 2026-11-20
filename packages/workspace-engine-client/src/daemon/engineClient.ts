@@ -3639,11 +3639,11 @@ export async function createEngineClient(options: EngineClientSpawnOptions): Pro
       // proved this child answers nothing, and it is about to run code that
       // can block the event loop, which is where that timer lives. Signal now.
       if (force) {
-        child.kill();
+        child.kill("SIGKILL");
         return;
       }
       const killTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill();
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }, 2_000);
       killTimer.unref();
       child.once("exit", () => clearTimeout(killTimer));
