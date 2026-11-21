@@ -60,6 +60,16 @@ if (host) {
         document.head.append(properties);
       }
       const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+      // The calendar finds what a drag is over with document.elementFromPoint,
+      // which stops at the shadow host. Look inside the demo for it.
+      if (document.elementFromPoint && !("demoPoint" in host.dataset)) {
+        host.dataset.demoPoint = "";
+        const elementFromPoint = document.elementFromPoint.bind(document);
+        document.elementFromPoint = (x, y) => {
+          const hit = elementFromPoint(x, y);
+          return hit === host ? (shadow.elementFromPoint(x, y) ?? hit) : hit;
+        };
+      }
       const style = document.createElement("style");
       style.textContent = demoCss;
       const root = document.createElement("div");

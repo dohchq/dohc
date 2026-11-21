@@ -8,35 +8,35 @@
 .dohc-collection-calendar .rbc-calendar {
   height: 100%;
   font-size: 13px;
-  color: var(--color-ink);
+  color: var(--dohc-ink);
 }
 
 .dohc-collection-calendar .rbc-month-view,
 .dohc-collection-calendar .rbc-header,
 .dohc-collection-calendar .rbc-day-bg + .rbc-day-bg,
 .dohc-collection-calendar .rbc-month-row + .rbc-month-row {
-  border-color: var(--color-line);
+  border-color: var(--dohc-line);
 }
 
 .dohc-collection-calendar .rbc-header {
   font-size: 12px;
   font-weight: 500;
-  color: var(--color-muted);
+  color: var(--dohc-muted);
 }
 
 .dohc-collection-calendar .rbc-off-range-bg {
-  background: var(--color-panel-2);
+  background: var(--dohc-panel-2);
 }
 
 .dohc-collection-calendar .rbc-today {
-  background: var(--color-panel);
+  background: var(--dohc-panel);
 }
 
 .dohc-collection-calendar .rbc-event,
 .dohc-collection-calendar .rbc-event.rbc-selected {
   border-radius: 4px;
-  background-color: var(--color-accent);
-  color: var(--color-bg);
+  background-color: var(--dohc-accent);
+  color: var(--dohc-bg);
 }
 
 /*

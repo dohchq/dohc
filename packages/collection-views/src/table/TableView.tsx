@@ -1229,7 +1229,8 @@ export function TableView({
   pressed.current = (event) => {
     pressHeld.current = false;
     press.current = null;
-    const target = event.target;
+    // Inside a shadow root the document sees the root's host as the target.
+    const target = event.composedPath()[0];
     if (!(target instanceof Element)) return;
     if (target.closest("[data-starts-new-record]")) press.current = "starts";
     else if (
