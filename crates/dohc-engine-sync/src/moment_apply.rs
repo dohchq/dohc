@@ -20,6 +20,8 @@ use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_enve
 #[cfg(test)]
 mod openhold_measurement;
 
+#[cfg(test)]
+mod held_claim_tests;
 pub(crate) mod open_artifacts;
 pub(crate) mod pending;
 #[cfg(test)]
@@ -903,6 +905,7 @@ fn apply_moment_append(
                 }) && holds_earlier_lineage_artifact(tx, envelope, payload, live_claim)?
             } else {
                 holds_earlier_lineage_artifact(tx, envelope, payload, None)?
+                    || origin_settled_on_held_claim(tx, envelope, payload)?
             })
     {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
@@ -1913,6 +1916,49 @@ fn holds_earlier_lineage_artifact(
         }
     }
     Ok(false)
+}
+
+fn origin_settled_on_held_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    if !is_ydoc_settlement_moment_id(&payload.moment_id)
+        || payload.path != payload.payload_after_path
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(false);
+    }
+    let claim: Option<String> = tx
+        .query_row(
+            "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_status='exact'",
+            params![envelope.workspace_id, payload.version_id, payload.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    let Some(claim) = claim else {
+        return Ok(false);
+    };
+    if !origin_update_is_on_live_claim(tx, envelope, payload, &claim)? {
+        return Ok(false);
+    }
+    let missing_edits: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+               WHERE workspace_id=?1 AND version_id=?3 AND object_id=?4) \
+             OR EXISTS(SELECT 1 FROM replication_log INDEXED BY replication_ydoc_origin_document \
+               WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+                 AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4 \
+                 AND apply_disposition='refused' AND json_extract(payload_json,'$.lineageClaimId')=?6)",
+            params![envelope.workspace_id, envelope.origin_id, payload.version_id, payload.object_id,
+                envelope.origin_seq, claim],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!missing_edits)
 }
 
 fn freeze_incoming_scene_delete_authority(

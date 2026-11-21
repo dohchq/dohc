@@ -1,6 +1,6 @@
 use super::ActorHandle;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
-use super::journal::journal_moment_outbound_in_tx;
+use super::journal::{journal_moment_outbound_in_tx, journal_owner_save_outbound_in_tx};
 use super::materialization::{
     MaterializationReplayScope, SelfWriteRecorder, replay_materializations_in_order,
     replay_pending_materializations,
@@ -4060,6 +4060,12 @@ fn ydoc_settle_attempt_on_store(
                 &result.moment.moment_id,
                 result.deduped,
             )?;
+        } else if live_audit.is_none()
+            && !result.deduped
+            && dohc_engine_collab::owner_outbox::release::claimed_note_off_in(tx, key)
+                .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?
+        {
+            journal_owner_save_outbound_in_tx(tx, key, &result.moment.moment_id)?;
         }
         let reconcile_required = settled_collection_record_reconcile_required_in_tx(
             tx,

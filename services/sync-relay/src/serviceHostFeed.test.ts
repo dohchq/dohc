@@ -894,6 +894,35 @@ it.each([
   ).toBe(input.stored.sha256);
 });
 
+it("keeps a hosted note's stored file against the owner's later save from another file", async () => {
+  const f = await fixture();
+  f.storage.putBlob({ workspaceId: ws, ...owner, createdAtMs: 1 });
+  f.storage.appendLogBatch({
+    workspaceId: ws,
+    originId: "owner-laptop",
+    ops: [
+      parseLogOp({
+        originSeq: 0,
+        opKind: "moment.append",
+        recordedAtMs: 4,
+        payload: write(binding.objectId, "docs/a.md", owner, {
+          momentId: "moment-owner-hosted",
+          recordedAtMs: 4,
+          beforePresent: true,
+          payloadBeforePath: "docs/a.md",
+          payloadBeforeBlobSha256: C.sha256,
+        }),
+      }),
+    ],
+    workReferences: { userId: "owner-1", references: [] },
+  });
+  expect(
+    f.raw
+      .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+      .get(ws, "docs/a.md")!.blob_sha256,
+  ).toBe(A.sha256);
+});
+
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
   const replacement = blob("replacement");

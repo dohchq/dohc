@@ -107,6 +107,15 @@ function objectOrEmpty(value: unknown): Record<string, unknown> {
     : {};
 }
 
+export function isOwnerLogOrigin(originId: string): boolean {
+  try {
+    assertUnreservedLogOrigin(originId, false);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
   if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
     throw badRequest(

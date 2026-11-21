@@ -71,6 +71,18 @@ pub fn owner_saves_publish_in(conn: &Connection, key: &DocKey) -> Result<bool, O
     conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released' AND json_extract(binding_json,'$.deferred') IS NULL AND json_extract(binding_json,'$.paused') IS NULL)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
 }
 
+pub fn claimed_note_off_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
+    let claimed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 AND d.lineage_claim_status='exact'
+               AND NOT EXISTS(SELECT 1 FROM owner_live_stops s WHERE s.workspace_id=d.workspace_id AND s.main_version_id=d.version_id AND s.object_id=d.object_id))",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    Ok(claimed && !owner_holds_live_in(conn, key).map_err(collab)?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerStopDocument {
