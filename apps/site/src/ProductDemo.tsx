@@ -16,6 +16,7 @@ import { PageIdentity } from "../../desktop/src/renderer/PageIdentity";
 import { PropertiesPanel } from "../../desktop/src/renderer/PropertiesPanel";
 import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
 import { Titlebar } from "../../desktop/src/renderer/Titlebar";
+import { DeleteCollectionRecordDialog } from "../../desktop/src/renderer/DeleteCollectionRecordDialog";
 import { TransactionalCollectionPage } from "../../desktop/src/renderer/TransactionalCollectionPage";
 import {
   applyFrontmatter,
@@ -273,6 +274,11 @@ export function ProductDemo() {
       if (!writeStored(GUESTS_STORAGE_KEY, records)) reportSessionOnly("workspace");
     }),
   );
+  // The record the Collection page asks to delete, and how to answer it.
+  const [deletion, setDeletion] = useState<{
+    recordId: string | number;
+    answer(confirmed: boolean): void;
+  } | null>(null);
 
   const activeTab = openTabs.includes(activePath) ? activePath : null;
   const activeKind = activeTab === null ? null : tabKind(activeTab);
@@ -844,7 +850,24 @@ export function ProductDemo() {
           }
           onSettled={clearIdentity}
           onNotice={(message) => reportShellFailure({ tone: "success", message })}
+          confirmDelete={(row) =>
+            new Promise((answer) => setDeletion({ recordId: row.id, answer }))
+          }
         />
+        {deletion && (
+          <DeleteCollectionRecordDialog
+            collectionName={GUESTS_DATASET.name}
+            recordId={deletion.recordId}
+            onCancel={() => {
+              deletion.answer(false);
+              setDeletion(null);
+            }}
+            onConfirm={() => {
+              deletion.answer(true);
+              setDeletion(null);
+            }}
+          />
+        )}
       </div>
     );
   } else {

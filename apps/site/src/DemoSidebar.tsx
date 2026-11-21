@@ -200,7 +200,12 @@ export function DemoSidebar(props: {
     () => moments.map((moment) => ({ kind: "file" as const, moment })),
     [moments],
   );
-  const refreshKey = props.documents.map((document) => document.path).join("|");
+  // The Graph reloads when a page is added, moved, or gains or loses a link.
+  const refreshKey = props.documents
+    .map(
+      (document) => `${document.path}:${document.body.match(/\[\[[^\]\n]*\]\]/g)?.join("") ?? ""}`,
+    )
+    .join("|");
 
   function reprojectPaths(changes: PendingTreeChange[]) {
     const project = (paths: string[]) => [
