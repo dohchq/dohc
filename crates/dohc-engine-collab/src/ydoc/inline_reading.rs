@@ -32,6 +32,9 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
     let mut work = units.len().saturating_mul(SCAN_WORK_PER_UNIT);
     lex(&units, &[], false, &mut work, &mut pieces).ok()?;
     let pieces = merged(pieces);
+    if pieces.iter().any(unsure_piece) {
+        return None;
+    }
     let read: Vec<MarkdownNode> = pieces
         .iter()
         .map(|piece| match piece {
@@ -49,19 +52,44 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
 
 const SCAN_WORK_PER_UNIT: usize = 32;
 
+// The editor sets character references aside before marked reads the text,
+// inside code spans too, which changes where emphasis closes.
 fn unsure_text(text: &str) -> bool {
     text.contains(" \n")
         || text.ends_with(' ')
-        || text.contains("==")
-        || text.contains("++")
-        || text.contains("[[")
+        || text.contains("&#")
+        || text.to_ascii_lowercase().contains("&amp;#")
         || text.chars().any(|character| {
-            matches!(
-                character,
-                '\\' | '<' | '>' | '&' | '$' | '{' | '\r' | '\u{a0}'
-            ) || (character.is_control() && character != '\n')
+            matches!(character, '\\' | '\r' | '\u{a0}')
+                || (character.is_control() && character != '\n')
                 || ('\u{e000}'..='\u{f8ff}').contains(&character)
         })
+}
+
+// These open syntax this reader doesn't follow, except inside a code span,
+// which holds its text as written.
+fn unsure_syntax(text: &str) -> bool {
+    text.contains("==")
+        || text.contains("++")
+        || text.contains("[[")
+        || text.contains(['<', '>', '&', '$', '{'])
+}
+
+fn unsure_piece(piece: &InlinePiece) -> bool {
+    match piece {
+        InlinePiece::Text(run) => {
+            (!run.marks.iter().any(|mark| mark.kind == MarkKind::Code) && unsure_syntax(&run.text))
+                || run.marks.iter().any(|mark| {
+                    mark.kind == MarkKind::Link
+                        && ["href", "title"]
+                            .iter()
+                            .any(|key| mark.attrs[key].as_str().is_some_and(unsure_syntax))
+                })
+        }
+        InlinePiece::Image(attrs) => attrs
+            .values()
+            .any(|value| value.as_str().is_some_and(unsure_syntax)),
+    }
 }
 
 fn merged(pieces: Vec<InlinePiece>) -> Vec<InlinePiece> {
@@ -134,8 +162,8 @@ fn plain(kind: MarkKind) -> MarkdownMark {
     }
 }
 
-// marked masks links and code spans before it looks for closing emphasis, so
-// no delimiter inside one closes a run outside it.
+// marked masks links, code spans and tags before it looks for closing
+// emphasis, so no delimiter inside one closes a run outside it.
 fn masked(src: &[u16]) -> Read<Vec<u16>> {
     let last_close = src.iter().rposition(|unit| *unit == u16::from(b']'));
     let mut out = src.to_vec();
@@ -151,6 +179,8 @@ fn masked(src: &[u16]) -> Read<Vec<u16>> {
                 return Err(Unsure);
             }
             end
+        } else if src[at] == u16::from(b'<') {
+            masked_tag(src, at)
         } else {
             None
         };
@@ -200,6 +230,18 @@ fn masked_link(src: &[u16], at: usize) -> Read<Option<usize>> {
         index += 1;
     }
     Ok(None)
+}
+
+// marked masks anything from a `<` not followed by a space to the next `>`
+// with no `<` between, even where code spans hold both.
+fn masked_tag(src: &[u16], at: usize) -> Option<usize> {
+    if src.get(at + 1) == Some(&u16::from(b' ')) {
+        return None;
+    }
+    let close = src[at + 1..]
+        .iter()
+        .position(|unit| matches!(ascii(*unit), Some(b'<' | b'>')))?;
+    (src[at + 1 + close] == u16::from(b'>')).then_some(at + close + 2)
 }
 
 fn masked_code(src: &[u16], at: usize) -> Option<usize> {
@@ -1081,6 +1123,46 @@ Run `make` and see [`npm install`](https://docs.example/install).
         assert!(read("**a `x**[`]**").is_none());
         assert!(read("**a `x**[a[b]` q** [l](u \"`][r]\")").is_none());
         assert!(read("**a `x[0]`** and [b](https://b.example)").is_some());
+    }
+
+    #[test]
+    fn a_code_span_holding_angle_brackets_or_ampersands_keeps_the_formatting_around_it() {
+        let runs = |text: &str| {
+            read_inline(text, true).map(|pieces| {
+                pieces
+                    .into_iter()
+                    .map(|piece| match piece {
+                        InlinePiece::Text(run) => {
+                            (run.text, run.marks.iter().map(|mark| mark.kind).collect())
+                        }
+                        InlinePiece::Image(_) => panic!("no image here"),
+                    })
+                    .collect::<Vec<(String, Vec<_>)>>()
+            })
+        };
+        let code = vec![MarkKind::Code];
+        let italic = vec![MarkKind::Italic];
+        assert_eq!(
+            runs("Use `a<b> & {c}` and *em*"),
+            Some(vec![
+                ("Use ".into(), vec![]),
+                ("a<b> & {c}".into(), code.clone()),
+                (" and ".into(), vec![]),
+                ("em".into(), italic),
+            ])
+        );
+        assert_eq!(
+            runs("``<a`b`` *x* ``c`>``"),
+            Some(vec![
+                ("<a`b".into(), code.clone()),
+                (" *x* ".into(), vec![]),
+                ("c`>".into(), code),
+            ])
+        );
+        assert!(runs("Use <b> and *em*").is_none());
+        assert!(runs("*a ``q`&#42;*x* y`` z*").is_none());
+        assert!(runs("*a ``q`&AMP;#42;*x* y`` z*").is_none());
+        assert!(runs("[a](https://e.example/?a=1&b=2) *em*").is_none());
     }
 
     #[test]

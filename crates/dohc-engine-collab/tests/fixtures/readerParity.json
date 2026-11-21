@@ -931,6 +931,326 @@
     ]
    },
    {
+    "markdown": "Use `a<b> & {c}` and *em*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "Use "
+       },
+       {
+        "x": "a<b> & {c}",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " and "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "`&amp;` and **strong**",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "&amp;",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " and "
+       },
+       {
+        "x": "strong",
+        "m": {
+         "bold": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "`{{atom:x}}` and `$x$` and `a==b++c[[d` *em*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "{{atom:x}}",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " and "
+       },
+       {
+        "x": "$x$",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " and "
+       },
+       {
+        "x": "a==b++c[[d",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "[`a<b`](https://e.example) *em*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a<b",
+        "m": {
+         "link": {
+          "href": "https://e.example",
+          "target": "_blank",
+          "rel": "noopener noreferrer nofollow",
+          "class": null,
+          "title": null
+         },
+         "code": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "*a* `x>` and `<y` *b*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a",
+        "m": {
+         "italic": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "x>",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " and "
+       },
+       {
+        "x": "<y",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "b",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "`<a` *x* `b>`",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "<a",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "b>",
+        "m": {
+         "code": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "``<a`b`` *x* ``c`>``",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "<a`b",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " *x* "
+       },
+       {
+        "x": "c`>",
+        "m": {
+         "code": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "``a`<`` _x_ ``>`b``",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a`<",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " _x_ "
+       },
+       {
+        "x": ">`b",
+        "m": {
+         "code": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "`a&b` *em* <b>tag</b>",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a&b",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "t": "rawInline",
+        "a": {
+         "source": "<b>tag</b>"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "[a](https://e.example/?a=1&b=2) *em*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a",
+        "m": {
+         "link": {
+          "href": "https://e.example/?a=1&b=2",
+          "target": "_blank",
+          "rel": "noopener noreferrer nofollow",
+          "class": null,
+          "title": null
+         }
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
     "markdown": "# ]``](\"![alt](x.png)*word_\"]?a~`code`[**c**](x.md)日本 a[a](https://e.example)[b](u \"t\")![alt](x.png)*em***__![alt](x.png).b![p](https://e.example/p.png \"t\")[`c`](u)",
     "reading": [
      {
