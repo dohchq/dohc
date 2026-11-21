@@ -3371,8 +3371,9 @@ mod tests {
             seen.push((captured, attempts, signalled, journal, holds));
             ROOT.with(|cell| *cell.borrow_mut() = None);
         }
+        // The widening stays after the file it would open, as it was captured.
         let (rule, file) = ("team/access.yaml".to_owned(), "team/a.md".to_owned());
-        let journal = vec![rule.clone(), rule, file];
+        let journal = vec![rule.clone(), file, rule];
         assert_eq!(
             seen,
             [
