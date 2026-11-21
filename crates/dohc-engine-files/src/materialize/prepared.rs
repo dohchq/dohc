@@ -1,12 +1,12 @@
 use super::{
     DurabilityPolicy, EngineStore, MAX_MATERIALIZE_BYTES, MaterializeError,
-    metadata_is_reparse_point, reject_link_or_reparse, resolve_target, temp_sibling,
-    walk_target_components, write_temp,
+    metadata_is_reparse_point, resolve_target, temp_sibling, walk_target_components, write_temp,
 };
 use dohc_engine_storage::{FileFlusher, Flushed, MaterializationJob, MaterializationOperation};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -132,6 +132,13 @@ impl PreparedTemps {
             .remove(job_id)
             .is_some_and(|temp| path_stamp(tmp) == Some(temp.stamp))
     }
+
+    /// Remove the temp prepared for `job_id`, for a job that ends without it.
+    pub(super) fn discard(&self, job_id: &str) {
+        if let Some(temp) = self.temps.borrow_mut().remove(job_id) {
+            remove_if_unchanged(&temp.path, temp.stamp);
+        }
+    }
 }
 
 impl Drop for PreparedTemps {
@@ -156,7 +163,11 @@ fn prepare_one(
         },
     )
     .ok()?;
-    reject_link_or_reparse(&work.target).ok()?;
+    match std::fs::symlink_metadata(&work.target) {
+        Ok(metadata) if metadata.is_file() && !metadata_is_reparse_point(&metadata) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        _ => return None,
+    }
     let path = temp_sibling(&work.target, &work.job.job_id);
     let file = write_temp(&work.target, &path, &work.content, false).ok()?;
     let flushed = flusher.map(|flusher| flusher.flush(&file)).transpose();

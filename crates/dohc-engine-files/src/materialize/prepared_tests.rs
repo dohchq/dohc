@@ -155,12 +155,20 @@ fn a_job_whose_folder_is_missing_gets_no_temp() {
 }
 
 #[test]
-fn a_file_that_already_holds_the_content_is_left_and_its_temp_removed() {
+fn a_file_that_already_holds_the_content_is_left_and_its_temp_removed_first() {
     let mut ws = Workspace::new("already");
     let job = ws.job(0, "a.md", Some(b"same"), b"same");
     let prepared = ws.prepare(&[&job]);
     assert_eq!(ws.run(&job, &prepared), JobOutcome::AlreadyMaterialized);
-    drop(prepared);
     assert!(!ws.temp(&job).exists());
     assert_eq!(ws.read("a.md"), b"same");
+}
+
+#[test]
+fn a_folder_a_file_replaces_gets_no_temp() {
+    let mut ws = Workspace::new("folder");
+    std::fs::create_dir_all(ws.root.join("a.md")).unwrap();
+    let job = ws.job(0, "a.md", None, b"a");
+    let _prepared = ws.prepare(&[&job]);
+    assert!(!ws.temp(&job).exists());
 }

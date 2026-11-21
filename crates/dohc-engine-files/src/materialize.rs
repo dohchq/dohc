@@ -1748,6 +1748,7 @@ fn materialize_ordinary_write(
             && respelled.is_none()
             && !target_has_other_leaf_spelling(target)
         {
+            prepared.discard(&job.job_id);
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
