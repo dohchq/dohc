@@ -166,7 +166,13 @@ test("the preview's environment separates the installed app's data and agent con
     LOCALAPPDATA: paths.localAppData,
     DOHC_UPDATE_URL: "http://127.0.0.1:9",
   });
-  for (const path of [paths.home, paths.appData, paths.localAppData, paths.profile])
+  for (const path of [
+    paths.home,
+    paths.appData,
+    paths.localAppData,
+    paths.profile,
+    ...paths.knownFolders,
+  ])
     assert.ok(path.startsWith(paths.data));
   assert.deepEqual(previewArgs(paths), [
     `--user-data-dir=${paths.profile}`,
@@ -252,6 +258,11 @@ test(
       assert.deepEqual(seen.args, previewArgs(paths));
       assert.equal(seen.feed, NO_UPDATE_FEED);
       assert.equal(seen.env.USERPROFILE, paths.home);
+      assert.deepEqual(
+        paths.knownFolders.filter((folder) => existsSync(folder)),
+        ["Desktop", "Documents", "Downloads"].map((name) => join(paths.home, name)),
+        "A native file dialog starts in a folder of the preview's home.",
+      );
       assert.equal(seen.env.DOHC_TEST_HOME, undefined);
       controller.abort();
       const reply = new Promise((resolve, reject) => {
