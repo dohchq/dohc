@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const NOTE_PATH: &str = "notes/note.md";
 const SAVED_VERSIONS: usize = 25;
+const ROWS_IN_A_LOG_PAGE: usize = 10_000;
 const ROUND_TRIP: Duration = Duration::from_millis(270);
 const TCP_AND_TLS_HANDSHAKE: Duration = Duration::from_millis(540);
 const PHOTO_PATH: &str = "notes/photo.bin";
@@ -30,9 +31,26 @@ enum Pace {
     },
 }
 
+#[derive(Clone, Copy)]
+struct SharedNote {
+    versions: usize,
+    empty_log_pages_before_it: usize,
+}
+
+const NOTE_SAVED_25_TIMES: SharedNote = SharedNote {
+    versions: SAVED_VERSIONS,
+    empty_log_pages_before_it: 0,
+};
+
+const NOTE_BEHIND_4_EMPTY_LOG_PAGES: SharedNote = SharedNote {
+    versions: 1,
+    empty_log_pages_before_it: 4,
+};
+
 #[derive(Default)]
 struct Served {
     connections: usize,
+    log_requests: usize,
     blob_requests: usize,
     blobs_in_flight: usize,
     most_blobs_in_flight: usize,
@@ -50,11 +68,17 @@ fn saved_version(index: usize) -> Vec<u8> {
     format!("# Note\n\nSaved version {index}.\n").into_bytes()
 }
 
-fn share_log_page() -> String {
-    let ops = (0..SAVED_VERSIONS)
+fn share_log_page(note: SharedNote, since: usize) -> String {
+    let first = note.empty_log_pages_before_it * ROWS_IN_A_LOG_PAGE;
+    if since < first {
+        let next = (since / ROWS_IN_A_LOG_PAGE + 1) * ROWS_IN_A_LOG_PAGE;
+        return serde_json::json!({ "ops": [], "nextCursor": next, "hasMore": true }).to_string();
+    }
+    let versions = if since == first { note.versions } else { 0 };
+    let ops = (0..versions)
         .map(|index| {
             serde_json::json!({
-                "relaySeq": index + 1,
+                "relaySeq": first + index + 1,
                 "originId": "granter",
                 "originSeq": index,
                 "opKind": "moment.append",
@@ -70,7 +94,15 @@ fn share_log_page() -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "ops": ops, "nextCursor": SAVED_VERSIONS, "hasMore": false }).to_string()
+    serde_json::json!({ "ops": ops, "nextCursor": first + note.versions, "hasMore": false })
+        .to_string()
+}
+
+fn since(path: &str) -> usize {
+    path.split_once("since=")
+        .and_then(|(_, rest)| rest.split('&').next())
+        .and_then(|since| since.parse().ok())
+        .expect("a share log request names its cursor")
 }
 
 fn read_request_path(stream: &mut TcpStream) -> Option<String> {
@@ -87,8 +119,13 @@ fn read_request_path(stream: &mut TcpStream) -> Option<String> {
     request.split_whitespace().nth(1).map(str::to_owned)
 }
 
-fn answer_blob(served: &(Mutex<Served>, Condvar), pace: Pace, sha256: &str) -> Vec<u8> {
-    let index = (0..SAVED_VERSIONS)
+fn answer_blob(
+    served: &(Mutex<Served>, Condvar),
+    pace: Pace,
+    note: SharedNote,
+    sha256: &str,
+) -> Vec<u8> {
+    let index = (0..note.versions)
         .find(|index| hex_sha256(&saved_version(*index)) == sha256)
         .expect("a blob of the shared note");
     let (lock, wake) = served;
@@ -102,7 +139,7 @@ fn answer_blob(served: &(Mutex<Served>, Condvar), pace: Pace, sha256: &str) -> V
             let batch_end = if index == 0 {
                 1
             } else {
-                ((index / MAX_SHARE_BLOB_BATCH + 1) * MAX_SHARE_BLOB_BATCH).min(SAVED_VERSIONS)
+                ((index / MAX_SHARE_BLOB_BATCH + 1) * MAX_SHARE_BLOB_BATCH).min(note.versions)
             };
             let (waited, timeout) = wake
                 .wait_timeout_while(state, Duration::from_secs(10), |state| {
@@ -125,7 +162,12 @@ fn answer_blob(served: &(Mutex<Served>, Condvar), pace: Pace, sha256: &str) -> V
     saved_version(index)
 }
 
-fn serve_connection(mut stream: TcpStream, served: &(Mutex<Served>, Condvar), pace: Pace) {
+fn serve_connection(
+    mut stream: TcpStream,
+    served: &(Mutex<Served>, Condvar),
+    pace: Pace,
+    note: SharedNote,
+) {
     if let Pace::Delayed { new_connection, .. } = pace {
         std::thread::sleep(new_connection);
     }
@@ -133,20 +175,14 @@ fn serve_connection(mut stream: TcpStream, served: &(Mutex<Served>, Condvar), pa
         let (content_type, body) = match path.split_once("/blobs/") {
             Some((_, sha256)) => (
                 "application/octet-stream",
-                answer_blob(served, pace, sha256),
+                answer_blob(served, pace, note, sha256),
             ),
             None => {
                 if let Pace::Delayed { round_trip, .. } = pace {
                     std::thread::sleep(round_trip);
                 }
-                let page = if path.contains("since=0&") {
-                    share_log_page()
-                } else {
-                    serde_json::json!({
-                        "ops": [], "nextCursor": SAVED_VERSIONS, "hasMore": false
-                    })
-                    .to_string()
-                };
+                served.0.lock().unwrap().log_requests += 1;
+                let page = share_log_page(note, since(&path));
                 ("application/json", page.into_bytes())
             }
         };
@@ -161,7 +197,7 @@ fn serve_connection(mut stream: TcpStream, served: &(Mutex<Served>, Condvar), pa
 }
 
 impl ShareRelay {
-    fn start(pace: Pace) -> Self {
+    fn start(pace: Pace, note: SharedNote) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let served = Arc::new((Mutex::new(Served::default()), Condvar::new()));
@@ -177,7 +213,7 @@ impl ShareRelay {
                 accept_served.0.lock().unwrap().connections += 1;
                 let served = Arc::clone(&accept_served);
                 connections.push(std::thread::spawn(move || {
-                    serve_connection(stream, &served, pace);
+                    serve_connection(stream, &served, pace, note);
                 }));
             }
             for connection in connections {
@@ -233,13 +269,24 @@ fn a_photo_over_the_ceiling_then_a_small_one_then_large_ones() -> Vec<Photo> {
     photos_of([ceiling + 1, 1024].into_iter().chain([PHOTO_BYTES; 6]))
 }
 
-fn photo_log_page(photos: &[Photo]) -> String {
-    let ops = photos
+fn photo_log_page(photos: &[Photo], since: usize) -> String {
+    if since < ROWS_IN_A_LOG_PAGE {
+        return serde_json::json!({
+            "ops": [], "nextCursor": ROWS_IN_A_LOG_PAGE, "hasMore": true
+        })
+        .to_string();
+    }
+    let served = if since == ROWS_IN_A_LOG_PAGE {
+        photos
+    } else {
+        &[]
+    };
+    let ops = served
         .iter()
         .enumerate()
         .map(|(index, photo)| {
             serde_json::json!({
-                "relaySeq": index + 1,
+                "relaySeq": ROWS_IN_A_LOG_PAGE + index + 1,
                 "originId": "granter",
                 "originSeq": index,
                 "opKind": "moment.append",
@@ -255,7 +302,10 @@ fn photo_log_page(photos: &[Photo]) -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "ops": ops, "nextCursor": photos.len(), "hasMore": false }).to_string()
+    serde_json::json!({
+        "ops": ops, "nextCursor": ROWS_IN_A_LOG_PAGE + photos.len(), "hasMore": false
+    })
+    .to_string()
 }
 
 #[derive(Default)]
@@ -331,11 +381,10 @@ fn serve_over_slow_link(
             link.0.lock().unwrap().photos_asked_for.push(asked);
             &photos[asked]
         });
-        let page = if path.contains("since=0&") {
-            photo_log_page(photos)
+        let page = if photo.is_some() {
+            String::new()
         } else {
-            serde_json::json!({ "ops": [], "nextCursor": photos.len(), "hasMore": false })
-                .to_string()
+            photo_log_page(photos, since(&path))
         };
         let length = photo.map_or(page.len(), |photo| photo.bytes.len());
         let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {length}\r\n\r\n");
@@ -406,29 +455,60 @@ impl SlowLinkRelay {
         asked.iter().filter(|asked| **asked == photo).count()
     }
 
+    async fn pull_and_commit_until_no_more(
+        &self,
+        actor: &ActorHandle,
+        deadline: &CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError> {
+        let relay = || RelayConfiguration {
+            base_url: format!("http://{}", self.address),
+            socket_path: None,
+            bearer_token: "token".to_owned(),
+            allow_insecure_loopback_for_tests: true,
+        };
+        loop {
+            let pulled = actor
+                .relay(
+                    relay(),
+                    pull_the_share(),
+                    LeaseRegistry::default(),
+                    deadline.clone(),
+                    None,
+                )
+                .await?;
+            let cursor = match &pulled {
+                RelayOperationOutcome::ShareViewPulled(outcome) if outcome.has_more => {
+                    outcome.pending_cursor.clone()
+                }
+                _ => return Ok(pulled),
+            };
+            actor
+                .relay(
+                    relay(),
+                    RelayOperation::CommitShareViewCursor {
+                        workspace_id: "ws".to_owned(),
+                        cursor,
+                    },
+                    LeaseRegistry::default(),
+                    deadline.clone(),
+                    None,
+                )
+                .await?;
+        }
+    }
+
     async fn pull_until_the_link_is_spent(
         &self,
         actor: &ActorHandle,
         link_spent: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
         bytes: usize,
-    ) -> Vec<bool> {
+    ) -> (Vec<bool>, Result<RelayOperationOutcome, RuntimeError>) {
         self.start_attempt(bytes);
         while link_spent.try_recv().is_ok() {}
         let deadline = CancellationToken::new();
-        let pull = actor.relay(
-            RelayConfiguration {
-                base_url: format!("http://{}", self.address),
-                socket_path: None,
-                bearer_token: "token".to_owned(),
-                allow_insecure_loopback_for_tests: true,
-            },
-            pull_the_share(),
-            LeaseRegistry::default(),
-            deadline.clone(),
-            None,
-        );
+        let pull = self.pull_and_commit_until_no_more(actor, &deadline);
         tokio::pin!(pull);
-        let _ = tokio::select! {
+        let pulled = tokio::select! {
             pulled = &mut pull => pulled,
             _ = link_spent.recv() => {
                 deadline.cancel();
@@ -436,7 +516,7 @@ impl SlowLinkRelay {
             }
         };
         let photos = Arc::clone(&self.photos);
-        actor
+        let stored = actor
             .run(move |store, _| {
                 Ok(photos
                     .iter()
@@ -444,7 +524,8 @@ impl SlowLinkRelay {
                     .collect())
             })
             .await
-            .unwrap()
+            .unwrap();
+        (stored, pulled)
     }
 
     fn finish(mut self) {
@@ -459,6 +540,7 @@ struct AddedNote {
     outcome: ShareViewPullOutcome,
     text: Option<String>,
     pull: Duration,
+    pulls: usize,
 }
 
 fn receiving_workspace() -> (ScratchDir, std::path::PathBuf) {
@@ -488,20 +570,40 @@ async fn add_the_shared_note(relay: &ShareRelay) -> AddedNote {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1_100).unwrap().actor;
     let started = Instant::now();
-    let pulled = actor
-        .relay(
-            relay.configuration(),
-            pull_the_share(),
-            LeaseRegistry::default(),
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
-    let pull = started.elapsed();
-    let RelayOperationOutcome::ShareViewPulled(outcome) = pulled else {
-        panic!("a share view pull answers with its outcome");
+    let mut pulls = 0;
+    let outcome = loop {
+        let pulled = actor
+            .relay(
+                relay.configuration(),
+                pull_the_share(),
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        pulls += 1;
+        let RelayOperationOutcome::ShareViewPulled(outcome) = pulled else {
+            panic!("a share view pull answers with its outcome");
+        };
+        if !outcome.has_more {
+            break outcome;
+        }
+        actor
+            .relay(
+                relay.configuration(),
+                RelayOperation::CommitShareViewCursor {
+                    workspace_id: "ws".to_owned(),
+                    cursor: outcome.pending_cursor.clone(),
+                },
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
     };
+    let pull = started.elapsed();
     drop(actor);
     supervisor.close(&path).unwrap();
     let mut store = EngineStore::open(&path, 1_200).unwrap();
@@ -513,12 +615,16 @@ async fn add_the_shared_note(relay: &ShareRelay) -> AddedNote {
         outcome,
         text,
         pull,
+        pulls,
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_share_pull_downloads_each_batch_of_a_notes_saved_versions_together() {
-    let relay = ShareRelay::start(Pace::HoldEachBlobUntilItsWholeBatchIsAsked);
+    let relay = ShareRelay::start(
+        Pace::HoldEachBlobUntilItsWholeBatchIsAsked,
+        NOTE_SAVED_25_TIMES,
+    );
 
     let added = add_the_shared_note(&relay).await;
 
@@ -551,6 +657,28 @@ async fn a_share_pull_downloads_each_batch_of_a_notes_saved_versions_together() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_pull_reads_past_empty_log_pages_in_one_call_and_applies_the_note_in_the_next() {
+    let relay = ShareRelay::start(
+        Pace::HoldEachBlobUntilItsWholeBatchIsAsked,
+        NOTE_BEHIND_4_EMPTY_LOG_PAGES,
+    );
+
+    let added = add_the_shared_note(&relay).await;
+
+    let served = relay.finish();
+    assert_eq!(
+        added.text.map(String::into_bytes),
+        Some(saved_version(0)),
+        "the note behind the empty pages was not applied"
+    );
+    assert_eq!(
+        (added.pulls, served.log_requests, served.connections),
+        (2, 6, 2),
+        "pull calls, share-log requests, and connections for a note behind 4 empty log pages"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_share_pull_over_a_slow_link_applies_large_files_on_every_attempt() {
     let (relay, mut link_spent) = SlowLinkRelay::start(photos_of([PHOTO_BYTES; PHOTO_VERSIONS]));
     let (_scratch, path) = receiving_workspace();
@@ -562,6 +690,7 @@ async fn a_share_pull_over_a_slow_link_applies_large_files_on_every_attempt() {
         let applied = relay
             .pull_until_the_link_is_spent(&actor, &mut link_spent, SLOW_LINK_BYTES_PER_ATTEMPT)
             .await
+            .0
             .into_iter()
             .filter(|stored| *stored)
             .count();
@@ -592,7 +721,7 @@ async fn a_refused_blob_does_not_keep_a_slow_pull_from_the_file_after_it() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1_100).unwrap().actor;
 
-    let stored = relay
+    let (stored, _) = relay
         .pull_until_the_link_is_spent(&actor, &mut link_spent, 11 * 1024 * 1024)
         .await;
 
@@ -627,9 +756,13 @@ async fn a_pull_downloads_a_refused_blob_once() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1_100).unwrap().actor;
 
-    let stored = relay
+    let (stored, pulled) = relay
         .pull_until_the_link_is_spent(&actor, &mut link_spent, usize::MAX)
         .await;
+    let RelayOperationOutcome::ShareViewPulled(outcome) = pulled.expect("the pull finishes") else {
+        panic!("a share view pull answers with its outcome");
+    };
+    let (constraint, ceiling) = dohc_engine_sync::blob_ceiling(dohc_engine_sync::BlobKind::Binary);
 
     println!(
         "{}",
@@ -645,6 +778,30 @@ async fn a_pull_downloads_a_refused_blob_once() {
         "every file but the refused one is applied"
     );
     assert_eq!(relay.times_asked_for(0), 1);
+    assert_eq!(
+        outcome
+            .refusals
+            .iter()
+            .map(|refusal| (
+                refusal.origin_id.as_str(),
+                refusal.origin_seq,
+                refusal.op_kind.as_str(),
+                refusal.code,
+                refusal.detail.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [(
+            "granter",
+            0,
+            "moment.append",
+            "share-blob-over-ceiling",
+            format!(
+                "shared blob exceeds {constraint}: limit {ceiling} bytes, observed {} bytes — {PHOTO_PATH}",
+                ceiling + 1
+            )
+            .as_str()
+        )]
+    );
     drop(actor);
     supervisor.close(&path).unwrap();
     relay.finish();
@@ -663,7 +820,7 @@ fn share_pull_of_a_note_saved_25_times_benchmark() {
         .build()
         .unwrap();
     for _ in 0..3 {
-        let relay = ShareRelay::start(pace);
+        let relay = ShareRelay::start(pace, NOTE_SAVED_25_TIMES);
         let added = runtime.block_on(add_the_shared_note(&relay));
         let served = relay.finish();
         println!(
@@ -675,6 +832,24 @@ fn share_pull_of_a_note_saved_25_times_benchmark() {
                 "fetched": added.outcome.fetched,
                 "blob_requests": served.blob_requests,
                 "most_blobs_in_flight": served.most_blobs_in_flight,
+                "connections": served.connections,
+                "pull_ms": added.pull.as_millis(),
+            })
+        );
+    }
+    for _ in 0..3 {
+        let relay = ShareRelay::start(pace, NOTE_BEHIND_4_EMPTY_LOG_PAGES);
+        let added = runtime.block_on(add_the_shared_note(&relay));
+        let served = relay.finish();
+        println!(
+            "{}",
+            serde_json::json!({
+                "benchmark": "share_add_of_a_note_behind_4_empty_log_pages",
+                "round_trip_ms": ROUND_TRIP.as_millis(),
+                "new_connection_ms": TCP_AND_TLS_HANDSHAKE.as_millis(),
+                "pull_calls": added.pulls,
+                "log_requests": served.log_requests,
+                "blob_requests": served.blob_requests,
                 "connections": served.connections,
                 "pull_ms": added.pull.as_millis(),
             })

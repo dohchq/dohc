@@ -687,6 +687,7 @@ struct PagedShareRelay {
     reference_pulls: Mutex<Vec<(bool, Option<String>)>>,
     shared_pushes: Mutex<Vec<ShareLogPushRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
+    after_view_pull: Option<Box<dyn Fn()>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
     /// What the transport answers for a blob instead of serving it. The real
     /// HTTP transport stops reading at its own bound and reports
@@ -724,6 +725,7 @@ impl PagedShareRelay {
             reference_pulls: Mutex::new(Vec::new()),
             shared_pushes: Mutex::new(Vec::new()),
             view_pulls: Mutex::new(Vec::new()),
+            after_view_pull: None,
             view_blobs: BTreeMap::new(),
             view_blob_errors: BTreeMap::new(),
             share_blob_calls: Mutex::new(Vec::new()),
@@ -855,6 +857,9 @@ impl RelayTransport for PagedShareRelay {
             .lock()
             .expect("view pull calls")
             .push((req.cursor, req.limit));
+        if let Some(after_view_pull) = &self.after_view_pull {
+            after_view_pull();
+        }
         self.view_pages
             .get(&req.cursor)
             .cloned()
