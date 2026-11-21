@@ -89,6 +89,9 @@ describe("documentEditUpdate", () => {
     const emphasis = markdownToYDoc("Read *[foo*] here*.\n\n[foo*]: /guide");
     edited(emphasis, { find: "Read", replacement: "See" });
     expect(markdownOf(emphasis)).toBe("See *[foo*] here*.\n\n[foo*]: /guide\n");
+    const appended = markdownToYDoc("Intro.\n\n[x]: /old");
+    edited(appended, { replacement: "Read [a &copy; b][x]." });
+    expect(markdownOf(appended)).toBe("Intro.\n\n[x]: /old\n\nRead [a &copy; b][x].\n");
     const named = "[constructor] and [__proto__] here.";
     expect(JSON.stringify(parseRichdocMarkdown(named, "source", named))).not.toContain("rawInline");
   });

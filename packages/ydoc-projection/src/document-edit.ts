@@ -275,9 +275,11 @@ function blockChange(
   markdown: string,
 ): (doc: Y.Doc) => void {
   const schema = getDohcProseMirrorSchema();
-  const from = layout.chunks[first]?.start ?? layout.body.length;
-  const to = last >= first ? layout.chunks[last]!.end : from;
-  const note = layout.body.slice(0, from) + markdown + layout.body.slice(to);
+  const note = [
+    ...layout.chunks.slice(0, first).map((chunk) => chunk.markdown),
+    markdown,
+    ...layout.chunks.slice(last + 1).map((chunk) => chunk.markdown),
+  ].join(BLOCK_SEPARATOR);
   const replacement: ProseMirrorNode[] = [];
   if (markdown.trim() !== "") {
     schema.nodeFromJSON(parseRichdocMarkdown(markdown, "source", note)).forEach((block) => {
