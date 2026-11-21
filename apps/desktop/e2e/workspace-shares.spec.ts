@@ -398,15 +398,9 @@ confidentialTest.describe("View link lifecycle", () => {
         await expect(
           dialog.getByRole("menuitemradio", { name: "Can view", exact: true }),
         ).toBeVisible();
-        await expect(dialog).toContainText(
-          "If files are added to this selection later, the link includes them.",
-        );
-        await expect(dialog).toContainText(
-          "The sync relay serves the link, so it can read this content.",
-        );
-        await expect(dialog).toContainText(
-          "Anyone with the link can read this without an account.",
-        );
+        await expect(dialog).toContainText("The link includes files added later.");
+        await expect(dialog).toContainText("The sync relay can read this content.");
+        await expect(dialog).toContainText("Can read, but not change.");
         await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();
@@ -1116,14 +1110,20 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
-      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
+      "Added e2e-granter to shared-with-me as a read-only copy.",
     );
+    await expect(
+      page.getByTestId("workspace-shell-notice").getByRole("button", { name: "Open to edit" }),
+    ).toBeVisible();
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
 
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveText(
+      "This copy is read-only.Open to edit",
+    );
     const refused = await page.evaluate(async () => {
       const api = (
         window as unknown as {
@@ -1163,9 +1163,12 @@ test("mount side: an Edit code opens separately by default, and added to a works
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    await page.getByTestId("workspace-switcher").click();
-    await page.getByTestId("workspace-switcher-open-share").click();
-    await page.getByTestId("open-share-code").fill(shareCode);
+    await page
+      .getByTestId("edit-copy-notice")
+      .getByRole("button", { name: "Open to edit" })
+      .click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await expect(page.getByTestId("open-share-code")).toHaveCount(0);
     await expect(page.getByTestId("open-share-mode-separate")).toHaveAttribute(
       "aria-checked",
       "true",
@@ -1175,6 +1178,37 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
+
+    await expect(page.getByTestId("tab-docs/brief.md")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveCount(0);
+    const wrote = await page.evaluate(async () => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText"
+          >;
+        }
+      ).dohcDesktop;
+      const { workspaces } = await api.getWorkspaceRegistry();
+      const workspaceId = workspaces.find((workspace) => workspace.shareView)!.workspaceId;
+      const relativePath = "docs/brief.md";
+      try {
+        const read = await api.readWorkspaceText({ workspaceId, relativePath });
+        if (read.truncated) return "the shared file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath,
+          text: "# Brief\n\nEdited in its own workspace.\n",
+          expectedContentHash: read.contentHash,
+        });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(wrote, "the share's own workspace takes the edit its copy refused").toBe("written");
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

@@ -7,7 +7,7 @@ import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { OpenSharedView, opensForLiveEditing, type MountedShare } from "./OpenSharedView";
+import { OpenSharedView, shareLevel, type MountedShare } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
@@ -49,7 +49,6 @@ type ReceivedShareState =
       kind: "ready";
       shareId: string;
       shareCode: string;
-      liveEditing: boolean;
       share: RelayShareReceivedRow;
     };
 
@@ -128,7 +127,6 @@ export function ShareHandoffSurface(
                   shareId,
                   shareCode: result.share.shareCode,
                   share: result.share,
-                  liveEditing: opensForLiveEditing(result.share),
                 },
         );
       })
@@ -253,7 +251,7 @@ export function ShareHandoffSurface(
     return (
       <OpenSharedView
         key={receivedShare.shareId}
-        liveEditing={receivedShare.liveEditing}
+        level={shareLevel(receivedShare.share)}
         resolvedShare={{
           shareId: receivedShare.shareId,
           shareCode: receivedShare.shareCode,

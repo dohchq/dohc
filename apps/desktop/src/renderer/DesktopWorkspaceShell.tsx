@@ -264,6 +264,7 @@ import {
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
 import { OpenSharedView, type MountedShare } from "./OpenSharedView";
+import { addedShareNotice, editCopyAt, useOpenShareToEdit } from "./shell/shareCopyEdit";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -7504,8 +7505,18 @@ export function DesktopWorkspaceShell(props: {
     agentSetup.runnerEnabled;
 
   // `openPath` is the file a notice named, inside the share.
+  const openShareToEdit = useOpenShareToEdit({
+    workspaceId,
+    onOpenShare: setOpenShare,
+    reportError: reportButtonError,
+  });
+  function openToEditOffer(path: string, tabPath: string | null): { onOpenToEdit?: () => void } {
+    const copy = editCopyAt(path, shareMounts, cloudStatus?.connected === true);
+    const tabOpen = () => allTabs(wbRef.current).some((tab) => tab.path === tabPath);
+    return copy ? { onOpenToEdit: () => void openShareToEdit(copy, tabOpen) } : {};
+  }
   function handleMountedShare(mounted: MountedShare, openPath?: string) {
-    const { label, access, alreadyAdded } = mounted;
+    const { label } = mounted;
     if (!mounted.left) setOpenShare(null);
     void reloadShareMounts();
     void refreshFiles()
@@ -7515,16 +7526,11 @@ export function DesktopWorkspaceShell(props: {
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    // A mount is read-only whatever the grant allows. Open a share defaults
-    // an Edit grant to Open separately; a person who chose Add is told how
-    // to reach the access they have.
-    showSuccessNotice(
-      alreadyAdded
-        ? `${label} is already in shared-with-me.`
-        : access === "edit"
-          ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
-          : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
+    const notice = addedShareNotice(
+      mounted,
+      () => void openShareToEdit({ shareId: mounted.shareId, path: openPath ?? null }),
     );
+    showSuccessNotice(notice.message, undefined, undefined, notice.action);
   }
 
   const storeUpdateState = desktopUpdate.state;
@@ -8488,7 +8494,7 @@ export function DesktopWorkspaceShell(props: {
                                   onOpenShare: ({ shareId, shareCode, liveEditing }) =>
                                     setOpenShare({
                                       resolvedShare: { shareId, shareCode },
-                                      liveEditing,
+                                      level: liveEditing ? "edit" : null,
                                       path: null,
                                     }),
                                 }}
@@ -8612,6 +8618,7 @@ export function DesktopWorkspaceShell(props: {
                                       }
                                       onOpenLiveDocuments={openLiveDocumentsAt}
                                       receivedShare={!!shareView || isMountedSharePath(path)}
+                                      {...openToEditOffer(path, tabPath)}
                                       {...(shareView || isMountedSharePath(path)
                                         ? {}
                                         : { onSharePath })}
@@ -10083,7 +10090,7 @@ export function DesktopWorkspaceShell(props: {
                                 ? {}
                                 : {
                                     resolvedShare: openShare.resolvedShare,
-                                    liveEditing: openShare.liveEditing,
+                                    level: openShare.level,
                                   })}
                               onWorkspaceReady={(workspace) => {
                                 setOpenShare(null);
