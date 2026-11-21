@@ -208,23 +208,50 @@ it.skipIf(engine.missing)(
 );
 
 it.skipIf(engine.missing)(
-  "a page deleted in a file manager after taking the other computer's copy in a delete conflict leaves both computers",
+  "keeping a changed copy of a page the other computer deleted closes the conflict on both computers",
   async () => {
     const path = "note.md";
-    await withPair("hand-delete-after-resolve", path, "base\n", async (pair) => {
+    await withPair("keep-changed-over-delete", path, "base\n", async (pair) => {
       await rm(join(pair.rootA, path));
       await pair.a.reconcileCapture();
       expect(await pair.a.capture.fileObjectIdForPath(path)).toBeNull();
       await writeAndCapture(pair.b, pair.rootB, path, "changed on B\n");
       for (const daemon of [pair.a, pair.b]) await pushUntilDrained(daemon.relay);
       for (const daemon of [pair.a, pair.b]) await pullCaptured(daemon.relay, daemon.capture);
-      const open = await openConflicts(pair.a);
-      expect(open).toHaveLength(1);
-      await pair.a.capture.resolveConflict(open[0]!.id, { kind: "apply-incoming" });
-      expect(await readFile(join(pair.rootA, path), "utf8")).toBe("changed on B\n");
-      const recorded = (await waitForPathMoments(pair.a.capture, path, 1)).length;
+      const onB = await openConflicts(pair.b);
+      expect(onB).toHaveLength(1);
+      await pair.b.capture.resolveConflict(onB[0]!.id, { kind: "keep-current" });
+      expect(await settled(pair, path)).toMatchObject({
+        a: { text: "changed on B\n", open: [], notices: { notices: [] } },
+        b: { text: "changed on B\n", open: [], notices: { notices: [] } },
+      });
+    });
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing).each([
+  ["the computer that deleted it", "a", { kind: "apply-incoming" }],
+  ["the computer that changed it", "b", { kind: "keep-current" }],
+] as const)(
+  "a page deleted in a file manager on %s after it settled a delete conflict leaves both computers",
+  async (_name, side, choice) => {
+    const path = "note.md";
+    await withPair(`hand-delete-${side}`, path, "base\n", async (pair) => {
       await rm(join(pair.rootA, path));
-      const [latest] = (await waitForPathMoments(pair.a.capture, path, recorded + 1)).sort(
+      await pair.a.reconcileCapture();
+      expect(await pair.a.capture.fileObjectIdForPath(path)).toBeNull();
+      await writeAndCapture(pair.b, pair.rootB, path, "changed on B\n");
+      for (const daemon of [pair.a, pair.b]) await pushUntilDrained(daemon.relay);
+      for (const daemon of [pair.a, pair.b]) await pullCaptured(daemon.relay, daemon.capture);
+      const [resolver, root] = side === "a" ? [pair.a, pair.rootA] : [pair.b, pair.rootB];
+      const open = await openConflicts(resolver);
+      expect(open).toHaveLength(1);
+      await resolver.capture.resolveConflict(open[0]!.id, choice);
+      expect(await readFile(join(root, path), "utf8")).toBe("changed on B\n");
+      const recorded = (await waitForPathMoments(resolver.capture, path, 1)).length;
+      await rm(join(root, path));
+      const [latest] = (await waitForPathMoments(resolver.capture, path, recorded + 1)).sort(
         (a, b) => b.momentOrder - a.momentOrder,
       );
       expect(latest?.operation).toBe("delete");

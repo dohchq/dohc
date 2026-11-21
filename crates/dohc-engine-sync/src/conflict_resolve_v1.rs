@@ -1581,7 +1581,9 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
             }
             record_facts = commit_imported_lineage(tx, envelope, payload, key.as_ref())?;
             // This machine's conflict holds the kept copy as its incoming side.
-            let named_mirrored = revived && payload.chosen_from == ResolveChoiceV1::Current;
+            let receiver_deleted = payload.incoming.present().is_none();
+            let named_mirrored =
+                (revived || receiver_deleted) && payload.chosen_from == ResolveChoiceV1::Current;
             close_imported_conflict(tx, payload, named_mirrored)?;
         }
         ImportedHeadDisposition::AlreadyResult => {
@@ -2099,13 +2101,14 @@ fn receiver_holds_reviewed_incoming(
             .result
             .present()
             .is_some_and(|head| head.content_kind == HeadContentKindV1::Text)
-        || !payload.incoming.present().is_some_and(|incoming| {
-            incoming.content_kind == HeadContentKindV1::Text
-                && payload
-                    .current
-                    .present()
-                    .is_some_and(|current| current.object_id == incoming.object_id)
-        })
+        || !match (payload.current.present(), payload.incoming.present()) {
+            (Some(current), Some(incoming)) => {
+                incoming.content_kind == HeadContentKindV1::Text
+                    && current.object_id == incoming.object_id
+            }
+            (Some(current), None) => current.content_kind == HeadContentKindV1::Text,
+            (None, _) => false,
+        }
         || *live != payload.incoming
     {
         return Ok(false);
@@ -2123,7 +2126,20 @@ fn receiver_holds_reviewed_incoming(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    Ok(!other_review_open)
+    let reviewed_delete_open = payload.incoming.present().is_some()
+        || tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM conflicts WHERE workspace_id=?1 \
+                  AND target_version_id=?2 AND conflict_id=?3 AND status='open' AND current_exists=0)",
+                params![
+                    payload.workspace_id,
+                    payload.target_version_id,
+                    payload.conflict_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+    Ok(reviewed_delete_open && !other_review_open)
 }
 
 fn imported_live_head(
