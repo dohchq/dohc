@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -254,6 +254,75 @@ it.skipIf(engine.missing)(
     } finally {
       await Promise.allSettled(editors.map((editor) => editor.session.close()));
       await daemonA?.close();
+      await relay.stop();
+    }
+  },
+  180_000,
+);
+
+it.skipIf(engine.missing)(
+  "keeps another computer's closed note on the owner's latest save, with no conflict copy",
+  async () => {
+    const workspaceId = "two-daemon-closed-follows";
+    const token = `test:${workspaceId}`;
+    const path = "notes/closed.txt";
+    const rootA = await createTestScratch("dohc-closed-follows-a-");
+    const rootB = await createTestScratch("dohc-closed-follows-b-");
+    const relayRoot = await createTestScratch("dohc-closed-follows-relay-");
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
+    const relayConnection = { baseUrl: relay.baseUrl, token };
+    const arrival = { timeout: 60_000, interval: 100 };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const editors: OpenEditor[] = [];
+    const sync = async (daemon: LiveDaemonCapture) => {
+      await pushUntilDrained(daemon.relay);
+      await pullCaptured(daemon.relay, daemon.capture);
+      await pushUntilDrained(daemon.relay);
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: rootA,
+        relay: relayConnection,
+      });
+      await daemonA.relay.claim();
+      await mkdir(join(rootA, "notes"), { recursive: true });
+      await writeFile(join(rootA, path), "");
+      const editorA = await openEditor(daemonA, path);
+      editors.push(editorA);
+      await typeAtEnd(editorA, "First save.\n");
+      await sync(daemonA);
+
+      daemonB = await openJoinedDaemonCapture({
+        workspaceId,
+        rootPath: rootB,
+        relay: relayConnection,
+      });
+      await pullCaptured(daemonB.relay, daemonB.capture);
+      const editorB = await openEditor(daemonB, path);
+      expect(shown(editorB)).toBe("First save.\n");
+      await editorB.session.close();
+
+      for (const line of ["Second save.\n", "Third save.\n"]) {
+        await typeAtEnd(editorA, line);
+        await sync(daemonA);
+        await pullCaptured(daemonB.relay, daemonB.capture);
+      }
+      const latest = "First save.\nSecond save.\nThird save.\n";
+      expect(await readFile(join(rootA, path), "utf8")).toBe(latest);
+      await vi.waitFor(async () => {
+        expect(await readFile(join(rootB, path), "utf8")).toBe(latest);
+      }, arrival);
+      await sync(daemonB);
+      expect(await readdir(join(rootB, "notes"))).toEqual(["closed.txt"]);
+      expect(await readFile(join(rootB, path), "utf8")).toBe(latest);
+    } finally {
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
       await relay.stop();
     }
   },
