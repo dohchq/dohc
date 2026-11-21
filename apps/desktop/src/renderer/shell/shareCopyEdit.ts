@@ -57,8 +57,7 @@ export function useOpenShareToEdit(input: {
       const request = requests.next();
       const wanted = () => requests.isCurrent(request) && stillWanted();
       const refuse = (message: string, cause: unknown) => {
-        if (wanted())
-          latest.current.reportError(message, cause, () => void open(copy, stillWanted));
+        if (wanted()) latest.current.reportError(message, cause, () => void open(copy));
       };
       let found;
       try {

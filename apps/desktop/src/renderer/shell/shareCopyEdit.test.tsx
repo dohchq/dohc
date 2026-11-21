@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GetRelayReceivedShareResult, ShareAccess } from "../../ipc/bridgeContract";
 import type { MountedShare } from "../OpenSharedView";
@@ -156,6 +156,22 @@ describe("Open to edit", () => {
 
     expect(onOpenShare).not.toHaveBeenCalled();
     expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("opens from Try again after the file's tab closed", async () => {
+    bridgeMock.getRelayReceivedShare.mockRejectedValueOnce(new Error("offline"));
+    const { open, onOpenShare, reportError } = setup();
+    let tabOpen = true;
+
+    await open({ shareId: "share-1", path: "docs/plan.md" }, () => tabOpen);
+    expect(reportError).toHaveBeenCalledOnce();
+    tabOpen = false;
+    bridgeMock.getRelayReceivedShare.mockResolvedValue(received("edit"));
+    await act(async () => reportError.mock.calls[0]![2]!());
+
+    expect(onOpenShare).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ path: "docs/plan.md", level: "edit" }),
+    );
   });
 
   it("opens from a file whose tab is still open when the answer lands", async () => {
