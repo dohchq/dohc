@@ -7510,9 +7510,10 @@ export function DesktopWorkspaceShell(props: {
     onOpenShare: setOpenShare,
     reportError: reportButtonError,
   });
-  function openToEditOffer(path: string): { onOpenToEdit?: () => void } {
-    const copy = editCopyAt(path, shareMounts);
-    return copy ? { onOpenToEdit: () => void openShareToEdit(copy) } : {};
+  function openToEditOffer(path: string, tabPath: string | null): { onOpenToEdit?: () => void } {
+    const copy = editCopyAt(path, shareMounts, cloudStatus?.connected === true);
+    const tabOpen = () => allTabs(wbRef.current).some((tab) => tab.path === tabPath);
+    return copy ? { onOpenToEdit: () => void openShareToEdit(copy, tabOpen) } : {};
   }
   function handleMountedShare(mounted: MountedShare, openPath?: string) {
     const { label } = mounted;
@@ -8617,7 +8618,7 @@ export function DesktopWorkspaceShell(props: {
                                       }
                                       onOpenLiveDocuments={openLiveDocumentsAt}
                                       receivedShare={!!shareView || isMountedSharePath(path)}
-                                      {...openToEditOffer(path)}
+                                      {...openToEditOffer(path, tabPath)}
                                       {...(shareView || isMountedSharePath(path)
                                         ? {}
                                         : { onSharePath })}

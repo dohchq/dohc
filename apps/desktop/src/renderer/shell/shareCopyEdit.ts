@@ -17,8 +17,9 @@ export type EditCopy = { shareId: string; path: string | null };
 export function editCopyAt(
   path: string | null,
   mounts: NonNullable<WorkspaceSummary["shareMounts"]>,
+  signedIn: boolean,
 ): EditCopy | null {
-  if (!path || !isSharedWithMePath(path)) return null;
+  if (!signedIn || !path || !isSharedWithMePath(path)) return null;
   const [, label, ...inside] = path.split("/");
   const mount = mounts.find(
     (candidate) => candidate.label === label && candidate.access === "edit" && !candidate.ended,
@@ -47,16 +48,17 @@ export function useOpenShareToEdit(input: {
   workspaceId: string;
   onOpenShare: (share: NoticeShare) => void;
   reportError: (message: string, cause: unknown, retry: (() => void) | null) => void;
-}): (copy: EditCopy) => Promise<void> {
+}): (copy: EditCopy, stillWanted?: () => boolean) => Promise<void> {
   const requests = useRequestSequence([input.workspaceId]);
   const latest = useRef(input);
   latest.current = input;
   return useCallback(
-    async function open(copy: EditCopy): Promise<void> {
+    async function open(copy: EditCopy, stillWanted = () => true): Promise<void> {
       const request = requests.next();
+      const wanted = () => requests.isCurrent(request) && stillWanted();
       const refuse = (message: string, cause: unknown) => {
-        if (requests.isCurrent(request))
-          latest.current.reportError(message, cause, () => void open(copy));
+        if (wanted())
+          latest.current.reportError(message, cause, () => void open(copy, stillWanted));
       };
       let found;
       try {
@@ -65,7 +67,7 @@ export function useOpenShareToEdit(input: {
         refuse(LOOKUP_FAILED, cause);
         return;
       }
-      if (!requests.isCurrent(request)) return;
+      if (!wanted()) return;
       if (!found.found || "chats" in found) {
         refuse(SHARE_MISSING, new Error(SHARE_MISSING));
         return;

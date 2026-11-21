@@ -1163,9 +1163,12 @@ test("mount side: an Edit code opens separately by default, and added to a works
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    await page.getByTestId("workspace-switcher").click();
-    await page.getByTestId("workspace-switcher-open-share").click();
-    await page.getByTestId("open-share-code").fill(shareCode);
+    await page
+      .getByTestId("edit-copy-notice")
+      .getByRole("button", { name: "Open to edit" })
+      .click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await expect(page.getByTestId("open-share-code")).toHaveCount(0);
     await expect(page.getByTestId("open-share-mode-separate")).toHaveAttribute(
       "aria-checked",
       "true",
@@ -1175,6 +1178,37 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
+
+    await expect(page.getByTestId("tab-docs/brief.md")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveCount(0);
+    const wrote = await page.evaluate(async () => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText"
+          >;
+        }
+      ).dohcDesktop;
+      const { workspaces } = await api.getWorkspaceRegistry();
+      const workspaceId = workspaces.find((workspace) => workspace.shareView)!.workspaceId;
+      const relativePath = "docs/brief.md";
+      try {
+        const read = await api.readWorkspaceText({ workspaceId, relativePath });
+        if (read.truncated) return "the shared file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath,
+          text: "# Brief\n\nEdited in its own workspace.\n",
+          expectedContentHash: read.contentHash,
+        });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    });
+    expect(wrote, "the share's own workspace takes the edit its copy refused").toBe("written");
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

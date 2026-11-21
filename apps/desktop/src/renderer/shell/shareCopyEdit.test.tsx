@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GetRelayReceivedShareResult, ShareAccess } from "../../ipc/bridgeContract";
 import type { MountedShare } from "../OpenSharedView";
+import { deferred } from "../../testing/deferred";
 import { addedShareNotice, editCopyAt, useOpenShareToEdit } from "./shareCopyEdit";
 
 const bridgeMock = { getRelayReceivedShare: vi.fn() };
@@ -79,11 +80,14 @@ describe("a file inside a read-only copy", () => {
   ];
 
   it("names the Edit share and the file's path inside it", () => {
-    expect(editCopyAt("shared-with-me/ana/docs/plan.md", mounts)).toEqual({
+    expect(editCopyAt("shared-with-me/ana/docs/plan.md", mounts, true)).toEqual({
       shareId: "share-edit",
       path: "docs/plan.md",
     });
-    expect(editCopyAt("shared-with-me/ana", mounts)).toEqual({ shareId: "share-edit", path: null });
+    expect(editCopyAt("shared-with-me/ana", mounts, true)).toEqual({
+      shareId: "share-edit",
+      path: null,
+    });
   });
 
   it.each([
@@ -92,7 +96,11 @@ describe("a file inside a read-only copy", () => {
     ["a share this workspace does not hold", "shared-with-me/dee/plan.md"],
     ["the person's own file", "docs/plan.md"],
   ])("offers nothing for a file in %s", (_place, path) => {
-    expect(editCopyAt(path, mounts)).toBeNull();
+    expect(editCopyAt(path, mounts, true)).toBeNull();
+  });
+
+  it("offers nothing for a file in an Edit share while signed out", () => {
+    expect(editCopyAt("shared-with-me/ana/docs/plan.md", mounts, false)).toBeNull();
   });
 });
 
@@ -121,6 +129,42 @@ describe("Open to edit", () => {
       path: "docs/plan.md",
     });
     expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the share at Edit", async () => received("edit")],
+    ["the owner's lowered level", async () => received("view")],
+    [
+      "a relay that cannot be reached",
+      async (): Promise<GetRelayReceivedShareResult> => {
+        throw new Error("offline");
+      },
+    ],
+  ])("drops an answer of %s that lands after the file's tab closed", async (_case, answer) => {
+    const lookup = deferred<void>();
+    bridgeMock.getRelayReceivedShare.mockImplementation(async () => {
+      await lookup.promise;
+      return answer();
+    });
+    const { open, onOpenShare, reportError } = setup();
+    let tabOpen = true;
+
+    const opening = open({ shareId: "share-1", path: "docs/plan.md" }, () => tabOpen);
+    tabOpen = false;
+    lookup.resolve();
+    await opening;
+
+    expect(onOpenShare).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("opens from a file whose tab is still open when the answer lands", async () => {
+    bridgeMock.getRelayReceivedShare.mockResolvedValue(received("edit"));
+    const { open, onOpenShare } = setup();
+
+    await open({ shareId: "share-1", path: "docs/plan.md" }, () => true);
+
+    expect(onOpenShare).toHaveBeenCalledOnce();
   });
 
   it.each([
