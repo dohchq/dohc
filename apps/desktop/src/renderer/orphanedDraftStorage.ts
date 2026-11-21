@@ -275,10 +275,10 @@ export function remapStoredDraftPaths(
   const dropped = new Set<number>();
   const handles = new Map<string, number[]>();
   for (const [id, key] of keys) handles.set(key, [...(handles.get(key) ?? []), id]);
-  const held = new Map(files);
+  const held: Array<[string, string]> = [...files];
   for (const [id, key] of keys) {
     const sent = expected.get(id);
-    if (pending.has(id) && sent !== undefined) held.set(key, sent);
+    if (pending.has(id) && sent !== undefined && files.get(key) !== sent) held.push([key, sent]);
   }
   for (const [key, raw] of held) {
     const ids = handles.get(key) ?? [];

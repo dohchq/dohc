@@ -212,7 +212,7 @@ interface EngineYDocBindOptions {
   // Runs right before main is told to accept the winner. Throwing keeps the
   // retired mirror, as a failed onDocumentReplacing does: the retired mirror
   // can take an edit while onDocumentReplacing settles.
-  beforeReplacementAcknowledged?: () => void;
+  beforeReplacementAcknowledged?: () => void | Promise<void>;
   // The retired mirror stays frozen and the winner waits. `retry` runs the
   // same replacement again; it does nothing once that replacement, or a newer
   // one, has installed.
@@ -705,7 +705,8 @@ export async function bindEngineYDoc(
         if (options.onDocumentReplacing) {
           await options.onDocumentReplacing(retired, input.recoveredPaths);
         }
-        options.beforeReplacementAcknowledged?.();
+        const checked = options.beforeReplacementAcknowledged?.();
+        if (checked) await checked;
         bufferedUpdates = await transport.acknowledgeLineageReplacement(input.lineageGeneration);
       } catch (error) {
         replacement.destroy();
