@@ -103,6 +103,33 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   expect(onWorkspaceReady).toHaveBeenCalled();
 });
 
+it("defaults an Edit handoff of a pinned version, which cannot be edited live, to Open separately", async () => {
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({
+    found: true,
+    share: {
+      ...receivedShare("share-edit", "edit-code"),
+      access: "edit",
+      selector: { paths: ["notes"], versionId: "version-7" },
+    },
+  });
+  render(
+    <ShareHandoffSurface
+      status={{ status: "done", statusId: "edit-status", shareId: "share-edit" }}
+      onWorkspaceReady={() => {}}
+      onBack={() => {}}
+      onOpened={() => {}}
+      mountInto={{ workspaceId: "host", onMounted: vi.fn() }}
+    />,
+  );
+
+  expect((await screen.findByTestId("open-share-mode-separate")).getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  expect(screen.getByTestId("open-share-mode-help").textContent).toBe(
+    "Opens as its own workspace, where you can edit.",
+  );
+});
+
 type ExactReceivedShareResult =
   | { found: false }
   | { found: true; share: ReturnType<typeof receivedShare> };

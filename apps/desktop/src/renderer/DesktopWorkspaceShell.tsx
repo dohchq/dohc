@@ -8488,7 +8488,7 @@ export function DesktopWorkspaceShell(props: {
                                   onOpenShare: ({ shareId, shareCode, liveEditing }) =>
                                     setOpenShare({
                                       resolvedShare: { shareId, shareCode },
-                                      liveEditing,
+                                      level: liveEditing ? "edit" : null,
                                       path: null,
                                     }),
                                 }}
@@ -10083,7 +10083,7 @@ export function DesktopWorkspaceShell(props: {
                                 ? {}
                                 : {
                                     resolvedShare: openShare.resolvedShare,
-                                    liveEditing: openShare.liveEditing,
+                                    level: openShare.level,
                                   })}
                               onWorkspaceReady={(workspace) => {
                                 setOpenShare(null);

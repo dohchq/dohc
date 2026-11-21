@@ -84,6 +84,16 @@ export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
   );
 }
 
+export function shareLevel(share: RelayShareReceivedRow | null): ShareAccess | null {
+  return share === null || share.damaged ? null : share.access;
+}
+
+function openingWords(mode: "mount" | "separate", level: ShareAccess | null): string {
+  if (mode === "mount") return "Adds a read-only copy to this workspace.";
+  if (level === "edit") return "Opens as its own workspace, where you can edit.";
+  return level === null ? "Opens as its own workspace." : "Opens as its own workspace, read-only.";
+}
+
 function displayPath(path: string): string {
   return isWindows() ? path.replaceAll("/", "\\") : path;
 }
@@ -121,7 +131,7 @@ export function OpenSharedView(
     onWorkspaceReady: (workspace: Workspace) => void;
     onBack: () => void;
     onOpened?: () => void;
-    liveEditing?: boolean;
+    level?: ShareAccess | null;
     resolvedShare?: {
       shareId: string;
       shareCode: string;
@@ -145,9 +155,7 @@ export function OpenSharedView(
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
   const [settledSuggestionShareId, setSettledSuggestionShareId] = useState<string | null>(null);
   const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
-  // Whether each pasted share opens for live editing, asked once per share
-  // id while this dialog is open. A failed lookup counts as no.
-  const [pastedLiveEditing, setPastedLiveEditing] = useState<ReadonlyMap<string, boolean>>(
+  const [pastedLevels, setPastedLevels] = useState<ReadonlyMap<string, ShareAccess | null>>(
     () => new Map(),
   );
   const accessLookups = useRef(new Map<string, Promise<RelayShareReceivedRow | null>>());
@@ -197,19 +205,19 @@ export function OpenSharedView(
 
   const shareCode = props.resolvedShare?.shareCode ?? code.trim();
   const shareId = props.resolvedShare?.shareId ?? parseShareCode(shareCode)?.shareId ?? null;
-  const liveEditing = props.resolvedShare
-    ? !!props.liveEditing
-    : shareId !== null && pastedLiveEditing.get(shareId) === true;
-  // Edit defaults to Open separately, as the browser handoff does, because
-  // a folder added to this workspace cannot be edited.
-  const mode = pickedMode ?? (props.mountInto && !liveEditing ? "mount" : "separate");
+  const level = props.resolvedShare
+    ? (props.level ?? null)
+    : shareId === null
+      ? null
+      : (pastedLevels.get(shareId) ?? null);
+  const mode = pickedMode ?? (props.mountInto && level !== "edit" ? "mount" : "separate");
   const mounting = mode === "mount" && !!props.mountInto;
 
   // Only a pasted code has an unknown grant, and only a signed-in session
   // can ask the relay about it. A mode the person picked needs no answer.
   const accessShareId = !props.resolvedShare && gate.kind === "signed-in" ? shareId : null;
   const checkingAccess =
-    pickedMode === null && accessShareId !== null && !pastedLiveEditing.has(accessShareId);
+    pickedMode === null && accessShareId !== null && !pastedLevels.has(accessShareId);
   useEffect(() => {
     const request = accessRequests.next();
     setPreview(null);
@@ -226,9 +234,7 @@ export function OpenSharedView(
     void lookup.then((share) => {
       if (!accessRequests.isCurrent(request)) return;
       setPreview(share);
-      setPastedLiveEditing((current) =>
-        new Map(current).set(accessShareId, share !== null && opensForLiveEditing(share)),
-      );
+      setPastedLevels((current) => new Map(current).set(accessShareId, shareLevel(share)));
     });
   }, [accessShareId, accessRequests]);
 
@@ -408,15 +414,14 @@ export function OpenSharedView(
               onClick={() => setPickedMode("separate")}
             />
           </div>
+          {checkingAccess ? null : (
+            <p data-testid="open-share-mode-help" className="m-0 text-[12px] leading-4 text-muted">
+              {openingWords(mode, level)}
+            </p>
+          )}
         </div>
       ) : null}
 
-      {liveEditing && props.mountInto ? (
-        <p className="m-0 text-xs leading-relaxed text-muted">
-          Open separately to edit shared Markdown. Adding it to this workspace creates a read-only
-          folder.
-        </p>
-      ) : null}
       <div className="flex flex-col gap-1.5">
         <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
         {mounting ? (
