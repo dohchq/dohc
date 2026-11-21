@@ -207,9 +207,8 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
             .to_owned()
     };
     let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true, true)];
-    sources.extend(
-        [213, 270, 556, 572, 575, 587, 619].map(|number| (example(number), false, false)),
-    );
+    sources
+        .extend([213, 270, 556, 572, 575, 587, 619].map(|number| (example(number), false, false)));
     // Raw HTML and a link through a definition keep their meaning as dohc
     // reads them today, but not in a document read before dohc kept them as
     // the file spells them.

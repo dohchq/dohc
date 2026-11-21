@@ -691,6 +691,8 @@ it.each([
   ["links through references", "See [docs][x], [x] and [x][].\n\n[x]: https://example.com\n"],
   ["definitions grouped together", '[a]: https://a.example\n[b]: <https://b.example> "B"\n'],
   ["comments with no blank line between", "<!-- one -->\n<!-- two -->\n"],
+  ["definitions with no blank line between in a list item", "- [x]: /x\n  [y]: /y\n"],
+  ["comments with no blank line between in a list item", "- <!-- a -->\n  <!-- b -->\n"],
 ])("saves %s as the file spells it", (_name, markdown) => {
   const doc = markdownToYDoc(markdown);
   try {

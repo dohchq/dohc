@@ -1017,6 +1017,32 @@ export const DohcMathBlock = Node.create({
 // rules rank above the code block's and code mark's, which match the same tags.
 // Their text is the source too, for a plain-text copy.
 const sealedSource = (node: { attrs: Record<string, unknown> }) => String(node.attrs.source ?? "");
+
+// A sealed block's source ends with the line breaks its token read. Sealed
+// blocks with no blank line between them are one block, since the writer
+// puts a blank line between blocks.
+export function joinSealedBlocks(content: JSONContent[]): JSONContent[] {
+  const joined: JSONContent[] = [];
+  let tight = false;
+  for (const block of content) {
+    if (block.type !== "rawBlock") {
+      joined.push(block);
+      tight = false;
+      continue;
+    }
+    const raw = String(block.attrs?.source ?? "");
+    const breaks = /\n[ \t\n]*$/u.exec(raw);
+    const source = breaks ? raw.slice(0, breaks.index) : raw;
+    const previous = joined.at(-1);
+    if (tight && previous) {
+      previous.attrs = { source: `${String(previous.attrs?.source)}\n${source}` };
+    } else {
+      joined.push({ type: "rawBlock", attrs: { source } });
+    }
+    tight = breaks?.[0] === "\n";
+  }
+  return joined;
+}
 const sealedText = {
   renderText: ({ node }: { node: { attrs: Record<string, unknown> } }) => sealedSource(node),
   // A plain ProseMirror view, as on the share page and phone, reads leafText.
@@ -1263,7 +1289,9 @@ function markdownLists(projected = false) {
         const tokens = (emptyTask ? [] : (item.tokens ?? [])).map((block) =>
           block.type === "text" ? { ...block, type: "paragraph" } : block,
         );
-        const content = (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens);
+        const content = joinSealedBlocks(
+          (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens),
+        );
         const opensBlank =
           /^[ \t]*\n/u.test(item.text ?? "") &&
           /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? "");

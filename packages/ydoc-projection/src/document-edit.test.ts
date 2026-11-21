@@ -75,13 +75,16 @@ describe("documentEditUpdate", () => {
     const doc = markdownToYDoc(["Status: draft.", ...sealed].join("\n\n"));
     edited(doc, { find: "draft", replacement: "ready" });
     expect(markdownOf(doc)).toBe(`${["Status: ready.", ...sealed].join("\n\n")}\n`);
-    // A sealed piece is one node, so a change inside it replaces its block.
-    const inside = { find: "the docs", replacement: "the guide" };
-    expect(() => edited(doc, inside)).toThrow(DOCUMENT_OPEN_REFUSAL);
-    edited(doc, inside, closed);
+    edited(doc, { find: "the docs", replacement: "the guide" });
     expect(markdownOf(doc)).toBe(
       `${["Status: ready.", ...sealed].join("\n\n").replace("the docs", "the guide")}\n`,
     );
+  });
+
+  test("edits text beside a link through a definition in another block", () => {
+    const doc = markdownToYDoc("See [docs][x] for details.\n\n[x]: https://example.com");
+    edited(doc, { find: "for details", replacement: "for more" });
+    expect(markdownOf(doc)).toBe("See [docs][x] for more.\n\n[x]: https://example.com\n");
   });
 
   test("adds a section written as Markdown", () => {

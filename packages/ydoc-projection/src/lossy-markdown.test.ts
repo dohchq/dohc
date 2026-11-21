@@ -46,6 +46,8 @@ const lossySource = "1. Run this:\n\n       pnpm install\n\n2. Done\n";
 it.each([
   ["an image with a root-relative path", "![logo](/docs/logo.png)\n"],
   ["code indented under a list item", lossySource],
+  ["a comment that never closes", "<!-- draft\n\nNotes\n"],
+  ["preformatted text that never closes", "<pre>\nfoo\n"],
 ])("flags %s", (_, markdown) => {
   expect(isLossyMarkdown(markdown)).toBe(true);
 });

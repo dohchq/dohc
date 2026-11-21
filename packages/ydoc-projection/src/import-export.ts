@@ -21,6 +21,7 @@ import {
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
+  joinSealedBlocks,
   MarkdownBulletList,
   MarkdownListItem,
   MarkdownOrderedList,
@@ -72,6 +73,8 @@ const PARSE_REFERENCE_RE = new RegExp(
 // open and close one.
 let parseReferences: ReadonlyMap<string, string> = new Map();
 let parseTabs: ReadonlyMap<string, string> = new Map();
+// The definitions of the note a parsed piece belongs to.
+let noteLinks: TokensList["links"] = {};
 let rawHtmlMarkup = { lt: "<", gt: ">", used: false };
 
 // Raw HTML and link reference definitions are sealed: the document holds the
@@ -83,10 +86,29 @@ const sealedBlock = (token: { raw?: string }): JSONContent => ({
   type: "rawBlock",
   attrs: { source: token.raw ?? "" },
 });
+// An HTML block that never closes runs to the end of its container, so it
+// would take in any block an edit adds after it. It reads as text instead,
+// which dohc writes differently, so the note is held.
+const CLOSING_HTML: ReadonlyArray<readonly [RegExp, RegExp]> = [
+  [/^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/iu, /<\/(?:pre|script|style|textarea)>/iu],
+  [/^ {0,3}<!--/u, /-->/u],
+  [/^ {0,3}<!\[CDATA\[/u, /\]\]>/u],
+  [/^ {0,3}<\?/u, /\?>/u],
+  [/^ {0,3}<![A-Za-z]/u, />/u],
+];
 const MarkdownHtml = Extension.create({
   name: "markdownHtml",
   markdownTokenName: "html",
-  parseMarkdown: sealedBlock,
+  parseMarkdown: (token) => {
+    const raw = token.raw ?? "";
+    for (const [opener, closer] of CLOSING_HTML) {
+      const open = opener.exec(raw);
+      if (!open) continue;
+      if (closer.test(raw.slice(open[0].length))) break;
+      return { type: "paragraph", content: [{ type: "text", text: raw.trimEnd() }] };
+    }
+    return sealedBlock(token);
+  },
 });
 
 // A definition the serializer wrote as references is the text it holds.
@@ -475,7 +497,7 @@ const markdownParser = new Marked({
     // The document holds no reference, so a link or picture through one is
     // sealed.
     reflink(src, links) {
-      const token = Tokenizer.prototype.reflink.call(this, src, links);
+      const token = Tokenizer.prototype.reflink.call(this, src, { ...noteLinks, ...links });
       return token && token.type !== "text"
         ? (sealedInline(token.raw) as unknown as Tokens.Link)
         : token;
@@ -581,9 +603,11 @@ export function markdownToYDoc(
   return doc;
 }
 
+/** `note` is the whole note `markdown` is a piece of, so the piece can use its definitions. */
 export function parseRichdocMarkdown(
   markdown: string,
   reading: "source" | "projection" = "source",
+  note?: string,
 ): JSONContent {
   const reservedSentinels = new Set(markdown.match(PARSE_SENTINEL_RE) ?? []);
   const entitySentinels = new Map<string, string>();
@@ -671,6 +695,7 @@ export function parseRichdocMarkdown(
   );
   parseReferences = entitySentinels;
   parseTabs = projectionTabs;
+  noteLinks = note === undefined ? {} : Lexer.lex(note).links;
   rawHtmlMarkup = markup;
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -681,13 +706,14 @@ export function parseRichdocMarkdown(
   let parsed: JSONContent;
   try {
     // Include escaped and multiline labels, including definitions inside quotes.
-    markdownListParseState.references = markdown.includes("]:");
+    markdownListParseState.references = markdown.includes("]:") || !!note?.includes("]:");
     parsed = (reading === "projection" ? projectedMarkdownManager() : markdownManager).parse(
       prepared,
     );
   } finally {
     parseReferences = new Map();
     parseTabs = new Map();
+    noteLinks = {};
     markdownListParseState.references = true;
     rawHtmlMarkup = { lt: "<", gt: ">", used: false };
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() };
@@ -723,32 +749,6 @@ function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0)
     (node.type === "listItem" || node.type === "taskItem") && blocks[0]?.type !== "paragraph";
   if (needsParagraph) blocks.unshift({ type: "paragraph" });
   return node;
-}
-
-// A sealed block's source ends with the line breaks its token read. Sealed
-// blocks with no blank line between them are one block, since the writer
-// puts a blank line between blocks.
-function joinSealedBlocks(content: JSONContent[]): JSONContent[] {
-  const joined: JSONContent[] = [];
-  let tight = false;
-  for (const block of content) {
-    if (block.type !== "rawBlock") {
-      joined.push(block);
-      tight = false;
-      continue;
-    }
-    const raw = String(block.attrs?.source ?? "");
-    const breaks = /\n[ \t\n]*$/u.exec(raw);
-    const source = breaks ? raw.slice(0, breaks.index) : raw;
-    const previous = joined.at(-1);
-    if (tight && previous) {
-      previous.attrs = { source: `${String(previous.attrs?.source)}\n${source}` };
-    } else {
-      joined.push({ type: "rawBlock", attrs: { source } });
-    }
-    tight = breaks?.[0] === "\n";
-  }
-  return joined;
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {
