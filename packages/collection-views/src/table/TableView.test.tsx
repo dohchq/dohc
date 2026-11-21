@@ -903,6 +903,30 @@ describe("pickers", () => {
     expect(document.activeElement).toBe(grid);
   });
 
+  it("saves an option picked with the pointer inside a shadow root", () => {
+    // The website's demo mounts the table in a shadow root, where the document
+    // sees every press as the root's host.
+    const host = document.body.appendChild(document.createElement("div"));
+    const container = host
+      .attachShadow({ mode: "open" })
+      .appendChild(document.createElement("div"));
+    const onCellChange = vi.fn(() => 1);
+    render(<TableView schema={schema} records={pickerRecords()} onCellChange={onCellChange} />, {
+      container,
+    });
+    const shadow = within(container);
+    fireEvent.click(
+      shadow.getAllByRole("row")[2]!.querySelectorAll<HTMLElement>('[role="gridcell"]')[STATUS]!,
+    );
+    const doing = shadow.getByRole("option", { name: "doing" });
+    fireEvent.pointerDown(doing);
+    fireEvent.click(doing);
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ recordId: "rec-b", field: "status", value: "doing" }),
+    );
+    host.remove();
+  });
+
   it("opens a picker with Enter, picks with the keys, and cancels with Escape", () => {
     const { grid, open, search, press, editor, selection, saved } = setup();
     open(0, STATUS);

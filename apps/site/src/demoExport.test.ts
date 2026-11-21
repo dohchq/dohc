@@ -32,6 +32,7 @@ it.each([
     configureDemoDesktopBridge({
       documents: [],
       folders: [],
+      fixedPaths: [],
       createFile: () => undefined,
       createFolder: () => undefined,
       movePath: () => undefined,

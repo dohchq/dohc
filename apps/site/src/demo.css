@@ -1,4 +1,9 @@
 @import "../../desktop/src/renderer/styles.css";
+/* The Collection calendar imports these itself, which puts them in the page's
+   head, outside the demo's shadow root. */
+@import "../../../packages/collection-views/node_modules/react-big-calendar/lib/css/react-big-calendar.css";
+@import "../../../packages/collection-views/node_modules/react-big-calendar/lib/addons/dragAndDrop/styles.css";
+@import "../../../packages/collection-views/src/calendar/calendar.css";
 @source "../../desktop/src/renderer";
 
 :host {

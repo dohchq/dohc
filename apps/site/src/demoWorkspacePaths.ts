@@ -35,6 +35,19 @@ export function rewritePathPrefix(path: string, fromPath: string, toPath: string
   return isPathAtOrBelow(path, fromPath) ? `${toPath}${path.slice(fromPath.length)}` : path;
 }
 
+/**
+ * The page a [[link]] names: by its path, or by its file name when one page
+ * has it, as the desktop resolves links. Null when none or several match.
+ */
+export function resolveDemoWikilink(pagePaths: readonly string[], target: string): string | null {
+  const wanted = target.trim().replace(/\.md$/i, "");
+  const stem = (path: string) => path.replace(/\.md$/i, "");
+  const exact = pagePaths.find((path) => stem(path) === wanted);
+  if (exact) return exact;
+  const byName = pagePaths.filter((path) => stem(path).split("/").pop() === wanted);
+  return byName.length === 1 ? byName[0]! : null;
+}
+
 export function planDemoPathMove(
   paths: readonly string[],
   fromPath: string,
