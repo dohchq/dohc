@@ -269,13 +269,24 @@ fn a_photo_over_the_ceiling_then_a_small_one_then_large_ones() -> Vec<Photo> {
     photos_of([ceiling + 1, 1024].into_iter().chain([PHOTO_BYTES; 6]))
 }
 
-fn photo_log_page(photos: &[Photo]) -> String {
-    let ops = photos
+fn photo_log_page(photos: &[Photo], since: usize) -> String {
+    if since < ROWS_IN_A_LOG_PAGE {
+        return serde_json::json!({
+            "ops": [], "nextCursor": ROWS_IN_A_LOG_PAGE, "hasMore": true
+        })
+        .to_string();
+    }
+    let served = if since == ROWS_IN_A_LOG_PAGE {
+        photos
+    } else {
+        &[]
+    };
+    let ops = served
         .iter()
         .enumerate()
         .map(|(index, photo)| {
             serde_json::json!({
-                "relaySeq": index + 1,
+                "relaySeq": ROWS_IN_A_LOG_PAGE + index + 1,
                 "originId": "granter",
                 "originSeq": index,
                 "opKind": "moment.append",
@@ -291,7 +302,10 @@ fn photo_log_page(photos: &[Photo]) -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "ops": ops, "nextCursor": photos.len(), "hasMore": false }).to_string()
+    serde_json::json!({
+        "ops": ops, "nextCursor": ROWS_IN_A_LOG_PAGE + photos.len(), "hasMore": false
+    })
+    .to_string()
 }
 
 #[derive(Default)]
@@ -367,11 +381,10 @@ fn serve_over_slow_link(
             link.0.lock().unwrap().photos_asked_for.push(asked);
             &photos[asked]
         });
-        let page = if path.contains("since=0&") {
-            photo_log_page(photos)
+        let page = if photo.is_some() {
+            String::new()
         } else {
-            serde_json::json!({ "ops": [], "nextCursor": photos.len(), "hasMore": false })
-                .to_string()
+            photo_log_page(photos, since(&path))
         };
         let length = photo.map_or(page.len(), |photo| photo.bytes.len());
         let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {length}\r\n\r\n");

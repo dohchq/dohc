@@ -840,7 +840,14 @@ pub struct PullContinuation(
     std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
     std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
     std::sync::Arc<std::sync::Mutex<SharePageBlobRefusals>>,
+    std::sync::Arc<std::sync::Mutex<Option<ShareLogReads>>>,
 );
+
+struct ShareLogReads {
+    pull: (String, i64),
+    began: std::time::Instant,
+    pages_decided: usize,
+}
 
 #[derive(Default)]
 struct SharePageBlobRefusals {
@@ -1155,6 +1162,47 @@ impl PullContinuation {
         }
         refusals
     }
+
+    /// Whether the pull of `share_id` that started at `starting_cursor` reads
+    /// its `page`th share-log page. The first page is always read. A later
+    /// page is decided once, while the budget lasts, and a decided page is
+    /// read on every later pass of the request whatever the clock says then.
+    fn reads_share_log_page(&self, share_id: &str, starting_cursor: i64, page: usize) -> bool {
+        let mut reads = self
+            .3
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pull = (share_id.to_owned(), starting_cursor);
+        if reads.as_ref().is_none_or(|reads| reads.pull != pull) {
+            *reads = Some(ShareLogReads {
+                pull,
+                began: std::time::Instant::now(),
+                pages_decided: 0,
+            });
+        }
+        let Some(reads) = reads.as_mut() else {
+            return true;
+        };
+        if page > reads.pages_decided {
+            if reads.pages_decided > 0 && reads.began.elapsed() >= SHARE_LOG_EMPTY_PAGES_BUDGET {
+                return false;
+            }
+            reads.pages_decided = page;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_share_log_reads(&self, by: std::time::Duration) {
+        if let Some(reads) = self
+            .3
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            reads.began -= by;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1167,6 +1215,12 @@ pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
 /// on the relay plus a round trip, so 16 pages on a 400 ms round trip stay
 /// under 10 seconds of the desktop's 30-second RPC deadline.
 const MAX_SHARE_LOG_PAGES_PER_PULL: usize = 16;
+/// How long after its first share-log read one pull still decides to read
+/// another empty page. A slow relay can take seconds a page, and the pull has
+/// to answer inside the desktop's 30-second RPC deadline for the desktop to
+/// commit its cursor, so the other 20 seconds are left for the page in flight,
+/// the page that holds operations, and its downloads.
+const SHARE_LOG_EMPTY_PAGES_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_BLOB_UPLOAD_BATCH_BYTES: usize = 1024 * 1024;
 
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
@@ -5154,7 +5208,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     /// Pull the next page of a received share that holds something for it.
     /// Pages that hold nothing are read past in the same call, up to
-    /// `MAX_SHARE_LOG_PAGES_PER_PULL` of them.
+    /// `MAX_SHARE_LOG_PAGES_PER_PULL` of them and for no longer than
+    /// `SHARE_LOG_EMPTY_PAGES_BUDGET`.
     ///
     /// `granted` is the selector the relay stated for this share, pinned by
     /// the recipient on first read, and it is enforced against every inbound
@@ -5177,7 +5232,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scope_id = format!("view:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
+        let starting_cursor = cursor;
         let mut pages_read = 0;
+        self.continuation
+            .reads_share_log_page(share_id, starting_cursor, 1);
         let page = loop {
             let page = self.transport.share_view_pull(ShareViewRequest {
                 include_work_references: true,
@@ -5188,7 +5246,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })?;
             validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
             pages_read += 1;
-            if !page.ops.is_empty() || !page.has_more || pages_read == MAX_SHARE_LOG_PAGES_PER_PULL
+            if !page.ops.is_empty()
+                || !page.has_more
+                || pages_read == MAX_SHARE_LOG_PAGES_PER_PULL
+                || !self.continuation.reads_share_log_page(
+                    share_id,
+                    starting_cursor,
+                    pages_read + 1,
+                )
             {
                 break page;
             }

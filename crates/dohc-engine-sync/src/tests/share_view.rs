@@ -4318,3 +4318,103 @@ fn share_view_pull_that_fails_on_an_empty_log_page_starts_again_from_its_stored_
         .expect("moment count");
     assert_eq!(moments, 1, "the note was applied more than once");
 }
+
+#[test]
+fn share_view_pull_stops_reading_empty_log_pages_once_they_have_taken_10_seconds() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let request = crate::PullContinuation::default();
+    let clock = request.clone();
+    let mut relay = note_behind_empty_log_pages(16, b"The note.\n");
+    relay.after_view_pull = Some(Box::new(move || {
+        clock.age_share_log_reads(std::time::Duration::from_secs(2));
+    }));
+    let client = RelaySyncClient::resuming(relay, request);
+
+    let mut pulls = 0;
+    loop {
+        let outcome = client
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .expect("share view pull");
+        pulls += 1;
+        if pulls == 1 {
+            assert_eq!(
+                share_log_pages_read(&client),
+                [0, 10, 20, 30, 40],
+                "a pull whose log pages take 2 seconds each read past its 10 seconds"
+            );
+            assert_eq!(
+                (
+                    outcome.fetched,
+                    outcome.has_more,
+                    outcome.pending_cursor.cursor
+                ),
+                (0, true, 50)
+            );
+        }
+        if !outcome.has_more {
+            break;
+        }
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &outcome.pending_cursor, &NoFaults)
+            .expect("commit the cursor past the pages read");
+    }
+
+    assert_eq!(pulls, 4);
+    assert_eq!(share_log_pages_read(&client).len(), 17);
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+}
+
+#[test]
+fn share_view_pull_reads_every_page_an_earlier_pass_decided_whatever_the_clock_says() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let request = crate::PullContinuation::default();
+    let mut stops_at_its_third_page = note_behind_empty_log_pages(4, b"The note.\n");
+    stops_at_its_third_page.view_pages.remove(&20);
+    let earlier_pass = RelaySyncClient::resuming(stops_at_its_third_page, request.clone());
+
+    earlier_pass
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect_err("a pass that waits for its third log page");
+    assert_eq!(share_log_pages_read(&earlier_pass), [0, 10, 20]);
+
+    request.age_share_log_reads(std::time::Duration::from_secs(60));
+    let later_pass =
+        RelaySyncClient::resuming(note_behind_empty_log_pages(4, b"The note.\n"), request);
+    let outcome = later_pass
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a later pass of the same request");
+
+    assert_eq!(
+        share_log_pages_read(&later_pass),
+        [0, 10, 20],
+        "a later pass asks for the pages the earlier pass decided, and decides no more after the budget"
+    );
+    assert_eq!(
+        (
+            outcome.fetched,
+            outcome.has_more,
+            outcome.pending_cursor.cursor
+        ),
+        (0, true, 30)
+    );
+}
