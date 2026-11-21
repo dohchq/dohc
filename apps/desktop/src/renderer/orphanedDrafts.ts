@@ -7,6 +7,10 @@ import {
   forgetStoredDraft,
   loadStoredDrafts,
   isStoredDraftCurrent,
+  isStoredDraftPending,
+  storedDraftSettled,
+  loadDraftFiles,
+  onDraftFilesChanged,
   persistable,
   remapStoredDraftPaths,
   replaceStoredDraft,
@@ -22,8 +26,9 @@ import {
 // The text never goes back into the document — writing it there is the clobber
 // the capture exists to prevent — but it does reach disk, in the app's
 // own storage and never in the workspace tree. `orphanedDraftStorage` keeps
-// the copy that outlives the app run; this module keeps the copy every surface
-// reads, and `restoreOrphanedDrafts` puts the two together at startup.
+// the copy that outlives the app run, one file each in main; this module keeps
+// the copy every surface reads, and `restoreOrphanedDrafts` puts the two
+// together at startup.
 
 export type OrphanedDraft = {
   id: number;
@@ -69,11 +74,6 @@ let notifyQueued = false;
 // sees stable references between mutations.
 let storeVersion = 0;
 const pathSetCache = new Map<string, { version: number; paths: ReadonlySet<string> }>();
-// The drafts a restart brings back. Everything else — a secret-classified
-// path the plaintext store refuses, and a draft whose write the storage quota
-// refused — dies with this app run, and only those stay behind the close
-// warning.
-let storedIds: Set<number> = new Set();
 const recoveryRequests = new Map<string, Promise<void>>();
 
 // A late list or dismiss reply must not reintroduce a record a later dismiss removed.
@@ -161,7 +161,7 @@ function keyFor(workspaceId: string, path: string): string {
 
 // Deferred because some captures still run during document-view render. A
 // synchronous notification there would schedule subscriber renders mid-render.
-if (typeof window !== "undefined") window.addEventListener("storage", scheduleNotify);
+onDraftFilesChanged(scheduleNotify);
 
 function scheduleNotify(): void {
   // Every caller just mutated the map; the bump invalidates snapshot caches.
@@ -204,12 +204,7 @@ export function captureOrphanedDraft(
   // One reading for both halves, or the copy that outlives the run would sort
   // against a different clock than the copy on screen.
   const capturedAtMs = Date.now();
-  // Durable before the notice exists. The write is synchronous, so the
-  // answer the close guard needs is already true here — a draft is at risk
-  // only when storage refused it.
-  if (storeDraft({ id, workspaceId, path, text, capturedAtMs, recovery })) {
-    storedIds.add(id);
-  }
+  void storeDraft({ id, workspaceId, path, text, capturedAtMs, recovery });
   // Append, never overwrite: a second reopen with the first notice still up
   // must not destroy the first draft.
   drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs, recovery }]);
@@ -251,30 +246,25 @@ export function replaceOrphanedDraft(
     key,
     current.map((draft) => (draft.id === id ? replacement : draft)),
   );
-  if (
-    replaceStoredDraft({
-      id,
-      workspaceId,
-      path,
-      text,
-      capturedAtMs: captured.capturedAtMs,
-      recovery: replacement.recovery,
-    })
-  ) {
-    storedIds.add(id);
-  } else {
-    storedIds.delete(id);
-  }
+  void replaceStoredDraft({
+    id,
+    workspaceId,
+    path,
+    text,
+    capturedAtMs: captured.capturedAtMs,
+    recovery: replacement.recovery,
+  });
   scheduleNotify();
 }
 
 // Startup restore: the persisted recoveries land in the same store the
 // in-document notice, the tab dot, the notice center, and the close warning
 // already read, so every one of those surfaces works unchanged. Called once,
-// from main.tsx before the root renders — synchronous, before any subscriber
-// or any workspace exists, so there is nothing to notify and no in-flight
-// response that could repaint a workspace the user has switched away from.
-export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
+// from main.tsx before the root renders — before any subscriber or any
+// workspace exists, so there is nothing to notify and no in-flight response
+// that could repaint a workspace the user has switched away from.
+export async function restoreOrphanedDrafts(nowMs: number = Date.now()): Promise<void> {
+  await loadDraftFiles();
   // Oldest first, by the same key the merge uses — storage holds arrival
   // order, which agrees with it except for a row whose capture time the load
   // pass had to repair.
@@ -285,7 +275,6 @@ export function restoreOrphanedDrafts(nowMs: number = Date.now()): void {
       ...(drafts.get(key) ?? EMPTY),
       { id: row.id, text: row.text, capturedAtMs: row.capturedAtMs, recovery: row.recovery },
     ]);
-    storedIds.add(row.id);
     // Storage maps each local handle to its durable key. Reserve restored
     // handles so this renderer's new captures cannot reuse them.
     claimedIds.add(row.id);
@@ -353,7 +342,6 @@ function retireOrphanedDraft(workspaceId: string, path: string, id: number): voi
   // next launch. (Copy leaves the draft standing on purpose: taking the text
   // is not deciding you are done with it.)
   forgetStoredDraft(id);
-  storedIds.delete(id);
   scheduleNotify();
 }
 
@@ -371,7 +359,6 @@ export function remapOrphanedDraftPaths(
   // path drops its plaintext row instead. Those drafts stop being durable
   // and go back behind the close warning.
   const demoted = remapStoredDraftPaths(workspaceId, project);
-  for (const id of demoted) storedIds.delete(id);
   let changed = demoted.size > 0;
   for (const [key, kept] of [...drafts]) {
     const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
@@ -457,14 +444,19 @@ export function atRiskOrphanedDraftIds(): readonly number[] {
   return ids;
 }
 
+/** Settles once main has answered every write of this draft. */
+export function orphanedDraftStoreSettled(id: number): Promise<void> {
+  return storedDraftSettled(id);
+}
+
 export function isOrphanedDraftStored(id: number): boolean {
-  return storedIds.has(id) && isStoredDraftCurrent(id);
+  return isStoredDraftCurrent(id);
 }
 
 // Whether storage refused a draft it should keep. A path storage never keeps
 // stays in this run, behind the close warning.
 export function orphanedDraftStorageRefused(path: string, id: number): boolean {
-  return persistable(path) && !isOrphanedDraftStored(id);
+  return persistable(path) && !isStoredDraftPending(id) && !isOrphanedDraftStored(id);
 }
 
 export type OrphanedDraftRow = {
@@ -539,7 +531,6 @@ export function orphanedDraftStoreVersionForTests(): number {
 export function resetOrphanedDrafts(): void {
   drafts.clear();
   workspaceLabels.clear();
-  storedIds = new Set();
   clearStoredDrafts();
   claimedIds.clear();
   scheduleNotify();

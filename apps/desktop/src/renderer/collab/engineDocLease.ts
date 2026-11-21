@@ -22,6 +22,7 @@ import { binaryFileDataFromArtifact, sameArtifactAssetDescriptor } from "../exca
 import {
   captureOrphanedDraft,
   orphanedDraftStorageRefused,
+  orphanedDraftStoreSettled,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
 import { reportDocumentReplacement } from "../shell/useDocumentSaveNotices";
@@ -1127,8 +1128,10 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
     detachSaveObserver = () => doc.off("update", onUpdate);
   };
 
-  const preserveRetiredDocument = (retired: Y.Doc): void => {
+  const preserveRetiredDocument = async (retired: Y.Doc): Promise<void> => {
     writesRefused.current = true;
+    const answering = retiredDrafts.get(retired)?.draftId ?? recovery.draftId;
+    if (answering !== null) await orphanedDraftStoreSettled(answering);
     const retiredRecoverySlot = recovery;
     // A deletion (or other capture) already owns a draft for this mirror —
     // the retired preserve refines that row instead of adding a sibling.
@@ -1299,6 +1302,7 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
     retired.on("update", onRetiredUpdate);
     retiredDraft.detach = () => retired.off("update", onRetiredUpdate);
     retiredDrafts.set(retired, retiredDraft);
+    if (replacedDraftId !== null) await orphanedDraftStoreSettled(replacedDraftId);
     assertRetiredDocumentStored();
     setOutcome(null);
   };
