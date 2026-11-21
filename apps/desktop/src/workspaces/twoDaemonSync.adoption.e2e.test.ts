@@ -1052,6 +1052,93 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
             { timeout: 120_000 },
           )
           .toContain("Name: Local after stop");
+        const resumed = (await discovery()).find((row) => row.binding.currentPath === path)!;
+        const resumedPass = (signal: AbortSignal) =>
+          source.sessions.run(source.workspace, async ({ workspace }) =>
+            runNativeOwnerDeliveryPass({
+              client: source.nativeClient(),
+              workspaceHandle: workspace,
+              document: resumed,
+              config: { ...config, documents: [resumed] },
+              refusals,
+              signal,
+              bearer: relayConnection.token,
+              accountId: workspaceId,
+              assertCurrent() {},
+            }),
+          );
+        expect(["empty", "acknowledged"]).toContain(await resumedPass(AbortSignal.timeout(60_000)));
+        const resumedSession = await capture.openYDocSession({
+          path,
+          contentKind: "richdoc",
+          onRemoteUpdate: () => undefined,
+        });
+        await resumedSession.applyDecidedLocalUpdate(
+          (doc) => {
+            const scratch = new Y.Doc();
+            try {
+              Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+              const before = Y.encodeStateVector(scratch);
+              patchFrontmatter(scratch, new Map([["Name", "Live after resume"]]));
+              return Y.encodeStateAsUpdate(scratch, before);
+            } finally {
+              scratch.destroy();
+            }
+          },
+          undefined,
+          {
+            actorOriginId: "local-person",
+            attribution: { actorKind: "human" },
+            idempotencyKey: "after-resume",
+          },
+        );
+        const currentFile = () => {
+          const db = new DatabaseSync(relayOptions.dbPath, { readOnly: true });
+          try {
+            return (
+              db
+                .prepare(
+                  "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?",
+                )
+                .get(workspaceId, path) as { blob_sha256: string } | undefined
+            )?.blob_sha256;
+          } finally {
+            db.close();
+          }
+        };
+        await expect
+          .poll(
+            async () => {
+              await resumedPass(AbortSignal.timeout(60_000));
+              await relay.pull((apply) => capture!.runRelaySync(apply));
+              const hosted = await readFile(join((await hostStore())!, path));
+              return hosted.includes("Name: Live after resume") &&
+                createHash("sha256").update(hosted).digest("hex") === currentFile()
+                ? "followed"
+                : "behind";
+            },
+            { timeout: 120_000 },
+          )
+          .toBe("followed")
+          .catch((error) => {
+            const db = new DatabaseSync(relayOptions.dbPath, { readOnly: true });
+            try {
+              throw new Error(
+                JSON.stringify({
+                  current: currentFile(),
+                  moments: db
+                    .prepare(
+                      "SELECT relay_seq,origin_id,json_extract(payload_json,'$.payloadBeforeBlobSha256') AS before,json_extract(payload_json,'$.payloadAfterBlobSha256') AS after FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json,'$.objectId')=?",
+                    )
+                    .all(workspaceId, document.binding.objectId),
+                }),
+                { cause: error },
+              );
+            } finally {
+              db.close();
+            }
+          });
+        await resumedSession.close({ settle: false });
         await relayServer.stop();
         relayServer = await spawnSyncRelay(relayOptions);
         proxy.routeRelayTo(relayServer.baseUrl);

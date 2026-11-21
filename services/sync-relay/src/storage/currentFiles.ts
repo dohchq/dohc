@@ -345,7 +345,7 @@ export function applyCurrentFileOp(
   opKind: string,
   payloadJson: string,
   relaySeq: number,
-  ownerSaveReplacesStoredFile = false,
+  replacesStoredFile: () => boolean = () => false,
 ): void {
   let parsed: unknown;
   try {
@@ -425,7 +425,7 @@ export function applyCurrentFileOp(
           versionId === "main" &&
           before.path === afterPath &&
           payload.payloadAfterContentKind !== "binary" &&
-          ownerSaveReplacesStoredFile
+          replacesStoredFile()
         )
       )
         return;
