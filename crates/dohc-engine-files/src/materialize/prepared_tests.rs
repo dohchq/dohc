@@ -134,24 +134,44 @@ fn a_temp_changed_since_it_was_prepared_is_written_again() {
 }
 
 #[test]
-fn temps_no_job_took_go_with_the_folders_made_for_them() {
-    let mut ws = Workspace::new("untaken");
+fn a_temp_replaced_since_it_was_prepared_is_written_again() {
+    let mut ws = Workspace::new("replaced");
+    let job = ws.job(0, "a.md", Some(b"before"), b"after");
+    let prepared = ws.prepare(&[&job]);
+    let temp = ws.temp(&job);
+    let modified = std::fs::metadata(&temp).unwrap().modified().unwrap();
+    std::fs::remove_file(&temp).unwrap();
+    std::fs::write(&temp, b"AFTER").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&temp)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(ws.run(&job, &prepared), JobOutcome::Completed);
+    assert_eq!(ws.read("a.md"), b"after");
+}
+
+#[test]
+fn a_job_whose_folder_is_missing_gets_no_temp() {
+    let mut ws = Workspace::new("missing");
     let deep = ws.job(0, "new/deep/a.md", None, b"a");
     let kept = ws.job(1, "notes/b.md", Some(b"before"), b"b");
     let prepared = ws.prepare(&[&deep, &kept]);
-    assert!(ws.temp(&deep).is_file());
+    assert!(!ws.root.join("new").exists());
     assert!(ws.temp(&kept).is_file());
     drop(prepared);
-    assert!(!ws.root.join("new").exists());
     assert!(!ws.temp(&kept).exists());
     assert_eq!(ws.read("notes/b.md"), b"before");
 }
 
 #[test]
-fn a_file_that_already_holds_the_content_gets_no_temp() {
+fn a_file_that_already_holds_the_content_is_left_and_its_temp_removed() {
     let mut ws = Workspace::new("already");
     let job = ws.job(0, "a.md", Some(b"same"), b"same");
     let prepared = ws.prepare(&[&job]);
-    assert!(!ws.temp(&job).exists());
     assert_eq!(ws.run(&job, &prepared), JobOutcome::AlreadyMaterialized);
+    drop(prepared);
+    assert!(!ws.temp(&job).exists());
+    assert_eq!(ws.read("a.md"), b"same");
 }

@@ -4924,14 +4924,6 @@ fn prepare_target_parent_symlink_free(root: &Path, target: &Path) -> Result<(), 
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), MaterializeError> {
-    ensure_real_directory_noting(path, &mut Vec::new())
-}
-
-/// [`ensure_real_directory`], adding each folder it creates to `created`.
-fn ensure_real_directory_noting(
-    path: &Path,
-    created: &mut Vec<PathBuf>,
-) -> Result<(), MaterializeError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
@@ -4947,12 +4939,9 @@ fn ensure_real_directory_noting(
             Ok(())
         }
         Err(err) if err.kind() == ErrorKind::NotFound => match std::fs::create_dir(path) {
-            Ok(()) => {
-                created.push(path.to_path_buf());
-                reject_link_or_reparse(path)
-            }
+            Ok(()) => reject_link_or_reparse(path),
             Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => {
-                ensure_real_directory_noting(path, created)
+                ensure_real_directory(path)
             }
             Err(create_err) => Err(MaterializeError::io(path, &create_err)),
         },

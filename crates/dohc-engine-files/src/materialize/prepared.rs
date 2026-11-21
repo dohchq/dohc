@@ -1,22 +1,23 @@
 use super::{
-    DurabilityPolicy, EngineStore, MAX_MATERIALIZE_BYTES, TargetHash, TargetReads,
-    ensure_real_directory_noting, reject_link_or_reparse, resolve_target, temp_sibling,
+    DurabilityPolicy, EngineStore, MAX_MATERIALIZE_BYTES, MaterializeError,
+    metadata_is_reparse_point, reject_link_or_reparse, resolve_target, temp_sibling,
     walk_target_components, write_temp,
 };
 use dohc_engine_storage::{FileFlusher, Flushed, MaterializationJob, MaterializationOperation};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::SystemTime;
 
 const WORKERS: usize = 64;
 const BYTE_BUDGET: usize = 64 << 20;
 
 /// Temps for ordinary writes, written and flushed many at a time before their
 /// jobs run. A job that takes its temp skips writing and flushing one, so its
-/// file is still on disk before it replaces the target. Dropping this removes
-/// every temp no job took, and the folders made only for them.
+/// file is still on disk before it replaces the target. A job only takes the
+/// file that was flushed, unchanged since. Dropping this removes every temp no
+/// job took.
 #[derive(Default)]
 pub struct PreparedTemps {
     temps: RefCell<HashMap<String, PreparedTemp>>,
@@ -25,10 +26,21 @@ pub struct PreparedTemps {
 struct PreparedTemp {
     path: PathBuf,
     stamp: Stamp,
-    created: Vec<PathBuf>,
 }
 
-type Stamp = (u64, Option<SystemTime>);
+/// A file's identity, size, and modification time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    device: u64,
+    index: u64,
+    len: u64,
+    modified: Modified,
+}
+
+#[cfg(unix)]
+type Modified = (i64, i64);
+#[cfg(windows)]
+type Modified = u64;
 
 struct Work<'a> {
     job: &'a MaterializationJob,
@@ -108,8 +120,8 @@ impl PreparedTemps {
         prepared
     }
 
-    /// Whether `job_id` has its temp at `tmp`, as it was prepared. A temp
-    /// changed since is left for the job to replace.
+    /// Whether `job_id` has at `tmp` the file prepared and flushed for it,
+    /// unchanged since. Any other file there is left for the job to replace.
     pub(super) fn take(&self, job_id: &str, tmp: &Path) -> bool {
         let mut temps = self.temps.borrow_mut();
         if temps.get(job_id).is_none_or(|temp| temp.path != tmp) {
@@ -117,20 +129,15 @@ impl PreparedTemps {
         }
         temps
             .remove(job_id)
-            .is_some_and(|temp| stamp(tmp) == Some(temp.stamp))
+            .is_some_and(|temp| path_stamp(tmp) == Some(temp.stamp))
     }
 }
 
 impl Drop for PreparedTemps {
     fn drop(&mut self) {
-        let mut created = Vec::new();
         for (_, temp) in self.temps.get_mut().drain() {
-            if stamp(&temp.path) == Some(temp.stamp) {
-                let _ = std::fs::remove_file(&temp.path);
-            }
-            created.extend(temp.created);
+            remove_if_unchanged(&temp.path, temp.stamp);
         }
-        remove_folders(created);
     }
 }
 
@@ -139,59 +146,82 @@ fn prepare_one(
     work: &Work<'_>,
     flusher: Option<FileFlusher>,
 ) -> Option<(String, PreparedTemp, Option<Flushed>)> {
-    let mut created = Vec::new();
-    let written = (|| {
-        let parent = work.target.parent()?;
-        walk_target_components(root, parent, |folder| {
-            ensure_real_directory_noting(folder, &mut created)
-        })
-        .ok()?;
-        reject_link_or_reparse(&work.target).ok()?;
-        if let Ok(TargetHash::Sha(sha)) = TargetReads::default().read(&work.target)
-            && sha == work.job.content_sha256
-        {
-            return None;
-        }
-        let path = temp_sibling(&work.target, &work.job.job_id);
-        let file = write_temp(&work.target, &path, &work.content, false).ok()?;
-        let flushed = flusher.map(|flusher| flusher.flush(&file)).transpose();
-        drop(file);
-        match (flushed, stamp(&path)) {
-            (Ok(flushed), Some(stamp)) => Some((path, stamp, flushed)),
-            _ => {
-                let _ = std::fs::remove_file(&path);
-                None
-            }
-        }
-    })();
-    match written {
-        Some((path, stamp, flushed)) => Some((
+    walk_target_components(
+        root,
+        work.target.parent()?,
+        |folder| match std::fs::symlink_metadata(folder) {
+            Ok(metadata) if metadata.is_dir() && !metadata_is_reparse_point(&metadata) => Ok(()),
+            _ => Err(MaterializeError::UnsafeTargetPath),
+        },
+    )
+    .ok()?;
+    reject_link_or_reparse(&work.target).ok()?;
+    let path = temp_sibling(&work.target, &work.job.job_id);
+    let file = write_temp(&work.target, &path, &work.content, false).ok()?;
+    let flushed = flusher.map(|flusher| flusher.flush(&file)).transpose();
+    let stamp = file_stamp(&file);
+    drop(file);
+    match (flushed, stamp) {
+        (Ok(flushed), Some(stamp)) => Some((
             work.job.job_id.clone(),
-            PreparedTemp {
-                path,
-                stamp,
-                created,
-            },
+            PreparedTemp { path, stamp },
             flushed,
         )),
-        None => {
-            remove_folders(created);
+        (_, stamp) => {
+            if let Some(stamp) = stamp {
+                remove_if_unchanged(&path, stamp);
+            }
             None
         }
     }
 }
 
-fn stamp(path: &Path) -> Option<Stamp> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    metadata
-        .file_type()
-        .is_file()
-        .then(|| (metadata.len(), metadata.modified().ok()))
+fn remove_if_unchanged(path: &Path, stamp: Stamp) {
+    if path_stamp(path) == Some(stamp) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
-fn remove_folders(mut folders: Vec<PathBuf>) {
-    folders.sort_by_key(|folder| std::cmp::Reverse(folder.components().count()));
-    for folder in folders {
-        let _ = std::fs::remove_dir(folder);
-    }
+#[cfg(unix)]
+fn file_stamp(file: &File) -> Option<Stamp> {
+    metadata_stamp(&file.metadata().ok()?)
+}
+
+#[cfg(unix)]
+fn path_stamp(path: &Path) -> Option<Stamp> {
+    metadata_stamp(&std::fs::symlink_metadata(path).ok()?)
+}
+
+#[cfg(unix)]
+fn metadata_stamp(metadata: &std::fs::Metadata) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_file().then(|| Stamp {
+        device: metadata.dev(),
+        index: metadata.ino(),
+        len: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+    })
+}
+
+#[cfg(windows)]
+fn file_stamp(file: &File) -> Option<Stamp> {
+    let information = winapi_util::file::information(file).ok()?;
+    Some(Stamp {
+        device: information.volume_serial_number(),
+        index: information.file_index(),
+        len: information.file_size(),
+        modified: information.last_write_time()?,
+    })
+}
+
+#[cfg(windows)]
+fn path_stamp(path: &Path) -> Option<Stamp> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    file_stamp(&file)
 }
