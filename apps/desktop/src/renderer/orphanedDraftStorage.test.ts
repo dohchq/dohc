@@ -100,6 +100,37 @@ describe("a rename while the first write is still on its way", () => {
   });
 });
 
+it.each([
+  ["b.md", ["b.md"]],
+  [".env", []],
+])(
+  "moves the older file to %s when the replacement in flight during the rename fails",
+  async (renamed, paths) => {
+    expect(await storeDraft(draft)).toBe(true);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      ...disk.calls,
+      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
+        gate.then(() => {
+          if (input.raw.includes("newer typing")) throw new Error("No space left on device");
+          return disk.calls.writeSetAsideDraft(input);
+        }),
+      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
+        gate.then(() => disk.calls.removeSetAsideDraft(input)),
+    });
+    const replaced = replaceStoredDraft({ ...draft, text: "newer typing" });
+    remapStoredDraftPaths("ws", () => renamed);
+    release();
+    expect(await replaced).toBe(false);
+    await draftFileWritesSettled();
+    expect(disk.rows().map((row) => [row.path, row.text])).toEqual(
+      paths.map((path) => [path, draft.text]),
+    );
+  },
+);
+
 it("reports a draft whose write failed as not kept", async () => {
   disk.fail(new Error("No space left on device"));
   expect(await storeDraft(draft)).toBe(false);

@@ -25,6 +25,7 @@ import {
   orphanedDraftStoreSettled,
   replaceOrphanedDraft,
 } from "../orphanedDrafts";
+import { isStoredDraftPending } from "../orphanedDraftStorage";
 import { reportDocumentReplacement } from "../shell/useDocumentSaveNotices";
 import { bytesToBase64 } from "../base64";
 import {
@@ -1302,15 +1303,18 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
     retired.on("update", onRetiredUpdate);
     retiredDraft.detach = () => retired.off("update", onRetiredUpdate);
     retiredDrafts.set(retired, retiredDraft);
-    if (replacedDraftId !== null) await orphanedDraftStoreSettled(replacedDraftId);
-    assertRetiredDocumentStored();
+    const checked = assertRetiredDocumentStored();
+    if (checked) await checked;
     setOutcome(null);
   };
 
   // The retired editor stays until storage keeps its edits, and the winner
   // waits for Try again. Checked again right before the acknowledgement,
   // because a late edit can reach a draft that storage refuses.
-  const assertRetiredDocumentStored = (): void => {
+  const assertRetiredDocumentStored = (): void | Promise<void> => {
+    const answering = replacedDraftId;
+    if (answering !== null && isStoredDraftPending(answering))
+      return orphanedDraftStoreSettled(answering).then(assertRetiredDocumentStored);
     if (replacedDraftUnstored()) throw new Error("Storage refused the earlier edits.");
   };
 
