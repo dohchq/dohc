@@ -324,6 +324,8 @@ export function appendLogBatchInTransaction(
   const currentFileStmt = currentFileStatements(storage.db);
   const owner = input.workReferences?.userId;
   const pushMessages: number[] = [];
+  const ownerEdits: Array<{ userId: string; payloadJson: string; authors: LiveAuthorSnapshot }> =
+    [];
   for (const op of newOps) {
     const result = insertStmt.run(
       input.workspaceId,
@@ -348,8 +350,7 @@ export function appendLogBatchInTransaction(
       continue;
     if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
     if (op.opKind === "ydoc.update" && owner !== undefined && op.admittedAuthorSnapshot)
-      bindStoppedNoteClient(storage, {
-        workspaceId: input.workspaceId,
+      ownerEdits.push({
         userId: owner,
         payloadJson: op.payloadJson,
         authors: op.admittedAuthorSnapshot,
@@ -447,6 +448,8 @@ export function appendLogBatchInTransaction(
     );
   }
   for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
+  for (const edit of ownerEdits)
+    bindStoppedNoteClient(storage, { workspaceId: input.workspaceId, ...edit });
   const settlementRefusals = input.ops
     .filter((op) => op.settlementAdmission?.status === "refused")
     .map((op) => ({

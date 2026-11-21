@@ -17,6 +17,7 @@ import { referencedBlobShas } from "./storage/blobReferences";
 import { stableJsonStringify } from "./canonicalJson";
 import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
+import { workspaceUsageBytes } from "./storage/workspaces";
 import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollment";
 import { appendLiveRoomEdit } from "./storage/liveRoomEdits";
 import * as Yjs from "yjs";
@@ -972,7 +973,14 @@ it.each([
 
 const ownerAuthor = [{ kind: "human", humanId: "owner-1", humanName: "Owner" }] as const;
 const agentAuthor = { kind: "agent", agentId: "agent-1", agentName: "Agent" } as const;
-const ownerEdit = { retire: true, account: true, clients: [42], base: false, agent: false };
+const ownerEdit = {
+  retire: true,
+  account: true,
+  clients: [42],
+  base: false,
+  agent: false,
+  full: false,
+};
 it.each([
   { name: "the owner after a Stop", ...ownerEdit, takes: true },
   { name: "the owner after a Pause", ...ownerEdit, retire: false, takes: false },
@@ -980,6 +988,7 @@ it.each([
   { name: "two new editor ids", ...ownerEdit, clients: [42, 43], takes: false },
   { name: "the owner's whole note rather than an edit", ...ownerEdit, base: true, takes: false },
   { name: "an agent working for the owner", ...ownerEdit, agent: true, takes: false },
+  { name: "a push that fills the workspace", ...ownerEdit, full: true, takes: false },
 ] as const)(
   "lets the owner's room edit build on the owner's own edit from a Stop: $name",
   async (input) => {
@@ -995,30 +1004,50 @@ it.each([
       guard() {},
     });
     const doc = new Yjs.Doc();
-    for (const clientId of input.clients) {
-      doc.clientID = clientId;
-      doc.getMap("frontmatter").set(`title-${clientId}`, "Owner");
-    }
-    const update = { content: Yjs.encodeStateAsUpdate(doc), sha256: "" };
-    update.sha256 = sha256Hex(update.content);
-    f.storage.putBlob({ workspaceId: ws, ...update, createdAtMs: 1 });
-    const op = parseLogOp({
-      originSeq: 0,
-      opKind: "ydoc.update",
-      recordedAtMs: 4,
-      payload: {
-        ...ydoc(binding.objectId, "docs/a.md", update),
-        isBaseState: input.base,
-        attribution: { actorKind: "human" },
-        actorOriginId: "owner-1",
-      },
-    });
     const authors = [...ownerAuthor, ...(input.agent ? [agentAuthor] : [])];
-    if (input.account) op.admittedAuthorSnapshot = authors;
+    const edit = (originSeq: number, change: () => void) => {
+      const sent = Yjs.encodeStateVector(doc);
+      change();
+      const update = { content: Yjs.encodeStateAsUpdate(doc, sent), sha256: "" };
+      update.sha256 = sha256Hex(update.content);
+      f.storage.putBlob({ workspaceId: ws, ...update, createdAtMs: 1 });
+      const op = parseLogOp({
+        originSeq,
+        opKind: "ydoc.update",
+        recordedAtMs: 4,
+        payload: {
+          ...ydoc(binding.objectId, "docs/a.md", update),
+          isBaseState: input.base,
+          attribution: { actorKind: "human" },
+          actorOriginId: "owner-1",
+        },
+      });
+      if (input.account) op.admittedAuthorSnapshot = authors;
+      return op;
+    };
+    const ops = [
+      edit(0, () => {
+        for (const clientId of input.clients) {
+          doc.clientID = clientId;
+          doc.getMap("frontmatter").set(`title-${clientId}`, "Owner");
+        }
+      }),
+    ];
+    if (input.full) {
+      ops.push(edit(1, () => doc.getMap("frontmatter").set("title-42", "Owner later")));
+      const storage = f.storage as unknown as StorageContext;
+      storage.options.workspaceQuotaBytes =
+        workspaceUsageBytes(storage, ws) +
+        ops.reduce(
+          (bytes, op) =>
+            bytes + Buffer.byteLength(op.payloadJson) + Buffer.byteLength(JSON.stringify(authors)),
+          0,
+        );
+    }
     f.storage.appendLogBatch({
       workspaceId: ws,
       originId: "owner-laptop",
-      ops: [op],
+      ops,
       workReferences: { userId: "owner-1", references: [] },
     });
     doc.clientID = 42;
