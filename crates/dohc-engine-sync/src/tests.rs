@@ -694,6 +694,7 @@ struct PagedShareRelay {
     /// nothing else in this file can produce that shape.
     view_blob_errors: BTreeMap<String, RelayError>,
     share_blob_calls: Mutex<Vec<String>>,
+    share_blob_batches: Mutex<Vec<usize>>,
     /// `proposal_calls` records the ORDER the submit lane touches
     /// the transport in, which is the property the blob ordering test needs
     /// and neither typed vector can state on its own.
@@ -725,6 +726,7 @@ impl PagedShareRelay {
             view_blobs: BTreeMap::new(),
             view_blob_errors: BTreeMap::new(),
             share_blob_calls: Mutex::new(Vec::new()),
+            share_blob_batches: Mutex::new(Vec::new()),
             proposal_calls: Mutex::new(Vec::new()),
             blob_uploads: Mutex::new(Vec::new()),
             proposal_submits: Mutex::new(Vec::new()),
@@ -870,6 +872,20 @@ impl RelayTransport for PagedShareRelay {
             .cloned()
             .map(|bytes| BlobDownloadResponse { bytes })
             .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn share_blobs(
+        &self,
+        requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        self.share_blob_batches
+            .lock()
+            .expect("share blob batches")
+            .push(requests.len());
+        Ok(requests
+            .into_iter()
+            .map(|request| self.share_blob(request))
+            .collect())
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
