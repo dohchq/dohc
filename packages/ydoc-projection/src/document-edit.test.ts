@@ -14,6 +14,7 @@ import {
 import {
   getDohcProseMirrorSchema,
   markdownToYDoc,
+  parseRichdocMarkdown,
   startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
@@ -85,6 +86,17 @@ describe("documentEditUpdate", () => {
     const doc = markdownToYDoc("See [docs][x] for details.\n\n[x]: https://example.com");
     edited(doc, { find: "for details", replacement: "for more" });
     expect(markdownOf(doc)).toBe("See [docs][x] for more.\n\n[x]: https://example.com\n");
+    const emphasis = markdownToYDoc("Read *[foo*] here*.\n\n[foo*]: /guide");
+    edited(emphasis, { find: "Read", replacement: "See" });
+    expect(markdownOf(emphasis)).toBe("See *[foo*] here*.\n\n[foo*]: /guide\n");
+    const named = "[constructor] and [__proto__] here.";
+    expect(JSON.stringify(parseRichdocMarkdown(named, "source", named))).not.toContain("rawInline");
+  });
+
+  test("reads a link as text once the same edit removes its definition", () => {
+    const doc = markdownToYDoc("[x]: /x\n\nText.");
+    edited(doc, { find: "[x]: /x\n\nText.", replacement: "Text [x]." }, closed);
+    expect(String(doc.toJSON().body)).toBe("<paragraph>Text [x].</paragraph>");
   });
 
   test("adds a section written as Markdown", () => {

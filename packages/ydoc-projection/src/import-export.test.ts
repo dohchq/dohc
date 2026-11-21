@@ -702,6 +702,13 @@ it.each([
   }
 });
 
+it.each([
+  ["", "<?a ?>\n   \n<?b ?>\n"],
+  ["in a list item", "- <?a ?>\n   \n  <?b ?>\n"],
+])("keeps a blank line with spaces between sealed blocks %s", (_where, markdown) => {
+  expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown.replace("   \n", "\n"));
+});
+
 it("keeps a mark around a picture link in the sealed piece", () => {
   expect(
     parseRichdocMarkdown("**[![a](https://img.example/a.png)](https://a.example)** done").content,

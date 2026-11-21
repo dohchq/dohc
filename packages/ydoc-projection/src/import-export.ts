@@ -74,7 +74,7 @@ const PARSE_REFERENCE_RE = new RegExp(
 let parseReferences: ReadonlyMap<string, string> = new Map();
 let parseTabs: ReadonlyMap<string, string> = new Map();
 // The definitions of the note a parsed piece belongs to.
-let noteLinks: TokensList["links"] = {};
+let noteLinks: TokensList["links"] | undefined;
 let rawHtmlMarkup = { lt: "<", gt: ">", used: false };
 
 // Raw HTML and link reference definitions are sealed: the document holds the
@@ -89,12 +89,12 @@ const sealedBlock = (token: { raw?: string }): JSONContent => ({
 // An HTML block that never closes runs to the end of its container, so it
 // would take in any block an edit adds after it. It reads as text instead,
 // which dohc writes differently, so the note is held.
-const CLOSING_HTML: ReadonlyArray<readonly [RegExp, RegExp]> = [
-  [/^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/iu, /<\/(?:pre|script|style|textarea)>/iu],
-  [/^ {0,3}<!--/u, /-->/u],
-  [/^ {0,3}<!\[CDATA\[/u, /\]\]>/u],
-  [/^ {0,3}<\?/u, /\?>/u],
-  [/^ {0,3}<![A-Za-z]/u, />/u],
+const CLOSING_HTML: ReadonlyArray<readonly [RegExp, (open: RegExpExecArray) => string]> = [
+  [/^ {0,3}<(pre|script|style|textarea)(?=[\s>]|$)/iu, (open) => `</${open[1]!.toLowerCase()}>`],
+  [/^ {0,3}<!--/u, () => "-->"],
+  [/^ {0,3}<!\[CDATA\[/iu, () => "]]>"],
+  [/^ {0,3}<\?/u, () => "?>"],
+  [/^ {0,3}<![A-Za-z]/u, () => ">"],
 ];
 const MarkdownHtml = Extension.create({
   name: "markdownHtml",
@@ -104,7 +104,7 @@ const MarkdownHtml = Extension.create({
     for (const [opener, closer] of CLOSING_HTML) {
       const open = opener.exec(raw);
       if (!open) continue;
-      if (closer.test(raw.slice(open[0].length))) break;
+      if (raw.slice(open[0].length).toLowerCase().includes(closer(open))) break;
       return { type: "paragraph", content: [{ type: "text", text: raw.trimEnd() }] };
     }
     return sealedBlock(token);
@@ -381,7 +381,14 @@ function settleSealedRuns(tokens: Token[], inCell: boolean): void {
     }
     const inner = generic.tokens as Token[] | undefined;
     if (inner) settleSealedRuns(inner, inCell);
-    if (!inline) return;
+    if (!inline) {
+      // A blank line holding spaces after a sealed block is its own token, so
+      // the block takes its line breaks back.
+      const next = tokens[index + 1];
+      if ((token.type === "html" || token.type === "def") && next?.type === "space")
+        token.raw += next.raw;
+      return;
+    }
     if (inCell && token.type === "dohcRawInline" && token.raw === GFM_TABLE_CELL_BLOCK_SEPARATOR) {
       tokens[index] = { type: "escape", raw: token.raw, text: fileAngles(token.raw) };
     } else if (inner?.some((piece) => piece.type === "image" || piece.type === "dohcRawInline")) {
@@ -497,7 +504,7 @@ const markdownParser = new Marked({
     // The document holds no reference, so a link or picture through one is
     // sealed.
     reflink(src, links) {
-      const token = Tokenizer.prototype.reflink.call(this, src, { ...noteLinks, ...links });
+      const token = Tokenizer.prototype.reflink.call(this, src, links);
       return token && token.type !== "text"
         ? (sealedInline(token.raw) as unknown as Tokens.Link)
         : token;
@@ -524,6 +531,7 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
   }
 
   lex(src: string): TokensList {
+    if (noteLinks) Object.assign(this.tokens.links, noteLinks);
     const tokens = super.lex(src);
     settleSealedRuns(tokens, false);
     return tokens;
@@ -695,7 +703,11 @@ export function parseRichdocMarkdown(
   );
   parseReferences = entitySentinels;
   parseTabs = projectionTabs;
-  noteLinks = note === undefined ? {} : Lexer.lex(note).links;
+  if (note !== undefined) {
+    const lexer = new Lexer();
+    lexer.blockTokens(note.replace(/\r\n?/gu, "\n"));
+    noteLinks = lexer.tokens.links;
+  }
   rawHtmlMarkup = markup;
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -713,7 +725,7 @@ export function parseRichdocMarkdown(
   } finally {
     parseReferences = new Map();
     parseTabs = new Map();
-    noteLinks = {};
+    noteLinks = undefined;
     markdownListParseState.references = true;
     rawHtmlMarkup = { lt: "<", gt: ">", used: false };
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() };

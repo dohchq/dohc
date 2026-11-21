@@ -48,6 +48,8 @@ it.each([
   ["code indented under a list item", lossySource],
   ["a comment that never closes", "<!-- draft\n\nNotes\n"],
   ["preformatted text that never closes", "<pre>\nfoo\n"],
+  ["preformatted text closed by another tag", "<pre>\n</script>\n"],
+  ["CDATA in lower case that never closes", "<![cdata[ x\n"],
 ])("flags %s", (_, markdown) => {
   expect(isLossyMarkdown(markdown)).toBe(true);
 });
