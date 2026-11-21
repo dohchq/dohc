@@ -52,9 +52,13 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
 
 const SCAN_WORK_PER_UNIT: usize = 32;
 
+// The editor sets character references aside before marked reads the text,
+// inside code spans too, which changes where emphasis closes.
 fn unsure_text(text: &str) -> bool {
     text.contains(" \n")
         || text.ends_with(' ')
+        || text.contains("&#")
+        || text.to_ascii_lowercase().contains("&amp;#")
         || text.chars().any(|character| {
             matches!(character, '\\' | '\r' | '\u{a0}')
                 || (character.is_control() && character != '\n')
@@ -1156,6 +1160,8 @@ Run `make` and see [`npm install`](https://docs.example/install).
             ])
         );
         assert!(runs("Use <b> and *em*").is_none());
+        assert!(runs("*a ``q`&#42;*x* y`` z*").is_none());
+        assert!(runs("*a ``q`&AMP;#42;*x* y`` z*").is_none());
         assert!(runs("[a](https://e.example/?a=1&b=2) *em*").is_none());
     }
 
