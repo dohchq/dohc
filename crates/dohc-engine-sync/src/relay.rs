@@ -5206,10 +5206,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(())
     }
 
-    /// Pull the next page of a received share that holds something for it.
-    /// Pages that hold nothing are read past in the same call, up to
+    /// Pull one page of a received share. A page that holds operations is
+    /// applied only when it is the first page the call reads. Pages that hold
+    /// nothing are read past in the same call, up to
     /// `MAX_SHARE_LOG_PAGES_PER_PULL` of them and for no longer than
-    /// `SHARE_LOG_EMPTY_PAGES_BUDGET`.
+    /// `SHARE_LOG_EMPTY_PAGES_BUDGET`, and the call then answers with the last
+    /// of them, so the page that holds operations gets a call, and a
+    /// deadline, of its own.
     ///
     /// `granted` is the selector the relay stated for this share, pinned by
     /// the recipient on first read, and it is enforced against every inbound
@@ -5234,6 +5237,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
         let starting_cursor = cursor;
         let mut pages_read = 0;
+        let mut empty_page_before = None;
         self.continuation
             .reads_share_log_page(share_id, starting_cursor, 1);
         let page = loop {
@@ -5246,8 +5250,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })?;
             validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
             pages_read += 1;
-            if !page.ops.is_empty()
-                || !page.has_more
+            if !page.ops.is_empty() {
+                let Some((empty_page_cursor, empty_page)) = empty_page_before.take() else {
+                    break page;
+                };
+                cursor = empty_page_cursor;
+                break empty_page;
+            }
+            if !page.has_more
                 || pages_read == MAX_SHARE_LOG_PAGES_PER_PULL
                 || !self.continuation.reads_share_log_page(
                     share_id,
@@ -5257,7 +5267,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             {
                 break page;
             }
-            cursor = page.next_cursor;
+            let next_cursor = page.next_cursor;
+            empty_page_before = Some((cursor, page));
+            cursor = next_cursor;
         };
         let fetched = page.ops.len();
         let ops = page.ops;

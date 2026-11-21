@@ -455,6 +455,48 @@ impl SlowLinkRelay {
         asked.iter().filter(|asked| **asked == photo).count()
     }
 
+    async fn pull_and_commit_until_no_more(
+        &self,
+        actor: &ActorHandle,
+        deadline: &CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError> {
+        let relay = || RelayConfiguration {
+            base_url: format!("http://{}", self.address),
+            socket_path: None,
+            bearer_token: "token".to_owned(),
+            allow_insecure_loopback_for_tests: true,
+        };
+        loop {
+            let pulled = actor
+                .relay(
+                    relay(),
+                    pull_the_share(),
+                    LeaseRegistry::default(),
+                    deadline.clone(),
+                    None,
+                )
+                .await?;
+            let cursor = match &pulled {
+                RelayOperationOutcome::ShareViewPulled(outcome) if outcome.has_more => {
+                    outcome.pending_cursor.clone()
+                }
+                _ => return Ok(pulled),
+            };
+            actor
+                .relay(
+                    relay(),
+                    RelayOperation::CommitShareViewCursor {
+                        workspace_id: "ws".to_owned(),
+                        cursor,
+                    },
+                    LeaseRegistry::default(),
+                    deadline.clone(),
+                    None,
+                )
+                .await?;
+        }
+    }
+
     async fn pull_until_the_link_is_spent(
         &self,
         actor: &ActorHandle,
@@ -464,18 +506,7 @@ impl SlowLinkRelay {
         self.start_attempt(bytes);
         while link_spent.try_recv().is_ok() {}
         let deadline = CancellationToken::new();
-        let pull = actor.relay(
-            RelayConfiguration {
-                base_url: format!("http://{}", self.address),
-                socket_path: None,
-                bearer_token: "token".to_owned(),
-                allow_insecure_loopback_for_tests: true,
-            },
-            pull_the_share(),
-            LeaseRegistry::default(),
-            deadline.clone(),
-            None,
-        );
+        let pull = self.pull_and_commit_until_no_more(actor, &deadline);
         tokio::pin!(pull);
         let pulled = tokio::select! {
             pulled = &mut pull => pulled,
@@ -626,7 +657,7 @@ async fn a_share_pull_downloads_each_batch_of_a_notes_saved_versions_together() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_share_pull_reads_past_empty_log_pages_over_one_connection() {
+async fn a_share_pull_reads_past_empty_log_pages_in_one_call_and_applies_the_note_in_the_next() {
     let relay = ShareRelay::start(
         Pace::HoldEachBlobUntilItsWholeBatchIsAsked,
         NOTE_BEHIND_4_EMPTY_LOG_PAGES,
@@ -642,7 +673,7 @@ async fn a_share_pull_reads_past_empty_log_pages_over_one_connection() {
     );
     assert_eq!(
         (added.pulls, served.log_requests, served.connections),
-        (1, 5, 1),
+        (2, 6, 2),
         "pull calls, share-log requests, and connections for a note behind 4 empty log pages"
     );
 }

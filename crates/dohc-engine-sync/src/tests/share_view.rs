@@ -4223,6 +4223,49 @@ fn share_view_pull_reads_past_log_pages_that_hold_nothing_for_the_share() {
     let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let client = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
+    let pull = |engine: &mut EngineStore| {
+        client
+            .pull_share_view(engine, "ws", "share", &tracked_grant(["docs"]), &NoFaults)
+            .expect("share view pull")
+    };
+
+    let first = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client), [0, 10, 20, 30, 40]);
+    assert_eq!(
+        (
+            first.fetched,
+            first.applied,
+            first.has_more,
+            first.pending_cursor.cursor
+        ),
+        (0, 0, true, 40),
+        "the first pull answers with the last empty page, whose cursor is the note's page"
+    );
+
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+        .expect("commit the cursor past the empty pages");
+    let second = pull(&mut engine);
+
+    assert_eq!(share_log_pages_read(&client)[5..], [40]);
+    assert_eq!(
+        (
+            second.fetched,
+            second.applied,
+            second.has_more,
+            second.pending_cursor.cursor
+        ),
+        (1, 1, false, 41)
+    );
+    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+}
+
+#[test]
+fn share_view_pull_asks_for_no_blob_of_a_page_it_reached_past_empty_pages() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let client = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
 
     let outcome = client
         .pull_share_view(
@@ -4232,15 +4275,24 @@ fn share_view_pull_reads_past_log_pages_that_hold_nothing_for_the_share() {
             &tracked_grant(["docs"]),
             &NoFaults,
         )
-        .expect("one pull reaches the note behind four empty pages");
+        .expect("a pull that reaches the note's page past four empty ones");
 
-    assert_eq!(share_log_pages_read(&client), [0, 10, 20, 30, 40]);
-    assert_eq!(
-        (outcome.fetched, outcome.applied, outcome.has_more),
-        (1, 1, false)
+    assert!(
+        client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches")
+            .is_empty(),
+        "the pull asked for a blob of the page it should leave to the next pull"
     );
-    assert_eq!(outcome.pending_cursor.cursor, 41);
-    assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
+    assert!(outcome.changed_paths.is_empty() && outcome.refusals.is_empty());
+    assert_eq!(note_text(&mut engine), None);
+    assert_eq!(
+        crate::read_share_cursor(&engine, "ws", "share", crate::CursorKind::ShareView)
+            .expect("share cursor"),
+        0
+    );
 }
 
 #[test]
@@ -4300,17 +4352,32 @@ fn share_view_pull_that_fails_on_an_empty_log_page_starts_again_from_its_stored_
     );
 
     let resumed = RelaySyncClient::new(note_behind_empty_log_pages(4, b"The note.\n"));
-    let outcome = resumed
-        .pull_share_view(
-            &mut engine,
-            "ws",
-            "share",
-            &tracked_grant(["docs"]),
-            &NoFaults,
-        )
-        .expect("the next pull reads every page again");
+    let pull = |engine: &mut EngineStore| {
+        resumed
+            .pull_share_view(engine, "ws", "share", &tracked_grant(["docs"]), &NoFaults)
+            .expect("the next pull reads every page again")
+    };
+    let past_the_empty_pages = pull(&mut engine);
 
     assert_eq!(share_log_pages_read(&resumed), [0, 10, 20, 30, 40]);
+    assert_eq!(
+        (
+            past_the_empty_pages.applied,
+            past_the_empty_pages.pending_cursor.cursor
+        ),
+        (0, 40)
+    );
+
+    resumed
+        .commit_share_view_cursor(
+            &mut engine,
+            "ws",
+            &past_the_empty_pages.pending_cursor,
+            &NoFaults,
+        )
+        .expect("commit the cursor past the empty pages");
+    let outcome = pull(&mut engine);
+
     assert_eq!((outcome.applied, outcome.pending_cursor.cursor), (1, 41));
     assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
     let moments: i64 = engine
@@ -4366,8 +4433,8 @@ fn share_view_pull_stops_reading_empty_log_pages_once_they_have_taken_10_seconds
             .expect("commit the cursor past the pages read");
     }
 
-    assert_eq!(pulls, 4);
-    assert_eq!(share_log_pages_read(&client).len(), 17);
+    assert_eq!(pulls, 5);
+    assert_eq!(share_log_pages_read(&client).len(), 18);
     assert_eq!(note_text(&mut engine), Some(b"The note.\n".to_vec()));
 }
 
