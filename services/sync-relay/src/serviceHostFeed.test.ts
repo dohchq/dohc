@@ -897,10 +897,37 @@ it.each([
 });
 
 const resumed = blob("save after resume");
+const ownerSave = "moment-owner-laptop-0";
+const hostSave = `moment-${HOST_ORIGIN}-0`;
 it.each([
-  { name: "the host that resumed from it", source: owner, host: true, stored: resumed },
-  { name: "a host that resumed from another file", source: last, host: true, stored: owner },
-  { name: "a push that is not the host's", source: owner, host: false, stored: owner },
+  {
+    name: "the host that resumed from it",
+    source: owner,
+    moment: ownerSave,
+    host: true,
+    stored: resumed,
+  },
+  {
+    name: "a host that resumed from another file",
+    source: last,
+    moment: hostSave,
+    host: true,
+    stored: owner,
+  },
+  {
+    name: "a host that resumed from the same words saved another time",
+    source: owner,
+    moment: "moment-earlier",
+    host: true,
+    stored: owner,
+  },
+  {
+    name: "a push that is not the host's",
+    source: owner,
+    moment: ownerSave,
+    host: false,
+    stored: owner,
+  },
 ] as const)(
   "lets a save from its host's last one replace the owner's save: $name",
   async (input) => {
@@ -908,9 +935,9 @@ it.each([
     retainServiceActivation(f.raw, namespace, true);
     f.raw
       .prepare(
-        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?)",
+        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceMomentId',?)",
       )
-      .run(input.source.sha256);
+      .run(input.source.sha256, input.moment);
     for (const content of [last, owner, resumed])
       f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
     const save = (originId: string, originSeq: number, before: Blob, after: Blob) =>
@@ -944,17 +971,15 @@ it.each([
 );
 
 const ownerAuthor = [{ kind: "human", humanId: "owner-1", humanName: "Owner" }] as const;
+const agentAuthor = { kind: "agent", agentId: "agent-1", agentName: "Agent" } as const;
+const ownerEdit = { retire: true, account: true, clients: [42], base: false, agent: false };
 it.each([
-  { name: "the owner after a Stop", retire: true, account: true, clients: [42], takes: true },
-  { name: "the owner after a Pause", retire: false, account: true, clients: [42], takes: false },
-  {
-    name: "a push without the owner's name",
-    retire: true,
-    account: false,
-    clients: [42],
-    takes: false,
-  },
-  { name: "two new editor ids", retire: true, account: true, clients: [42, 43], takes: false },
+  { name: "the owner after a Stop", ...ownerEdit, takes: true },
+  { name: "the owner after a Pause", ...ownerEdit, retire: false, takes: false },
+  { name: "a push without the owner's name", ...ownerEdit, account: false, takes: false },
+  { name: "two new editor ids", ...ownerEdit, clients: [42, 43], takes: false },
+  { name: "the owner's whole note rather than an edit", ...ownerEdit, base: true, takes: false },
+  { name: "an agent working for the owner", ...ownerEdit, agent: true, takes: false },
 ] as const)(
   "lets the owner's room edit build on the owner's own edit from a Stop: $name",
   async (input) => {
@@ -981,9 +1006,15 @@ it.each([
       originSeq: 0,
       opKind: "ydoc.update",
       recordedAtMs: 4,
-      payload: ydoc(binding.objectId, "docs/a.md", update),
+      payload: {
+        ...ydoc(binding.objectId, "docs/a.md", update),
+        isBaseState: input.base,
+        attribution: { actorKind: "human" },
+        actorOriginId: "owner-1",
+      },
     });
-    if (input.account) op.admittedAuthorSnapshot = [...ownerAuthor];
+    const authors = [...ownerAuthor, ...(input.agent ? [agentAuthor] : [])];
+    if (input.account) op.admittedAuthorSnapshot = authors;
     f.storage.appendLogBatch({
       workspaceId: ws,
       originId: "owner-laptop",
@@ -1001,7 +1032,7 @@ it.each([
           objectId: binding.objectId,
           lineageClaimId: binding.lineageClaimId,
         },
-        sender: [...ownerAuthor],
+        sender: authors,
         clients: [{ clientId: 42, inNote: true }],
         updateBytes: Yjs.encodeStateAsUpdate(doc, before),
         receivedAtMs: 30,

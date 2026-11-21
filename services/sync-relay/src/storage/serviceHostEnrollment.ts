@@ -19,6 +19,7 @@ import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocument
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import { assertWorkspaceQuota } from "./workspaces";
+import { SyncRelayQuotaExceededError } from "./errors";
 import { forgetServiceHostUploads } from "./serviceHostUploads";
 import {
   listServiceActivationRetirements,
@@ -577,15 +578,21 @@ export function isResumedHostSave(
       save.objectId
   )
     return false;
-  const stored = storage.currentFileBlobSha256({ workspaceId, versionId: "main", path: save.path });
-  const source = storage.db
-    .prepare(
-      `SELECT json_extract(source_json,'$.currentPath') AS path,json_extract(source_json,'$.sourceDigest') AS digest
-        FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
-        AND retire_requested_at_ms IS NULL AND retired_at_ms IS NULL`,
-    )
-    .get(workspaceId, save.objectId);
-  return stored !== undefined && source?.path === save.path && source.digest === stored;
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_ACTIVATIONS} a
+        JOIN sync_relay_current_files f ON f.workspace_id=a.workspace_id AND f.version_id='main'
+          AND f.path=json_extract(a.source_json,'$.currentPath')
+        JOIN sync_relay_object_moments m ON m.workspace_id=f.workspace_id AND m.object_id=a.object_id
+          AND m.relay_seq=f.state_relay_seq
+        WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND f.path=?
+          AND a.retire_requested_at_ms IS NULL AND a.retired_at_ms IS NULL
+          AND f.blob_sha256=json_extract(a.source_json,'$.sourceDigest')
+          AND m.moment_id=json_extract(a.source_json,'$.sourceMomentId')`,
+      )
+      .get(workspaceId, save.objectId, save.path) !== undefined
+  );
 }
 export function bindStoppedNoteClient(
   storage: StorageContext,
@@ -602,17 +609,31 @@ export function bindStoppedNoteClient(
     path = row?.path,
     lineageClaimId = row?.lineageClaimId,
     update = row?.updateBlobSha256;
+  const [author, ...others] = input.authors;
   if (
     row?.versionId !== "main" ||
+    row.isBaseState !== false ||
+    asRecord(row.attribution)?.actorKind !== "human" ||
+    row.actorOriginId !== userId ||
     typeof objectId !== "string" ||
     typeof path !== "string" ||
     typeof lineageClaimId !== "string" ||
     typeof update !== "string" ||
-    input.authors.length === 0 ||
+    author?.kind !== "human" ||
+    author.humanId !== userId ||
+    others.length > 0 ||
     !stoppedBy(storage, { workspaceId, userId, objectId, path })
   )
     return;
   const document = { workspaceId, mainVersionId: "main" as const, objectId, lineageClaimId };
+  if (
+    !storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=? AND lineage_state='current'",
+      )
+      .get(workspaceId, objectId, lineageClaimId)
+  )
+    return;
   const seed = liveJournalSeedClientId(storage, document);
   const blob = storage.db
     .prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
@@ -637,7 +658,12 @@ export function bindStoppedNoteClient(
   if (unbound.length !== 1) return;
   const snapshot = JSON.stringify(input.authors);
   const storageBytes = Buffer.byteLength(JSON.stringify([...params, unbound[0], snapshot]));
-  assertWorkspaceQuota(storage, workspaceId, storageBytes);
+  try {
+    assertWorkspaceQuota(storage, workspaceId, storageBytes);
+  } catch (error) {
+    if (error instanceof SyncRelayQuotaExceededError) return;
+    throw error;
+  }
   storage.db
     .prepare(
       `INSERT INTO ${LIVE_AUTHOR_CLIENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,author_snapshot_json,storage_bytes) VALUES (?,?,?,?,?,?,?)`,
