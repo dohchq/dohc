@@ -276,7 +276,9 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
     // A transactional Collection with the generator's operations: Name, its primary text field, and a date.
     const collection = page.getByRole("region", { name: collectionName, exact: true });
     if (!existsSync(join(rootPath, collectionName, "dataset.json"))) {
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await page.keyboard.press("ControlOrMeta+k");
+      await expect(page.getByTestId("command-palette")).toBeVisible();
       await page
         .getByTestId("command-palette")
         .getByRole("option", { name: "New collection", exact: true })
