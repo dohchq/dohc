@@ -398,12 +398,8 @@ confidentialTest.describe("View link lifecycle", () => {
         await expect(
           dialog.getByRole("menuitemradio", { name: "Can view", exact: true }),
         ).toBeVisible();
-        await expect(dialog).toContainText(
-          "If files are added to this selection later, the link includes them.",
-        );
-        await expect(dialog).toContainText(
-          "The sync relay serves the link, so it can read this content.",
-        );
+        await expect(dialog).toContainText("The link includes files added later.");
+        await expect(dialog).toContainText("The sync relay can read this content.");
         await expect(dialog).toContainText("Can read, but not change.");
         await page.keyboard.press("Escape");
 

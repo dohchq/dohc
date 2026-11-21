@@ -22,12 +22,12 @@ import {
 } from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
-const RELAY_READS = "The sync relay serves the link, so it can read this content.";
+const RELAY_READS = "The sync relay can read this content.";
 const VERSION_WARNING = `The link shows this version as it is now. ${RELAY_READS}`;
-const PATHS_WARNING = `If files are added to this selection later, the link includes them. ${RELAY_READS}`;
+const PATHS_WARNING = `The link includes files added later. ${RELAY_READS}`;
 
 // The line under the invite field once a person is invited.
-const INVITED = /^Invited .*This server sends no email\.$/;
+const INVITED = /^Invited .*send it to them\.$/;
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -863,7 +863,7 @@ describe("RelayShareDialog", () => {
       versionId: "version-7",
     });
     expect((await screen.findByText(INVITED)).textContent).toBe(
-      "Invited friend@dohc.test. This server sends no email.",
+      "Invited friend@dohc.test. Copy the invitation and send it to them.",
     );
     expect(field.value).toBe("");
     expect(document.activeElement).toBe(field);

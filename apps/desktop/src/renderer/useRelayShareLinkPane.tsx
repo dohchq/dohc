@@ -196,8 +196,8 @@ function newLinkReach(target: RelayShareTarget): string {
   const reach =
     target.kind === "version"
       ? "The link shows this version as it is now."
-      : "If files are added to this selection later, the link includes them.";
-  return `${reach} The sync relay serves the link, so it can read this content.`;
+      : "The link includes files added later.";
+  return `${reach} The sync relay can read this content.`;
 }
 
 const LINKS_BUSY = "Finish the change under way first.";

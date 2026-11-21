@@ -212,7 +212,9 @@ describe("EmailShareForm", () => {
     });
     const status = await screen.findByText(/^Invited/);
     expect(status.getAttribute("role")).toBe("status");
-    expect(status.textContent).toBe("Invited friend@dohc.test. This server sends no email.");
+    expect(status.textContent).toBe(
+      "Invited friend@dohc.test. Copy the invitation and send it to them.",
+    );
     expect(field.value).toBe("");
     expect(document.activeElement).toBe(field);
     expect(screen.getByTestId("share-create").textContent).toBe("Invite");
@@ -226,7 +228,10 @@ describe("EmailShareForm", () => {
 
   it.each([
     [{ invitationEmail: "sent" }, "Email invite sent to friend@dohc.test."],
-    [{ invitationEmail: "unavailable" }, "Invited friend@dohc.test. This server sends no email."],
+    [
+      { invitationEmail: "unavailable" },
+      "Invited friend@dohc.test. Copy the invitation and send it to them.",
+    ],
     [{ invitationEmail: "failed" }, "Invited friend@dohc.test. dohc could not send the email."],
     [
       {
@@ -277,7 +282,7 @@ describe("EmailShareForm", () => {
     await user.keyboard("ana@dohc.test{Enter}");
     await waitFor(() =>
       expect(screen.getByText(/^Invited/).textContent).toBe(
-        "Invited ana@dohc.test. This server sends no email.",
+        "Invited ana@dohc.test. Copy the invitation and send it to them.",
       ),
     );
     expect(bridgeMock.createRelayShare).toHaveBeenLastCalledWith({
