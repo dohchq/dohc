@@ -203,27 +203,75 @@ pub fn originate_closing_ydoc_base_in_tx(
     }
 }
 
+/// Each pending conflict bundle goes after the moments at or before its cut.
+/// Rule moments are the exception, because members pull between push batches:
+/// a rule goes before every bundle, and the last delete of a folder's rule
+/// goes after all of them, so no bundle splits a rule from its replacement.
+/// A rule at a path a bundle names stays in its window, because that bundle's
+/// resolve compares the head there.
 fn backfill_moments_and_conflict_bundles(
     tx: &Transaction<'_>,
     workspace_id: &str,
 ) -> Result<(), SyncError> {
+    use dohc_engine_files::floor::path_collision_key;
     let bundles = crate::conflict_outbox::pending_conflict_bundle_cuts_in_tx(tx, workspace_id)?;
+    let named: std::collections::HashSet<String> = query_rows(
+        tx,
+        "SELECT p.value FROM replication_pending_conflict_bundles b \
+         JOIN replication_pending_conflict_ops o \
+           ON o.bundle_order=b.bundle_order AND o.op_index=0, \
+         json_each(o.payload_json,'$.paths') p \
+         WHERE b.workspace_id=?1 AND p.type='text'",
+        [workspace_id],
+        |row| row.get::<_, String>(0),
+    )?
+    .iter()
+    .map(|path| path_collision_key(path))
+    .collect();
+    let moments = rules_first(tx, workspace_id, backfill_moments(tx, workspace_id)?)?;
+    let (mut front, mut windowed, mut tail) = (Vec::new(), Vec::new(), Vec::new());
+    for (place, moment) in moments {
+        match place {
+            Place::Rule if !named.contains(&path_collision_key(&moment.path)) => front.push(moment),
+            Place::LastDelete if !named.contains(&path_collision_key(&moment.path)) => {
+                tail.push(moment);
+            }
+            _ => windowed.push(moment),
+        }
+    }
+    journal_backfilled(tx, workspace_id, &front)?;
     let mut after_moment_order = -1;
     for bundle in bundles {
-        backfill_moments_between(
-            tx,
-            workspace_id,
-            after_moment_order,
-            Some(bundle.pre_effect_moment_order),
-        )?;
+        let through = bundle.pre_effect_moment_order;
+        let window = windowed
+            .iter()
+            .filter(|m| m.moment_order > after_moment_order && m.moment_order <= through);
+        journal_backfilled(tx, workspace_id, window)?;
         crate::conflict_outbox::journal_pending_conflict_bundle_in_tx(
             tx,
             workspace_id,
             bundle.bundle_order,
         )?;
-        after_moment_order = bundle.pre_effect_moment_order;
+        after_moment_order = through;
     }
-    backfill_moments_between(tx, workspace_id, after_moment_order, None)
+    let rest = windowed
+        .iter()
+        .filter(|m| m.moment_order > after_moment_order);
+    journal_backfilled(tx, workspace_id, rest)?;
+    journal_backfilled(tx, workspace_id, &tail)
+}
+
+fn journal_backfilled<'a>(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moments: impl IntoIterator<Item = &'a Backfilled>,
+) -> Result<(), SyncError> {
+    crate::journal::replay_history(|| {
+        for moment in moments {
+            journal_moment_append_in_tx(tx, workspace_id, &moment.moment_id)?;
+        }
+        Ok(())
+    })
 }
 
 macro_rules! head_export_exclusions_sql {
@@ -510,12 +558,10 @@ pub(crate) fn export_covered_heads_in_tx(
     Ok(())
 }
 
-fn backfill_moments_between(
+fn backfill_moments(
     tx: &Transaction<'_>,
     workspace_id: &str,
-    after_moment_order: i64,
-    through_moment_order: Option<i64>,
-) -> Result<(), SyncError> {
+) -> Result<Vec<Backfilled>, SyncError> {
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
     // WIRE payload's `metadata.origin` verbatim (the sending peer's own
@@ -529,64 +575,51 @@ fn backfill_moments_between(
     // still exists while first-position backfill runs. Exclude only a matching
     // coordinate with no refusal. Retained CRDT state supersedes file history,
     // so covered heads have their own strict projection proof.
-    let moments: Vec<Backfilled> = {
-        let mut statement = tx
-            .prepare(concat!(
-                "SELECT m.moment_id, m.version_id, m.object_id, m.path FROM moments m \
-                 WHERE m.workspace_id=?1 AND ",
-                dohc_engine_domain::exclude_capture_recovery_sql!("m"),
-                " \
-                   AND ((m.metadata_origin != 'ydoc' OR EXISTS ( \
-                     SELECT 1 FROM ydoc_docs p \
-                     WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
-                       AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
-                       AND p.head_update_seq=0 AND p.head_snapshot_seq=0 AND p.file_export_lane=0 \
-                       AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id))) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
-                       WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
-                         AND d.object_id=m.object_id \
-                         AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
-                           OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
-                   AND m.moment_order > ?2 \
-                   AND (?3 IS NULL OR m.moment_order <= ?3) \
-                   AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
-                     WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.moment_id) \
-                   AND NOT EXISTS (SELECT 1 FROM replication_log r \
-                     WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
-                       AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
-                       AND (r.imported=0 OR NOT EXISTS ( \
-                         SELECT 1 FROM replication_pending_refusals p \
-                         WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
-                           AND p.origin_seq=r.origin_seq))) \
-                   AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
-                     WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
-                       AND d.object_id=m.object_id) \
-                 ORDER BY m.moment_order"
-            ))
-            .map_err(SyncError::corrupt)?;
-        statement
-            .query_map(
-                params![workspace_id, after_moment_order, through_moment_order],
-                |row| {
-                    Ok(Backfilled {
-                        moment_id: row.get(0)?,
-                        version_id: row.get(1)?,
-                        object_id: row.get(2)?,
-                        path: row.get(3)?,
-                    })
-                },
-            )
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    let moment_ids = rules_first(tx, workspace_id, moments)?;
-    crate::journal::replay_history(|| {
-        for moment_id in moment_ids {
-            journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
-        }
-        Ok(())
-    })
+    let mut statement = tx
+        .prepare(concat!(
+            "SELECT m.moment_id, m.version_id, m.object_id, m.path, m.moment_order FROM moments m \
+             WHERE m.workspace_id=?1 AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!("m"),
+            " \
+               AND ((m.metadata_origin != 'ydoc' OR EXISTS ( \
+                 SELECT 1 FROM ydoc_docs p \
+                 WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
+                   AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
+                   AND p.head_update_seq=0 AND p.head_snapshot_seq=0 AND p.file_export_lane=0 \
+                   AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id))) \
+                 AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
+                   WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+                     AND d.object_id=m.object_id \
+                     AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
+                       OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
+               AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                 WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.moment_id) \
+               AND NOT EXISTS (SELECT 1 FROM replication_log r \
+                 WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
+                   AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
+                   AND (r.imported=0 OR NOT EXISTS ( \
+                     SELECT 1 FROM replication_pending_refusals p \
+                     WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
+                       AND p.origin_seq=r.origin_seq))) \
+               AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
+                 WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+                   AND d.object_id=m.object_id) \
+             ORDER BY m.moment_order"
+        ))
+        .map_err(SyncError::corrupt)?;
+    statement
+        .query_map([workspace_id], |row| {
+            Ok(Backfilled {
+                moment_id: row.get(0)?,
+                version_id: row.get(1)?,
+                object_id: row.get(2)?,
+                path: row.get(3)?,
+                moment_order: row.get(4)?,
+            })
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)
 }
 
 struct Backfilled {
@@ -594,6 +627,15 @@ struct Backfilled {
     version_id: String,
     object_id: String,
     path: String,
+    moment_order: i64,
+}
+
+/// Where [`rules_first`] puts a backfilled moment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Rule,
+    File,
+    LastDelete,
 }
 
 /// A rule file's history, as one object.
@@ -608,7 +650,8 @@ struct RuleObject {
 /// never see a file before the rule over it, nor after a rule that covered
 /// it was removed. Each rule object's moments go first, in their own order.
 /// The last delete of a rule whose folder has no rule now goes last, after
-/// the files it covered. Everything else keeps its order.
+/// the files it covered. Everything else keeps its order. Each moment comes
+/// back with its place, so bundles can keep the order across their cuts.
 ///
 /// A file moved into or out of a rule's name keeps its place: rules never
 /// rename now, and only such old history has one.
@@ -616,7 +659,7 @@ fn rules_first(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moments: Vec<Backfilled>,
-) -> Result<Vec<String>, SyncError> {
+) -> Result<Vec<(Place, Backfilled)>, SyncError> {
     use dohc_engine_files::access_rules::{is_access_rule_path, is_rule_of};
     use std::collections::{HashMap, HashSet};
     let mut rules: HashMap<(&str, &str), RuleObject> = HashMap::new();
@@ -658,20 +701,26 @@ fn rules_first(
             last.insert(moment_id.as_str());
         }
     }
-    let (mut first, mut middle, mut after) = (Vec::new(), Vec::new(), Vec::new());
-    for moment in &moments {
-        let key = (moment.version_id.as_str(), moment.object_id.as_str());
-        if last.contains(moment.moment_id.as_str()) {
-            after.push(moment.moment_id.clone());
-        } else if rules.contains_key(&key) {
-            first.push(moment.moment_id.clone());
-        } else {
-            middle.push(moment.moment_id.clone());
-        }
-    }
-    first.extend(middle);
-    first.extend(after);
-    Ok(first)
+    let places: Vec<Place> = moments
+        .iter()
+        .map(|moment| {
+            if last.contains(moment.moment_id.as_str()) {
+                Place::LastDelete
+            } else if rules.contains_key(&(moment.version_id.as_str(), moment.object_id.as_str())) {
+                Place::Rule
+            } else {
+                Place::File
+            }
+        })
+        .collect();
+    let mut placed: Vec<(Place, Backfilled)> = places.into_iter().zip(moments).collect();
+    // Stable, so each place keeps moment order.
+    placed.sort_by_key(|(place, _)| match place {
+        Place::Rule => 0,
+        Place::File => 1,
+        Place::LastDelete => 2,
+    });
+    Ok(placed)
 }
 
 /// The object's history when every moment of it is a rule file's, or `None`.
@@ -1603,27 +1652,11 @@ mod tests {
         assert_eq!(raw_bundle_ops, vec![raw_resolve, raw_shadow]);
     }
 
-    /// A conflict bundle cut between a rule's delete and the rule that
-    /// replaced it. Members pull between push batches, so they see every
-    /// prefix of the journal. The covered file was hidden from them at every
-    /// point of its history, so no prefix may show it to them.
-    #[test]
-    #[ignore = "known gap: a window cut before the replacement rule shows the covered file"]
-    fn a_bundle_cut_between_a_rule_and_its_replacement_shows_no_covered_file() {
-        use dohc_engine_files::access_rules::{access_rule_folder, parse_access_rule};
-        let (_scratch, _, mut store) = open_store();
-        seed_main(&mut store);
-        let (view, nobody) = ("members: view\n", "people: {}\n");
-        let history: [(&str, &str, Option<&str>); 5] = [
-            ("team", "team/access.yaml", Some(view)),
-            ("old-rule", "team/private/access.yaml", Some(nobody)),
-            ("secret", "team/private/secret.md", Some("secret")),
-            ("old-rule", "team/private/access.yaml", None),
-            ("new-rule", "team/private/access.yaml", Some(nobody)),
-        ];
-        for (index, (object, path, text)) in history.into_iter().enumerate() {
+    /// Writes or deletes each `(object, path, text)` in turn as moment `m-<index>`.
+    fn write_history(store: &mut EngineStore, history: &[(&str, &str, Option<&str>)]) {
+        for (index, (object, path, text)) in history.iter().copied().enumerate() {
             let moment_id = format!("m-{index}");
-            let mut versioned = VersionedTextStore::new(&mut store);
+            let mut versioned = VersionedTextStore::new(store);
             match text {
                 Some(text) => drop(
                     versioned
@@ -1667,6 +1700,26 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// A conflict bundle cut between a rule's delete and the rule that
+    /// replaced it. Members pull between push batches, so they see every
+    /// prefix of the journal. The covered file was hidden from them at every
+    /// point of its history, so no prefix may show it to them.
+    #[test]
+    fn a_bundle_cut_between_a_rule_and_its_replacement_shows_no_covered_file() {
+        use dohc_engine_files::access_rules::{access_rule_folder, parse_access_rule};
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let (view, nobody) = ("members: view\n", "people: {}\n");
+        let history: [(&str, &str, Option<&str>); 5] = [
+            ("team", "team/access.yaml", Some(view)),
+            ("old-rule", "team/private/access.yaml", Some(nobody)),
+            ("secret", "team/private/secret.md", Some("secret")),
+            ("old-rule", "team/private/access.yaml", None),
+            ("new-rule", "team/private/access.yaml", Some(nobody)),
+        ];
+        write_history(&mut store, &history);
         let cut: i64 = store
             .read_with(|conn| {
                 conn.query_row(
@@ -1727,6 +1780,56 @@ mod tests {
             );
         }
         assert_eq!(steps.len(), 6, "{steps:?}");
+    }
+
+    /// A bundle whose conflict names a rule's path compares the head there,
+    /// so that rule's moments keep their side of the cut.
+    #[test]
+    fn a_rule_at_a_path_a_bundle_names_keeps_its_side_of_the_cut() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_history(
+            &mut store,
+            &[
+                ("rule", "team/access.yaml", Some("people: {}\n")),
+                ("other", "other/access.yaml", Some("people: {}\n")),
+                ("rule", "team/access.yaml", Some("members: view\n")),
+                ("other", "other/access.yaml", Some("members: view\n")),
+            ],
+        );
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='m-1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("the cut's order");
+        seed_pending_conflict_bundle(&mut store, "conflict-x", cut, &[], 20);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_pending_conflict_ops \
+                     SET payload_json=json_set(payload_json,'$.paths',                        json_array('team/access.yaml')) \
+                     WHERE op_index=0",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("name the rule's path");
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let steps: Vec<String> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| match payload["momentId"].as_str() {
+                Some(moment_id) if kind == "moment.append" => moment_id.to_owned(),
+                _ => kind,
+            })
+            .collect();
+        // The other folder's rule goes first, before every bundle.
+        assert_eq!(steps, ["m-1", "m-3", "m-0", "conflict.resolve", "m-2"]);
     }
 
     #[test]
