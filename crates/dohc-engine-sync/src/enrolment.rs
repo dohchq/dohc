@@ -205,10 +205,10 @@ pub fn originate_closing_ydoc_base_in_tx(
 
 /// Each pending conflict bundle goes after the moments at or before its cut.
 /// Rule moments are the exception, because members pull between push batches:
-/// a rule goes before every bundle, and the last delete of a folder's rule
-/// goes after all of them, so no bundle splits a rule from its replacement.
-/// A rule at a path a bundle names stays in its window, because that bundle's
-/// resolve compares the head there.
+/// a rule that gives nobody more over the files it passes goes before every
+/// bundle, and the last delete of a folder's rule goes after all of them, so
+/// no bundle splits a rule from its replacement. [`rules_first`] decides
+/// which rules move.
 fn backfill_moments_and_conflict_bundles(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -228,14 +228,14 @@ fn backfill_moments_and_conflict_bundles(
     .iter()
     .map(|path| path_collision_key(path))
     .collect();
-    let moments = rules_first(tx, workspace_id, backfill_moments(tx, workspace_id)?)?;
+    let cuts: Vec<i64> = bundles.iter().map(|b| b.pre_effect_moment_order).collect();
+    let backfilled = backfill_moments(tx, workspace_id)?;
+    let moments = rules_first(tx, workspace_id, backfilled, &cuts, &named)?;
     let (mut front, mut windowed, mut tail) = (Vec::new(), Vec::new(), Vec::new());
     for (place, moment) in moments {
         match place {
-            Place::Rule if !named.contains(&path_collision_key(&moment.path)) => front.push(moment),
-            Place::LastDelete if !named.contains(&path_collision_key(&moment.path)) => {
-                tail.push(moment);
-            }
+            Place::Front => front.push(moment),
+            Place::Tail => tail.push(moment),
             _ => windowed.push(moment),
         }
     }
@@ -577,7 +577,8 @@ fn backfill_moments(
     // so covered heads have their own strict projection proof.
     let mut statement = tx
         .prepare(concat!(
-            "SELECT m.moment_id, m.version_id, m.object_id, m.path, m.moment_order FROM moments m \
+            "SELECT m.moment_id, m.version_id, m.object_id, m.path, m.moment_order, \
+             m.before_path FROM moments m \
              WHERE m.workspace_id=?1 AND ",
             dohc_engine_domain::exclude_capture_recovery_sql!("m"),
             " \
@@ -615,6 +616,7 @@ fn backfill_moments(
                 object_id: row.get(2)?,
                 path: row.get(3)?,
                 moment_order: row.get(4)?,
+                before_path: row.get(5)?,
             })
         })
         .map_err(SyncError::corrupt)?
@@ -628,14 +630,23 @@ struct Backfilled {
     object_id: String,
     path: String,
     moment_order: i64,
+    before_path: Option<String>,
 }
 
-/// Where [`rules_first`] puts a backfilled moment.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Where [`rules_first`] puts a backfilled moment, around the pending
+/// conflict bundles. Each place keeps moment order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Place {
-    Rule,
-    File,
-    LastDelete,
+    /// Before every bundle.
+    Front,
+    /// First in its window between two bundles.
+    WindowStart,
+    /// In its window, among the files.
+    Stay,
+    /// Last in its window.
+    WindowEnd,
+    /// After every bundle.
+    Tail,
 }
 
 /// A rule file's history, as one object.
@@ -648,10 +659,18 @@ struct RuleObject {
 
 /// Order backfilled moments so members, who pull between push batches,
 /// never see a file before the rule over it, nor after a rule that covered
-/// it was removed. Each rule object's moments go first, in their own order.
-/// The last delete of a rule whose folder has no rule now goes last, after
-/// the files it covered. Everything else keeps its order. Each moment comes
-/// back with its place, so bundles can keep the order across their cuts.
+/// it was removed. The relay judges each moment by the rules before it,
+/// history included, so no rule may move ahead of a file's moment if it
+/// gives anyone more there than they had when the moment was made.
+///
+/// Rule objects that share a folder form a group, whose moments keep their
+/// order. Each group moves its longest run of first moments that passes
+/// files without giving anyone more over them ([`hoisted`]): to the front,
+/// or to the start of each window when a bundle names one of its paths,
+/// since that bundle's resolve compares the head there. The last delete of a
+/// rule whose folder has no rule now goes after the files it covered, but
+/// never past a later file the removed rule gives anyone more over.
+/// Everything else keeps its order.
 ///
 /// A file moved into or out of a rule's name keeps its place: rules never
 /// rename now, and only such old history has one.
@@ -659,6 +678,8 @@ fn rules_first(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moments: Vec<Backfilled>,
+    cuts: &[i64],
+    named: &std::collections::HashSet<String>,
 ) -> Result<Vec<(Place, Backfilled)>, SyncError> {
     use dohc_engine_files::access_rules::{is_access_rule_path, is_rule_of};
     use std::collections::{HashMap, HashSet};
@@ -701,26 +722,369 @@ fn rules_first(
             last.insert(moment_id.as_str());
         }
     }
-    let places: Vec<Place> = moments
-        .iter()
-        .map(|moment| {
-            if last.contains(moment.moment_id.as_str()) {
-                Place::LastDelete
-            } else if rules.contains_key(&(moment.version_id.as_str(), moment.object_id.as_str())) {
-                Place::Rule
-            } else {
-                Place::File
-            }
-        })
-        .collect();
+    let mut places = vec![Place::Stay; moments.len()];
+    if !rules.is_empty() {
+        let is_rule = |moment: &Backfilled| {
+            rules.contains_key(&(moment.version_id.as_str(), moment.object_id.as_str()))
+        };
+        let is_last = |moment: &Backfilled| last.contains(moment.moment_id.as_str());
+        for (index, place) in hoisted(tx, workspace_id, &moments, is_rule, is_last, cuts, named)? {
+            places[index] = place;
+        }
+    }
     let mut placed: Vec<(Place, Backfilled)> = places.into_iter().zip(moments).collect();
     // Stable, so each place keeps moment order.
-    placed.sort_by_key(|(place, _)| match place {
-        Place::Rule => 0,
-        Place::File => 1,
-        Place::LastDelete => 2,
-    });
+    placed.sort_by_key(|(place, _)| *place);
     Ok(placed)
+}
+
+/// Rule files by version and path: each one's folder, folded, and its rule,
+/// `None` when it does not parse.
+type RuleFiles = std::collections::BTreeMap<
+    (String, String),
+    (String, Option<dohc_engine_files::access_rules::AccessRule>),
+>;
+
+/// What members could reach at a ruled folder when a file's moment was made.
+#[derive(Clone, PartialEq)]
+enum Seen {
+    Own(Option<dohc_engine_files::access_rules::AccessRule>),
+    Inherited(Option<dohc_engine_files::access_rules::AccessRule>),
+    Workspace,
+}
+
+/// The places of rule moments: `is_rule` names a rule object's moment and
+/// `is_last` the last delete of a folder's rule. A group's run of moments
+/// moves only if, for every file moment it passes, the rule it leaves at
+/// each folder gives nobody more than they had when that moment was made,
+/// as the widening hold judges a rule change ([`rule_change_narrows`]).
+/// Bundle effects count among the files passed.
+fn hoisted(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moments: &[Backfilled],
+    is_rule: impl Fn(&Backfilled) -> bool,
+    is_last: impl Fn(&Backfilled) -> bool,
+    cuts: &[i64],
+    named: &std::collections::HashSet<String>,
+) -> Result<Vec<(usize, Place)>, SyncError> {
+    use dohc_engine_files::access_rules::{
+        AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, parse_access_rule,
+        rule_change_narrows,
+    };
+    use dohc_engine_files::floor::path_collision_key;
+    use std::collections::{BTreeSet, HashMap};
+
+    fn under(folder: &str, key: &str) -> bool {
+        folder.is_empty()
+            || key
+                .strip_prefix(folder)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+    fn find(parent: &[usize], mut at: usize) -> usize {
+        while parent[at] != at {
+            at = parent[at];
+        }
+        at
+    }
+    fn rule_paths(m: &Backfilled) -> impl Iterator<Item = &str> {
+        std::iter::once(m.path.as_str())
+            .chain(m.before_path.as_deref())
+            .filter(|path| is_access_rule_path(path))
+    }
+    // One group per set of folders that rule objects join.
+    let mut parent: Vec<usize> = Vec::new();
+    let mut nodes: HashMap<String, usize> = HashMap::new();
+    let mut node = |key: String, parent: &mut Vec<usize>| {
+        *nodes.entry(key).or_insert_with(|| {
+            parent.push(parent.len());
+            parent.len() - 1
+        })
+    };
+    let mut object_node = HashMap::new();
+    for (index, moment) in moments.iter().enumerate().filter(|(_, m)| is_rule(m)) {
+        let object = node(
+            format!("o\0{}\0{}", moment.version_id, moment.object_id),
+            &mut parent,
+        );
+        object_node.insert(index, object);
+        for path in rule_paths(moment) {
+            let folder = path_collision_key(access_rule_folder(path));
+            let folder = node(format!("f\0{}\0{folder}", moment.version_id), &mut parent);
+            let (a, b) = (find(&parent, object), find(&parent, folder));
+            parent[a.max(b)] = a.min(b);
+        }
+    }
+    struct Group<'a> {
+        version: &'a str,
+        folders: BTreeSet<String>,
+        named: bool,
+        moments: Vec<usize>,
+    }
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    let mut group_of: HashMap<usize, usize> = HashMap::new();
+    let mut places = Vec::new();
+    for (&index, &object) in &object_node {
+        let root = find(&parent, object);
+        let moment = &moments[index];
+        let at = *group_of.entry(root).or_insert_with(|| {
+            groups.push(Group {
+                version: &moment.version_id,
+                folders: BTreeSet::new(),
+                named: false,
+                moments: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        let group = &mut groups[at];
+        for path in rule_paths(moment) {
+            group
+                .folders
+                .insert(path_collision_key(access_rule_folder(path)));
+            group.named |= named.contains(&path_collision_key(path));
+        }
+        if !is_last(moment) {
+            group.moments.push(index);
+        }
+    }
+    for group in &mut groups {
+        group.moments.sort_unstable();
+    }
+    // Each last delete: its index and whether a bundle names its group.
+    let lasts: HashMap<&str, (usize, bool)> = object_node
+        .iter()
+        .filter(|(index, _)| is_last(&moments[**index]))
+        .map(|(&index, &object)| {
+            let named = groups[group_of[&find(&parent, object)]].named;
+            (moments[index].moment_id.as_str(), (index, named))
+        })
+        .collect();
+
+    // Replay every moment the backfill and the bundles journal, in moment
+    // order, noting what each group's folders gave when each file's moment
+    // was made, once per window and change.
+    let effects = query_rows(
+        tx,
+        "SELECT m.moment_id, m.version_id, m.object_id, m.path, m.moment_order, m.before_path \
+         FROM replication_pending_conflict_moments p JOIN moments m \
+           ON m.workspace_id=p.workspace_id AND m.moment_id=p.moment_id \
+         WHERE p.workspace_id=?1",
+        [workspace_id],
+        |row| {
+            Ok(Backfilled {
+                moment_id: row.get(0)?,
+                version_id: row.get(1)?,
+                object_id: row.get(2)?,
+                path: row.get(3)?,
+                moment_order: row.get(4)?,
+                before_path: row.get(5)?,
+            })
+        },
+    )?;
+    let mut events: Vec<&Backfilled> = moments.iter().chain(&effects).collect();
+    events.sort_by_key(|m| m.moment_order);
+    let rule_at = |files: &RuleFiles, version: &str, folder: &str| {
+        let mut here = files
+            .iter()
+            .filter(|((v, _), (f, _))| v == version && f == folder)
+            .map(|(_, (_, rule))| rule);
+        let first = here.next()?;
+        // Two files in one folder are a rule that can't be read.
+        Some(if here.next().is_some() {
+            None
+        } else {
+            first.clone()
+        })
+    };
+    let seen_at = |files: &RuleFiles, version: &str, folder: &str| {
+        if let Some(own) = rule_at(files, version, folder) {
+            return Seen::Own(own);
+        }
+        let mut above = folder;
+        while !above.is_empty() {
+            above = access_rule_folder(above);
+            if let Some(rule) = rule_at(files, version, above) {
+                return Seen::Inherited(rule);
+            }
+        }
+        Seen::Workspace
+    };
+    let apply = |files: &mut RuleFiles, m: &Backfilled, change: &Option<Option<AccessRule>>| {
+        for path in std::iter::once(&m.path).chain(&m.before_path) {
+            files.remove(&(m.version_id.clone(), path.clone()));
+        }
+        if let (Some(rule), true) = (change, is_access_rule_path(&m.path)) {
+            let folder = path_collision_key(access_rule_folder(&m.path));
+            files.insert(
+                (m.version_id.clone(), m.path.clone()),
+                (folder, rule.clone()),
+            );
+        }
+    };
+    // A folder left with no rule inherits as it did only if it had none then.
+    let raises = |seen: &Seen, now: Option<Option<AccessRule>>| match now {
+        None => matches!(seen, Seen::Own(_)),
+        Some(rule) => {
+            let before = match seen {
+                Seen::Own(rule) => ReachBefore::Own(rule.as_ref()),
+                Seen::Inherited(rule) => ReachBefore::Inherited(rule.as_ref()),
+                Seen::Workspace => ReachBefore::WorkspaceLevel,
+            };
+            !rule_change_narrows(before, rule.as_ref())
+        }
+    };
+    let mut files = RuleFiles::new();
+    let mut starts = vec![RuleFiles::new()];
+    let mut changes: HashMap<&str, Option<Option<AccessRule>>> = HashMap::new();
+    // Per group: (window, moment order, folder, what it gave).
+    let mut passed: Vec<Vec<(usize, i64, &str, Seen)>> =
+        groups.iter().map(|_| Vec::new()).collect();
+    let mut last_seen: HashMap<(usize, &str, usize), Seen> = HashMap::new();
+    // Last deletes passed so far, with each window where moving one later
+    // would give more.
+    struct Removed<'a> {
+        delete: &'a Backfilled,
+        folder: String,
+        rule: Option<Option<AccessRule>>,
+        blocked: BTreeSet<usize>,
+    }
+    let mut removed: Vec<Removed<'_>> = Vec::new();
+    for event in events {
+        while starts.len() <= cuts.len() && event.moment_order > cuts[starts.len() - 1] {
+            starts.push(files.clone());
+        }
+        if rule_paths(event).next().is_some() {
+            let (operation, text): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT m.operation, b.text FROM moments m \
+                     LEFT JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+                     WHERE m.workspace_id=?1 AND m.moment_id=?2",
+                    params![workspace_id, event.moment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(SyncError::corrupt)?;
+            let change =
+                (operation != "delete").then(|| text.as_deref().and_then(parse_access_rule));
+            if lasts.contains_key(event.moment_id.as_str()) {
+                let folder = path_collision_key(access_rule_folder(&event.path));
+                let rule = rule_at(&files, &event.version_id, &folder);
+                removed.push(Removed {
+                    delete: event,
+                    folder,
+                    rule,
+                    blocked: BTreeSet::new(),
+                });
+            }
+            apply(&mut files, event, &change);
+            changes.insert(&event.moment_id, change);
+            continue;
+        }
+        let window = cuts.partition_point(|cut| *cut < event.moment_order);
+        let keys: Vec<String> = std::iter::once(&event.path)
+            .chain(&event.before_path)
+            .map(|path| path_collision_key(path))
+            .collect();
+        for Removed {
+            delete,
+            folder,
+            rule,
+            blocked,
+        } in &mut removed
+        {
+            if delete.version_id == event.version_id
+                && keys.iter().any(|key| under(folder, key))
+                && raises(&seen_at(&files, &event.version_id, folder), rule.clone())
+            {
+                blocked.insert(window);
+            }
+        }
+        for (at, group) in groups.iter().enumerate() {
+            if group.version != event.version_id {
+                continue;
+            }
+            for folder in &group.folders {
+                if !keys.iter().any(|key| under(folder, key)) {
+                    continue;
+                }
+                let seen = seen_at(&files, group.version, folder);
+                if last_seen.get(&(at, folder.as_str(), window)) != Some(&seen) {
+                    last_seen.insert((at, folder.as_str(), window), seen.clone());
+                    passed[at].push((window, event.moment_order, folder.as_str(), seen));
+                }
+            }
+        }
+    }
+    while starts.len() <= cuts.len() {
+        starts.push(files.clone());
+    }
+    // A last delete goes after the files it passes, as far as it can
+    // without leaving its rule over a file written after it that the rule
+    // gives anyone more over.
+    for Removed {
+        delete, blocked, ..
+    } in removed
+    {
+        let (index, named) = lasts[delete.moment_id.as_str()];
+        let window = cuts.partition_point(|cut| *cut < delete.moment_order);
+        let place = if blocked.contains(&window) {
+            Place::Stay
+        } else if named || !blocked.is_empty() {
+            Place::WindowEnd
+        } else {
+            Place::Tail
+        };
+        places.push((index, place));
+    }
+
+    for (at, group) in groups.iter().enumerate() {
+        let windows: Vec<Option<usize>> = if group.named {
+            let mut windows: Vec<Option<usize>> = group
+                .moments
+                .iter()
+                .map(|&index| Some(cuts.partition_point(|cut| *cut < moments[index].moment_order)))
+                .collect();
+            windows.dedup();
+            windows
+        } else {
+            vec![None]
+        };
+        for window in windows {
+            let run: Vec<usize> = group
+                .moments
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    window.is_none_or(|w| {
+                        cuts.partition_point(|cut| *cut < moments[index].moment_order) == w
+                    })
+                })
+                .collect();
+            let mut state = window.map_or_else(RuleFiles::new, |w| starts[w].clone());
+            let mut moved = 0;
+            for (taken, &index) in run.iter().enumerate() {
+                let moment = &moments[index];
+                apply(&mut state, moment, &changes[moment.moment_id.as_str()]);
+                let fits = passed[at]
+                    .iter()
+                    .filter(|(w, order, _, _)| {
+                        *order < moment.moment_order && window.is_none_or(|window| *w == window)
+                    })
+                    .all(|(_, _, folder, seen)| {
+                        !raises(seen, rule_at(&state, group.version, folder))
+                    });
+                if fits {
+                    moved = taken + 1;
+                }
+            }
+            let to = if window.is_some() {
+                Place::WindowStart
+            } else {
+                Place::Front
+            };
+            places.extend(run[..moved].iter().map(|&index| (index, to)));
+        }
+    }
+    Ok(places)
 }
 
 /// The object's history when every moment of it is a rule file's, or `None`.
@@ -1782,6 +2146,89 @@ mod tests {
         assert_eq!(steps.len(), 6, "{steps:?}");
     }
 
+    /// A file written and then deleted, by a bundle, while its folder was
+    /// hidden; a later rule opens the folder. The relay judges each moment
+    /// by the rules before it, so the opening rule must not go ahead of the
+    /// file's moments, or members see the deleted file and its history.
+    #[test]
+    fn a_later_rule_that_opens_a_folder_stays_after_the_files_it_passed() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_history(
+            &mut store,
+            &[
+                ("team", "team/access.yaml", Some("members: view\n")),
+                ("rule", "team/private/access.yaml", Some("people: {}\n")),
+                ("secret", "team/private/secret.md", Some("secret")),
+                ("secret", "team/private/secret.md", None),
+                ("rule", "team/private/access.yaml", Some("members: view\n")),
+            ],
+        );
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='m-2'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("the cut's order");
+        seed_pending_conflict_bundle(&mut store, "conflict-x", cut, &["m-3"], 20);
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let steps: Vec<String> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| match payload["momentId"].as_str() {
+                Some(moment_id) if kind == "moment.append" => moment_id.to_owned(),
+                _ => kind,
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            ["m-0", "m-1", "m-2", "conflict.resolve", "m-3", "m-4"]
+        );
+    }
+
+    /// A folder's last rule let members edit, and a file was written there
+    /// after the rule was deleted, past a bundle. Moving the delete after
+    /// that file would leave the rule over it, so members could edit it.
+    #[test]
+    fn a_last_rule_delete_stays_ahead_of_a_later_file_it_would_open() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_history(
+            &mut store,
+            &[
+                ("team", "team/access.yaml", Some("members: view\n")),
+                ("rule", "team/private/access.yaml", Some("members: edit\n")),
+                ("rule", "team/private/access.yaml", None),
+                ("notes", "team/private/notes.md", Some("notes")),
+            ],
+        );
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='m-2'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("the cut's order");
+        seed_pending_conflict_bundle(&mut store, "conflict-x", cut, &[], 20);
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let steps: Vec<String> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| match payload["momentId"].as_str() {
+                Some(moment_id) if kind == "moment.append" => moment_id.to_owned(),
+                _ => kind,
+            })
+            .collect();
+        assert_eq!(steps, ["m-0", "m-1", "m-2", "conflict.resolve", "m-3"]);
+    }
+
     /// A bundle whose conflict names a rule's path compares the head there,
     /// so that rule's moments keep their side of the cut.
     #[test]
@@ -1830,6 +2277,69 @@ mod tests {
             .collect();
         // The other folder's rule goes first, before every bundle.
         assert_eq!(steps, ["m-1", "m-3", "m-0", "conflict.resolve", "m-2"]);
+    }
+
+    /// Old history can hold a rule moved from one rule path to another. When
+    /// a bundle names only the first path, the move still stays after the
+    /// write it moves.
+    #[test]
+    fn a_rule_moved_between_rule_paths_keeps_its_order_across_a_cut() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        write_history(
+            &mut store,
+            &[("rule", "a/access.yaml", Some("people: {}\n"))],
+        );
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: "a/access.yaml".to_owned(),
+                    to_path: "b/access.yaml".to_owned(),
+                    moment_id: "m-1".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .expect("move the rule");
+        let cut: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE workspace_id='ws' AND moment_id='m-0'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("the cut's order");
+        seed_pending_conflict_bundle(&mut store, "conflict-x", cut, &[], 20);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE replication_pending_conflict_ops \
+                     SET payload_json=json_set(payload_json,'$.paths',json_array('a/access.yaml')) \
+                     WHERE op_index=0",
+                    [],
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("name the first path");
+
+        enroll(&mut store).expect("first-position enrolment");
+
+        let steps: Vec<String> = local_ops(&store)
+            .into_iter()
+            .map(|(kind, payload)| match payload["momentId"].as_str() {
+                Some(moment_id) if kind == "moment.append" => moment_id.to_owned(),
+                _ => kind,
+            })
+            .collect();
+        assert_eq!(steps, ["m-0", "conflict.resolve", "m-1"]);
     }
 
     #[test]
