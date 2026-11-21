@@ -24,6 +24,10 @@ final class ServerRoundTests: XCTestCase {
     for character in text { element.typeText(String(character)) }
   }
 
+  private func recordFields(_ app: XCUIApplication) -> XCUIElementQuery {
+    app.descendants(matching: .any).matching(identifier: "record-field")
+  }
+
   private func say(_ line: String) {
     print(line)
     fflush(stdout)
@@ -206,6 +210,7 @@ final class ServerRoundTests: XCTestCase {
     // An agent's row has its own Sign out; the account's is the last button.
     let buttons = app.buttons.matching(NSPredicate(format: "label == %@", "Sign out"))
     XCTAssertTrue(buttons.firstMatch.waitForExistence(timeout: 30), "Settings should show Sign out")
+    say("SERVER ROUND SETTINGS OPEN")
     let signOut = buttons.element(boundBy: buttons.count - 1)
     for _ in 0..<5 where !signOut.isHittable { app.swipeUp() }
     signOut.tap()
@@ -245,8 +250,9 @@ final class ServerRoundTests: XCTestCase {
     let page = app.webViews.firstMatch
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
-    // At the sentence's end, so the next round still finds the sentence whole.
-    text.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
+    // At the page's end, so the next round still finds the sentence whole.
+    text.tap()
+    app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: .command)
     typeSlowly(app, sentence)
     let start = Date()
     XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
@@ -257,6 +263,8 @@ final class ServerRoundTests: XCTestCase {
     openPlan(app)
     XCTAssertTrue(containing(app.webViews.firstMatch, sentence.trimmingCharacters(in: .whitespaces)).waitForExistence(timeout: 60),
                   "After a relaunch, Plan should show the sentence typed on the phone")
+    XCTAssertTrue(containing(app.webViews.firstMatch, try need("DOHC_SERVER_SENTENCE")).exists,
+                  "The seed's sentence should still be whole after the phone's edit")
   }
 
   // Needs a seeded transactional Collection named in DOHC_SERVER_COLLECTION, whose first table has a record with the
@@ -276,7 +284,7 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
     // In a field of the record's own screen, not the row it was opened from.
-    let field = app.descendants(matching: .any).matching(identifier: "record-field")
+    let field = recordFields(app)
       .containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)).firstMatch
     if !field.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
     XCTAssertTrue(field.exists, "The record's fields should show \(value)")
@@ -347,7 +355,7 @@ final class ServerRoundTests: XCTestCase {
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
-    let field = app.descendants(matching: .any).matching(identifier: "record-field")
+    let field = recordFields(app)
       .containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)).firstMatch
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
     return field
@@ -405,7 +413,7 @@ final class ServerRoundTests: XCTestCase {
     app.launch()
     let undo = app.buttons["Undo last edit"]
     let showing = { (text: String) in
-      app.descendants(matching: .any).matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch
+      self.recordFields(app).containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch
     }
     // `value` is a prefix of `changed`, so a field showing `value` must not also show `changed`.
     let only = { (text: String, what: String) in
@@ -464,10 +472,10 @@ final class ServerRoundTests: XCTestCase {
     new.tap()
 
     // The new record opens on its own screen; its first field names it.
-    let first = app.descendants(matching: .any).matching(identifier: "record-field").firstMatch
+    let first = recordFields(app).firstMatch
     XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s")
     edit(app, first, typing: added)
-    let named = app.descendants(matching: .any).matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", added, added)).firstMatch
+    let named = recordFields(app).containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", added, added)).firstMatch
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
     settled(app, named, "Naming the new record")
     reread(app, added)
