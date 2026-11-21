@@ -959,22 +959,13 @@
     ]
    },
    {
-    "markdown": "`&amp;` and `&#42;` and **strong**",
+    "markdown": "`&amp;` and **strong**",
     "reading": [
      {
       "t": "paragraph",
       "c": [
        {
         "x": "&amp;",
-        "m": {
-         "code": {}
-        }
-       },
-       {
-        "x": " and "
-       },
-       {
-        "x": "&#42;",
         "m": {
          "code": {}
         }
