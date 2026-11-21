@@ -97,8 +97,6 @@
   container-type: inline-size;
 }
 
-/* A confirmation fits the viewport in the desktop. Here it fits the demo
-   window, less the Overlay's 16px sides. */
 .demo-overlay [data-testid="delete-collection-record"] {
   max-width: calc(100cqw - 32px);
 }

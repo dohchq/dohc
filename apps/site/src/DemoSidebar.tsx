@@ -25,7 +25,6 @@ import { GUESTS_DATASET, GUESTS_DATASET_PATH, GUESTS_TABLE_ID } from "./demoColl
 import type { DemoPanelId } from "./demoPanels";
 import { APP_ENTRY, APP_ROOT, APP_TITLE } from "./demoWorkspace";
 
-// The demo's Collection is a Data Collection, so no folder is a Markdown one.
 const noCollectionFolders: ReadonlySet<string> = new Set();
 const APP_FOLDERS: ReadonlySet<string> = new Set([APP_ROOT]);
 const FIXED_FILES: readonly WorkspaceFileEntry[] = [
@@ -91,8 +90,6 @@ type DemoMomentAuthor =
   | { liveAuthorName: string }
   | { agentAuthorName: string };
 
-// What the trip's History shows: who changed what, whether a person on this
-// computer, a collaborator's live edit, or an agent's run.
 function demoMoments(documents: DemoWorkspaceDocument[]): EngineMomentRecord[] {
   const events: Array<[string, string, number, DemoMomentAuthor]> = [
     ["Ticked off the Alfama flat", "Trip plan.md", 50_000, { personAuthorName: "You" }],
@@ -200,7 +197,6 @@ export function DemoSidebar(props: {
     () => moments.map((moment) => ({ kind: "file" as const, moment })),
     [moments],
   );
-  // The Graph reloads when a page is added, moved, or gains or loses a link.
   const refreshKey = props.documents
     .map(
       (document) => `${document.path}:${document.body.match(/\[\[[^\]\n]*\]\]/g)?.join("") ?? ""}`,

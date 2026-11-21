@@ -274,7 +274,6 @@ export function ProductDemo() {
       if (!writeStored(GUESTS_STORAGE_KEY, records)) reportSessionOnly("workspace");
     }),
   );
-  // The record the Collection page asks to delete, and how to answer it.
   const [deletion, setDeletion] = useState<{
     recordId: string | number;
     answer(confirmed: boolean): void;
@@ -340,8 +339,6 @@ export function ProductDemo() {
     return () => window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
   }, [reportSessionOnly]);
 
-  // The Collection page sends its changes through the workspace's shell, as
-  // on the desktop, and reports how they ended there.
   useEffect(() => {
     const close = openCollectionChangeShell(WORKSPACE_ID, {
       onError: (fallback, error, retry, identity, quiet, onDismiss) =>
@@ -433,7 +430,6 @@ export function ProductDemo() {
     setSaveState("saved");
   }, []);
 
-  // The Collection's file opens the Collection, as its row does.
   const openDocument = useCallback(
     (path: string) => {
       const target = path === GUESTS_DATASET_PATH ? COLLECTION_TAB : path;
@@ -675,7 +671,6 @@ export function ProductDemo() {
                       : null;
       if (!run) return;
       event.preventDefault();
-      // An open confirmation keeps the demo where it is until it is answered.
       if (!deletion) run();
     },
     [activeTab, closeTab, createDocument, deletion, showNeighbourTab, toggleSidebar],
@@ -803,7 +798,7 @@ export function ProductDemo() {
             />
           }
         />
-        {showSource ? (
+        {showSource && (
           <textarea
             className="demo-source"
             value={APP_SOURCE}
@@ -811,16 +806,14 @@ export function ProductDemo() {
             spellCheck={false}
             aria-label={`Read-only source of ${APP_ENTRY}`}
           />
-        ) : (
-          // Scripts run, and nothing else: the app has no origin, so it reads
-          // no storage, cookies, or workspace data.
-          <iframe
-            title={APP_TITLE}
-            sandbox="allow-scripts allow-forms"
-            srcDoc={appDocument(theme)}
-            className="demo-app min-h-0 flex-1 border-0 bg-bg"
-          />
         )}
+        <iframe
+          title={APP_TITLE}
+          hidden={showSource}
+          sandbox="allow-scripts allow-forms"
+          srcDoc={appDocument(theme)}
+          className="demo-app min-h-0 flex-1 border-0 bg-bg"
+        />
       </>
     );
   } else if (activeKind === "app-source") {

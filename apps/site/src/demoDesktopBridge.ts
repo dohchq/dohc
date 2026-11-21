@@ -22,8 +22,6 @@ export type DemoBridgeDocument = {
 type DemoBridgeContext = {
   documents: DemoBridgeDocument[];
   folders: string[];
-  // Files the demo shows but never moves or deletes: the app's source and the
-  // Collection's description.
   fixedPaths: string[];
   createFile: (path: string) => void;
   createFolder: (path: string) => void;
@@ -369,7 +367,6 @@ const AUTHORS: Record<DemoAuthor, { name: string; kind: "human" | "agent" }> = {
 
 type DemoPost = { author: DemoAuthor; body: string; ageMs: number };
 
-// One thread a channel holds, as the people on the trip wrote it.
 const THREADS: Record<string, DemoPost[]> = {
   "channel-trip": [
     {
@@ -468,10 +465,8 @@ function yourPost(body: string): DemoPost {
   return { author: "you", body, ageMs: 0 };
 }
 
-// A link stays on one line and holds no other bracket, so a lone "[[" in prose links nothing.
 const WIKILINK = /\[\[([^[\]|#\n]+)(?:[#|][^[\]\n]*)?\]\]/g;
 
-/** The links between pages, from each page's [[links]]. */
 export function demoLinkEdges(documents: readonly DemoBridgeDocument[]) {
   const paths = documents.map((document) => document.path);
   const entries: Array<{ source: string; target: string; kind: "wikilink"; ordinal: number }> = [];

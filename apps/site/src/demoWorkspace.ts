@@ -1,7 +1,3 @@
-// What the demo workspace holds when someone first opens it: one trip, as a
-// group would keep it in dohc. Pages are editable Markdown. The app's source
-// and the Collection's description are files the demo shows but doesn't edit.
-
 export const DEMO_WORKSPACE_NAME = "Lisbon trip";
 
 export const APP_ROOT = "trip-planner";
@@ -120,8 +116,6 @@ icon: 🎒
 
 export const DEMO_PINNED_PAGES = ["Trip plan.md"];
 
-// A static app, as an agent might write one. The demo runs it in a sandboxed
-// frame with scripts and nothing else, so it reaches nothing in the workspace.
 export const APP_SOURCE = `<!doctype html>
 <html lang="en">
 <head>
@@ -215,7 +209,6 @@ export const APP_SOURCE = `<!doctype html>
 </html>
 `;
 
-/** The app's page, in the demo's theme. */
 export function appDocument(theme: "light" | "dark"): string {
   return APP_SOURCE.replace('<html lang="en">', `<html lang="en" data-theme="${theme}">`);
 }

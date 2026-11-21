@@ -25,7 +25,6 @@ describe("demoLinkEdges", () => {
       {
         path: "Trip plan.md",
         title: "Trip plan",
-        // The tip's lone "[[" must not swallow the next line's link.
         body: "Type **[[** to link.\n## Days\n[[Day 1]], [[Budget|money]], [[Nowhere]]",
       },
       { path: "Days/Day 1.md", title: "Day 1", body: "Back to [[Trip plan#Days]]" },

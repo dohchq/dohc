@@ -5,9 +5,6 @@ import type {
 
 type AppBackendJson = TransactionalInvoke["input"];
 
-// The demo's one Collection. The desktop reads a Collection's description from
-// the engine; the demo writes it out, with fixed ids so stored records keep
-// their fields across visits.
 const id = (n: number) => `0d0c0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 export const GUESTS_DATASET_PATH = "guests/dataset.json";
@@ -190,11 +187,6 @@ function fields(value: AppBackendJson | undefined): Record<string, AppBackendJso
 const same = (left: AppBackendJson | undefined, right: AppBackendJson | undefined) =>
   JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 
-/**
- * One page of a read, as the page asks for it: by search, filters, one board
- * column (`group`), one calendar range, or a board's column values (`groupBy`).
- * A board or calendar read names what it read in its answer.
- */
 function readPage(
   records: readonly DemoRecord[],
   body: Record<string, AppBackendJson>,
@@ -267,10 +259,6 @@ function readPage(
   };
 }
 
-/**
- * Answers the Collection page's operations from records kept in this browser,
- * as the engine answers them on the desktop. `save` runs after each change.
- */
 export function demoCollectionStore(
   initial: readonly DemoRecord[],
   save: (records: readonly DemoRecord[]) => void,
