@@ -269,6 +269,9 @@ pub struct BlobUploadRequest {
 }
 
 pub const MAX_BLOB_DOWNLOAD_BATCH: usize = 8;
+/// The most blobs one `share_blobs` call names. Each body may run to
+/// `MAX_INGEST_BLOB_BYTES`, so this bounds what a share pull holds at once.
+pub const MAX_SHARE_BLOB_BATCH: usize = MAX_BLOB_DOWNLOAD_BATCH;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobDownloadSpec {
@@ -749,6 +752,21 @@ pub trait RelayTransport {
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError>;
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError>;
     fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError>;
+    /// Up to `MAX_SHARE_BLOB_BATCH` of a share's blobs. Answers the first
+    /// request and as many of the next as it downloaded with it, in request
+    /// order. One blob's failure is that blob's answer and fails no other.
+    fn share_blobs(
+        &self,
+        requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_SHARE_BLOB_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(requests
+            .into_iter()
+            .map(|request| self.share_blob(request))
+            .collect())
+    }
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError>;
     fn share_proposal_submit(
         &self,
@@ -821,7 +839,14 @@ pub struct RelaySyncClient<T> {
 pub struct PullContinuation(
     std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
     std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
+    std::sync::Arc<std::sync::Mutex<SharePageBlobRefusals>>,
 );
+
+#[derive(Default)]
+struct SharePageBlobRefusals {
+    page: Option<(String, i64)>,
+    refused: BTreeMap<(String, &'static str), RelayError>,
+}
 
 struct FetchPullToken {
     identity: crate::SyncIdentity,
@@ -1110,6 +1135,25 @@ impl PullContinuation {
             fetched,
             progress,
         });
+    }
+
+    fn share_page_blob_refusals(
+        &self,
+        share_id: &str,
+        page_cursor: i64,
+    ) -> std::sync::MutexGuard<'_, SharePageBlobRefusals> {
+        let mut refusals = self
+            .2
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let page = (share_id.to_owned(), page_cursor);
+        if refusals.page.as_ref() != Some(&page) {
+            *refusals = SharePageBlobRefusals {
+                page: Some(page),
+                refused: BTreeMap::new(),
+            };
+        }
+        refusals
     }
 }
 
@@ -5150,15 +5194,26 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut refusals = Vec::new();
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
-        let mut blob_refusals = BTreeMap::<(String, &'static str), RelayError>::new();
-        for (index, op) in ops.into_iter().enumerate() {
-            // The coordinate before the envelope is built: a malformed op the
-            // engine will not apply still commits the cursor past itself, and
-            // when its origin coordinate is usable there is an identity to
-            // attach the reason to. Only an op with no usable coordinate is a
-            // bare skip — that one genuinely has nothing to record.
-            let coordinate = usable_coordinate(&op);
-            let envelope = match share_envelope(workspace_id, op) {
+        let mut page_blob_refusals = self
+            .continuation
+            .share_page_blob_refusals(share_id, page_cursor);
+        // The coordinate before the envelope is built: a malformed op the
+        // engine will not apply still commits the cursor past itself, and
+        // when its origin coordinate is usable there is an identity to
+        // attach the reason to. Only an op with no usable coordinate is a
+        // bare skip — that one genuinely has nothing to record.
+        let ops = ops
+            .into_iter()
+            .map(|op| (usable_coordinate(&op), share_envelope(workspace_id, op)))
+            .collect::<Vec<_>>();
+        let mut blobs = ShareBlobBatches::plan(
+            share_id,
+            &boundary,
+            ops.iter()
+                .filter_map(|(_, envelope)| envelope.as_ref().ok()),
+        );
+        for (index, (coordinate, envelope)) in ops.into_iter().enumerate() {
+            let envelope = match envelope {
                 Ok(envelope) => envelope,
                 Err(ShareEnvelopeError { op_kind, cause }) => {
                     skipped += 1;
@@ -5248,7 +5303,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped: &mut skipped,
                 refusals: &mut refusals,
                 changed: &mut changed,
-                blob_refusals: &mut blob_refusals,
+                blob_refusals: &mut page_blob_refusals.refused,
+                blobs: &mut blobs,
             };
             // Replay refusals are recorded inside, one per refused blob, by
             // `refuse_replay_unit`. What reaches here is only what must abort.
@@ -7552,6 +7608,211 @@ struct ShareViewReplayContext<'a, T> {
     /// Blobs this pull has already refused permanently, by sha256 and the
     /// content kind the op claimed for them. See `blob_refusal_key`.
     blob_refusals: &'a mut BTreeMap<(String, &'static str), RelayError>,
+    blobs: &'a mut ShareBlobBatches,
+}
+
+#[derive(Clone, Copy)]
+struct ShareWrite<'a> {
+    path: &'a str,
+    sha256: &'a str,
+    content_kind: &'static str,
+    object_id: Option<&'a str>,
+    rename_from: Option<&'a str>,
+}
+
+fn share_writes(envelope: &ReplicationEnvelope) -> Vec<ShareWrite<'_>> {
+    match envelope.op_kind.as_str() {
+        "moment.append" => {
+            let moment = MomentRefs::read(&envelope.payload);
+            let rename_from = match moment.operation {
+                Some("rename") if moment.payload_before.path.is_some() => {
+                    moment.payload_before.path
+                }
+                Some("write") => None,
+                _ => return Vec::new(),
+            };
+            moment
+                .after_path()
+                .zip(moment.payload_after.blob_sha256)
+                .map(|(path, sha256)| ShareWrite {
+                    path,
+                    sha256,
+                    content_kind: moment.payload_after.content_kind.as_str(),
+                    object_id: moment.object_id,
+                    rename_from,
+                })
+                .into_iter()
+                .collect()
+        }
+        "version.create" => VersionCreateRefs::read(&envelope.payload)
+            .snapshots()
+            .filter_map(|snapshot| {
+                Some(ShareWrite {
+                    path: snapshot.content.path?,
+                    sha256: snapshot.content.blob_sha256?,
+                    content_kind: snapshot.content.content_kind.as_str(),
+                    object_id: snapshot.object_id,
+                    rename_from: None,
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn share_write_request_id(
+    share_id: &str,
+    envelope: &ReplicationEnvelope,
+    write: &ShareWrite<'_>,
+) -> (String, String) {
+    let action = if write.rename_from.is_some() {
+        "rename"
+    } else {
+        "write"
+    };
+    let key = replay_id(share_id, envelope, action, write.path);
+    let request_id = format!("share-view:{key}");
+    (key, request_id)
+}
+
+fn share_write_applied(store: &EngineStore, request_id: &str) -> Result<bool, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                [request_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)
+}
+
+struct PlannedShareBlob {
+    request_id: String,
+    sha256: String,
+    content_kind: &'static str,
+}
+
+struct FetchedShareBlob {
+    bytes: Result<Vec<u8>, RelayError>,
+    writes_still_to_read_it: usize,
+}
+
+struct ShareBlobBatches {
+    planned: Vec<PlannedShareBlob>,
+    fetched: BTreeMap<String, FetchedShareBlob>,
+}
+
+impl ShareBlobBatches {
+    fn plan<'a>(
+        share_id: &str,
+        boundary: &crate::ShareBoundary,
+        envelopes: impl Iterator<Item = &'a ReplicationEnvelope>,
+    ) -> Self {
+        let mut planned = Vec::new();
+        let mut request_ids = BTreeSet::new();
+        for envelope in envelopes {
+            if crate::share::enforce_share_view_boundary(boundary, envelope).is_err() {
+                continue;
+            }
+            for write in share_writes(envelope) {
+                if !valid_sha256(write.sha256)
+                    || dohc_engine_domain::validate_plaintext_storable_path(write.path).is_err()
+                {
+                    continue;
+                }
+                let (_, request_id) = share_write_request_id(share_id, envelope, &write);
+                if request_ids.insert(request_id.clone()) {
+                    planned.push(PlannedShareBlob {
+                        request_id,
+                        sha256: write.sha256.to_owned(),
+                        content_kind: write.content_kind,
+                    });
+                }
+            }
+        }
+        Self {
+            planned,
+            fetched: BTreeMap::new(),
+        }
+    }
+
+    fn bytes<T: RelayTransport>(
+        &mut self,
+        transport: &T,
+        store: &EngineStore,
+        share_id: &str,
+        request_id: &str,
+        sha256: &str,
+        refused: &BTreeMap<(String, &'static str), RelayError>,
+    ) -> Result<Vec<u8>, RelayError> {
+        if !self.fetched.contains_key(sha256) {
+            self.fetched.clear();
+            let mut wanted = vec![(sha256.to_owned(), 0_usize)];
+            if let Some(index) = self
+                .planned
+                .iter()
+                .position(|blob| blob.request_id == request_id)
+            {
+                let batch_start = index - index % MAX_SHARE_BLOB_BATCH;
+                for blob in self.planned[batch_start..]
+                    .iter()
+                    .take(MAX_SHARE_BLOB_BATCH)
+                {
+                    if refused.contains_key(&blob_refusal_key(&blob.sha256, blob.content_kind))
+                        || share_write_applied(store, &blob.request_id)?
+                    {
+                        continue;
+                    }
+                    if let Some((_, writes)) =
+                        wanted.iter_mut().find(|(wanted, _)| *wanted == blob.sha256)
+                    {
+                        *writes += 1;
+                    } else if wanted.len() < MAX_SHARE_BLOB_BATCH {
+                        wanted.push((blob.sha256.clone(), 1));
+                    }
+                }
+            }
+            let results = transport.share_blobs(
+                wanted
+                    .iter()
+                    .map(|(sha256, _)| ShareBlobRequest {
+                        share_id: share_id.to_owned(),
+                        sha256: sha256.clone(),
+                    })
+                    .collect(),
+            )?;
+            if results.is_empty() || results.len() > wanted.len() {
+                return Err(RelayError::InvalidResponse);
+            }
+            self.fetched = wanted
+                .into_iter()
+                .zip(results)
+                .map(|((sha256, writes_still_to_read_it), result)| {
+                    (
+                        sha256,
+                        FetchedShareBlob {
+                            bytes: result.map(|blob| blob.bytes),
+                            writes_still_to_read_it,
+                        },
+                    )
+                })
+                .collect();
+        }
+        let fetched = self
+            .fetched
+            .get_mut(sha256)
+            .ok_or(RelayError::InvalidResponse)?;
+        if fetched.writes_still_to_read_it > 1 {
+            fetched.writes_still_to_read_it -= 1;
+            return fetched.bytes.clone();
+        }
+        self.fetched
+            .remove(sha256)
+            .ok_or(RelayError::InvalidResponse)?
+            .bytes
+    }
 }
 
 /// What a permanent blob refusal is remembered under, and why the pull is the
@@ -7735,100 +7996,40 @@ fn replay_share_view_op<T: RelayTransport>(
     };
     if envelope.op_kind == "moment.append" {
         let moment = MomentRefs::read(&envelope.payload);
-        let after_kind = moment.payload_after.content_kind.as_str();
-        match moment.operation {
-            Some("delete") => {
-                if let Some(path) = moment.path {
-                    replay_share_delete(
-                        &mut *context.store,
-                        context.workspace_id,
-                        &main_version_id,
-                        context.share_id,
-                        envelope,
-                        path,
-                        context.faults,
-                        &mut *context.applied,
-                        &mut *context.changed,
-                    )?;
-                }
-            }
-            Some("rename") => {
-                if let (Some(before), Some(after), Some(sha)) = (
-                    moment.payload_before.path,
-                    moment.after_path(),
-                    moment.payload_after.blob_sha256,
-                ) && let Err(error) = replay_share_write(
-                    context.transport,
-                    &mut *context.store,
-                    context.workspace_id,
-                    &main_version_id,
-                    context.share_id,
-                    envelope,
-                    after,
-                    sha,
-                    after_kind,
-                    moment.object_id,
-                    Some(before),
-                    context.faults,
-                    &mut *context.applied,
-                    &mut *context.changed,
-                    &mut *context.blob_refusals,
-                ) {
-                    refuse_replay_unit(context, &mut refused, after, error)?;
-                }
-            }
-            Some("write") => {
-                if let (Some(after), Some(sha)) =
-                    (moment.after_path(), moment.payload_after.blob_sha256)
-                    && let Err(error) = replay_share_write(
-                        context.transport,
-                        &mut *context.store,
-                        context.workspace_id,
-                        &main_version_id,
-                        context.share_id,
-                        envelope,
-                        after,
-                        sha,
-                        after_kind,
-                        moment.object_id,
-                        None,
-                        context.faults,
-                        &mut *context.applied,
-                        &mut *context.changed,
-                        &mut *context.blob_refusals,
-                    )
-                {
-                    refuse_replay_unit(context, &mut refused, after, error)?;
-                }
-            }
-            _ => {}
+        if moment.operation == Some("delete")
+            && let Some(path) = moment.path
+        {
+            replay_share_delete(
+                &mut *context.store,
+                context.workspace_id,
+                &main_version_id,
+                context.share_id,
+                envelope,
+                path,
+                context.faults,
+                &mut *context.applied,
+                &mut *context.changed,
+            )?;
         }
-    } else if envelope.op_kind == "version.create" {
-        for snapshot in VersionCreateRefs::read(&envelope.payload).snapshots() {
-            let content = snapshot.content;
-            if let (Some(path), Some(sha)) = (content.path, content.blob_sha256) {
-                // Per SNAPSHOT, so one refused file in a shared version does
-                // not take its siblings with it. The loop continues.
-                if let Err(error) = replay_share_write(
-                    context.transport,
-                    &mut *context.store,
-                    context.workspace_id,
-                    &main_version_id,
-                    context.share_id,
-                    envelope,
-                    path,
-                    sha,
-                    content.content_kind.as_str(),
-                    snapshot.object_id,
-                    None,
-                    context.faults,
-                    &mut *context.applied,
-                    &mut *context.changed,
-                    &mut *context.blob_refusals,
-                ) {
-                    refuse_replay_unit(context, &mut refused, path, error)?;
-                }
-            }
+    }
+    // Per write, so one refused file in a shared version does not take its
+    // siblings with it. The loop continues.
+    for write in share_writes(envelope) {
+        if let Err(error) = replay_share_write(
+            context.transport,
+            &mut *context.store,
+            context.workspace_id,
+            &main_version_id,
+            context.share_id,
+            envelope,
+            &write,
+            context.faults,
+            &mut *context.applied,
+            &mut *context.changed,
+            &mut *context.blob_refusals,
+            &mut *context.blobs,
+        ) {
+            refuse_replay_unit(context, &mut refused, write.path, error)?;
         }
     }
     record_refused_blobs(context, envelope, &refused);
@@ -7843,16 +8044,20 @@ fn replay_share_write<T: RelayTransport>(
     version_id: &str,
     share_id: &str,
     envelope: &ReplicationEnvelope,
-    path: &str,
-    sha256: &str,
-    content_kind: &'static str,
-    object_id: Option<&str>,
-    rename_from: Option<&str>,
+    write: &ShareWrite<'_>,
     faults: &dyn FaultInjector,
     applied: &mut usize,
     changed: &mut BTreeMap<String, ShareViewChangedPath>,
     blob_refusals: &mut BTreeMap<(String, &'static str), RelayError>,
+    blobs: &mut ShareBlobBatches,
 ) -> Result<(), RelayError> {
+    let ShareWrite {
+        path,
+        sha256,
+        content_kind,
+        object_id,
+        rename_from,
+    } = *write;
     // The OP is wrong, not the relay's copy of the blob: this reference is not
     // a sha256, so there is no blob to ask for and no repair that produces one.
     if !valid_sha256(sha256) {
@@ -7876,28 +8081,8 @@ fn replay_share_write<T: RelayTransport>(
     // find anything this call did not. The writes below therefore keep the
     // plain `domain` mapping.
     dohc_engine_domain::validate_plaintext_storable_path(path).map_err(replayed_domain)?;
-    let key = replay_id(
-        share_id,
-        envelope,
-        if rename_from.is_some() {
-            "rename"
-        } else {
-            "write"
-        },
-        path,
-    );
-    let request_id = format!("share-view:{key}");
-    let already_applied = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
-                [&request_id],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)
-        })
-        .map_err(local)?;
-    if already_applied {
+    let (key, request_id) = share_write_request_id(share_id, envelope, write);
+    if share_write_applied(store, &request_id)? {
         if let Some(before) = rename_from {
             changed.insert(
                 before.to_owned(),
@@ -7945,13 +8130,16 @@ fn replay_share_write<T: RelayTransport>(
     } else {
         BlobKind::Text
     });
-    let bytes = transport
-        .share_blob(ShareBlobRequest {
-            share_id: share_id.to_owned(),
-            sha256: sha256.to_owned(),
-        })
-        .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?
-        .bytes;
+    let bytes = blobs
+        .bytes(
+            transport,
+            store,
+            share_id,
+            &request_id,
+            sha256,
+            blob_refusals,
+        )
+        .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?;
     // INTEGRITY BEFORE SIZE, and the order is the whole point. "Too large" is
     // a permanent refusal that commits the cursor past the op, and that is only
     // honest about bytes proven to be the ones this op named. Measured first,
