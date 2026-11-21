@@ -435,7 +435,8 @@ describe("retained failures", () => {
   });
 
   it("refuses a field write when its session holds a lossy note other than the bytes it checked", async () => {
-    const markdown = "---\nid: rec-1\nstatus: draft\n---\n\n<details>\n\nHidden.\n</details>\n";
+    const markdown =
+      "---\nid: rec-1\nstatus: draft\n---\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
     // The record's live document as the desktop seeds it, with a witness of
     // a file that changed after the check read it.
     const doc = markdownToYDoc(markdown);

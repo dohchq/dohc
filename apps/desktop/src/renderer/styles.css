@@ -944,6 +944,11 @@ body {
   padding: 44px calc(var(--dohc-editor-block-inset) - 1px) 14px;
 }
 
+.dohc-notion-editor pre.dohc-raw-block {
+  padding-top: 14px;
+  white-space: pre-wrap;
+}
+
 .dohc-notion-editor pre code {
   border: 0;
   background: transparent;

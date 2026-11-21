@@ -480,7 +480,7 @@ export function LossyNoteNotice(props: {
           }}
         >
           <p>
-            Saving rewrites the parts dohc can't show, such as raw HTML or reference links.
+            Saving rewrites the parts dohc can't show.
             {historyLine ? ` ${historyLine}` : null}
           </p>
         </ConfirmDialog>
