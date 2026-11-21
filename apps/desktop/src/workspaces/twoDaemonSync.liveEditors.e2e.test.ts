@@ -328,3 +328,74 @@ it.skipIf(engine.missing)(
   },
   180_000,
 );
+
+it.skipIf(engine.missing)(
+  "lets a computer type in a note right after a pull wrote its file",
+  async () => {
+    const workspaceId = "two-daemon-type-after-pull";
+    const token = `test:${workspaceId}`;
+    const path = "notes/pulled.txt";
+    const rootA = await createTestScratch("dohc-type-after-pull-a-");
+    const rootB = await createTestScratch("dohc-type-after-pull-b-");
+    const relayRoot = await createTestScratch("dohc-type-after-pull-relay-");
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
+    const relayConnection = { baseUrl: relay.baseUrl, token };
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    const editors: OpenEditor[] = [];
+    const sync = async (daemon: LiveDaemonCapture) => {
+      await pushUntilDrained(daemon.relay);
+      await pullCaptured(daemon.relay, daemon.capture);
+      await pushUntilDrained(daemon.relay);
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: rootA,
+        relay: relayConnection,
+      });
+      await daemonA.relay.claim();
+      await mkdir(join(rootA, "notes"), { recursive: true });
+      await writeFile(join(rootA, path), "");
+      const editorA = await openEditor(daemonA, path);
+      editors.push(editorA);
+      for (const line of ["First save.\n", "Second save.\n"]) {
+        await typeAtEnd(editorA, line);
+        await sync(daemonA);
+      }
+      await editorA.session.close();
+      editors.length = 0;
+
+      daemonB = await openJoinedDaemonCapture({
+        workspaceId,
+        rootPath: rootB,
+        relay: relayConnection,
+      });
+      await sync(daemonB);
+      const pulled = "First save.\nSecond save.\n";
+      expect(await readFile(join(rootB, path), "utf8")).toBe(pulled);
+      const editorB = await openEditor(daemonB, path);
+      editors.push(editorB);
+      expect(shown(editorB)).toBe(pulled);
+      await typeAtEnd(editorB, "Typed after the pull.\n");
+      await editorB.session.close();
+      editors.length = 0;
+      const typed = `${pulled}Typed after the pull.\n`;
+      expect(await readFile(join(rootB, path), "utf8")).toBe(typed);
+      expect(await readdir(join(rootB, "notes"))).toEqual(["pulled.txt"]);
+
+      await sync(daemonB);
+      await sync(daemonA);
+      expect(await readFile(join(rootA, path), "utf8")).toBe(typed);
+      expect(await readdir(join(rootA, "notes"))).toEqual(["pulled.txt"]);
+    } finally {
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  180_000,
+);
