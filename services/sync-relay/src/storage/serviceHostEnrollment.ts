@@ -566,24 +566,26 @@ export function isOwnerSaveOfUnhostedNote(
     typeof objectId !== "string" ||
     typeof path !== "string" ||
     typeof before !== "string" ||
-    typeof recordedAtMs !== "number"
+    typeof recordedAtMs !== "number" ||
+    liveDocumentKindForPath(path) !== "richdoc"
   )
     return false;
   const stored = storage.db
     .prepare(
-      `SELECT f.blob_sha256,l.recorded_at_ms FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+      `SELECT f.blob_sha256,l.recorded_at_ms,json_extract(l.payload_json,'$.objectId') AS object_id
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
         WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
     )
     .get(workspaceId, path);
   if (
     typeof stored?.recorded_at_ms !== "number" ||
+    stored.object_id !== objectId ||
     stored.blob_sha256 === before ||
     recordedAtMs <= stored.recorded_at_ms
   )
     return false;
   return (
     storage.workspaceIsOwnedBy(workspaceId, userId) &&
-    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId &&
     storage.db
       .prepare(
         `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS}

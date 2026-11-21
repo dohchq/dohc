@@ -144,19 +144,32 @@ it("shows the owner's latest save of a note that is not live, even when two comp
   const storage = await newStorage();
   const h = handler(storage);
   const link = await seed(h, "view");
-  const shown = async () => {
+  const shown = async (path = "docs/shared.md") => {
     const current = await json(await h(linkRequest(link.capability, "/sync/link/current")));
-    return (current.files as { blobSha256: string }[]).map((file) => file.blobSha256);
+    return (current.files as { path: string; blobSha256: string }[])
+      .filter((file) => file.path === path)
+      .map((file) => file.blobSha256);
   };
-  const save = async (originId: string, text: string, recordedAtMs: number) => {
+  const seqs = new Map<string, number>([["origin-a", 3]]);
+  const save = async (
+    originId: string,
+    text: string,
+    recordedAtMs: number,
+    {
+      path = "docs/shared.md",
+      objectId = "object-shared",
+      before = "# shared\n",
+    }: { path?: string; objectId?: string; before?: string | null } = {},
+  ) => {
     const sha = await putBlob(h, text);
+    const seq = seqs.get(originId) ?? 0;
+    seqs.set(originId, seq + 1);
     await appendMoments(
       h,
       [
-        moment(originId === "origin-a" ? 3 : 0, "docs/shared.md", text, recordedAtMs, {
-          objectId: "object-shared",
-          beforePath: "docs/shared.md",
-          beforeContent: "# shared\n",
+        moment(seq, path, text, recordedAtMs, {
+          objectId,
+          ...(before === null ? {} : { beforePath: path, beforeContent: before }),
         }),
       ],
       { originId },
@@ -169,6 +182,25 @@ it("shows the owner's latest save of a note that is not live, even when two comp
   expect(await shown()).toEqual([second]);
   await save("origin-c", "saved offline earlier\n", 1_500);
   expect(await shown()).toEqual([second]);
+  await save("origin-d", "another note\n", 3_000, { objectId: "object-other" });
+  await save("origin-d", "another note again\n", 3_001, {
+    objectId: "object-other",
+    before: "another note\n",
+  });
+  expect(await shown()).toEqual([second]);
+
+  const records = await save("origin-a", "records: []\n", 4_000, {
+    path: "docs/tasks.yaml",
+    objectId: "object-tasks",
+    before: null,
+  });
+  await putBlob(h, "records: [old]\n");
+  await save("origin-a", "records: [mine]\n", 4_100, {
+    path: "docs/tasks.yaml",
+    objectId: "object-tasks",
+    before: "records: [old]\n",
+  });
+  expect(await shown("docs/tasks.yaml")).toEqual([records]);
 });
 it("serves one link-grant identity to browser and agent holders, separated from other grants and named users", async () => {
   const storage = await newStorage(),
