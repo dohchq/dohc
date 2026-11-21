@@ -7497,7 +7497,6 @@ const desktopEngine = createDesktopEngine({
     // A window's reads that came before this open, such as its settings, read again.
     notifyRenderer({ workspaceId });
     agentThreads().watch(workspaceId);
-    ownerPendingShare.refresh(workspaceId);
     if (workspace)
       void withWorkspaceAttachment({ workspaceId }, (lease) =>
         recoverOutageTyping(canonicalWorkspaceFor(lease)),
