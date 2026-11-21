@@ -6491,11 +6491,10 @@ describe("people and links on one surface", () => {
     });
   });
 
-  it("says a resend failed on the person's line, and hands it to the shell with a Try again that sends again", async () => {
+  it("keeps a resend that failed on the person's line while Share shows them, and files no notice", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
       sharingAccess([invitedRow("ana", "ana@dohc.test")]),
     );
-    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
     const report = vi.fn<ReportShellFailure>();
     const clear = vi.fn<(identity: string) => void>();
     const user = userEvent.setup();
@@ -6508,70 +6507,78 @@ describe("people and links on one surface", () => {
     );
     const ana = await screen.findByTestId("share-invited-ana");
 
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
     await choosePersonOption(user, ana, "Resend invitation");
     await waitFor(() =>
-      expect(report).toHaveBeenCalledExactlyOnceWith({
-        message: "dohc could not email ana@dohc.test their invitation.",
-        cause: undefined,
-        identity: "share-invitation-email:ana",
-        retry: expect.any(Function),
-      }),
+      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
     );
-    expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent.");
-    expect(clear).not.toHaveBeenCalled();
+    expect(ana.querySelector(".text-danger")?.textContent).toBe("The email could not be sent.");
 
-    const down = new Error("relay down");
-    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(down);
-    await act(async () => report.mock.calls[0]![0].retry!());
-    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2);
-    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenLastCalledWith({
-      workspaceId: "ws-1",
-      shareId: "share-ana",
-      grantId: "ana",
-    });
-    expect(report).toHaveBeenCalledTimes(2);
-    expect(report.mock.calls[1]![0]).toMatchObject({
-      cause: down,
-      identity: "share-invitation-email:ana",
-    });
+    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(new Error("relay down"));
+    await choosePersonOption(user, ana, "Resend invitation");
+    await waitFor(() => expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
+    );
+    expect(report).not.toHaveBeenCalled();
 
     bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
-    await act(async () => report.mock.calls[1]![0].retry!());
+    await choosePersonOption(user, ana, "Resend invitation");
+    await waitFor(() => expect(ana.textContent).toContain("ana@dohc.testEmail invite sent."));
     expect(clear).toHaveBeenCalledExactlyOnceWith("share-invitation-email:ana");
-    expect(report).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("share-invited-ana").textContent).toContain(
-      "ana@dohc.testEmail invite sent.",
-    );
+    expect(report).not.toHaveBeenCalled();
   });
 
-  it("hands the shell an answer that no email went out when it comes after Share closed", async () => {
+  it("hands the shell an answer that comes after Share closed, with a Try again that sends again", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
-      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+      sharingAccess([invitedRow("late", "late@dohc.test")]),
     );
     const sending = controllable<unknown>();
     bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(sending.promise);
     const report = vi.fn<ReportShellFailure>();
+    const clear = vi.fn<(identity: string) => void>();
     const user = userEvent.setup();
     const view = render(
       <ShellErrorReporter.Provider value={report}>
-        <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        <ShellNoticeClear.Provider value={clear}>
+          <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        </ShellNoticeClear.Provider>
       </ShellErrorReporter.Provider>,
     );
     await choosePersonOption(
       user,
-      await screen.findByTestId("share-invited-ana"),
+      await screen.findByTestId("share-invited-late"),
       "Resend invitation",
     );
     view.unmount();
 
     await act(async () => sending.resolve({ invitationEmail: "recent" }));
-
     expect(report).toHaveBeenCalledExactlyOnceWith({
-      message: "dohc could not email ana@dohc.test their invitation.",
+      message: "dohc could not email late@dohc.test their invitation.",
       cause: new Error("Sent a moment ago. Try again in a minute."),
-      identity: "share-invitation-email:ana",
+      identity: "share-invitation-email:late",
       retry: expect.any(Function),
     });
+
+    const down = new Error("relay down");
+    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(down);
+    await act(async () => report.mock.calls[0]![0].retry!());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-late",
+      grantId: "late",
+    });
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(report.mock.calls[1]![0]).toMatchObject({
+      cause: down,
+      identity: "share-invitation-email:late",
+    });
+
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
+    await act(async () => report.mock.calls[1]![0].retry!());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(3);
+    expect(clear).toHaveBeenCalledExactlyOnceWith("share-invitation-email:late");
+    expect(report).toHaveBeenCalledTimes(2);
   });
 
   it("reports an invitation the clipboard refused, the way a copy button does", async () => {

@@ -1092,7 +1092,7 @@ describe("copying a share's code or invitation", () => {
     });
   });
 
-  it("says a resend failed on the person's second line, and hands it to the shell with a Try again that sends again", async () => {
+  it("says a resend failed on the person's second line and to the shell, and shows a Try again from Notices on the row while it sends", async () => {
     answerWith({ granted: answer("granted", { rows: [granted()] }) });
     bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
     render(<CopyView />);
@@ -1114,7 +1114,7 @@ describe("copying a share's code or invitation", () => {
 
     const down = new Error("relay down");
     bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(down);
-    await act(async () => reportFailure.mock.calls[0]![0].retry());
+    await act(async () => void reportFailure.mock.calls[0]![0].retry());
     expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2);
     expect(reportFailure).toHaveBeenCalledTimes(2);
     expect(reportFailure.mock.calls[1]![0]).toMatchObject({
@@ -1122,16 +1122,107 @@ describe("copying a share's code or invitation", () => {
       identity: "share-invitation-email:grant-1",
     });
 
-    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
-    await act(async () => reportFailure.mock.calls[1]![0].retry());
+    let sent: (answer: ResendRelayShareInvitationResult) => void = () => undefined;
+    bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(
+      new Promise((resolve) => {
+        sent = resolve;
+      }),
+    );
+    await act(async () => void reportFailure.mock.calls[1]![0].retry());
     expect(bridgeMock.resendRelayShareInvitation).toHaveBeenLastCalledWith({
       workspaceId: "workspace-a",
       shareId: "share-1",
       grantId: "grant-1",
     });
+    expect(detail.textContent).toBe("Sending the email…");
+    const held = menuItem(await personMenu(person!), /^Resend invitation/);
+    expect(held.getAttribute("aria-disabled")).toBe("true");
+    await userEvent.keyboard("{Escape}");
+
+    await act(async () => sent({ invitationEmail: "sent" }));
     expect(clearNotice).toHaveBeenCalledExactlyOnceWith("share-invitation-email:grant-1");
     expect(reportFailure).toHaveBeenCalledTimes(2);
     expect(detail.textContent).toBe("Email invite sent.");
+  });
+
+  it("keeps the notice when its Try again is pressed while the person's resend is under way", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
+    render(<CopyView />);
+    const [person] = await people(await rowOf("share-1"));
+    await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+    await waitFor(() => expect(reportFailure).toHaveBeenCalledOnce());
+    const tryAgain: () => void | false = reportFailure.mock.calls[0]![0].retry;
+
+    let sent: (answer: ResendRelayShareInvitationResult) => void = () => undefined;
+    bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(
+      new Promise((resolve) => {
+        sent = resolve;
+      }),
+    );
+    await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2);
+
+    expect(tryAgain()).toBe(false);
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2);
+
+    await act(async () => sent({ invitationEmail: "sent" }));
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
+    let ran: void | false = false;
+    await act(async () => {
+      ran = tryAgain();
+    });
+    expect(ran).toBeUndefined();
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows a resend under way, and then its answer, on a person's row that was closed and opened again", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    const sends: Array<(answer: ResendRelayShareInvitationResult) => void> = [];
+    bridgeMock.resendRelayShareInvitation.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          sends.push(resolve);
+        }),
+    );
+    render(<CopyView />);
+    const item = await rowOf("share-1");
+    const toggle = within(item).getByTestId("sharing-item-toggle");
+    const detail = () =>
+      within(within(item).getByTestId("sharing-person")).getByTestId("sharing-person-detail")
+        .textContent;
+    const [person] = await people(item);
+    await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+    expect(detail()).toBe("Sending the email…");
+
+    await userEvent.click(toggle);
+    expect(within(item).queryByTestId("sharing-person")).toBeNull();
+    await userEvent.click(toggle);
+    expect(detail()).toBe("Sending the email…");
+    const [reopened] = await people(item);
+    expect(
+      menuItem(await personMenu(reopened!), /^Resend invitation/).getAttribute("aria-disabled"),
+    ).toBe("true");
+    await userEvent.keyboard("{Escape}");
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledOnce();
+    await act(async () => sends[0]!({ invitationEmail: "sent" }));
+    expect(detail()).toBe("Email invite sent.");
+
+    await userEvent.click(menuItem(await personMenu(reopened!), "Resend invitation"));
+    await userEvent.click(toggle);
+    await act(async () => sends[1]!({ invitationEmail: "unavailable" }));
+    expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+      message: "dohc could not email sam@example.com their invitation.",
+      cause: new Error("This server sends no email."),
+      identity: "share-invitation-email:grant-1",
+      retry: expect.any(Function),
+    });
+    await userEvent.click(toggle);
+    expect(detail()).toBe("This server sends no email.");
+
+    await userEvent.click(toggle);
+    await userEvent.click(toggle);
+    expect(detail()).toBe("Invited by email");
   });
 
   it("puts a person's levels first in their menu, then Copy invitation, Resend invitation, Copy share code and Remove access", async () => {

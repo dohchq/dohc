@@ -541,17 +541,21 @@ export function createShareGrantRoutes(
         throw badRequest("request body contains an unknown field");
       }
       const workspaceId = parseWorkspaceId(input.workspaceId);
-      const { share, grant } = requireOwnedGrant("person", route.shareId, route.grantId, actor);
-      requireShareWorkspace(share, workspaceId);
-      const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
-      const recipient = grant.principalUserId
-        ? { recipientUserId: grant.principalUserId }
-        : grant.principalEmail
-          ? { recipientEmail: grant.principalEmail }
-          : null;
-      if (!selector || "kind" in selector || grant.parentGrantId !== null || !recipient) {
-        throw notFound();
-      }
+      const invited = () => {
+        const { share, grant } = requireOwnedGrant("person", route.shareId, route.grantId, actor);
+        requireShareWorkspace(share, workspaceId);
+        const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+        const recipient = grant.principalUserId
+          ? { recipientUserId: grant.principalUserId }
+          : grant.principalEmail
+            ? { recipientEmail: grant.principalEmail }
+            : null;
+        if (!selector || "kind" in selector || grant.parentGrantId !== null || !recipient) {
+          throw notFound();
+        }
+        return { share, grant, selector, recipient };
+      };
+      const { share, grant, selector, recipient } = invited();
       const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
         share.workspaceId,
         grant.grantId,
@@ -568,6 +572,7 @@ export function createShareGrantRoutes(
           subjectName: storage.getShareLabels(share.shareId, "member").subjectName,
           access: grant.access,
           browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+          beforeResend: () => void invited(),
         })),
       });
     }

@@ -2,6 +2,7 @@ import type { EmailMessage } from "@dohc/workspace-auth/smtp";
 import { afterEach, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import {
+  createShareInvitationEmailer,
   SHARE_INVITATION_EMAIL_DAILY_LIMIT,
   SHARE_INVITATION_EMAIL_GRANT_INTERVAL_SECONDS,
 } from "./shareInvitationEmail";
@@ -9,6 +10,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import {
   admitShareInvitationEmail,
+  forgetShareInvitationEmailGrant,
   SHARE_INVITATION_EMAILS,
 } from "./storage/shareInvitationEmails";
 import {
@@ -365,4 +367,191 @@ it("paces a database that counted invitations before it knew their grants", asyn
   expect(admit(2000)).toMatchObject({ admitted: true });
   expect(admit(2001)).toEqual({ admitted: false, refused: "recent" });
   expect(admit(2000 + INTERVAL_MS)).toEqual({ admitted: false, refused: "limit", sent: 2 });
+});
+
+it("sends nothing, counts nothing and answers as a level change does when the person is removed while their address is read", async () => {
+  let held = false;
+  let waiting: () => void = () => undefined;
+  const reading = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  let answerLookup: (email: string) => void = () => undefined;
+  const f = await invited({
+    lookupVerifiedUserEmail: (userId) => {
+      if (!held || userId !== "friend") return `${userId}@dohc.test`;
+      waiting();
+      return new Promise<string>((resolve) => {
+        answerLookup = resolve;
+      });
+    },
+  });
+  const counted = attempts(f.storage);
+
+  held = true;
+  const resending = f.resendTo("owner", "grant-0", "share-0");
+  await reading;
+  held = false;
+  const removed = await f.handler(
+    request(
+      "owner",
+      "/sync/shares/share-0/grants/grant-0/revoke",
+      jsonBody({ workspaceId: "workspace" }),
+    ),
+  );
+  expect(removed.status).toBe(200);
+  answerLookup("friend@dohc.test");
+  const response = await resending;
+
+  const levelChange = await f.handler(
+    request(
+      "owner",
+      "/sync/shares/share-0/grants/grant-0/retune",
+      jsonBody({ workspaceId: "workspace", access: "view" }),
+    ),
+  );
+  expect(response.status).toBe(404);
+  expect(await response.text()).toBe(await levelChange.text());
+  expect(f.sent).toHaveLength(2);
+  expect(attempts(f.storage)).toBe(counted);
+});
+
+it("keeps the minute when the deadline passes after the send began, and frees it once the mail server refuses", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const storage = await testStorage();
+  let refuse: (error: Error) => void = () => undefined;
+  const sendEmail = vi.fn(
+    () =>
+      new Promise<void>((_, reject) => {
+        refuse = reject;
+      }),
+  );
+  const email = createShareInvitationEmailer({
+    storage,
+    nowMs: () => 1_000_000,
+    sendEmail,
+    lookupVerifiedUserEmail: () => "owner@dohc.test",
+    relayPublicOrigin: "https://relay.example.test",
+    timeoutMs: 20,
+  });
+  const resend = {
+    inviterUserId: "owner",
+    recipientEmail: "friend@dohc.test",
+    shareId: "share-0",
+    grantId: "grant-0",
+    subjectName: "Trip plan",
+    access: "edit",
+    browserInvitationUrl: null,
+    beforeResend: () => undefined,
+  };
+
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+  try {
+    const pastTheDeadline = async (sends: number) => {
+      const answer = email(resend);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sendEmail).toHaveBeenCalledTimes(sends);
+      await vi.advanceTimersByTimeAsync(20);
+      return answer;
+    };
+
+    expect(await pastTheDeadline(1)).toEqual({ invitationEmail: "failed" });
+    expect(await email(resend)).toEqual({ invitationEmail: "recent" });
+    expect(sendEmail).toHaveBeenCalledOnce();
+
+    refuse(new Error("mail server refused"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await pastTheDeadline(2)).toEqual({ invitationEmail: "failed" });
+    expect(attempts(storage)).toBe(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("frees only its own try's minute when another try took the same row number since", async () => {
+  const storage = await testStorage();
+  const admit = (inviterUserId: string, grantId: string) =>
+    admitShareInvitationEmail(storage, {
+      inviterUserId,
+      grantId,
+      nowMs: 2000,
+      limit: 50,
+      windowMs: 86_400_000,
+      grantIntervalMs: INTERVAL_MS,
+    });
+  const first = admit("owner", "grant-0");
+  if (!first.admitted) throw new Error("the first try was refused");
+  (storage as StorageContext).db.exec(`DELETE FROM ${SHARE_INVITATION_EMAILS}`);
+  expect(admit("neighbor", "grant-9")).toEqual(first);
+
+  forgetShareInvitationEmailGrant(storage, {
+    attemptId: first.attemptId,
+    inviterUserId: "owner",
+    grantId: "grant-0",
+  });
+
+  expect(admit("neighbor", "grant-9")).toEqual({ admitted: false, refused: "recent" });
+});
+
+it("sends a first invite whatever was already recorded for its new grant, and paces the resend after it", async () => {
+  const f = await fixture();
+  expect(
+    admitShareInvitationEmail(f.storage, {
+      inviterUserId: "owner",
+      grantId: "grant-0",
+      nowMs: f.clock.nowMs,
+      limit: 50,
+      windowMs: 86_400_000,
+      grantIntervalMs: INTERVAL_MS,
+    }),
+  ).toMatchObject({ admitted: true });
+
+  expect(await f.invite("pending@example.test")).toMatchObject({
+    grantId: "grant-0",
+    invitationEmail: "sent",
+  });
+  expect(f.sent).toHaveLength(1);
+  expect(await f.resend("grant-0", "share-0")).toEqual({ ok: true, invitationEmail: "recent" });
+  expect(f.sent).toHaveLength(1);
+});
+
+it("emails a person who joined through a link once the owner has made them independent", async () => {
+  const f = await invited();
+  seedLinkGrant(f.storage, {
+    shareId: "share-0",
+    grantId: "link",
+    secretHash: hashLinkBearer("a".repeat(43), LINK_KEY),
+    access: "edit",
+  });
+  expect(
+    seedDependentGrant(f.storage, {
+      shareId: "share-0",
+      parentGrantId: "link",
+      grantId: "joined",
+      principalUserId: "holder",
+      createdAtMs: 3,
+    }).ok,
+  ).toBe(true);
+  expect((await f.resendTo("owner", "joined", "share-0")).status).toBe(404);
+
+  const promoted = await f.handler(
+    request(
+      "owner",
+      "/sync/shares/share-0/grants/joined/promote",
+      jsonBody({
+        workspaceId: "workspace",
+        expectedParentGrantId: "link",
+        expectedParentGeneration: 1,
+      }),
+    ),
+  );
+  expect(promoted.status).toBe(200);
+  expect(f.storage.getShareGrant("joined")).toMatchObject({ parentGrantId: null });
+
+  expect(await f.resend("joined", "share-0")).toEqual({ ok: true, invitationEmail: "sent" });
+  expect(f.sent).toHaveLength(3);
+  expect(f.sent[2]).toMatchObject({
+    to: "holder@dohc.test",
+    subject: 'owner@dohc.test shared "Trip plan" with you',
+  });
+  expect(f.sent[2]!.text).toContain("1. Sign in to dohc as holder@dohc.test.");
 });

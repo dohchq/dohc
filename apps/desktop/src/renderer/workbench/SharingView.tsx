@@ -874,11 +874,11 @@ function PersonRow(props: {
     sensitive: SHARE_CODE_SECRET,
   });
   const copied = copiedLast === "code" ? codeCopy : invitationCopy;
-  const resend = useInvitationResend(props.workspaceId, {
-    shareId: grant.shareId,
-    grantId: grant.grantId,
-    name,
-  });
+  const resend = useInvitationResend(
+    props.workspaceId,
+    { shareId: grant.shareId, grantId: grant.grantId, name },
+    "on-row-and-reported",
+  );
 
   const automations = useAutomationShareCheck(props.workspaceId, props.target ?? NEVER_CHECKED);
   const checks = useRequestSequence([grant.grantId]);

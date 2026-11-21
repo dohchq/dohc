@@ -27,6 +27,12 @@ export type ShareInvitation = {
   subjectName: string | null;
   access: string;
   browserInvitationUrl: string | null;
+  /**
+   * Set for a resend, which one grant gets once a minute. It runs after the
+   * address lookups, with nothing awaited between it and the send. What it
+   * throws reaches the caller, with nothing counted and nothing sent.
+   */
+  beforeResend?: () => void;
 } & ({ recipientEmail: string } | { recipientUserId: string });
 
 export function createShareInvitationEmailer(options: {
@@ -43,21 +49,35 @@ export function createShareInvitationEmailer(options: {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const startedAt = performance.now();
     let answered = false;
-    let attemptId: number | undefined;
+    let refused: { error: unknown } | undefined;
     const assertInTime = () => {
       if (answered || performance.now() - startedAt >= timeoutMs) throw new Error("timed out");
     };
     const email = async (): Promise<ShareInvitationEmailAnswer> => {
       const inviterEmail = await options.lookupVerifiedUserEmail?.(invitation.inviterUserId);
       if (!inviterEmail) return { invitationEmail: "unavailable" };
+      const recipientEmail =
+        "recipientEmail" in invitation
+          ? invitation.recipientEmail
+          : (await options.lookupVerifiedUserEmail?.(invitation.recipientUserId))
+              ?.trim()
+              .toLowerCase();
       assertInTime();
+      try {
+        invitation.beforeResend?.();
+      } catch (error) {
+        refused = { error };
+        throw error;
+      }
       const admission = admitShareInvitationEmail(options.storage, {
         inviterUserId: invitation.inviterUserId,
         grantId: invitation.grantId,
         nowMs: options.nowMs(),
         limit: SHARE_INVITATION_EMAIL_DAILY_LIMIT,
         windowMs: SHARE_INVITATION_EMAIL_WINDOW_HOURS * 60 * 60 * 1000,
-        grantIntervalMs: SHARE_INVITATION_EMAIL_GRANT_INTERVAL_SECONDS * 1000,
+        grantIntervalMs: invitation.beforeResend
+          ? SHARE_INVITATION_EMAIL_GRANT_INTERVAL_SECONDS * 1000
+          : null,
       });
       if (!admission.admitted && admission.refused === "recent")
         return { invitationEmail: "recent" };
@@ -70,24 +90,29 @@ export function createShareInvitationEmailer(options: {
             sent: admission.sent,
           },
         };
-      attemptId = admission.attemptId;
-      const recipientEmail =
-        "recipientEmail" in invitation
-          ? invitation.recipientEmail
-          : (await options.lookupVerifiedUserEmail?.(invitation.recipientUserId))
-              ?.trim()
-              .toLowerCase();
-      if (!recipientEmail || !ONE_MAILBOX.test(recipientEmail)) throw new Error("not one mailbox");
-      const message = shareInvitationMessage({
-        recipientEmail,
-        inviterEmail,
-        subjectName: invitation.subjectName,
-        access: invitation.access,
-        browserInvitationUrl: invitation.browserInvitationUrl,
-        shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
-      });
-      assertInTime();
-      await sendEmail(message);
+      try {
+        if (!recipientEmail || !ONE_MAILBOX.test(recipientEmail))
+          throw new Error("not one mailbox");
+        const message = shareInvitationMessage({
+          recipientEmail,
+          inviterEmail,
+          subjectName: invitation.subjectName,
+          access: invitation.access,
+          browserInvitationUrl: invitation.browserInvitationUrl,
+          shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
+        });
+        assertInTime();
+        await sendEmail(message);
+      } catch (error) {
+        try {
+          forgetShareInvitationEmailGrant(options.storage, {
+            attemptId: admission.attemptId,
+            inviterUserId: invitation.inviterUserId,
+            grantId: invitation.grantId,
+          });
+        } catch {}
+        throw error;
+      }
       return { invitationEmail: "sent" };
     };
     try {
@@ -103,10 +128,8 @@ export function createShareInvitationEmailer(options: {
         }),
       ]);
     } catch {
+      if (refused) throw refused.error;
       console.error(`[sync-relay] share invitation email failed for share ${invitation.shareId}`);
-      try {
-        if (attemptId !== undefined) forgetShareInvitationEmailGrant(options.storage, attemptId);
-      } catch {}
       return { invitationEmail: "failed" };
     } finally {
       clearTimeout(deadline);

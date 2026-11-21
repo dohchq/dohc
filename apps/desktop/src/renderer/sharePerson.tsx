@@ -1,4 +1,14 @@
-import { useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import type { ResendRelayShareInvitationResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import { bridge } from "./bridge";
@@ -280,90 +290,109 @@ function invitationResendWords(answer: ResendRelayShareInvitationResult): string
   }
 }
 
-const invitationResends = new Set<string>();
+type InvitationResendState = ResendRelayShareInvitationResult | "sending";
+const invitationResends = new Map<string, InvitationResendState>();
+const invitationResendRows = new Map<string, Set<() => void>>();
+
+function setInvitationResend(grantId: string, state: InvitationResendState | null): void {
+  if (state === null) invitationResends.delete(grantId);
+  else invitationResends.set(grantId, state);
+  for (const changed of invitationResendRows.get(grantId) ?? []) changed();
+}
+
+function showInvitationResend(grantId: string, changed: () => void): () => void {
+  const rows = invitationResendRows.get(grantId) ?? new Set();
+  invitationResendRows.set(grantId, rows.add(changed));
+  return () => {
+    rows.delete(changed);
+    queueMicrotask(() => {
+      if (rows.size > 0 || invitationResendRows.get(grantId) !== rows) return;
+      invitationResendRows.delete(grantId);
+      if (invitationResends.get(grantId) !== "sending") invitationResends.delete(grantId);
+    });
+  };
+}
 
 type InvitationResend = {
   workspaceId: string;
   person: Pick<SharedPerson, "shareId" | "grantId" | "name">;
   report: ReportShellFailure | null;
   clear: ((identity: string) => void) | null;
-  show: (answer: ResendRelayShareInvitationResult) => boolean;
+  failure: "on-row" | "on-row-and-reported";
 };
 
-async function resendInvitation(resend: InvitationResend): Promise<void> {
+function resendInvitation(resend: InvitationResend): void | false {
   const { workspaceId, person } = resend;
-  if (invitationResends.has(person.grantId)) return;
-  invitationResends.add(person.grantId);
-  let answer: ResendRelayShareInvitationResult = { invitationEmail: "failed" };
-  let cause: unknown;
-  try {
-    answer = await bridge().resendRelayShareInvitation({
-      workspaceId,
-      shareId: person.shareId,
-      grantId: person.grantId,
-    });
-  } catch (error) {
-    cause = error;
-  } finally {
-    invitationResends.delete(person.grantId);
-  }
-  const shownOnRow = resend.show(answer);
-  const identity = invitationEmailNoticeIdentity(person.grantId);
-  if (answer.invitationEmail === "sent") resend.clear?.(identity);
-  else if (answer.invitationEmail === "failed" || !shownOnRow)
-    resend.report?.({
-      message: `dohc could not email ${person.name} their invitation.`,
-      cause: answer.invitationEmail === "failed" ? cause : new Error(invitationResendWords(answer)),
-      identity,
-      retry: () => void resendInvitation(resend),
+  const { grantId } = person;
+  if (invitationResends.get(grantId) === "sending") return false;
+  setInvitationResend(grantId, "sending");
+  void bridge()
+    .resendRelayShareInvitation({ workspaceId, shareId: person.shareId, grantId })
+    .then(
+      (answer) => ({ answer, cause: undefined }),
+      (cause: unknown) => ({ answer: { invitationEmail: "failed" as const }, cause }),
+    )
+    .then(({ answer, cause }) => {
+      setInvitationResend(grantId, answer);
+      const identity = invitationEmailNoticeIdentity(grantId);
+      const onRow = (invitationResendRows.get(grantId)?.size ?? 0) > 0;
+      if (answer.invitationEmail === "sent") resend.clear?.(identity);
+      else if (
+        !onRow ||
+        (answer.invitationEmail === "failed" && resend.failure === "on-row-and-reported")
+      )
+        resend.report?.({
+          message: `dohc could not email ${person.name} their invitation.`,
+          cause:
+            answer.invitationEmail === "failed" ? cause : new Error(invitationResendWords(answer)),
+          identity,
+          retry: () => resendInvitation(resend),
+        });
     });
 }
 
 /**
  * Resend invitation for one person's row. `words` is what the row's detail
  * line says: that the email is being sent, then the server's answer, until
- * `forget` or the next send. A send that fails also goes to the shell with
- * Try again, and so does any answer but "sent" that comes after the row has
- * gone.
+ * `forget`, the next send, or the person's last row going. Every row of the
+ * person reads the same send, however it was started. `failure` says where a
+ * send that failed goes while a row of the person shows: Share keeps it on
+ * the row, and the Sharing page also reports it to the shell with Try again.
+ * With no row showing, any answer but "sent" goes to the shell.
  */
 export function useInvitationResend(
   workspaceId: string,
   person: Pick<SharedPerson, "shareId" | "grantId" | "name">,
+  failure: InvitationResend["failure"],
 ) {
+  const { shareId, grantId, name } = person;
   const report = useContext(ShellErrorReporter);
   const clear = useContext(ShellNoticeClear);
-  const [answer, setAnswer] = useState<ResendRelayShareInvitationResult | "sending" | null>(null);
-  const shown = useRef(false);
-  useEffect(() => {
-    shown.current = true;
-    return () => {
-      shown.current = false;
-    };
-  }, []);
+  const state = useSyncExternalStore(
+    useCallback((changed: () => void) => showInvitationResend(grantId, changed), [grantId]),
+    () => invitationResends.get(grantId) ?? null,
+  );
   return {
-    sending: answer === "sending",
-    failed: answer !== null && answer !== "sending" && answer.invitationEmail === "failed",
+    sending: state === "sending",
+    failed: state !== null && state !== "sending" && state.invitationEmail === "failed",
     words:
-      answer === null
+      state === null
         ? null
-        : answer === "sending"
+        : state === "sending"
           ? SENDING_INVITATION
-          : invitationResendWords(answer),
-    forget: () => setAnswer((held) => (held === "sending" ? held : null)),
-    send: () => {
-      if (invitationResends.has(person.grantId)) return;
-      setAnswer("sending");
+          : invitationResendWords(state),
+    forget: () => {
+      if (invitationResends.has(grantId) && invitationResends.get(grantId) !== "sending")
+        setInvitationResend(grantId, null);
+    },
+    send: () =>
       void resendInvitation({
         workspaceId,
-        person: { shareId: person.shareId, grantId: person.grantId, name: person.name },
+        person: { shareId, grantId, name },
         report,
         clear,
-        show: (next) => {
-          if (shown.current) setAnswer(next);
-          return shown.current;
-        },
-      });
-    },
+        failure,
+      }),
   };
 }
 

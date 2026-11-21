@@ -59,7 +59,7 @@ export function admitShareInvitationEmail(
     nowMs: number;
     limit: number;
     windowMs: number;
-    grantIntervalMs: number;
+    grantIntervalMs: number | null;
   },
 ): ShareInvitationEmailAdmission {
   const context = storage as StorageContext;
@@ -68,6 +68,7 @@ export function admitShareInvitationEmail(
       .prepare(`DELETE FROM ${SHARE_INVITATION_EMAILS} WHERE attempted_at_ms <= ?`)
       .run(input.nowMs - input.windowMs);
     if (
+      input.grantIntervalMs !== null &&
       context.db
         .prepare(
           `SELECT 1 FROM ${SHARE_INVITATION_EMAILS} WHERE grant_id = ? AND attempted_at_ms > ? LIMIT 1`,
@@ -92,9 +93,15 @@ export function admitShareInvitationEmail(
 
 export function forgetShareInvitationEmailGrant(
   storage: SyncRelayStorage,
-  attemptId: number,
+  attempt: { attemptId: number; inviterUserId: string; grantId: string },
 ): void {
-  (storage as StorageContext).db
-    .prepare(`UPDATE ${SHARE_INVITATION_EMAILS} SET grant_id = NULL WHERE rowid = ?`)
-    .run(attemptId);
+  const context = storage as StorageContext;
+  context.tx(() => {
+    context.db
+      .prepare(
+        `UPDATE ${SHARE_INVITATION_EMAILS} SET grant_id = NULL
+           WHERE rowid = ? AND inviter_user_id = ? AND grant_id = ?`,
+      )
+      .run(attempt.attemptId, attempt.inviterUserId, attempt.grantId);
+  });
 }

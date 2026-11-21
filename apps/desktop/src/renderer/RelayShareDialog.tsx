@@ -457,7 +457,7 @@ function InvitedPersonRow(props: {
   });
   const [copiedLast, setCopiedLast] = useState<InvitationPart>("invitation");
   const copied = copiedLast === "code" ? codeCopy : invitationCopy;
-  const resend = useInvitationResend(workspaceId, person);
+  const resend = useInvitationResend(workspaceId, person, "on-row");
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const shown = useRef(false);
