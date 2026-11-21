@@ -18,6 +18,22 @@ const withDocument = <
   retirementOwed: true,
 });
 
+// The engine's own release, as the desktop calls it.
+const engineRelease =
+  (client: EngineClient) =>
+  (
+    binding: Parameters<EngineClient["ownerYDocRelease"]>[1],
+    acceptedCursor: number,
+    signal: AbortSignal,
+  ) =>
+    client.ownerYDocRelease(
+      { id: 0, workspace: "handle", deadlineMs: 30_000 },
+      binding,
+      "person",
+      { acceptedCursor },
+      signal,
+    );
+
 it("never retries a deferred local fold on later sync passes", async () => {
   const row = {
     ...withDocument({
@@ -36,6 +52,7 @@ it("never retries a deferred local fold on later sync passes", async () => {
   const options = {
     client,
     workspaceHandle: "handle",
+    release: engineRelease(client),
     workspaceId: "workspace",
     signal: new AbortController().signal,
     assertCurrent() {},
@@ -82,6 +99,7 @@ it("continues past a corrupt Stop and requests moved documents by their saved ke
     reconcileOwnerLiveStops({
       client,
       workspaceHandle: "handle",
+      release: engineRelease(client),
       workspaceId: "workspace",
       signal: new AbortController().signal,
       assertCurrent() {},
@@ -116,6 +134,7 @@ it("retains a waiting Stop and retries with the engine's successor binding", asy
   const options = {
     client,
     workspaceHandle: "handle",
+    release: engineRelease(client),
     workspaceId: "workspace",
     signal: new AbortController().signal,
     assertCurrent() {},
@@ -130,6 +149,7 @@ it("retains a waiting Stop and retries with the engine's successor binding", asy
   expect(release).toHaveBeenCalledWith(
     { id: 0, workspace: "handle", deadlineMs: 30_000 },
     row.binding,
+    "person",
     { acceptedCursor: 17 },
     options.signal,
   );
@@ -159,6 +179,7 @@ it("does not retire a Stop cancelled before its document transition runs", async
   await reconcileOwnerLiveStops({
     client,
     workspaceHandle: "handle",
+    release: engineRelease(client),
     workspaceId: "workspace",
     signal: new AbortController().signal,
     assertCurrent() {},
@@ -198,6 +219,7 @@ it.each(["owner-stop-conflict", "owner-stop-restore-pending"])(
       reconcileOwnerLiveStops({
         client,
         workspaceHandle: "handle",
+        release: engineRelease(client),
         workspaceId: "workspace",
         signal: new AbortController().signal,
         assertCurrent() {},
@@ -237,6 +259,7 @@ it("retries an unenrolled offline Stop by document key and acknowledges retireme
   const options = {
     client,
     workspaceHandle: "handle",
+    release: engineRelease(client),
     workspaceId: "workspace",
     signal: new AbortController().signal,
     assertCurrent() {},
@@ -295,6 +318,7 @@ it("finishes both Stops when the first release is held and only the safe peer ma
     reconcileOwnerLiveStops({
       client,
       workspaceHandle: "handle",
+      release: engineRelease(client),
       workspaceId: "workspace",
       signal: new AbortController().signal,
       assertCurrent() {},

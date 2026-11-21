@@ -290,7 +290,7 @@ describe("private owner delivery transport", () => {
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
       expect(e.params).toEqual(
         action === "release"
-          ? { binding: target.binding, acceptedCursor: 0 }
+          ? { binding: target.binding, personId: "person", acceptedCursor: 0 }
           : action === "list"
             ? {}
             : action === "clear"
@@ -324,7 +324,7 @@ describe("private owner delivery transport", () => {
       await transport.ownerYDocStopRequest(request, "a.md", undefined, { retired: true });
       expect(action).toBe("requestRetired");
       expect(
-        await transport.ownerYDocRelease(request, target.binding, { acceptedCursor: 0 }),
+        await transport.ownerYDocRelease(request, target.binding, "person", { acceptedCursor: 0 }),
       ).toMatchObject({ state: "released", materialized: true });
       expect(await transport.ownerYDocStopList(request)).toEqual([
         { ...stopTarget, state: "requested" },
@@ -364,7 +364,7 @@ describe("private owner delivery transport", () => {
     };
     try {
       await expect(
-        transport.ownerYDocRelease(request, target.binding, { acceptedCursor: 0 }),
+        transport.ownerYDocRelease(request, target.binding, "person", { acceptedCursor: 0 }),
       ).rejects.toThrow(TypeError);
     } finally {
       transport.close();

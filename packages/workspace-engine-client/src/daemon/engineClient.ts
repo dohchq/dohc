@@ -1220,11 +1220,12 @@ export class EngineClient implements EngineTransport {
    * Releases a Stop at the relay's retirement cursor, recording the kept
    * edits it takes when a snapshot is given. With only a snapshot it is a Try
    * again: it settles a release that already took exactly those edits, and
-   * starts none.
+   * starts none. A person's queued edits are credited to `personId`.
    */
   async ownerYDocRelease(
     request: OwnerYDocDeliveryRequest,
     binding: OwnerYDocDeliveryTarget["binding"],
+    personId: string,
     release: { acceptedCursor: number; keptSnapshot?: string } | { keptSnapshot: string },
     signal?: AbortSignal,
   ) {
@@ -1242,6 +1243,7 @@ export class EngineClient implements EngineTransport {
       "release",
       {
         binding,
+        personId,
         ...(acceptedCursor === undefined ? {} : { acceptedCursor }),
         ...(keptSnapshot === undefined ? {} : { keptSnapshot }),
       },

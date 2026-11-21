@@ -298,11 +298,13 @@ pub fn list_requested_in(
 /// `kept_snapshot` names the refused edits the desktop recorded before this
 /// release; a released Stop answers again only for the same one. Without
 /// `accepted_cursor` it is a Try again, which never starts a release.
+/// `person_id` is who this computer credits with its person's edits.
 pub fn release_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
     accepted_cursor: Option<i64>,
     kept_snapshot: Option<&str>,
+    person_id: &str,
     now_ms: i64,
     mut post_append: impl FnMut(
         &rusqlite::Transaction<'_>,
@@ -419,7 +421,8 @@ pub fn release_in_tx(
                     },
                 )
                 .transpose()?;
-            let credit = super::entry_credit(source.as_ref(), agent, run, automation, person)?;
+            let credit =
+                super::entry_credit(source.as_ref(), agent, run, automation, person, person_id)?;
             credited.push((credit, digest, bytes));
         }
     }

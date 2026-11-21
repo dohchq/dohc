@@ -2909,12 +2909,14 @@ pub(crate) type EntryCredit = (
 /// outranks an agent, and either a person's edit. An adoption seed, and a
 /// draft that declared nothing, credit nobody; a caller treats that as
 /// unattributed, never as whoever reads the entry.
+/// A draft keeps only that a person made it; the caller names the person.
 pub(crate) fn entry_credit(
     native: Option<&OwnerOutboxNativeSource>,
     agent: Option<String>,
     agent_run_id: Option<String>,
     automation: Option<String>,
     person: Option<i64>,
+    person_id: &str,
 ) -> Result<EntryCredit, OwnerOutboxError> {
     let person = match person {
         None => false,
@@ -2951,7 +2953,7 @@ pub(crate) fn entry_credit(
         )
     } else if person {
         (
-            Some("local-person".into()),
+            Some(person_id.to_owned()),
             Some(dohc_engine_domain::ChangeAttribution {
                 actor_kind: dohc_engine_domain::ChangeActorKind::Human,
                 on_behalf_of: None,

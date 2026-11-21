@@ -179,6 +179,7 @@ function fixture(options: { ownerLiveReleases?: UnwrittenReleases } = {}) {
   const unwritten: UnwrittenRelease[] = [];
   const recoveries = new Map<string, string>();
   const dependencies: Dependencies = {
+    localPersonId: () => "person",
     ownerLiveReleases: options.ownerLiveReleases ?? {
       list: async (id) => unwritten.filter((row) => row.workspaceId === id),
       put: async (release, recovery) => {
