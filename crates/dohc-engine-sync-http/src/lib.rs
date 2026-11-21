@@ -14,13 +14,13 @@ use dohc_engine_sync::{
     HostedPullRequest, HostedPullResponse, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
-    MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
-    ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, RelayError,
-    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
-    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
-    ShareProposalChange, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
-    SharedChannelResponse,
+    MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_SHARE_BLOB_BATCH,
+    ObservedBytes, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RelayError, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -49,6 +49,9 @@ const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
 /// `ureq` refuses a body once a read reaches its limit, so the limit sits one
 /// byte past the largest body this transport accepts.
 const BLOB_BODY_READ_LIMIT_BYTES: usize = MAX_BLOB_BODY_BYTES + 1;
+/// `ureq` keeps 3 idle connections to a host unless told otherwise, so a wider
+/// batch would open a connection, and pay its TLS handshake, on every batch.
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = MAX_SHARE_BLOB_BATCH;
 
 /// A blob body that overruns the read limit broke the ingest ceiling, so the
 /// caller gets the ceiling by name. The transport stops reading at its bound
@@ -761,6 +764,7 @@ fn configured_agent(
         .http_status_as_error(false)
         .https_only(!allow_insecure_loopback)
         .max_redirects(0)
+        .max_idle_connections_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .middleware(name_relay_api_version);
     let builder = if let Some(tls_config) = tls_config {
         builder.tls_config(tls_config)
@@ -1172,6 +1176,28 @@ impl RelayTransport for HttpRelayTransport {
             blob_body_overflow(),
         )?;
         Ok(BlobDownloadResponse { bytes })
+    }
+
+    fn share_blobs(
+        &self,
+        mut requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_SHARE_BLOB_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        if requests.len() == 1 {
+            return Ok(vec![self.share_blob(requests.remove(0))]);
+        }
+        Ok(std::thread::scope(|scope| {
+            let downloads = requests
+                .into_iter()
+                .map(|request| scope.spawn(move || self.share_blob(request)))
+                .collect::<Vec<_>>();
+            downloads
+                .into_iter()
+                .map(|download| download.join().unwrap_or(Err(RelayError::InvalidResponse)))
+                .collect()
+        }))
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {

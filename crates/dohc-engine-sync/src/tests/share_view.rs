@@ -3949,3 +3949,185 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
         TxnOutcome::Crashed { .. } => panic!("lane read crashed"),
     }
 }
+
+fn saved_note_versions() -> Vec<Vec<u8>> {
+    (0..25)
+        .map(|index| format!("Saved version {index}.\n").into_bytes())
+        .collect()
+}
+
+fn note_share_relay(versions: &[Vec<u8>]) -> PagedShareRelay {
+    PagedShareRelay::new(
+        [],
+        [(
+            0,
+            ShareViewResponse {
+                work_references: Vec::new(),
+                next_reference_after: None,
+                reference_has_more: false,
+                ops: versions
+                    .iter()
+                    .zip(0..)
+                    .map(|(version, seq)| {
+                        share_view_write_op(
+                            seq,
+                            "docs/note.md",
+                            &dohc_engine_storage::hex_sha256(version),
+                        )
+                    })
+                    .collect(),
+                next_cursor: versions.len() as i64,
+                has_more: false,
+            },
+        )],
+    )
+    .with_view_blobs(
+        versions
+            .iter()
+            .map(|version| (dohc_engine_storage::hex_sha256(version), version.clone())),
+    )
+}
+
+fn note_text(engine: &mut EngineStore) -> Option<Vec<u8>> {
+    VersionedTextStore::new(engine)
+        .read_text("ws", "main", "docs/note.md")
+        .expect("share-view path read is answerable")
+        .map(|snapshot| snapshot.text.into_bytes())
+}
+
+#[test]
+fn share_view_pull_asks_for_a_notes_saved_versions_a_batch_at_a_time() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions();
+    let client = RelaySyncClient::new(note_share_relay(&versions));
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a note saved 25 times is pulled");
+
+    assert_eq!(
+        (outcome.fetched, outcome.applied, outcome.skipped),
+        (25, 25, 0)
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches"),
+        [8, 8, 8, 1],
+        "25 saved versions cost more than 4 requests to the transport"
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        versions
+            .iter()
+            .map(|version| dohc_engine_storage::hex_sha256(version))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}
+
+#[test]
+fn share_view_pull_stops_at_a_missing_blob_and_resumes_from_it() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions();
+    let shas = versions
+        .iter()
+        .map(|version| dohc_engine_storage::hex_sha256(version))
+        .collect::<Vec<_>>();
+    let interrupted = RelaySyncClient::new(
+        note_share_relay(&versions)
+            .with_view_blob_errors([(shas[10].clone(), RelayError::BlobMissing)]),
+    );
+
+    assert_eq!(
+        interrupted
+            .pull_share_view(
+                &mut engine,
+                "ws",
+                "share",
+                &tracked_grant(["docs"]),
+                &NoFaults,
+            )
+            .expect_err("a pull past a blob the relay does not hold yet"),
+        RelayError::BlobMissing
+    );
+    assert_eq!(
+        note_text(&mut engine).as_ref(),
+        Some(&versions[9]),
+        "the pull stops with every version before the missing one applied and none after it"
+    );
+
+    let resumed = RelaySyncClient::new(note_share_relay(&versions));
+    let outcome = resumed
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("the pull resumes once the relay holds the blob");
+
+    assert_eq!((outcome.fetched, outcome.applied), (25, 15));
+    assert_eq!(outcome.pending_cursor.cursor, 25);
+    assert_eq!(
+        *resumed
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        shas[10..],
+        "the resumed pull asks again for a version it already applied"
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}
+
+#[test]
+fn share_view_pull_asks_once_for_a_blob_two_writes_of_one_batch_name() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let first = b"First wording.\n".to_vec();
+    let second = b"Second wording.\n".to_vec();
+    let client = RelaySyncClient::new(note_share_relay(&[
+        first.clone(),
+        second.clone(),
+        first.clone(),
+    ]));
+
+    client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a note put back to an earlier wording is pulled");
+
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        [
+            dohc_engine_storage::hex_sha256(&first),
+            dohc_engine_storage::hex_sha256(&second)
+        ],
+    );
+    assert_eq!(note_text(&mut engine), Some(first));
+}
