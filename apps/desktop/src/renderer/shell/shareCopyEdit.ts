@@ -33,13 +33,18 @@ export function addedShareNotice(
   mounted: MountedShare,
   openToEdit: () => void,
 ): { message: string; action?: { label: string; run: () => void } } {
+  if (!mounted.alreadyAdded && mounted.files === 0) {
+    return {
+      message: `Added ${mounted.name} to shared-with-me. Nothing has arrived from the owner's computer yet.`,
+    };
+  }
   const edit = mounted.access === "edit";
   return {
     message: mounted.alreadyAdded
-      ? `${mounted.label} is already in shared-with-me.`
+      ? `${mounted.name} is already in shared-with-me.`
       : edit
-        ? `Added ${mounted.label} to shared-with-me as a read-only copy.`
-        : `Added ${mounted.label} to shared-with-me. Its files are read-only and stay up to date.`,
+        ? `Added ${mounted.name} to shared-with-me as a read-only copy.`
+        : `Added ${mounted.name} to shared-with-me. Its files are read-only and stay up to date.`,
     ...(edit ? { action: { label: OPEN_TO_EDIT, run: openToEdit } } : {}),
   };
 }
@@ -76,7 +81,11 @@ export function useOpenShareToEdit(input: {
         return;
       }
       latest.current.onOpenShare({
-        resolvedShare: { shareId: copy.shareId, shareCode: found.share.shareCode },
+        resolvedShare: {
+          shareId: copy.shareId,
+          shareCode: found.share.shareCode,
+          share: found.share,
+        },
         level: "edit",
         path: copy.path,
       });

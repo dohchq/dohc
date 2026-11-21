@@ -346,7 +346,7 @@ describe("opening a sent notice", () => {
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(getRelayReceivedShare).toHaveBeenCalledWith({ shareId: "share-1" });
     expect(onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
       level: "edit",
       path: "Trips/Japan/report.md",
     });
@@ -1080,7 +1080,7 @@ describe("a failed run's notice", () => {
     const notAdded = setup([copy], [workspace("notes")]);
     await notAdded.result.current.onOpenSentNotice(copy, live());
     expect(notAdded.onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
+      resolvedShare: { shareId: "share-1", shareCode: "code-1", share: RECEIVED.share },
       level: "edit",
       path: "Tasks/automations.yaml",
       controls: {

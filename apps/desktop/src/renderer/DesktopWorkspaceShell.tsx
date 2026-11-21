@@ -6614,7 +6614,7 @@ export function DesktopWorkspaceShell(props: {
           ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
           : "dohc can't read what this share grants. Open the share again to restore it."
         : shareViewWritable
-          ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
+          ? `Shared view from ${shareGranterName}. Pages save as you type. Other files need Send changes.`
           : shareViewHasIndependentChat
             ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
             : shareAccess === "comment"
@@ -7522,7 +7522,8 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles()
       .catch(() => undefined)
       .then(() => {
-        if (openPath && !mounted.left) openFile(`shared-with-me/${label}/${openPath}`);
+        if (openPath && !mounted.left && (mounted.alreadyAdded || mounted.files > 0))
+          openFile(`shared-with-me/${label}/${openPath}`);
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
@@ -8189,11 +8190,6 @@ export function DesktopWorkspaceShell(props: {
                                 {shareView.subjectName}
                               </span>
                             )}
-                            {shareView.granterEmail && (
-                              <span className="shrink-0 font-mono text-[11px]">
-                                {shareView.granterEmail}
-                              </span>
-                            )}{" "}
                             <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
                               {shareBannerText}
                             </span>
@@ -8491,9 +8487,9 @@ export function DesktopWorkspaceShell(props: {
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                   onShare: setShareTarget,
-                                  onOpenShare: ({ shareId, shareCode, liveEditing }) =>
+                                  onOpenShare: ({ shareId, shareCode, liveEditing, share }) =>
                                     setOpenShare({
-                                      resolvedShare: { shareId, shareCode },
+                                      resolvedShare: { shareId, shareCode, share },
                                       level: liveEditing ? "edit" : null,
                                       path: null,
                                     }),

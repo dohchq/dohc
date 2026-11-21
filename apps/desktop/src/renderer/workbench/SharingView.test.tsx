@@ -2576,6 +2576,7 @@ describe("Shared with me, by who shared", () => {
         shareId: "in-2",
         shareCode: "code-2",
         liveEditing: true,
+        share: expect.objectContaining({ shareId: "in-2" }),
       }),
     );
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({ shareId: "in-2" });
@@ -2955,6 +2956,7 @@ describe("Shared with me, by who shared", () => {
           shareId: "in-4",
           shareCode: "code-in-4",
           liveEditing: true,
+          share: expect.objectContaining({ shareId: "in-4" }),
         }),
       );
       await act(async () => slow.resolve(found("in-2")));

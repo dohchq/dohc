@@ -19,7 +19,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { ShareAccess, ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareAccess,
+  ShareProposalRow,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { useAutomationShareCheck } from "../automationShareCheck";
 import { accessOptions } from "../EmailShareForm";
@@ -98,7 +103,12 @@ export type CopyWhat = "code" | "invitation";
 export type ChangedAccess = { access: ShareAccess; generation: number };
 export type AccessChange = { asked: ShareAccess | null; answered: ChangedAccess | null };
 export type AccessChanges = Readonly<Record<string, AccessChange>>;
-export type OpenedShare = { shareId: string; shareCode: string; liveEditing: boolean };
+export type OpenedShare = {
+  shareId: string;
+  shareCode: string;
+  liveEditing: boolean;
+  share: RelayShareReceivedRow;
+};
 export type SharingLaneView =
   | AccessView
   | { status: "ready"; answer: AccessAnswer; moreFailed: true };
@@ -2482,7 +2492,7 @@ export function SharingView(props: {
         void loadReceived({ refreshed: refresh() });
         return;
       }
-      open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true });
+      open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true, share });
     } catch (cause) {
       if (openLookups.isCurrent(lookup))
         receivedFailed(token, "dohc could not open this share.", cause, retry);
