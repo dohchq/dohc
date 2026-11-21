@@ -284,7 +284,7 @@ function invitationResendWords(answer: ResendRelayShareInvitationResult): string
     case "limit":
       return invitationEmailNote(answer);
     case "recent":
-      return "Sent a moment ago. Try again in a minute.";
+      return "Tried a moment ago. Try again in a minute.";
     case "failed":
       return "The email could not be sent.";
   }

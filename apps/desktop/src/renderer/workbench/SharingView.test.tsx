@@ -1076,7 +1076,7 @@ describe("copying a share's code or invitation", () => {
     for (const [next, words] of [
       [{ invitationEmail: "unavailable" }, "This server sends no email."],
       [limited, invitationEmailNote(limited)],
-      [{ invitationEmail: "recent" }, "Sent a moment ago. Try again in a minute."],
+      [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(next);
       await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));

@@ -29,10 +29,11 @@ export type ShareInvitation = {
   browserInvitationUrl: string | null;
   /**
    * Set for a resend, which one grant gets once a minute. It runs after the
-   * address lookups, with nothing awaited between it and the send. What it
-   * throws reaches the caller, with nothing counted and nothing sent.
+   * address lookups, with nothing awaited between it and the send, and answers
+   * what the grant gives now. What it throws reaches the caller, with nothing
+   * counted and nothing sent.
    */
-  beforeResend?: () => void;
+  beforeResend?: () => { access: string; browserInvitationUrl: string | null };
 } & ({ recipientEmail: string } | { recipientUserId: string });
 
 export function createShareInvitationEmailer(options: {
@@ -63,8 +64,9 @@ export function createShareInvitationEmailer(options: {
               ?.trim()
               .toLowerCase();
       assertInTime();
+      let granted: { access: string; browserInvitationUrl: string | null } = invitation;
       try {
-        invitation.beforeResend?.();
+        granted = invitation.beforeResend?.() ?? invitation;
       } catch (error) {
         refused = { error };
         throw error;
@@ -90,6 +92,7 @@ export function createShareInvitationEmailer(options: {
             sent: admission.sent,
           },
         };
+      let sending = false;
       try {
         if (!recipientEmail || !ONE_MAILBOX.test(recipientEmail))
           throw new Error("not one mailbox");
@@ -97,20 +100,22 @@ export function createShareInvitationEmailer(options: {
           recipientEmail,
           inviterEmail,
           subjectName: invitation.subjectName,
-          access: invitation.access,
-          browserInvitationUrl: invitation.browserInvitationUrl,
+          access: granted.access,
+          browserInvitationUrl: granted.browserInvitationUrl,
           shareCode: shareCodeForRelay(invitation.shareId, options.relayPublicOrigin),
         });
         assertInTime();
+        sending = true;
         await sendEmail(message);
       } catch (error) {
-        try {
-          forgetShareInvitationEmailGrant(options.storage, {
-            attemptId: admission.attemptId,
-            inviterUserId: invitation.inviterUserId,
-            grantId: invitation.grantId,
-          });
-        } catch {}
+        if (!sending)
+          try {
+            forgetShareInvitationEmailGrant(options.storage, {
+              attemptId: admission.attemptId,
+              inviterUserId: invitation.inviterUserId,
+              grantId: invitation.grantId,
+            });
+          } catch {}
         throw error;
       }
       return { invitationEmail: "sent" };

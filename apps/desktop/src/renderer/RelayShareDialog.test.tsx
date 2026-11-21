@@ -6471,7 +6471,7 @@ describe("people and links on one surface", () => {
     for (const [answer, words] of [
       [{ invitationEmail: "unavailable" }, "This server sends no email."],
       [limited, invitationEmailNote(limited)],
-      [{ invitationEmail: "recent" }, "Sent a moment ago. Try again in a minute."],
+      [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(answer);
       await choosePersonOption(user, ana, "Resend invitation");
@@ -6555,7 +6555,7 @@ describe("people and links on one surface", () => {
     await act(async () => sending.resolve({ invitationEmail: "recent" }));
     expect(report).toHaveBeenCalledExactlyOnceWith({
       message: "dohc could not email late@dohc.test their invitation.",
-      cause: new Error("Sent a moment ago. Try again in a minute."),
+      cause: new Error("Tried a moment ago. Try again in a minute."),
       identity: "share-invitation-email:late",
       retry: expect.any(Function),
     });

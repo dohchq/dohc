@@ -555,13 +555,20 @@ export function createShareGrantRoutes(
         }
         return { share, grant, selector, recipient };
       };
-      const { share, grant, selector, recipient } = invited();
-      const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
-        share.workspaceId,
-        grant.grantId,
-        selector,
-        grant.access,
-      );
+      const granted = () => {
+        const { share, grant, selector } = invited();
+        const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
+          share.workspaceId,
+          grant.grantId,
+          selector,
+          grant.access,
+        );
+        return {
+          access: grant.access,
+          browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+        };
+      };
+      const { share, grant, recipient } = invited();
       return jsonResponse({
         ok: true,
         ...(await emailShareInvitation({
@@ -570,9 +577,8 @@ export function createShareGrantRoutes(
           shareId: share.shareId,
           grantId: grant.grantId,
           subjectName: storage.getShareLabels(share.shareId, "member").subjectName,
-          access: grant.access,
-          browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
-          beforeResend: () => void invited(),
+          ...granted(),
+          beforeResend: granted,
         })),
       });
     }

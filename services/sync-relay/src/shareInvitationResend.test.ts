@@ -322,7 +322,7 @@ it("answers failed for a signed-in person with no verified address, and may be t
   expect(f.sent.at(-1)!.to).toBe("friend@example.test");
 });
 
-it("lets a send that failed be tried again at once", async () => {
+it("paces a send the mail server refused, since it may still have delivered, and sends again after the minute", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const sent: string[] = [];
   let down = false;
@@ -336,8 +336,9 @@ it("lets a send that failed be tried again at once", async () => {
   down = true;
   expect(await f.resend("grant-1", "share-1")).toEqual({ ok: true, invitationEmail: "failed" });
   down = false;
-  expect(await f.resend("grant-1", "share-1")).toEqual({ ok: true, invitationEmail: "sent" });
   expect(await f.resend("grant-1", "share-1")).toEqual({ ok: true, invitationEmail: "recent" });
+  f.clock.nowMs += INTERVAL_MS;
+  expect(await f.resend("grant-1", "share-1")).toEqual({ ok: true, invitationEmail: "sent" });
 
   expect(sent).toEqual(["friend@dohc.test", "pending@example.test", "pending@example.test"]);
   expect(attempts(f.storage)).toBe(4);
@@ -415,7 +416,43 @@ it("sends nothing, counts nothing and answers as a level change does when the pe
   expect(attempts(f.storage)).toBe(counted);
 });
 
-it("keeps the minute when the deadline passes after the send began, and frees it once the mail server refuses", async () => {
+it("names the access the person has when the email goes, after a change made while their address was read", async () => {
+  let held = false;
+  let waiting: () => void = () => undefined;
+  const reading = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  let answerLookup: (email: string) => void = () => undefined;
+  const f = await invited({
+    lookupVerifiedUserEmail: (userId) => {
+      if (!held || userId !== "friend") return `${userId}@dohc.test`;
+      waiting();
+      return new Promise<string>((resolve) => {
+        answerLookup = resolve;
+      });
+    },
+  });
+
+  held = true;
+  const resending = f.resendTo("owner", "grant-0", "share-0");
+  await reading;
+  held = false;
+  const lowered = await f.handler(
+    request(
+      "owner",
+      "/sync/shares/share-0/grants/grant-0/retune",
+      jsonBody({ workspaceId: "workspace", access: "view" }),
+    ),
+  );
+  expect(lowered.status).toBe(200);
+  answerLookup("friend@dohc.test");
+
+  expect(await json(await resending)).toEqual({ ok: true, invitationEmail: "sent" });
+  expect(f.sent.at(-1)!.text).toContain("You can view it.");
+  expect(f.sent.at(-1)!.text).not.toContain("Open it in your browser:");
+});
+
+it("keeps the minute once a send began, whether the deadline passed or the mail server refused", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const storage = await testStorage();
   let refuse: (error: Error) => void = () => undefined;
@@ -441,7 +478,7 @@ it("keeps the minute when the deadline passes after the send began, and frees it
     subjectName: "Trip plan",
     access: "edit",
     browserInvitationUrl: null,
-    beforeResend: () => undefined,
+    beforeResend: () => ({ access: "edit", browserInvitationUrl: null }),
   };
 
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
@@ -460,8 +497,9 @@ it("keeps the minute when the deadline passes after the send began, and frees it
 
     refuse(new Error("mail server refused"));
     await vi.advanceTimersByTimeAsync(0);
-    expect(await pastTheDeadline(2)).toEqual({ invitationEmail: "failed" });
-    expect(attempts(storage)).toBe(2);
+    expect(await email(resend)).toEqual({ invitationEmail: "recent" });
+    expect(sendEmail).toHaveBeenCalledOnce();
+    expect(attempts(storage)).toBe(1);
   } finally {
     vi.useRealTimers();
   }
