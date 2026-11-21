@@ -1110,14 +1110,20 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
-      "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
+      "Added e2e-granter to shared-with-me as a read-only copy.",
     );
+    await expect(
+      page.getByTestId("workspace-shell-notice").getByRole("button", { name: "Open to edit" }),
+    ).toBeVisible();
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
 
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
+    await expect(page.getByTestId("edit-copy-notice")).toHaveText(
+      "This copy is read-only.Open to edit",
+    );
     const refused = await page.evaluate(async () => {
       const api = (
         window as unknown as {

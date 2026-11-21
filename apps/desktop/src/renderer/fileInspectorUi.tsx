@@ -215,6 +215,20 @@ export function EngineMayHoldDocumentNotice(props: {
   );
 }
 
+export function EditCopyNotice(props: { onOpenToEdit: () => void }) {
+  return (
+    <div
+      data-testid="edit-copy-notice"
+      className="flex items-center gap-3 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+    >
+      <span>This copy is read-only.</span>
+      <SecondaryButton size="row" onClick={props.onOpenToEdit}>
+        Open to edit
+      </SecondaryButton>
+    </div>
+  );
+}
+
 // An Open externally control, then a lock and "Read-only copy" when the file
 // is from someone else. Main answers by the open's own rule. Until it answers
 // for this file, or when it can't, no words show, and the open decides alone.

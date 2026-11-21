@@ -27,6 +27,7 @@ import { FolderChip } from "./ui/Step";
 // nobody has to pick a folder to see the files.
 
 export type MountedShare = {
+  shareId: string;
   label: string;
   access: ShareAccess | null;
   alreadyAdded: boolean;
@@ -40,6 +41,7 @@ function mountedShare(result: MountShareResult, left: boolean): MountedShare {
     (mount) => mount.shareId === result.mount.shareId,
   );
   return {
+    shareId: result.mount.shareId,
     label: result.mount.label,
     access: pinned?.access ?? null,
     alreadyAdded: result.alreadyAdded === true,

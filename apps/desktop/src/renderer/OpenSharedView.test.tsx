@@ -130,6 +130,7 @@ describe("OpenSharedView", () => {
     expect(onOpened).not.toHaveBeenCalled();
     expect(onWorkspaceReady).not.toHaveBeenCalled();
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      shareId: "share-1",
       label: "granter",
       access: null,
       alreadyAdded: false,
@@ -158,6 +159,7 @@ describe("OpenSharedView", () => {
 
     await waitFor(() =>
       expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+        shareId: "share-1",
         label: "granter",
         access: null,
         alreadyAdded: true,
@@ -210,6 +212,7 @@ describe("OpenSharedView", () => {
       shareCode: "dohc-share:share-1:http://localhost:1788",
     });
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      shareId: "share-1",
       label: "granter",
       access: null,
       alreadyAdded: false,
@@ -300,6 +303,7 @@ describe("OpenSharedView", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onOpened).toHaveBeenCalledOnce();
     expect(onMounted).toHaveBeenCalledWith({
+      shareId: "share-1",
       label: "granter",
       access: "edit",
       alreadyAdded: false,

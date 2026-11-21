@@ -510,6 +510,7 @@ describe("ShareHandoffSurface", () => {
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onMounted).toHaveBeenCalledWith({
+      shareId: "share-exact",
       label: "granter",
       access: null,
       alreadyAdded: false,

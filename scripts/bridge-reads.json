@@ -126,6 +126,7 @@
     "apps/desktop/src/renderer/shareLinkAgents.tsx | listRelayShareLinkAgents",
     "apps/desktop/src/renderer/shell/agentRunState.ts | readAgentRunState",
     "apps/desktop/src/renderer/shell/oldWindowState.ts | readOldWindowState",
+    "apps/desktop/src/renderer/shell/shareCopyEdit.ts | getRelayReceivedShare",
     "apps/desktop/src/renderer/shell/usageRecordStops.ts | readUsageRecord",
     "apps/desktop/src/renderer/shell/useAgentSetup.ts | getAgentRunStatus",
     "apps/desktop/src/renderer/shell/useAgentSetup.ts | getAgentRunStatus #2",
