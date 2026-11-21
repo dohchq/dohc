@@ -444,7 +444,6 @@ export function atRiskOrphanedDraftIds(): readonly number[] {
   return ids;
 }
 
-/** Settles once main has answered every write of this draft. */
 export function orphanedDraftStoreSettled(id: number): Promise<void> {
   return storedDraftSettled(id);
 }

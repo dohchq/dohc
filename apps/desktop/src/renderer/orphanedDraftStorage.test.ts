@@ -64,6 +64,42 @@ it("counts a draft kept only once main answers that its file is written", async 
   expect(isStoredDraftCurrent(draft.id)).toBe(true);
 });
 
+describe("a rename while the first write is still on its way", () => {
+  let release!: () => void;
+  beforeEach(() => {
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      ...disk.calls,
+      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
+        gate.then(() => disk.calls.writeSetAsideDraft(input)),
+      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
+        gate.then(() => disk.calls.removeSetAsideDraft(input)),
+    });
+  });
+  afterEach(() => release());
+
+  it("stores the draft under the new path", async () => {
+    const stored = storeDraft(draft);
+    remapStoredDraftPaths("ws", () => "b.md");
+    expect(isStoredDraftPending(draft.id)).toBe(true);
+    release();
+    expect(await stored).toBe(true);
+    await draftFileWritesSettled();
+    expect(disk.rows().map((row) => row.path)).toEqual(["b.md"]);
+    expect(isStoredDraftCurrent(draft.id)).toBe(true);
+  });
+
+  it("removes the plaintext file when the new path is a secret", async () => {
+    const stored = storeDraft(draft);
+    expect([...remapStoredDraftPaths("ws", () => ".env")]).toEqual([draft.id]);
+    release();
+    await stored;
+    await draftFileWritesSettled();
+    expect(disk.files.size).toBe(0);
+  });
+});
+
 it("reports a draft whose write failed as not kept", async () => {
   disk.fail(new Error("No space left on device"));
   expect(await storeDraft(draft)).toBe(false);

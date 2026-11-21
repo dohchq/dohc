@@ -5,11 +5,6 @@ type DraftFileCalls = Pick<
   "listSetAsideDrafts" | "writeSetAsideDraft" | "removeSetAsideDraft" | "onSetAsideDraftChanged"
 >;
 
-/**
- * Main's set-aside draft files, in memory. A change reaches every listening
- * window before its call answers, as main's does. `set` and `delete` change a
- * file the way another window or an earlier app run would.
- */
 export function draftFilesForTests() {
   const files = new Map<string, string>();
   const listeners = new Set<(change: SetAsideDraftChange) => void>();
@@ -52,7 +47,6 @@ export function draftFilesForTests() {
       for (const key of [...files.keys()]) remove(key);
     },
     rows: () => [...files.values()].map((raw) => JSON.parse(raw) as Record<string, unknown>),
-    /** Every later write and removal fails with this error, until set back to null. */
     fail: (error: Error | null) => {
       failure = error;
     },

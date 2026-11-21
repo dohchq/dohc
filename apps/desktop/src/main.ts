@@ -10390,9 +10390,9 @@ function registerIpcHandlers(): void {
   inspectNamedForCli = buttonsIpc.inspectNamed;
 
   const setAsideDrafts = setAsideDraftFiles(join(stateDir(), "set-aside-drafts"), (change) => {
-    for (const window of desktopWindows.workspaceWindows.allLive())
-      if (!window.webContents.isDestroyed())
-        window.webContents.send(CHANNELS.setAsideDraftChanged, change);
+    for (const window of BrowserWindow.getAllWindows())
+      if (desktopWindows.showsNotices(window))
+        sendIfOpen(window, CHANNELS.setAsideDraftChanged, change);
   });
   registerOperations(operationBoundary, setAsideDraftOperations, {
     listSetAsideDrafts: () => setAsideDrafts.list(),
