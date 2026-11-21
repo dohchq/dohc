@@ -18,7 +18,9 @@
 //!    secret or not, and a new file's temp takes its folder's entries.
 //! 3. **Flush** per the per-OS [`DurabilityPolicy`], through
 //!    [`EngineStore::flush_before_commits`], so the file persists before the
-//!    job's status.
+//!    job's status. A version switch writes and flushes many temps at once
+//!    before their jobs run ([`PreparedTemps`]); a job takes its temp in place
+//!    of steps 2 and 3.
 //! 4. **Revalidate the preimage** immediately before the replace: if an external
 //!    editor produced newer content after the DB commit, do not overwrite —
 //!    preserve both and mark the job `conflict`.
@@ -138,10 +140,13 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod prepared;
 #[cfg(windows)]
 mod readonly_link;
 #[cfg(windows)]
 mod staged_dacl;
+pub use prepared::PreparedTemps;
+
 #[cfg(not(windows))]
 mod staged_dacl {
     use super::{EngineStore, MaterializeError};
@@ -1142,7 +1147,19 @@ pub fn materialize_one_ordinary(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    materialize_one_ordinary_with(store, root, job, options, false)
+    materialize_one_ordinary_prepared(store, root, job, options, &PreparedTemps::default())
+}
+
+/// [`materialize_one_ordinary`], placing the temp `prepared` holds for the
+/// job, if any, instead of writing one.
+pub fn materialize_one_ordinary_prepared(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+    prepared: &PreparedTemps,
+) -> Result<JobOutcome, MaterializeError> {
+    materialize_one_ordinary_with(store, root, job, options, false, prepared)
 }
 
 fn materialize_one_ordinary_with(
@@ -1151,9 +1168,10 @@ fn materialize_one_ordinary_with(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
     conflict_only: bool,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     require_materialization_owner(store)?;
-    let result = materialize_one_inner(store, root, job, options, conflict_only);
+    let result = materialize_one_inner(store, root, job, options, conflict_only, prepared);
     if matches!(&result, Ok(JobOutcome::Conflict))
         || matches!(&result, Err(error) if !matches!(error, MaterializeError::Storage(_)))
     {
@@ -1192,6 +1210,7 @@ fn materialize_one_inner(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
     conflict_only: bool,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
@@ -1282,6 +1301,7 @@ fn materialize_one_inner(
         job,
         &content,
         options,
+        prepared,
     )
 }
 
@@ -1294,7 +1314,8 @@ pub fn materialize_write_conflict(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    match materialize_one_ordinary_with(store, root, job, options, true) {
+    match materialize_one_ordinary_with(store, root, job, options, true, &PreparedTemps::default())
+    {
         Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable) => {
             Ok(JobOutcome::Blocked)
         }
@@ -1685,6 +1706,10 @@ enum OrdinaryWritePlacement<'a> {
 
 /// Write an ordinary job's content without overwriting bytes the preimage
 /// check did not see (module docs, "Stage, then place").
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a prepared temp replaces the write and flush of steps 2 and 3"
+)]
 fn materialize_ordinary_write(
     store: &EngineStore,
     root: &Path,
@@ -1693,6 +1718,7 @@ fn materialize_ordinary_write(
     job: &MaterializationJob,
     content: &[u8],
     options: &MaterializeOptions<'_>,
+    prepared: &PreparedTemps,
 ) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions {
         policy,
@@ -1731,7 +1757,13 @@ fn materialize_ordinary_write(
     // secret path routed here still gets an owner-only temp.
     let tmp = temp_sibling(target, &job.job_id);
     let owner_only = crate::policy::normalized_path_is_secret(&job.target_path);
-    let temp_file = write_temp(target, &tmp, content, owner_only)?;
+    let temp_file = if matches!(placement, OrdinaryWritePlacement::Target(_))
+        && prepared.take(&job.job_id, &tmp)
+    {
+        None
+    } else {
+        Some(write_temp(target, &tmp, content, owner_only)?)
+    };
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content: it lives under a `.dohc-write-` name
@@ -1742,8 +1774,9 @@ fn materialize_ordinary_write(
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced after the renames, which is where their durability
     // lives on POSIX.
-    flush_temp_file(store, &temp_file, &tmp, policy)?;
-    drop(temp_file);
+    if let Some(temp_file) = temp_file {
+        flush_temp_file(store, &temp_file, &tmp, policy)?;
+    }
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterFlushBeforeRename,
@@ -4891,6 +4924,14 @@ fn prepare_target_parent_symlink_free(root: &Path, target: &Path) -> Result<(), 
 }
 
 fn ensure_real_directory(path: &Path) -> Result<(), MaterializeError> {
+    ensure_real_directory_noting(path, &mut Vec::new())
+}
+
+/// [`ensure_real_directory`], adding each folder it creates to `created`.
+fn ensure_real_directory_noting(
+    path: &Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<(), MaterializeError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
@@ -4906,9 +4947,12 @@ fn ensure_real_directory(path: &Path) -> Result<(), MaterializeError> {
             Ok(())
         }
         Err(err) if err.kind() == ErrorKind::NotFound => match std::fs::create_dir(path) {
-            Ok(()) => reject_link_or_reparse(path),
+            Ok(()) => {
+                created.push(path.to_path_buf());
+                reject_link_or_reparse(path)
+            }
             Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => {
-                ensure_real_directory(path)
+                ensure_real_directory_noting(path, created)
             }
             Err(create_err) => Err(MaterializeError::io(path, &create_err)),
         },
@@ -7740,3 +7784,7 @@ mod retention_tests;
 #[cfg(all(test, windows))]
 #[path = "materialize/staged_dacl_tests.rs"]
 mod staged_dacl_tests;
+
+#[cfg(test)]
+#[path = "materialize/prepared_tests.rs"]
+mod prepared_tests;

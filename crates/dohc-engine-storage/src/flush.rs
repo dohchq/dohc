@@ -142,6 +142,67 @@ pub fn refuse_folder_flushes(folder: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Flushes files from any thread, as the store's own flush does. Record each
+/// [`Flushed`] with the store before the commit that describes its file, so a
+/// barrier leaves its drain owed.
+#[derive(Debug, Clone, Copy)]
+pub struct FileFlusher {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    device: Option<u64>,
+}
+
+/// A flush a [`FileFlusher`] ran, for its store to record.
+#[derive(Debug, Clone, Copy)]
+#[must_use]
+pub struct Flushed {
+    barrier: bool,
+    #[cfg(feature = "fault-injection")]
+    event: FlushEvent,
+}
+
+impl FileFlusher {
+    pub fn flush(&self, file: &File) -> std::io::Result<Flushed> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if self.device == Some(file.metadata()?.dev()) {
+                dohc_macos_files::barrier_fsync(file)?;
+                return Ok(Flushed {
+                    barrier: true,
+                    #[cfg(feature = "fault-injection")]
+                    event: event(FlushKind::Barrier, file),
+                });
+            }
+        }
+        file.sync_all()?;
+        Ok(Flushed {
+            barrier: false,
+            #[cfg(feature = "fault-injection")]
+            event: event(FlushKind::Full, file),
+        })
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+fn event(kind: FlushKind, file: &File) -> FlushEvent {
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().expect("flushed file metadata");
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = {
+        let _ = file;
+        (0, 0)
+    };
+    FlushEvent {
+        kind,
+        device,
+        inode,
+    }
+}
+
 impl Flushes {
     /// A store that can commit a materialization: barriers where its folder
     /// allows them.
@@ -183,22 +244,25 @@ impl Flushes {
         }
     }
 
-    pub(crate) fn flush(&self, file: &File) -> std::io::Result<()> {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if self.device.get() == Some(file.metadata()?.dev()) {
-                dohc_macos_files::barrier_fsync(file)?;
-                self.drain_owed.set(true);
-                #[cfg(feature = "fault-injection")]
-                self.record(FlushKind::Barrier, file);
-                return Ok(());
-            }
+    pub(crate) fn flusher(&self) -> FileFlusher {
+        FileFlusher {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            device: self.device.get(),
         }
-        file.sync_all()?;
-        #[cfg(feature = "fault-injection")]
-        self.record(FlushKind::Full, file);
+    }
+
+    pub(crate) fn flush(&self, file: &File) -> std::io::Result<()> {
+        let flushed = self.flusher().flush(file)?;
+        self.record(flushed);
         Ok(())
+    }
+
+    pub(crate) fn record(&self, flushed: Flushed) {
+        if flushed.barrier {
+            self.drain_owed.set(true);
+        }
+        #[cfg(feature = "fault-injection")]
+        self.push(flushed.event);
     }
 
     /// Drain the drive cache when a barrier ran since the last successful
@@ -222,29 +286,13 @@ impl Flushes {
             drain_folder(folder)?;
             self.drain_owed.set(false);
             #[cfg(feature = "fault-injection")]
-            self.record(FlushKind::Drain, folder);
+            self.push(event(FlushKind::Drain, folder));
         }
         Ok(())
     }
 
     #[cfg(feature = "fault-injection")]
-    fn record(&self, kind: FlushKind, file: &File) {
-        #[cfg(unix)]
-        let (device, inode) = {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = file.metadata().expect("flushed file metadata");
-            (metadata.dev(), metadata.ino())
-        };
-        #[cfg(not(unix))]
-        let (device, inode) = {
-            let _ = file;
-            (0, 0)
-        };
-        let event = FlushEvent {
-            kind,
-            device,
-            inode,
-        };
+    fn push(&self, event: FlushEvent) {
         self.trace.borrow_mut().push(event);
         if let Some(FlushObserver(observe)) = &*self.observer.borrow() {
             observe(event);

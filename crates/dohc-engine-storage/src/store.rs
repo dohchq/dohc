@@ -582,6 +582,17 @@ impl EngineStore {
         self.flushes.flush(file)
     }
 
+    /// A flusher other threads can use for files a later commit of this store
+    /// describes. Record each flush with [`Self::record_flush`] before that
+    /// commit.
+    pub fn file_flusher(&self) -> crate::FileFlusher {
+        self.flushes.flusher()
+    }
+
+    pub fn record_flush(&self, flushed: crate::Flushed) {
+        self.flushes.record(flushed);
+    }
+
     /// Make every file flushed with a barrier durable by draining the drive
     /// cache once, through the database's real folder. A no-op when no drain
     /// is owed. A failed drain stays owed until one succeeds. It does not
