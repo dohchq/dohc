@@ -59,7 +59,7 @@ A Markdown file in a workspace, shown with its title and icon. The Explorer's Ho
 _Avoid_: document (in the interface), doc
 
 **Lossy note**:
-A Markdown note that dohc's editor cannot save without changing its meaning, because it cannot hold parts such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens, and opens a lossy note read-only.
+A Markdown note that dohc's editor cannot save without changing its meaning, because it cannot hold some of its parts as written, such as code indented under a list item. dohc checks each note's current bytes when it opens, and opens a lossy note read-only.
 _Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
 
 ### Collections

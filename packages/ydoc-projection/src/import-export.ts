@@ -9,6 +9,7 @@ import {
   type marked,
   type Token,
   type Tokens,
+  type TokensList,
 } from "marked";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
@@ -73,35 +74,29 @@ let parseReferences: ReadonlyMap<string, string> = new Map();
 let parseTabs: ReadonlyMap<string, string> = new Map();
 let rawHtmlMarkup = { lt: "<", gt: ">", used: false };
 
-// Raw HTML stays the text the file holds, references and all. Tiptap keeps it
-// as text where there is no DOM, as in the engine, but reads it through the DOM
-// in a browser, which drops a comment and turns tags into marks. A block of
-// HTML becomes a paragraph of its source here, and an inline tag an `escape`
-// token below.
+// Raw HTML and link reference definitions are sealed: the document holds the
+// file's source, references and all, and both writers write it back. Tiptap
+// would read HTML through the DOM in a browser, which drops a comment and
+// turns tags into marks, and it drops a definition. A block's source keeps
+// its trailing line breaks until `joinSealedBlocks` reads them.
+const sealedBlock = (token: { raw?: string }): JSONContent => ({
+  type: "rawBlock",
+  attrs: { source: token.raw ?? "" },
+});
 const MarkdownHtml = Extension.create({
   name: "markdownHtml",
   markdownTokenName: "html",
-  parseMarkdown: (token) => {
-    const text = rawHtmlText(token.text || token.raw || "");
-    return text ? { type: "paragraph", content: [{ type: "text", text }] } : [];
-  },
+  parseMarkdown: sealedBlock,
 });
 
-// marked reads a link reference definition as a `def` token, which Tiptap
-// drops. The engine's fold keeps the line as paragraph text, and so does
-// this, so the person's line stays in the document and in the file, as it
-// holds it. A link that uses the definition still resolves, because marked
-// collects it while lexing.
+// A definition the serializer wrote as references is the text it holds.
 const MarkdownDefinition = Extension.create({
   name: "markdownDefinition",
   markdownTokenName: "def",
-  parseMarkdown: (token) => {
-    const text =
-      typeof token.dohcText === "string"
-        ? token.dohcText
-        : sourceText(definitionText(token.raw ?? ""));
-    return text ? { type: "paragraph", content: [{ type: "text", text }] } : [];
-  },
+  parseMarkdown: (token) =>
+    typeof token.dohcText === "string"
+      ? { type: "paragraph", content: [{ type: "text", text: token.dohcText }] }
+      : sealedBlock(token),
 });
 
 function definitionText(raw: string): string {
@@ -314,11 +309,6 @@ function writtenLink(
   };
 }
 
-// Tiptap trims a literal fragment's trailing whitespace.
-function rawHtmlText(source: string): string {
-  return sourceText(source.replace(/\s+$/u, ""));
-}
-
 // Source the document keeps as the text the file holds, with each reference
 // as the file spells it.
 function sourceText(source: string): string {
@@ -334,11 +324,48 @@ function fileAngles(text: string): string {
   return replaced;
 }
 
-// A token's source in a gathered HTML run. A gathered run keeps its whole
-// source as text, and its raw holds only the closing tag the lexer consumed.
-function htmlRunSource(token: Token): string {
-  const generic = token as Tokens.Generic;
-  return generic.dohcHtmlRun === true ? String(generic.text) : token.raw;
+// An inline piece the document holds as the file spells it. A gathered HTML
+// run's raw holds only the closing tag the lexer consumed, so its source is
+// the whole run.
+function sealedInline(raw: string, source = raw): Tokens.Generic {
+  return { type: "dohcRawInline", raw, dohcSource: source };
+}
+
+function inlineSource(token: Token): string {
+  const source: unknown = (token as Tokens.Generic).dohcSource;
+  return typeof source === "string" ? source : token.raw;
+}
+
+// The arrays the lexer read inline content into.
+const inlineRuns = new WeakSet<Token[]>();
+
+// Tiptap marks only text, so a link or other mark on a picture or a sealed
+// piece would drop, and such a run is sealed whole. A table cell writes its
+// line break as `<br>`, which the editor holds as the cell's text. Inner
+// runs settle first, so each run looks only at its own pieces.
+function settleSealedRuns(tokens: Token[], inCell: boolean): void {
+  const inline = inlineRuns.has(tokens);
+  tokens.forEach((token, index) => {
+    const generic = token as Tokens.Generic;
+    if (token.type === "table") {
+      const table = token as Tokens.Table;
+      for (const cell of [...table.header, ...table.rows.flat()])
+        settleSealedRuns(cell.tokens, true);
+      return;
+    }
+    if (token.type === "list") {
+      for (const item of (token as Tokens.List).items) settleSealedRuns(item.tokens, inCell);
+      return;
+    }
+    const inner = generic.tokens as Token[] | undefined;
+    if (inner) settleSealedRuns(inner, inCell);
+    if (!inline) return;
+    if (inCell && token.type === "dohcRawInline" && token.raw === GFM_TABLE_CELL_BLOCK_SEPARATOR) {
+      tokens[index] = { type: "escape", raw: token.raw, text: fileAngles(token.raw) };
+    } else if (inner?.some((piece) => piece.type === "image" || piece.type === "dohcRawInline")) {
+      tokens[index] = sealedInline(token.raw);
+    }
+  });
 }
 
 const extensions: AnyExtension[] = [
@@ -408,10 +435,10 @@ const markdownParser = new Marked({
     },
     {
       // The lexer's own tag rule reads the tag, so a raw `<a>` or `<pre>` still
-      // changes how marked reads the text after it. Tiptap reads an opening tag
-      // through its closing tag as one fragment, so the Markdown between them
-      // stays text. A closing tag gathers that run back from the earliest open
-      // tag it closes, the way Tiptap matches them.
+      // changes how marked reads the text after it. Each tag is sealed, and an
+      // opening tag through its closing tag is one piece, so the Markdown
+      // between them stays source. A closing tag gathers that run back from
+      // the earliest open tag it closes, the way Tiptap matches them.
       name: "dohcHtmlTag",
       level: "inline",
       tokenizer(src, tokens) {
@@ -419,21 +446,19 @@ const markdownParser = new Marked({
         const tag = this.lexer.options.tokenizer?.tag(src);
         if (!tag) return undefined;
         const { raw } = tag;
-        const text = rawHtmlText(raw);
         // The tag patterns are Tiptap's own.
         if (/^<\/[\s]*[\w-]+/i.test(raw)) {
           const opened = tokens.findIndex((token) => {
             const name: unknown = (token as Tokens.Generic).dohcOpenTag;
             return typeof name === "string" && new RegExp(`^<\\/\\s*${name}\\b`, "i").test(raw);
           });
-          if (opened < 0) return { type: "escape", raw, text };
-          const run = rawHtmlText(tokens.splice(opened).map(htmlRunSource).join("") + raw);
-          return { type: "escape", raw, text: run, dohcHtmlRun: true };
+          if (opened < 0) return sealedInline(raw);
+          return sealedInline(raw, tokens.splice(opened).map(inlineSource).join("") + raw);
         }
         const open = /^<[\s]*([\w-]+)(\s|>|\/|$)/i.exec(raw);
         return open && !raw.endsWith("/>")
-          ? { type: "escape", raw, text, dohcOpenTag: open[1] }
-          : { type: "escape", raw, text };
+          ? { ...sealedInline(raw), dohcOpenTag: open[1] }
+          : sealedInline(raw);
       },
     },
   ],
@@ -446,6 +471,14 @@ const markdownParser = new Marked({
       repeatedDefinitions.set(this.lexer, count);
       token.tag = `]${count}`;
       return token;
+    },
+    // The document holds no reference, so a link or picture through one is
+    // sealed.
+    reflink(src, links) {
+      const token = Tokenizer.prototype.reflink.call(this, src, links);
+      return token && token.type !== "text"
+        ? (sealedInline(token.raw) as unknown as Tokens.Link)
+        : token;
     },
     inlineText(src) {
       const token = Tokenizer.prototype.inlineText.call(this, src);
@@ -463,7 +496,15 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
 > {
   inlineTokens(src: string, tokens: Token[] = []): Token[] {
     const source = parseTabs.size ? restoreParseSentinels(src, parseTabs) : src;
-    return readInline(this, tokens, source, () => super.inlineTokens(source, tokens));
+    const read = readInline(this, tokens, source, () => super.inlineTokens(source, tokens));
+    inlineRuns.add(read);
+    return read;
+  }
+
+  lex(src: string): TokensList {
+    const tokens = super.lex(src);
+    settleSealedRuns(tokens, false);
+    return tokens;
   }
 }
 markdownParser.Lexer = ContentTabLexer;
@@ -676,10 +717,38 @@ function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0)
   const content = node.content;
   if (!content) return node;
   for (const child of content) ensureListItemParagraphs(child, depth + 1, quotes);
+  const blocks = joinSealedBlocks(content);
+  node.content = blocks;
   const needsParagraph =
-    (node.type === "listItem" || node.type === "taskItem") && content[0]?.type !== "paragraph";
-  if (needsParagraph) content.unshift({ type: "paragraph" });
+    (node.type === "listItem" || node.type === "taskItem") && blocks[0]?.type !== "paragraph";
+  if (needsParagraph) blocks.unshift({ type: "paragraph" });
   return node;
+}
+
+// A sealed block's source ends with the line breaks its token read. Sealed
+// blocks with no blank line between them are one block, since the writer
+// puts a blank line between blocks.
+function joinSealedBlocks(content: JSONContent[]): JSONContent[] {
+  const joined: JSONContent[] = [];
+  let tight = false;
+  for (const block of content) {
+    if (block.type !== "rawBlock") {
+      joined.push(block);
+      tight = false;
+      continue;
+    }
+    const raw = String(block.attrs?.source ?? "");
+    const breaks = /\n[ \t\n]*$/u.exec(raw);
+    const source = breaks ? raw.slice(0, breaks.index) : raw;
+    const previous = joined.at(-1);
+    if (tight && previous) {
+      previous.attrs = { source: `${String(previous.attrs?.source)}\n${source}` };
+    } else {
+      joined.push({ type: "rawBlock", attrs: { source } });
+    }
+    tight = breaks?.[0] === "\n";
+  }
+  return joined;
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {
@@ -762,7 +831,9 @@ function restoreBlockEntityParseSentinels(
       node.type === "mathBlock" ||
       node.type === "wikilink" ||
       node.type === "inlineAtom" ||
-      node.type === "callout";
+      node.type === "callout" ||
+      node.type === "rawBlock" ||
+      node.type === "rawInline";
     const attributes = restoreAttributeSentinels(
       node.attrs,
       preservesLiteralAttributes ? encodedEntities : decodedEntities,

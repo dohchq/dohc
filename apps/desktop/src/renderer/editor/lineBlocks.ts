@@ -387,6 +387,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let quoteFence: Fence | null = null;
   let fence: Fence | null = null;
   let mathUntil: number | null = null;
+  let definitionEnded = false;
 
   for (let index = 0; index < lines.length; index += 1) {
     const text = lines[index] ?? "";
@@ -413,6 +414,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     if (BLANK_RE.test(text)) {
       open = false;
       quoteOpen = false;
+      definitionEnded = false;
       continue;
     }
     // A setext underline makes the open paragraph a heading and ends it — the
@@ -556,7 +558,11 @@ export function blockForLine(body: string, line: number): LineBlock {
             (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
-    const opens = (kind === "heading" || interrupts || !open) && !resumes;
+    // The editor seals a definition and the definition or raw HTML right
+    // under it as one block.
+    const joinsSealed: boolean =
+      definitionEnded && (definition !== null || HTML_BLOCK_RE.test(text));
+    const opens: boolean = (kind === "heading" || interrupts || !open) && !resumes && !joinsSealed;
     if (opens) {
       // Blocks open in document order, so the first one starting past `line`
       // settles the answer and leaves nothing worth walking. This block's
@@ -607,8 +613,10 @@ export function blockForLine(body: string, line: number): LineBlock {
     // A top-level definition ends at its own last line, as a heading does:
     // the next line opens its own block, blank line or not. One indented into
     // a list item leaves that item's list open.
+    if (joinsSealed && definition === null) openHtml = true;
+    definitionEnded = definition !== null && (opens || joinsSealed);
     if (definition !== null) {
-      if (opens) open = false;
+      if (opens || joinsSealed) open = false;
       index = definition;
     }
   }

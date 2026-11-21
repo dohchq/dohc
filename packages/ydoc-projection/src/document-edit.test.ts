@@ -66,6 +66,24 @@ describe("documentEditUpdate", () => {
     expect(body.toArray()).toEqual([heading, dayOne, dayTwo]);
   });
 
+  test("keeps raw HTML, references and picture links as the file spells them", () => {
+    const sealed = [
+      "<details>\n<summary>Setup</summary>\n\nRun it.\n\n</details>",
+      "[![build](https://img.example/b.svg)](https://ci.example/run) see [the docs][docs].",
+      "[docs]: https://example.com/docs",
+    ];
+    const doc = markdownToYDoc(["Status: draft.", ...sealed].join("\n\n"));
+    edited(doc, { find: "draft", replacement: "ready" });
+    expect(markdownOf(doc)).toBe(`${["Status: ready.", ...sealed].join("\n\n")}\n`);
+    // A sealed piece is one node, so a change inside it replaces its block.
+    const inside = { find: "the docs", replacement: "the guide" };
+    expect(() => edited(doc, inside)).toThrow(DOCUMENT_OPEN_REFUSAL);
+    edited(doc, inside, closed);
+    expect(markdownOf(doc)).toBe(
+      `${["Status: ready.", ...sealed].join("\n\n").replace("the docs", "the guide")}\n`,
+    );
+  });
+
   test("adds a section written as Markdown", () => {
     const doc = markdownToYDoc("# Itinerary\n\n## Thursday\n\nFly home.");
     edited(doc, {

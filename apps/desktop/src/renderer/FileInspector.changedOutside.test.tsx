@@ -233,9 +233,9 @@ describe("FileInspector when an open note changed outside dohc", () => {
       const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(
         10,
       );
-      const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
+      const versionA = `# Readme\n\n1. Version A.\n\n       pnpm install\n\n2. Done\n\n${filler}`;
       const versionB = lossy
-        ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
+        ? `# Readme\n\n1. Version B, from another app.\n\n       pnpm install\n\n2. Done\n\n${filler}`
         : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
       expect(isLossyMarkdown(versionB)).toBe(lossy);
       expect(versionB).not.toBe(yDocToMarkdown(markdownToYDoc(versionB)));
@@ -297,7 +297,7 @@ describe("FileInspector when an open note changed outside dohc", () => {
   );
 
   it.each(["workspace"])("drops a stale-pane reread after its %s changes", async (changed) => {
-    const versionA = "# Readme\n\n<details>\n\nVersion A.\n</details>\n";
+    const versionA = "# Readme\n\n1. Version A.\n\n       pnpm install\n\n2. Done\n";
     const versionB = versionA.replace("Version A.", "Version B, from another app.");
     const other = "# Other note\n\nCurrent text.\n";
     const bridge = makeBridge();

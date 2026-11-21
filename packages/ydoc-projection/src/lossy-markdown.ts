@@ -2,6 +2,7 @@ import { exceedsLiveMarkdownLimit } from "@dohc/live-session-contract/limits";
 import { digest } from "lib0/hash/sha256";
 import { Marked } from "marked";
 import * as Y from "yjs";
+import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { markdownToYDoc, yDocToMarkdown } from "./import-export.js";
 
 const reader = new Marked();
@@ -64,7 +65,7 @@ export function isLossyMarkdownCached(digest: string, markdown: string): boolean
 
 /** What an agent, the CLI or an automation is told when it changes a lossy note. */
 export function lossyNoteRefusal(path: string): string {
-  return `dohc can't change ${path} without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.`;
+  return `dohc can't change ${path} without also changing parts it can't show. Edit the file directly instead.`;
 }
 
 const utf8 = new TextEncoder();
@@ -121,10 +122,12 @@ export function checkMarkdownWitness(
   )
     return false;
   let canonical: string;
+  let sealed: boolean;
   try {
     const imported = markdownToYDoc(source);
     try {
       canonical = yDocToMarkdown(imported);
+      sealed = holdsSealedPieces(imported);
     } finally {
       imported.destroy();
     }
@@ -132,8 +135,20 @@ export function checkMarkdownWitness(
     return false;
   }
   // Today's projection decides, not the recorded one: an update that changes
-  // how dohc writes a note changes its projection but not its meaning.
-  return sameMarkdownMeaning(source, canonical);
+  // how dohc writes a note changes its projection but not its meaning. A
+  // document read before dohc kept a piece as the file spells it holds that
+  // piece another way, so only today's own projection vouches for it.
+  return sameMarkdownMeaning(source, canonical) && (!sealed || projectionSha === sha256(canonical));
+}
+
+function holdsSealedPieces(doc: Y.Doc): boolean {
+  return !getDohcYDocBodyFragment(doc)
+    .createTreeWalker(
+      (node) =>
+        node instanceof Y.XmlElement &&
+        (node.nodeName === "rawBlock" || node.nodeName === "rawInline"),
+    )
+    .next().done;
 }
 
 /** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */

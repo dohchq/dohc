@@ -1041,7 +1041,7 @@ it.each([false, true])(
   },
 );
 
-it.each([148, 161, 192, 193, 572, 575, 577])(
+it.each([213, 270, 556, 572, 575, 587, 619])(
   "retains CommonMark %i source and an edited paragraph through client reopen and reconnect",
   async (number) => {
     const example = commonmark.examples.find((row) => row.example === number)!;
@@ -1167,7 +1167,7 @@ it("resyncs a native invalidation into an open provider without losing its durab
 it.each(["old-source", "converted"])(
   "delivers a witness clear and authoritative head to an open %s peer without losing its tail",
   async (peerHead) => {
-    const source = "# Note\n\n<details>Hidden.</details>\n\nEditable.";
+    const source = "# Note\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n\nEditable.";
     const sha = (text: string) => createHash("sha256").update(text).digest("hex");
     const convertedHead = sha("converted file");
     const engine = new YdocLoopbackEngine();

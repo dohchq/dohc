@@ -195,18 +195,27 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         "../../../packages/ydoc-projection/src/fixtures/commonmark-edit-meaning.json"
     ))
     .unwrap();
-    let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true)];
-    sources.extend([148, 161, 192, 193, 572, 575, 577].map(|number| {
-        let example = examples["examples"]
+    let example = |number: u64| {
+        examples["examples"]
             .as_array()
             .unwrap()
             .iter()
             .find(|row| row["example"] == number)
-            .unwrap();
-        (example["markdown"].as_str().unwrap().to_owned(), false)
-    }));
+            .unwrap()["markdown"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true, true)];
+    sources.extend(
+        [213, 270, 556, 572, 575, 587, 619].map(|number| (example(number), false, false)),
+    );
+    // Raw HTML and a link through a definition keep their meaning as dohc
+    // reads them today, but not in a document read before dohc kept them as
+    // the file spells them.
+    sources.extend([148, 192].map(|number| (example(number), true, false)));
     let mut reader = Reader::new(Some(config));
-    for (source, expected) in sources {
+    for (source, expected, older_expected) in sources {
         let mut input = request("note.md");
         input.document.main_version_id = "main".into();
         input.document.object_id = "fixture".into();
@@ -241,7 +250,7 @@ fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
         else {
             panic!("the real pipe must answer the witness request");
         };
-        assert_eq!(keeps_meaning, expected);
+        assert_eq!(keeps_meaning, older_expected);
     }
     finish(&mut reader);
 }

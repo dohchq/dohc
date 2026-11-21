@@ -1009,9 +1009,10 @@ export const DohcMathBlock = Node.create({
 
 // Sealed pieces: Markdown the editor cannot represent, kept as the file spells
 // it. Both writers write `source` back exactly. A block is a raw HTML block, an
-// HTML comment or a link reference definition; an inline piece is a tag or an
-// entity. No reader makes them yet, but every editor must know them before one
-// does, because the editor binding deletes a node its schema cannot make.
+// HTML comment or a run of link reference definitions; an inline piece is a
+// tag or a run of them, a link through a reference, or a link on a picture.
+// Every editor must know them, because the editor binding deletes a node its
+// schema cannot make.
 // Their HTML holds the source as text so a paste brings it back; their parse
 // rules rank above the code block's and code mark's, which match the same tags.
 // Their text is the source too, for a plain-text copy.
@@ -1066,6 +1067,8 @@ export const DohcRawInline = Node.create({
       String(node.attrs.source ?? ""),
     ];
   },
+  markdownTokenName: "dohcRawInline",
+  parseMarkdown: (token) => ({ type: "rawInline", attrs: { source: String(token.dohcSource) } }),
   renderMarkdown: (node) => String(node.attrs?.source ?? ""),
 });
 
@@ -1261,12 +1264,18 @@ function markdownLists(projected = false) {
           block.type === "text" ? { ...block, type: "paragraph" } : block,
         );
         const content = (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens);
-        if (
-          content[0]?.type !== "paragraph" ||
-          (/^[ \t]*\n/u.test(item.text ?? "") &&
-            /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? ""))
-        )
+        const opensBlank =
+          /^[ \t]*\n/u.test(item.text ?? "") &&
+          /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? "");
+        // An item starts with a paragraph, so a sealed block on its first line
+        // is that paragraph's one piece.
+        const first = content[0];
+        if (first?.type === "rawBlock" && !opensBlank) {
+          const source = String(first.attrs?.source ?? "").replace(/\n[ \t\n]*$/u, "");
+          content[0] = { type: "paragraph", content: [{ type: "rawInline", attrs: { source } }] };
+        } else if (first?.type !== "paragraph" || opensBlank) {
           content.unshift({ type: "paragraph" });
+        }
         list.content!.push({
           type: task ? "taskItem" : "listItem",
           ...(task

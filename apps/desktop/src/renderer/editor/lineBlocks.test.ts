@@ -526,15 +526,16 @@ describe("blockForLine — the index", () => {
   });
 
   it("counts a link reference definition as a block of its own", () => {
-    // The canonical writer keeps the definition as paragraph text.
+    // The editor seals the definition as the file spells it.
     const body = "Intro\n\n[docs]: https://e.com\n\nAfter";
     expect(blockForLine(body, 3).index).toBe(1);
     expect(blockForLine(body, 5).index).toBe(2);
     // It ends at its own line, so what follows opens a block with no blank
     // line between, where a paragraph would run on.
     expect(blockForLine("Intro\n\n[docs]: https://e.com\nAfter", 4).index).toBe(2);
-    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 4).index).toBe(2);
-    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 5).index).toBe(3);
+    // Definitions with no blank line between them are one sealed block.
+    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 4).index).toBe(1);
+    expect(blockForLine("Intro\n\n[a]: https://a.com\n[b]: https://b.com\nAfter", 5).index).toBe(2);
     expect(blockForLine('Intro\n\n[a]: https://a.com "T"\nAfter', 4).index).toBe(2);
     expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 4).index).toBe(1);
     expect(blockForLine('Intro\n\n[a]: https://a.com\n  "T"\nAfter', 5).index).toBe(2);
@@ -1391,12 +1392,21 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a trailing cluster of definitions is one block each",
+      name: "a trailing cluster of definitions is one block",
       body: "Text\n\n[a]: https://a.com\n[b]: https://b.com",
       lands: [
         [1, "Text"],
         [3, "[a]: https://a.com"],
         [4, "[b]: https://b.com"],
+      ],
+    },
+    {
+      name: "raw HTML right under a definition is the definition's block",
+      body: "[a]: https://a.com\n<!-- note -->\n<div>x</div>\n\nAfter",
+      lands: [
+        [2, "note"],
+        [3, "x"],
+        [5, "After"],
       ],
     },
     {

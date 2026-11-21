@@ -8,7 +8,47 @@
         "content": [
           {
             "type": "text",
-            "text": "Intro <!-- inline note --> and <kbd>Ctrl</kbd>+<kbd>K</kbd> keys, line<br>break."
+            "text": "Intro "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<!-- inline note -->"
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<kbd>Ctrl</kbd>"
+            }
+          },
+          {
+            "type": "text",
+            "text": "+"
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<kbd>K</kbd>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " keys, line"
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<br>"
+            }
+          },
+          {
+            "type": "text",
+            "text": "break."
           }
         ]
       },
@@ -17,28 +57,107 @@
         "content": [
           {
             "type": "text",
-            "text": "Before <b>**keep raw**</b> after, <span>*literal* _under_ ~~struck~~ [link](x) $x$ ==mark==</span> and <i>open <b>`x`</b> "
+            "text": "Before "
           },
-          { "type": "text", "marks": [{ "type": "bold" }], "text": "bold" },
-          { "type": "text", "text": " " },
-          { "type": "mathInline", "attrs": { "tex": "y" } },
-          { "type": "text", "text": " " },
-          { "type": "text", "marks": [{ "type": "highlight" }], "text": "hl" },
-          { "type": "text", "text": "." }
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<b>**keep raw**</b>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " after, "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<span>*literal* _under_ ~~struck~~ [link](x) $x$ ==mark==</span>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<i>"
+            }
+          },
+          {
+            "type": "text",
+            "text": "open "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<b>`x`</b>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "bold",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "mathInline",
+            "attrs": {
+              "tex": "y"
+            }
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "text",
+            "text": "hl",
+            "marks": [
+              {
+                "type": "highlight"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "."
+          }
         ]
       },
       {
-        "type": "paragraph",
-        "content": [{ "type": "text", "text": "<!-- reviewer: keep -->" }]
+        "type": "rawBlock",
+        "attrs": {
+          "source": "<!-- reviewer: keep -->"
+        }
       },
       {
-        "type": "paragraph",
-        "content": [{ "type": "text", "text": "<div class=\"note\">block</div>" }]
+        "type": "rawBlock",
+        "attrs": {
+          "source": "<div class=\"note\">block</div>"
+        }
       },
       {
         "type": "paragraph",
         "content": [
-          { "type": "text", "marks": [{ "type": "highlight" }], "text": "<b>a=b *c*</b>" }
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "==<b>a\\=b *c*</b>=="
+            }
+          }
         ]
       },
       {
@@ -46,67 +165,178 @@
         "content": [
           {
             "type": "text",
-            "text": "Run <span title=\"q 'x'\">\\* {{atom:rate 150}} https://in.example/a_b www.in.example a@b.co <https://auto.example>  \nnext</span> and real "
+            "text": "Run "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<span title=\"q 'x'\">\\* {{atom:rate 150}} https://in.example/a_b www.in.example a@b.co <https://auto.example>  \nnext</span>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " and real "
           },
           {
             "type": "inlineAtom",
-            "attrs": { "atomId": "rate", "params": "150", "source": "atom:rate 150" }
+            "attrs": {
+              "atomId": "rate",
+              "params": "150",
+              "source": "atom:rate 150"
+            }
           },
-          { "type": "text", "text": " " },
           {
             "type": "text",
-            "marks": [{ "type": "link", "attrs": { "href": "https://out.example", "title": null } }],
-            "text": "https://out.example"
+            "text": " "
           },
-          { "type": "text", "text": " " },
-          { "type": "escapedPunctuation", "attrs": { "value": "*" } },
-          { "type": "text", "text": " end." }
-        ]
-      },
-      {
-        "type": "paragraph",
-        "content": [
           {
             "type": "text",
-            "text": "Refs <b title=\"&#42; &#92;\">&#42; &#35; &#92; &#123;&#123;atom:a}} &#58; &amp;#92; &amp;amp;#42;</b> <!-- &#36; &#58; &#92; --> then * and &#123;&#123;atom:b}} https&#58;//out.example end."
+            "text": "https://out.example",
+            "marks": [
+              {
+                "type": "link",
+                "attrs": {
+                  "href": "https://out.example",
+                  "title": null
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "escapedPunctuation",
+            "attrs": {
+              "value": "*"
+            }
+          },
+          {
+            "type": "text",
+            "text": " end."
           }
         ]
       },
       {
         "type": "paragraph",
-        "content": [{ "type": "text", "text": "<div title=\"&#42;\">&#92; &#36; &amp;#92;</div>" }]
+        "content": [
+          {
+            "type": "text",
+            "text": "Refs "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<b title=\"&#42; &#92;\">&#42; &#35; &#92; &#123;&#123;atom:a}} &#58; &amp;#92; &amp;amp;#42;</b>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<!-- &#36; &#58; &#92; -->"
+            }
+          },
+          {
+            "type": "text",
+            "text": " then * and &#123;&#123;atom:b}} https&#58;//out.example end."
+          }
+        ]
+      },
+      {
+        "type": "rawBlock",
+        "attrs": {
+          "source": "<div title=\"&#42;\">&#92; &#36; &amp;#92;</div>"
+        }
       },
       {
         "type": "paragraph",
         "content": [
-          { "type": "text", "text": "Between <b>x</b> * &#123; &#92; &#92; <i>y</i> and " },
-          { "type": "text", "marks": [{ "type": "bold" }], "text": "real" },
-          { "type": "text", "text": " " },
+          {
+            "type": "text",
+            "text": "Between "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<b>x</b>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " * &#123; &#92; &#92; "
+          },
+          {
+            "type": "rawInline",
+            "attrs": {
+              "source": "<i>y</i>"
+            }
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "text",
+            "text": "real",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
           {
             "type": "inlineAtom",
-            "attrs": { "atomId": "rate", "params": "150", "source": "atom:rate 150" }
+            "attrs": {
+              "atomId": "rate",
+              "params": "150",
+              "source": "atom:rate 150"
+            }
           },
-          { "type": "text", "text": " " },
-          { "type": "mathInline", "attrs": { "tex": "m" } },
-          { "type": "text", "text": " done." }
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "mathInline",
+            "attrs": {
+              "tex": "m"
+            }
+          },
+          {
+            "type": "text",
+            "text": " done."
+          }
         ]
       },
       {
-        "type": "paragraph",
-        "content": [{ "type": "text", "text": "<!-- TODO: fix this,\n\nsee: later -->" }]
+        "type": "rawBlock",
+        "attrs": {
+          "source": "<!-- TODO: fix this,\n\nsee: later -->"
+        }
+      },
+      {
+        "type": "rawBlock",
+        "attrs": {
+          "source": "<pre>\n*x* {{atom:rate 150}} \\* https://in.example a@b.co [l](u) &#59;\n\n \t\n$y$ ==h==\n</pre>"
+        }
       },
       {
         "type": "paragraph",
         "content": [
           {
             "type": "text",
-            "text": "<pre>\n*x* {{atom:rate 150}} \\* https://in.example a@b.co [l](u) &#59;\n\n \t\n$y$ ==h==\n</pre>"
+            "text": "After."
           }
         ]
-      },
-      {
-        "type": "paragraph",
-        "content": [{ "type": "text", "text": "After." }]
       }
     ]
   }

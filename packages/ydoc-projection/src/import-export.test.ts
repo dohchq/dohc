@@ -306,9 +306,9 @@ it("saves the same Markdown for a line holding an empty text piece as for the li
   expect(saved(true)).toBe(without);
 });
 
-// Raw HTML is the text the file holds. The desktop tests read the same fixture
-// where a DOM exists and must get this same document.
-it("keeps raw HTML as the text the file holds", () => {
+// Raw HTML is sealed as the file spells it. The desktop tests read the same
+// fixture where a DOM exists and must get this same document.
+it("keeps raw HTML as the file spells it", () => {
   expect(parseRichdocMarkdown(rawHtml.markdown)).toEqual(rawHtml.document);
   const doc = markdownToYDoc(rawHtml.markdown);
   try {
@@ -316,6 +316,7 @@ it("keeps raw HTML as the text the file holds", () => {
       getDohcProseMirrorSchema().nodeFromJSON(rawHtml.document).toJSON(),
     );
     const saved = yDocToMarkdown(doc);
+    for (const source of sealedPieces(rawHtml.document).sources) expect(saved).toContain(source);
     expect(parseRichdocMarkdown(saved)).toEqual(rawHtml.document);
     const reopened = markdownToYDoc(saved);
     try {
@@ -606,6 +607,27 @@ it("keeps a mark that opens on whitespace and continues into text", () => {
   expect(textContentOf(parseRichdocMarkdown(saved))).toBe("x y");
 });
 
+// The pieces a document holds as the file spells them, and whether it holds
+// anything else.
+function sealedPieces(node: JSONContent): { sources: string[]; other: boolean } {
+  if (node.type === "rawBlock" || node.type === "rawInline") {
+    return { sources: [String(node.attrs?.source)], other: false };
+  }
+  const children = (node.content ?? []).map(sealedPieces);
+  return {
+    sources: children.flatMap((child) => child.sources),
+    other: node.type === "text" || children.some((child) => child.other),
+  };
+}
+
+function expectSealedAsWritten(markdown: string): JSONContent {
+  const document = parseRichdocMarkdown(markdown);
+  expect(sealedPieces(document)).toEqual({ sources: [markdown], other: false });
+  expect(serializeRichdocBody(document)).toBe(markdown);
+  expectSavedAsTheSameDocument(document);
+  return document;
+}
+
 function textContentOf(node: JSONContent): string {
   return (node.text ?? "") + (node.content ?? []).map(textContentOf).join("");
 }
@@ -634,13 +656,8 @@ it.each([
     "<span title=\"&#42; &#92;\" data-x='&#123; &amp;#61;'>x</span>",
   ],
   ["numeric references in a block of HTML", '<div title="&#42;">&#92; &#36; &amp;#92;</div>'],
-])("keeps %s in raw HTML as text through a save", (_name, markdown) => {
-  const document = parseRichdocMarkdown(markdown);
-  expect(document.content).toHaveLength(1);
-  const inline = document.content?.[0]?.content ?? [];
-  expect(inline.every((node) => node.type === "text" && !node.marks)).toBe(true);
-  expect(inline.map((node) => node.text).join("")).toBe(markdown);
-  expectSavedAsTheSameDocument(document);
+])("keeps %s in raw HTML as the file spells it", (_name, markdown) => {
+  expectSealedAsWritten(markdown);
 });
 
 it.each([
@@ -659,20 +676,57 @@ it.each([
   ["a processing instruction", "<?php echo \"a: b\";\n\necho 'c'; ?>"],
   ["a declaration", '<!DOCTYPE html\n\nSYSTEM "a: b, {{atom:c}}">'],
   ["CDATA", "<![CDATA[ a: [b],\n\n- c ]]>"],
-])("keeps %s with a blank line in it as one paragraph through a save", (_name, markdown) => {
-  const document = parseRichdocMarkdown(markdown);
-  expect(document).toEqual({
-    type: "doc",
-    content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
-  });
-  expectSavedAsTheSameDocument(document);
+])("keeps %s with a blank line in it as one sealed block", (_name, markdown) => {
+  expect(expectSealedAsWritten(markdown).content).toEqual([
+    { type: "rawBlock", attrs: { source: markdown } },
+  ]);
 });
 
 it.each([
-  ["raw HTML", "<b>&#59;</b>", "<b>&#59;</b>", "&lt;b&gt;&amp;&#35;59&#59;&lt;/b&gt;"],
+  ["a tag on a list item's first line", '- <img src="x.png">\n- next\n'],
+  ["a tag in a heading", "# Release <small>v2</small>\n"],
+  ["raw HTML in a quote", "> <kbd>Ctrl</kbd>\n>\n> <div>note</div>\n"],
+  ["a picture link", "[![build](https://img.example/b.svg)](https://ci.example/run)\n"],
+  ["bold around a picture link", "**[![a](https://img.example/a.png)](https://a.example)** done\n"],
+  ["links through references", "See [docs][x], [x] and [x][].\n\n[x]: https://example.com\n"],
+  ["definitions grouped together", '[a]: https://a.example\n[b]: <https://b.example> "B"\n'],
+  ["comments with no blank line between", "<!-- one -->\n<!-- two -->\n"],
+])("saves %s as the file spells it", (_name, markdown) => {
+  const doc = markdownToYDoc(markdown);
+  try {
+    expect(yDocToMarkdown(doc)).toBe(markdown);
+  } finally {
+    doc.destroy();
+  }
+});
+
+it("keeps a mark around a picture link in the sealed piece", () => {
+  expect(
+    parseRichdocMarkdown("**[![a](https://img.example/a.png)](https://a.example)** done").content,
+  ).toEqual([
+    {
+      type: "paragraph",
+      content: [
+        {
+          type: "rawInline",
+          attrs: { source: "**[![a](https://img.example/a.png)](https://a.example)**" },
+        },
+        { type: "text", text: " done" },
+      ],
+    },
+  ]);
+});
+
+it.each([
   [
-    "text between raw runs",
-    "<b>x</b> &#123; <i>y</i>",
+    "typed raw HTML",
+    "&lt;b&gt;&amp;&#35;59&#59;&lt;/b&gt;",
+    "<b>&#59;</b>",
+    "&lt;b&gt;&amp;&#35;59&#59;&lt;/b&gt;",
+  ],
+  [
+    "typed text between raw runs",
+    "&lt;b&gt;x&lt;/b&gt; &amp;&#35;123&#59; &lt;i&gt;y&lt;/i&gt;",
     "<b>x</b> &#123; <i>y</i>",
     "&lt;b&gt;x&lt;/b&gt; &amp;&#35;123&#59; &lt;i&gt;y&lt;/i&gt;",
   ],
@@ -801,11 +855,10 @@ it.each([
   '[x]: https://h.example "kept"',
   '[x]: https://e.example "a &amp; b &#35; &amp;#35; *c*"',
   '[x]:\nhttps://e.example\n"t"',
-])("keeps the link reference definition %j as the text the file holds", (markdown) => {
-  expect(parseRichdocMarkdown(markdown)).toEqual({
-    type: "doc",
-    content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
-  });
+])("keeps the link reference definition %j as the file spells it", (markdown) => {
+  expect(expectSealedAsWritten(markdown).content).toEqual([
+    { type: "rawBlock", attrs: { source: markdown } },
+  ]);
 });
 
 it.each([
@@ -841,8 +894,8 @@ it.each([
     "&#91;x&#93;&#58; u &#34;one\n&#35; two\n&#45; three\n&#124; four &#124;\n&#45;&#45;&#45;&#34;",
   ],
   ["[multi\nline label]: u 't'", "&#91;multi\nline label&#93;&#58; u &#39;t&#39;"],
-])("saves the link reference definition %j as the same text", (markdown, saved) => {
-  expectParagraphText(markdown, markdown, saved);
+])("saves text that spells the link reference definition %j as the same text", (text, saved) => {
+  expectParagraphText(saved, text, saved);
 });
 
 const exampleLink = {
@@ -894,15 +947,15 @@ it("saves definitions beside other blocks as the same document", () => {
     ].join("\n\n"),
   );
   expect(document.content?.map((block) => block.type)).toEqual([
-    "paragraph",
+    "rawBlock",
     "table",
     "blockquote",
     "bulletList",
     "heading",
   ]);
   expect(document.content?.[0]).toEqual({
-    type: "paragraph",
-    content: [{ type: "text", text: '[x]: u "a\n# b"' }],
+    type: "rawBlock",
+    attrs: { source: '[x]: u "a\n# b"' },
   });
   expectSavedAsTheSameDocument(document);
 });
@@ -1398,10 +1451,10 @@ it("keeps a break spelled in code in a table cell as the code's text", () => {
 it("keeps a definition and the table after it apart", () => {
   const source = '[x]: u "a\n| b |"\n| c |\n| - |\n| d |';
   const document = parseRichdocMarkdown(source);
-  expect(document.content?.map((block) => block.type)).toEqual(["paragraph", "table"]);
+  expect(document.content?.map((block) => block.type)).toEqual(["rawBlock", "table"]);
   expect(document.content?.[0]).toEqual({
-    type: "paragraph",
-    content: [{ type: "text", text: '[x]: u "a\n| b |"' }],
+    type: "rawBlock",
+    attrs: { source: '[x]: u "a\n| b |"' },
   });
   expectSavedAsTheSameDocument(document);
 });
@@ -1707,10 +1760,10 @@ it("reads references between separate raw HTML runs as it reads them outside raw
       {
         type: "paragraph",
         content: [
-          {
-            type: "text",
-            text: "<b>x</b> * &#123; &#92; &#58; &#32; &#92; &amp;#123; <i>y</i> and ",
-          },
+          { type: "rawInline", attrs: { source: "<b>x</b>" } },
+          { type: "text", text: " * &#123; &#92; &#58; &#32; &#92; &amp;#123; " },
+          { type: "rawInline", attrs: { source: "<i>y</i>" } },
+          { type: "text", text: " and " },
           { type: "text", marks: [{ type: "bold" }], text: "real" },
           { type: "text", text: " " },
           { type: "inlineAtom", attrs: { atomId: "rate", params: "150", source: "atom:rate 150" } },
@@ -1730,7 +1783,9 @@ it("saves a table cell holding a real <br> beside raw HTML as the same document"
   );
   const cell = document.content?.[0]?.content?.[1]?.content?.[0]?.content?.[0]?.content ?? [];
   expect(cell.map((node) => node.text ?? node.type)).toEqual([
-    "a<br>b &#124; &#123; <b>*x*</b> ",
+    "a<br>b &#124; &#123; ",
+    "rawInline",
+    " ",
     "inlineAtom",
   ]);
   expectSavedAsTheSameDocument(document);
@@ -3486,7 +3541,7 @@ describe("Y.Doc markdown import/export", () => {
 
     it.each([
       ["# After", "heading", "After"],
-      ["<!-- ordinary -->", "paragraph", "<!-- ordinary -->"],
+      ["<!-- ordinary -->", "rawBlock", "<!-- ordinary -->"],
       ["```\nfenced\n```", "codeBlock", "fenced"],
       ["- item", "bulletList", "item"],
     ])("keeps the block right after an annotated table: %j", (following, type, text) => {
@@ -3543,7 +3598,7 @@ describe("Y.Doc markdown import/export", () => {
           const doc = markdownToYDoc(
             `${Array(annotations).fill("<!-- dohc:table row-heights=1:84 -->").join("\n")}\nNot a table.`,
           );
-          expect(getDohcYDocBodyFragment(doc).length).toBe(annotations + 1);
+          expect(getDohcYDocBodyFragment(doc).length).toBe(2);
           doc.destroy();
         });
       const small = measure(32);
@@ -3588,7 +3643,7 @@ describe("Y.Doc markdown import/export", () => {
     it("leaves an annotation that no table follows as an ordinary comment", () => {
       const doc = markdownToYDoc("<!-- dohc:table row-heights=1:84 -->\nNot a table.");
       expect(yDocBodyJSON(doc).content?.map((node) => node.type)).toEqual([
-        "paragraph",
+        "rawBlock",
         "paragraph",
       ]);
     });
@@ -3629,21 +3684,13 @@ describe("Y.Doc markdown import/export", () => {
     }
   });
 
-  it("keeps a link reference definition as text, and a link that uses it still resolves", () => {
-    expect(expectStableMarkdownRoundTrip('Hello\n\n[x]: https://h.example "kept"\n', [])).toBe(
-      "Hello\n\n&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;\n",
-    );
-    // marked drops a second definition of a label without a token.
-    const repeated = expectStableMarkdownRoundTrip(
+  it("keeps link reference definitions as the file spells them", () => {
+    for (const definitions of [
+      'Hello\n\n[x]: https://h.example "kept"\n',
       '[x]: https://a.example\n[x]: https://b.example "kept"\n',
-      [],
-    );
-    expect(repeated).toBe(
-      "&#91;x&#93;&#58; https&#58;//a&#46;example\n\n&#91;x&#93;&#58; https&#58;//b&#46;example &#34;kept&#34;\n",
-    );
-    expect(yDocBodyJSON(markdownToYDoc(repeated))).toEqual(
-      yDocBodyJSON(markdownToYDoc('[x]: https://a.example\n[x]: https://b.example "kept"\n')),
-    );
+    ]) {
+      expect(expectStableMarkdownRoundTrip(definitions, [])).toBe(definitions);
+    }
     expect(
       yDocBodyJSON(markdownToYDoc('Hello[](https://h.example "kept")\n')).content?.[0],
     ).toEqual({
@@ -3660,21 +3707,26 @@ describe("Y.Doc markdown import/export", () => {
     const hasOwn = vi.spyOn(Object, "hasOwn");
     try {
       const doc = markdownToYDoc("[x]: /a\n".repeat(repeats));
-      expect(yDocBodyJSON(doc).content?.length).toBe(repeats);
+      expect(yDocBodyJSON(doc).content).toEqual([
+        { type: "rawBlock", attrs: { source: "[x]: /a\n".repeat(repeats).trimEnd() } },
+      ]);
       // One check for each definition, with room for the rest of the import.
       expect(hasOwn.mock.calls.length).toBeLessThan(10 * repeats);
     } finally {
       hasOwn.mockRestore();
     }
     const body = yDocBodyJSON(markdownToYDoc("See [docs][x].\n\n[x]: https://example.com\n"));
-    expect(body.content?.[0]?.content?.[1]).toMatchObject({
-      text: "docs",
-      marks: [{ type: "link", attrs: { href: "https://example.com" } }],
-    });
-    expect(body.content?.[1]).toEqual({
-      type: "paragraph",
-      content: [{ type: "text", text: "[x]: https://example.com" }],
-    });
+    expect(body.content).toEqual([
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "See " },
+          { type: "rawInline", attrs: { source: "[docs][x]" } },
+          { type: "text", text: "." },
+        ],
+      },
+      { type: "rawBlock", attrs: { source: "[x]: https://example.com" } },
+    ]);
   });
 
   it("still reads an empty extra cell and a pipe inside inline code as one table", () => {

@@ -812,7 +812,7 @@ describe("useShellError", () => {
       senderKind: null,
       senderLabel: null,
       title: "Held a change to note.md",
-      body: "Saving it would also change parts dohc can't show, such as raw HTML or reference links.",
+      body: "Saving it would also change parts dohc can't show.",
       target: { path: "note.md" },
       createdAtMs: 1,
       readAtMs: null,

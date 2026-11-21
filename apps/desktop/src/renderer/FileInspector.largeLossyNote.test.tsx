@@ -58,12 +58,12 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// Past read mode's size, with a raw HTML block near the top.
+// Past read mode's size, with code indented under a list item near the top.
 const FILLER = Array.from(
   { length: 8 },
   (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`,
 ).join("\n\n");
-const LARGE_LOSSY = `# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\n${FILLER}\n`;
+const LARGE_LOSSY = `# Notes\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n\n${FILLER}\n`;
 
 function bridgeFor(text: string, engine: "record" | "no-record") {
   const bridgeMock = {
