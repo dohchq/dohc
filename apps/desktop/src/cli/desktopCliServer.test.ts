@@ -1155,8 +1155,7 @@ describe("desktop CLI workspace context", () => {
 
   it("reads a lossy note as its file, and refuses to edit it before any session opens", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-lossy-"));
-    const lossy =
-      "# Readme\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\nSee [the docs][docs].\n\n[docs]: https://example.com/docs\n";
+    const lossy = "# Readme\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n";
     try {
       await writeFile(join(root, "readme.md"), lossy);
       await writeFile(join(root, "plan.md"), "# Plan\n\nText.\n");
@@ -1184,12 +1183,12 @@ describe("desktop CLI workspace context", () => {
       };
       await context.documents!.edit({
         path: "readme.md",
-        edit: { find: "Hidden.", replacement: "Shown." },
+        edit: { find: "Run this:", replacement: "Run these:" },
         origin,
       });
       const [input] = vi.mocked(f.dependencies.liveDocuments.editDocument).mock.calls[0]!;
       await expect(input.assertEditable("readme.md")).rejects.toThrow(
-        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+        "dohc can't change readme.md without also changing parts it can't show. Edit the file directly instead.",
       );
       await expect(input.assertEditable("plan.md")).resolves.toBeUndefined();
       await mkdir(join(root, "folder.md"));
@@ -1216,7 +1215,7 @@ describe("desktop CLI workspace context", () => {
 
   it("uses the authoritative head for an edited witness and forwards explicit consent with an absent head", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-cli-consent-"));
-    const source = "# Readme\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const source = "# Readme\n\n1. Run this:\n\n       pnpm install\n\n2. Done\n\nEditable.\n";
     const sha = (text: string) => createHash("sha256").update(text).digest("hex");
     const doc = markdownToYDoc(source);
     doc.getMap("meta").set("dohcMarkdownSource", source);
@@ -1268,7 +1267,7 @@ describe("desktop CLI workspace context", () => {
       expect(yDocToMarkdown(doc)).toContain("Changed.");
       expect(await readFile(join(root, "readme.md"), "utf8")).toBe(source);
 
-      await writeFile(join(root, "readme.md"), source.replace("Hidden.", "Another source."));
+      await writeFile(join(root, "readme.md"), source.replace("Run this:", "Another source:"));
       await expect(consented.assertEditable("readme.md")).rejects.toThrow("parts it can't show");
     } finally {
       doc.destroy();

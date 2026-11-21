@@ -24,8 +24,8 @@ import {
 } from "./helpers/workspace";
 
 // A lossy note (CONTEXT.md) opens read-only, with no engine session, and
-// nothing that skips the editor writes it either. The README holds the four
-// forms found in the app.
+// nothing that skips the editor writes it either. The README holds two forms
+// the editor keeps as written and two it can't hold.
 
 const README = [
   "# Readme",
@@ -147,7 +147,7 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     ).resolves.toMatchObject({
       ok: false,
       reason:
-        "dohc can't change readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+        "dohc can't change readme.md without also changing parts it can't show. Edit the file directly instead.",
     });
     expect(await sha256(temp.rootPath, "readme.md")).toBe(original);
 
@@ -169,7 +169,7 @@ test("@lossy-note a lossy note opens read-only, takes no edit it didn't choose, 
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog", { name: "Edit this note anyway?" });
     await expect(dialog).toContainText(
-      "Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.",
+      "Saving rewrites the parts dohc can't show. History keeps the original.",
     );
     await shoot(page, "lossy-note-edit-anyway");
     await page.keyboard.press("Escape");

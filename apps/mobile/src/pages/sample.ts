@@ -5,7 +5,7 @@ export interface SamplePage {
   readonly icon?: string;
   readonly properties: readonly { name: string; value: string; opens?: boolean }[];
   readonly markdown: string;
-  /** Raw HTML or reference links: dohc can't edit it yet without changing parts it can't show. */
+  /** dohc can't edit it yet without changing parts it can't show. */
   readonly lossy?: boolean;
   /** History's answer about the original, which the server gives before Edit anyway. */
   readonly history?: "kept" | "untracked" | "unconfirmed";
