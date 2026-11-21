@@ -11,6 +11,7 @@ import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-rea
 import { useContext, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
+import { SHARE_ACCESS_WORDS } from "./shareAccess";
 import type { MountShareResult, RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
@@ -29,6 +30,8 @@ import { FolderChip } from "./ui/Step";
 export type MountedShare = {
   shareId: string;
   label: string;
+  name: string;
+  files: number;
   access: ShareAccess | null;
   alreadyAdded: boolean;
   left: boolean;
@@ -36,13 +39,15 @@ export type MountedShare = {
 
 type MountInto = { workspaceId: string; onMounted: (mounted: MountedShare) => void };
 
-function mountedShare(result: MountShareResult, left: boolean): MountedShare {
+function mountedShare(result: MountShareResult, left: boolean, name: string | null): MountedShare {
   const pinned = result.workspace.shareMounts?.find(
     (mount) => mount.shareId === result.mount.shareId,
   );
   return {
     shareId: result.mount.shareId,
     label: result.mount.label,
+    name: name ?? result.mount.label,
+    files: result.mount.changedPaths,
     access: pinned?.access ?? null,
     alreadyAdded: result.alreadyAdded === true,
     left,
@@ -53,6 +58,7 @@ function reportAddAfterLeaving(
   report: ReportShellFailure | null,
   into: MountInto,
   shareCode: string,
+  name: string | null,
   cause: unknown,
 ) {
   const shareId = parseShareCode(shareCode)?.shareId;
@@ -64,8 +70,8 @@ function reportAddAfterLeaving(
       void bridge()
         .mountShare({ workspaceId: into.workspaceId, shareCode })
         .then(
-          (result) => into.onMounted(mountedShare(result, true)),
-          (again: unknown) => reportAddAfterLeaving(report, into, shareCode, again),
+          (result) => into.onMounted(mountedShare(result, true, name)),
+          (again: unknown) => reportAddAfterLeaving(report, into, shareCode, name, again),
         ),
   });
 }
@@ -292,6 +298,7 @@ export function OpenSharedView(
     setOpening(true);
     setError(null);
     const adding = mounting && props.mountInto ? props.mountInto : null;
+    const name = (preview?.shareId === shareId ? preview.subjectName : null) ?? null;
     try {
       if (adding) {
         const result = await bridge().mountShare({
@@ -301,7 +308,7 @@ export function OpenSharedView(
         const left = actionRequests.isCutOff(actionRequest);
         if (!left && !actionRequests.isCurrent(actionRequest)) return;
         if (!left) props.onOpened?.();
-        adding.onMounted(mountedShare(result, left));
+        adding.onMounted(mountedShare(result, left, name));
       } else {
         const result = await bridge().openSharedView({
           shareCode,
@@ -313,7 +320,7 @@ export function OpenSharedView(
       }
     } catch (cause) {
       if (adding && actionRequests.isCutOff(actionRequest)) {
-        reportAddAfterLeaving(reportShellError, adding, shareCode, cause);
+        reportAddAfterLeaving(reportShellError, adding, shareCode, name, cause);
         return;
       }
       if (!actionRequests.isCurrent(actionRequest)) return;
@@ -394,11 +401,17 @@ export function OpenSharedView(
       </div>
 
       {preview?.shareId === shareId && (
-        <p data-testid="open-share-summary" className="m-0 text-[13px] text-ink">
-          {preview.subjectName ?? shareSubjectFallback(preview.selector)} ·{" "}
-          {shareSenderLabel(preview.sharerName, preview.granterEmail)} ·{" "}
-          {shareAccessLabel(preview.access)} access
-        </p>
+        <div data-testid="open-share-summary" className="flex flex-col gap-0.5">
+          <p className="m-0 truncate text-[13px] font-medium text-ink">
+            {preview.subjectName ?? shareSubjectFallback(preview.selector)}
+          </p>
+          <p className="m-0 text-[12px] leading-4 text-muted [overflow-wrap:anywhere]">
+            {preview.damaged
+              ? `${shareAccessLabel(preview.access)} access`
+              : SHARE_ACCESS_WORDS[preview.access]}{" "}
+            · From {shareSenderLabel(preview.sharerName, preview.granterEmail)}
+          </p>
+        </div>
       )}
       {props.mountInto ? (
         <div className="flex flex-col gap-1.5">

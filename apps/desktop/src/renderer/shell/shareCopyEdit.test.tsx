@@ -13,8 +13,16 @@ beforeEach(() => {
   vi.resetAllMocks();
 });
 
-function mounted(access: ShareAccess | null, alreadyAdded = false): MountedShare {
-  return { shareId: "share-1", label: "ana", access, alreadyAdded, left: false };
+function mounted(access: ShareAccess | null, alreadyAdded = false, files = 2): MountedShare {
+  return {
+    shareId: "share-1",
+    label: "ana",
+    name: "Trip plan.md",
+    files,
+    access,
+    alreadyAdded,
+    left: false,
+  };
 }
 
 function received(access: ShareAccess): GetRelayReceivedShareResult {
@@ -39,7 +47,7 @@ describe("the notice after adding a share", () => {
     const openToEdit = vi.fn();
     const notice = addedShareNotice(mounted("edit"), openToEdit);
 
-    expect(notice.message).toBe("Added ana to shared-with-me as a read-only copy.");
+    expect(notice.message).toBe("Added Trip plan.md to shared-with-me as a read-only copy.");
     expect(notice.action?.label).toBe("Open to edit");
     expect(openToEdit).not.toHaveBeenCalled();
     notice.action?.run();
@@ -52,7 +60,19 @@ describe("the notice after adding a share", () => {
       const notice = addedShareNotice(mounted(access), vi.fn());
 
       expect(notice.message).toBe(
-        "Added ana to shared-with-me. Its files are read-only and stay up to date.",
+        "Added Trip plan.md to shared-with-me. Its files are read-only and stay up to date.",
+      );
+      expect(notice.action).toBeUndefined();
+    },
+  );
+
+  it.each(["edit", "view"] as const)(
+    "says nothing has arrived, and offers no Open to edit, when a share at %s brought no file",
+    (access) => {
+      const notice = addedShareNotice(mounted(access, false, 0), vi.fn());
+
+      expect(notice.message).toBe(
+        "Added Trip plan.md to shared-with-me. Nothing has arrived from the owner's computer yet.",
       );
       expect(notice.action).toBeUndefined();
     },
@@ -61,7 +81,7 @@ describe("the notice after adding a share", () => {
   it("offers Open to edit for an Edit share this workspace already has", () => {
     const notice = addedShareNotice(mounted("edit", true), vi.fn());
 
-    expect(notice.message).toBe("ana is already in shared-with-me.");
+    expect(notice.message).toBe("Trip plan.md is already in shared-with-me.");
     expect(notice.action?.label).toBe("Open to edit");
   });
 });

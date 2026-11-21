@@ -87,9 +87,9 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   );
   const user = userEvent.setup();
   expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
-  expect(screen.getByTestId("open-share-summary").textContent).toContain(
-    "Trip plans · Ana (granter@dohc.test) · Edit access",
-  );
+  expect(
+    [...screen.getByTestId("open-share-summary").children].map((line) => line.textContent),
+  ).toEqual(["Trip plans", "Can edit · From Ana (granter@dohc.test)"]);
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));
@@ -512,6 +512,8 @@ describe("ShareHandoffSurface", () => {
     expect(onMounted).toHaveBeenCalledWith({
       shareId: "share-exact",
       label: "granter",
+      name: "Trip plans",
+      files: 3,
       access: null,
       alreadyAdded: false,
       left: false,

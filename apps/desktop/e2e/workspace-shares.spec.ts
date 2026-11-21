@@ -43,7 +43,7 @@ import {
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const GRANTER_LABEL = "e2e-granter (e2e-granter@dohc.test)";
-const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Markdown edits save to the live host. Other file changes need their acceptance.`;
+const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Pages save as you type. Other files need Send changes.`;
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";

@@ -132,6 +132,8 @@ describe("OpenSharedView", () => {
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
       shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 3,
       access: null,
       alreadyAdded: false,
       left: true,
@@ -161,6 +163,8 @@ describe("OpenSharedView", () => {
       expect(onMounted).toHaveBeenCalledExactlyOnceWith({
         shareId: "share-1",
         label: "granter",
+        name: "granter",
+        files: 0,
         access: null,
         alreadyAdded: true,
         left: false,
@@ -214,6 +218,8 @@ describe("OpenSharedView", () => {
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
       shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 1,
       access: null,
       alreadyAdded: false,
       left: true,
@@ -305,6 +311,8 @@ describe("OpenSharedView", () => {
     expect(onMounted).toHaveBeenCalledWith({
       shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 3,
       access: "edit",
       alreadyAdded: false,
       left: false,
@@ -532,7 +540,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
 
     await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(screen.getByTestId("open-share-summary").textContent).toContain("Edit access"),
+      expect(screen.getByTestId("open-share-summary").textContent).toContain("Can edit"),
     );
     expect(modeChecked("mount")).toBe("true");
     expect(start.textContent).toBe("Add share");
