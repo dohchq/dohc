@@ -923,6 +923,14 @@ it.each([
     stored: owner,
   },
   {
+    name: "a host whose start the owner saved again after Resume",
+    source: owner,
+    moment: ownerSave,
+    host: true,
+    restored: true,
+    stored: owner,
+  },
+  {
     name: "a push that is not the host's",
     source: owner,
     moment: ownerSave,
@@ -961,7 +969,10 @@ it.each([
       });
     save(HOST_ORIGIN, 0, A, last);
     save("owner-laptop", 0, last, owner);
-    if (input.host) save(HOST_ORIGIN, 1, last, resumed);
+    save(HOST_ORIGIN, 1, owner, owner);
+    save(HOST_ORIGIN, 2, owner, owner);
+    if ("restored" in input) save("owner-laptop", 1, owner, owner);
+    if (input.host) save(HOST_ORIGIN, 3, last, resumed);
     else save("other-laptop", 0, last, resumed);
     expect(
       f.raw

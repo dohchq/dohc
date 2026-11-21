@@ -584,14 +584,23 @@ export function isResumedHostSave(
         `SELECT 1 FROM ${SERVICE_ACTIVATIONS} a
         JOIN sync_relay_current_files f ON f.workspace_id=a.workspace_id AND f.version_id='main'
           AND f.path=json_extract(a.source_json,'$.currentPath')
-        JOIN sync_relay_object_moments m ON m.workspace_id=f.workspace_id AND m.object_id=a.object_id
-          AND m.relay_seq=f.state_relay_seq
         WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND f.path=?
           AND a.retire_requested_at_ms IS NULL AND a.retired_at_ms IS NULL
           AND f.blob_sha256=json_extract(a.source_json,'$.sourceDigest')
-          AND m.moment_id=json_extract(a.source_json,'$.sourceMomentId')`,
+          AND json_extract(a.source_json,'$.sourceMomentId')=(
+            SELECT m.moment_id FROM sync_relay_object_moments m
+            JOIN sync_relay_log l ON l.workspace_id=m.workspace_id AND l.relay_seq=m.relay_seq
+            WHERE m.workspace_id=a.workspace_id AND m.object_id=a.object_id AND m.version_id='main'
+              AND substr(l.origin_id,1,length(?))<>?
+            ORDER BY m.relay_seq DESC LIMIT 1)`,
       )
-      .get(workspaceId, save.objectId, save.path) !== undefined
+      .get(
+        workspaceId,
+        save.objectId,
+        save.path,
+        SERVICE_HOST_ORIGIN_PREFIX,
+        SERVICE_HOST_ORIGIN_PREFIX,
+      ) !== undefined
   );
 }
 export function bindStoppedNoteClient(
