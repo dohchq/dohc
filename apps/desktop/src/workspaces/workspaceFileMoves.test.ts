@@ -364,6 +364,29 @@ describe("agent moves and deletes", () => {
     await f.engine().stop();
   });
 
+  it("moves an agent's file under another folder rule at once, and answers with the warning a person is asked", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "Plan.txt", "plan");
+    await write(f.rootPath, "Team/access.yaml", "members: view\n");
+    await f.start();
+
+    expect(await f.move("Plan.txt", "Team/Plan.txt")).toMatchObject({
+      ok: true,
+      fromPath: "Plan.txt",
+      toPath: "Team/Plan.txt",
+      accessWarning:
+        "Moving Plan.txt into Team may change who can see it. People who could read it may keep a copy.",
+    });
+    expect(existsSync(join(f.rootPath, "Team/Plan.txt"))).toBe(true);
+    expect(await f.move("Team/Plan.txt", "Team/Kept.txt")).not.toHaveProperty("accessWarning");
+    // The warning reads the paths as the move does.
+    expect(await f.move("Team\\Kept.txt", "Kept.txt")).toMatchObject({
+      ok: true,
+      accessWarning:
+        "Moving Kept.txt out of Team may change who can see it. People who could read it may keep a copy.",
+    });
+  });
+
   it("stops a folder delete at the file History refuses, puts the rest back, and names the files deleted", async () => {
     const f = await fixture({
       beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "dir/2.txt"),

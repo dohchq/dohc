@@ -446,7 +446,14 @@ describe("the words for a stopped rebuild", () => {
 
   // The engine answers a stop at a path, since a refusal's message carries none.
   const stoppedAt = (code: string, path: string) => {
-    const read = { signature: "s", visibilitySignature: "v", rootLevel: null, folders: [] };
+    const read = {
+      signature: "s",
+      visibilitySignature: "v",
+      rootLevel: null,
+      groupDefault: "view" as const,
+      groups: [],
+      folders: [],
+    };
     try {
       parseShareViewRebuildAnswer({ state: "stopped", code, path }, read);
     } catch (error) {

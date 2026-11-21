@@ -159,6 +159,7 @@ const FALLBACK: Record<MembersRequest["action"], string> = {
   link: "dohc could not change the invite link.",
   leave: "dohc could not leave this workspace.",
   end: "dohc could not end membership.",
+  group: "dohc could not change this Group's access.",
 };
 
 /**

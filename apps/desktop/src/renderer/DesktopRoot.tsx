@@ -177,9 +177,16 @@ function UpdatingAccess(props: { workspace: Workspace }) {
       <h2 className="m-0 text-xl font-semibold leading-tight tracking-tight text-ink">
         {workspaceName(props.workspace)}
       </h2>
+      {/* The owner or an admin may have made the change, so it names no one.
+          A failed update opens nothing until Try again. */}
       {ended ? null : (
-        <p className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted">
-          The owner changed what you can see here. This copy stays closed until it matches.
+        <p
+          data-testid="workspace-updating-access-line"
+          className="m-0 max-w-md select-text text-[13px] leading-relaxed text-muted"
+        >
+          {failed
+            ? "Your access to this workspace changed."
+            : "Your access to this workspace changed. dohc is updating this copy and opens it when it's done."}
         </p>
       )}
       {stopped ? (

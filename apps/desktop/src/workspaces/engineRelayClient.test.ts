@@ -484,6 +484,8 @@ describe("EngineRelayClient", () => {
       signature: "r1",
       visibilitySignature: "v1",
       rootLevel: "comment" as const,
+      groupDefault: "comment" as const,
+      groups: [],
       folders: [{ path: "Plans", level: "edit" as const }],
     };
     let pulls = 0;
@@ -539,6 +541,8 @@ describe("EngineRelayClient", () => {
       signature: "r1",
       visibilitySignature: "v1",
       rootLevel: "comment" as const,
+      groupDefault: "comment" as const,
+      groups: [],
       folders: [],
     };
     const daemon = new MockDaemon((request) => {

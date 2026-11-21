@@ -43,7 +43,11 @@ import {
   pathLevel,
 } from "../shareFilter";
 import { threadPathsInTransaction } from "./accountFeed";
-import type { ChatMessageAccess, PushMessage } from "../chatMessageInterest";
+import {
+  chatNoticeReached,
+  type ChatMessageAccess,
+  type PushMessage,
+} from "../chatMessageInterest";
 import { accountName } from "./accountNames";
 import type { StorageContext } from "./context";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
@@ -1465,13 +1469,35 @@ function settleLostWakeOwnership(
 
 // Rechecks rows read through a share, in one pass inside the write
 // transaction, and only when the reads behind the recipient's access
-// changed since the last check. Each row whose recipient no longer reads
-// its target there moves to another share that admits its path, or loses
-// its target.
+// changed since the last check, or a thread a row names is no longer served.
+// Each row whose recipient no longer reads its target there moves to another
+// share that admits its path, or loses its target.
 function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs: number): void {
   const live = `recipient_user_id = ? AND recipient_share_id IS NOT NULL AND target_json IS NOT NULL
     AND removed_at_ms IS NULL AND expires_at_ms > ?`;
   const plan = storage.readTx((): "none" | "digest" | "shares" => {
+    // A chat Notice's target names a thread and no path. Its Group can be
+    // hidden and its file moved or hidden without any read the digest
+    // covers, so each share and thread pair is checked where it is now.
+    const threadLost = storage.db
+      .prepare(
+        `SELECT recipient_share_id, thread, (SELECT workspace_id FROM sync_relay_shares s
+           WHERE s.share_id = recipient_share_id) AS workspace_id
+         FROM (SELECT DISTINCT recipient_share_id, json_extract(target_json, '$.thread') AS thread
+           FROM sync_relay_notices WHERE ${live} AND json_extract(target_json, '$.thread') IS NOT NULL)`,
+      )
+      .all(recipientUserId, nowMs)
+      .some(
+        (row) =>
+          row.workspace_id === null ||
+          !chatNoticeReached(
+            storage,
+            recipientUserId,
+            String(row.recipient_share_id),
+            String(row.workspace_id),
+            String(row.thread),
+          ),
+      );
     // A row whose target names a path needs the digest of everything that
     // decides what the recipient reads.
     const withPath = storage.db
@@ -1484,10 +1510,11 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
       const list = storage.db
         .prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
         .get(recipientUserId);
-      return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId)
-        ? "digest"
-        : "none";
+      if (list !== undefined && list.reach_token !== reachToken(storage, recipientUserId))
+        return "digest";
+      return threadLost ? "shares" : "none";
     }
+    if (threadLost) return "shares";
     // A row that points only at a share needs only a current grant on it.
     const lost = storage.db
       .prepare(
@@ -1509,7 +1536,7 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
        SET recipient_share_id = COALESCE(?, recipient_share_id),
            target_json = CASE WHEN ? IS NULL THEN NULL ELSE target_json END,
            title = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
-             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN 'No longer available' ELSE title END,
+             WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN ? ELSE title END,
            body = CASE WHEN ? IS NULL AND EXISTS (SELECT 1 FROM sync_relay_shares s
              WHERE s.share_id = recipient_share_id AND json_extract(s.selector_json, '$.kind') = 'workspace') THEN '' ELSE body END,
            change_seq = ?
@@ -1517,20 +1544,33 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
     );
     for (const row of rows) {
       const shareId = String(row.recipient_share_id);
-      const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
+      const { path, thread } = JSON.parse(String(row.target_json)) as NoticeTarget;
+      const workspaceId = storage.getShare(shareId)?.workspaceId;
+      const threadReached =
+        thread === undefined ||
+        (workspaceId !== undefined &&
+          chatNoticeReached(storage, recipientUserId, shareId, workspaceId, thread));
       if (
-        path === undefined
+        threadReached &&
+        (path === undefined
           ? holdsShare(storage, recipientUserId, shareId)
-          : admits(reach.sidesOn(shareId), path)
+          : admits(reach.sidesOn(shareId), path))
       )
         continue;
-      const workspaceId = storage.getShare(shareId)?.workspaceId;
+      // Only a path moves to another share. A thread the share no longer
+      // serves loses the target.
       const movedTo =
-        path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
+        path === undefined || workspaceId === undefined || !threadReached
+          ? null
+          : reach.admitting(workspaceId, path);
+      // A row that named a thread says so, as Notices words a chat that is gone.
+      const goneTitle =
+        thread === undefined ? "No longer available" : "dohc could not find this chat.";
       move.run(
         movedTo,
         movedTo,
         movedTo,
+        goneTitle,
         movedTo,
         nextChangeSeq(storage, recipientUserId),
         recipientUserId,

@@ -477,6 +477,7 @@ function buildCliRequest(
           name: command.name,
           ...(command.purpose !== undefined ? { purpose: command.purpose } : {}),
           ...(command.type ? { type: command.type } : {}),
+          ...(command.level ? { level: command.level } : {}),
         },
       };
     case "groups":

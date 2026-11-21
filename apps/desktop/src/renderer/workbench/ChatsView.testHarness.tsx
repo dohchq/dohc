@@ -11,15 +11,18 @@ import type {
 } from "../../ipc/bridgeContract";
 import { ChatsView as ProductionChatsView } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 
 type TestChatsViewProps = Parameters<typeof ProductionChatsView>[0];
 
-// The workspace shell provides the reaction store in production.
+// The workspace shell provides the session and the reaction store in production.
 export function ChatsView(props: TestChatsViewProps) {
   return (
-    <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionChatsView {...props} />
-    </ReactionStoreProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ReactionStoreProvider workspaceId={props.workspaceId}>
+        <ProductionChatsView {...props} />
+      </ReactionStoreProvider>
+    </WorkspaceSessionProvider>
   );
 }
 

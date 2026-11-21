@@ -14,6 +14,7 @@ import {
   bridgeMock,
   renderView,
 } from "./ChatsView.testHarness";
+import { deferred } from "../../testing/deferred";
 
 describe("ChatsView expand-to-tab", () => {
   it("marks the page variant on the root so the tab surface is testable", async () => {
@@ -139,6 +140,44 @@ describe("ChatsView expand-to-tab", () => {
     const view = await screen.findByTestId("chats-channel-view");
     expect(view.dataset.variant).toBe("page");
     expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("general");
+  });
+
+  // Such as a Group the owner set to No access: the copy rebuilds, the shell
+  // mounts again, and the restored tab names a Group Chats no longer lists.
+  it("closes a restored Group's tab once Chats lists without that Group", async () => {
+    const list = deferred<{ channels: ReturnType<typeof channel>[]; fileThreads: [] }>();
+    bridgeMock.listChatChannels.mockReturnValue(list.promise);
+    const onCloseTab = vi.fn();
+    const onNavChange = vi.fn();
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "channel", id: "garden" }),
+      onOpenInTab: vi.fn(),
+      onCloseTab,
+      onNavChange,
+    });
+    // Not while the list loads.
+    await act(async () => {});
+    expect(onCloseTab).not.toHaveBeenCalled();
+
+    await act(async () => list.resolve({ channels: [channel()], fileThreads: [] }));
+
+    await waitFor(() => expect(onCloseTab).toHaveBeenCalledOnce());
+    expect(onNavChange).not.toHaveBeenCalledWith({ level: "channels" });
+  });
+
+  it("keeps a restored Group's tab while Chats cannot list", async () => {
+    bridgeMock.listChatChannels.mockRejectedValue(new Error("ECONNRESET"));
+    const onCloseTab = vi.fn();
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "channel", id: "garden" }),
+      onOpenInTab: vi.fn(),
+      onCloseTab,
+    });
+    await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
+    await act(async () => {});
+    expect(onCloseTab).not.toHaveBeenCalled();
   });
 
   it("never reports the default overview position while a seed is pending", async () => {

@@ -11,14 +11,17 @@ import {
 } from "@dohc/security-contract/access-rules";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { accountEmail } from "./accountEmails";
+import { accountEmail, ruleEmailRetired } from "./accountEmails";
 import { accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
+import { readGroupRules, type GroupRuleRow } from "./groupRules";
 import type { SqliteDb } from "./types";
 
 export interface EvaluatedMemberReach {
   role: "admin" | "member";
   level: ShareAccess;
   rules: [string, ShareAccess | null][];
+  /** Each Group with an active rule, and the level it gives this viewer. */
+  groups: [string, ShareAccess | null][];
 }
 
 /**
@@ -35,14 +38,21 @@ export interface ListedMemberReach {
   visibilitySignature: string;
   rootLevel: ShareAccess | null;
   folders: Array<{ path: string; level: ShareAccess }>;
+  /** The level in a Group no entry in `groups` names. */
+  groupDefault: ShareAccess;
+  /** Each Group the member reaches at a level other than `groupDefault`. */
+  groups: Array<{ channelWireId: string; level: ShareAccess }>;
 }
 
 export interface MemberReach {
   evaluated: EvaluatedMemberReach;
   /** Whether the member holds `level` on some folder. */
   hasLevel(level: ShareAccess): boolean;
-  /** The member's level in a Group. Every Group takes the member level for now. */
-  groupLevel(channelWireId: string): ShareAccess;
+  /**
+   * The member's level in a Group, or null when its rule hides it: Edit for an
+   * admin, else the Group's rule, else the member level.
+   */
+  groupLevel(channelWireId: string): ShareAccess | null;
   /** Whether the member holds `level` in some Group. */
   hasGroupLevel(level: ShareAccess): boolean;
   /**
@@ -94,23 +104,42 @@ export function memberReach(
   current?: AccessRuleSet,
 ): MemberReach {
   const email = accountEmail(db, userId);
-  const viewer: ReachViewer =
-    role === "admin"
-      ? { role }
-      : {
-          role,
-          level,
-          verifiedEmail: email?.verifiedEmail ?? null,
-        };
+  const verifiedEmail = email?.verifiedEmail ?? null;
+  const viewer: ReachViewer = role === "admin" ? { role } : { role, level, verifiedEmail };
+  // An entry naming a deleted account's address named that account. Not
+  // matching it could widen a level the entry narrows, so its rule hides.
+  const retired = role !== "admin" && verifiedEmail !== null && ruleEmailRetired(db, verifiedEmail);
+  const namesRetired = (rule: AccessRule) => retired && rule.people.has(verifiedEmail!);
   const knownRules = (rules: AccessRuleSet) =>
-    email || role === "admin"
+    role === "admin" || (email && !retired)
       ? rules
       : accessRuleSet(
           [...rules.exact].map(
-            ([folder, rule]) => [folder, rule && rule.people.size === 0 ? rule : null] as const,
+            ([folder, rule]) =>
+              [
+                folder,
+                rule && (email ? namesRetired(rule) : rule.people.size > 0) ? null : rule,
+              ] as const,
           ),
         );
   const rules = knownRules(current ?? currentAccessRuleSet(db, workspaceId));
+  const groupRows = readGroupRules(db, workspaceId);
+  // A Group rule's level for this viewer. A person entry the relay can't
+  // match hides, as in a folder's rule.
+  const groupRuleLevel = (rule: GroupRuleRow["rule"]): ShareAccess | null | undefined => {
+    if (rule === undefined) return undefined;
+    if (viewer.role !== "member") return "edit";
+    if (rule && rule.people.size > 0 && (verifiedEmail === null || namesRetired(rule))) return null;
+    return ruleLevel(rule, viewer);
+  };
+  const ruledGroups = [...groupRows.values()].flatMap((row) => {
+    const ruled = groupRuleLevel(row.rule);
+    return ruled === undefined ? [] : [[row.channelWireId, ruled] as [string, ShareAccess | null]];
+  });
+  const groupLevels = new Map(ruledGroups);
+  const groupDefault: ShareAccess = role === "admin" ? "edit" : level;
+  const groupLevel = (id: string): ShareAccess | null =>
+    groupLevels.has(id) ? groupLevels.get(id)! : groupDefault;
   const levelAt = (path: string) => fileLevel(rules, viewer, path);
   const atFolder = (folder: string) => folderLevel(rules, viewer, folder);
   const parsedRules = new Map<string, AccessRule | null>();
@@ -155,6 +184,8 @@ export function memberReach(
           ? []
           : [[folder, atFolder(folder)]],
       ),
+      groupDefault,
+      ruledGroups.map(([id]) => [id, groupLevel(id)]),
     ]);
   // A hidden folder hides all under it, so reach can only stop at a ruled
   // folder. Reach is the same for every spelling of a folded name, so each
@@ -173,6 +204,19 @@ export function memberReach(
             .map(pathCollisionKey),
         ),
       ].sort(),
+      // A Group enters only while its visibility differs from the one it was
+      // created with. Creating a hidden Group rebuilds no copy; showing it
+      // rebuilds each copy that gains it, once, so the copy gets the history
+      // its cursor passed. A cleared rule's row keeps that baseline.
+      [...groupRows.values()]
+        .filter((row) => {
+          const created = groupRuleLevel(row.createdRule);
+          return (
+            (groupLevel(row.channelWireId) !== null) !==
+            ((created === undefined ? groupDefault : created) !== null)
+          );
+        })
+        .map((row) => row.channelWireId),
     ]);
   const keyed = (key: string | Uint8Array, tag: string, value: string) =>
     createHmac("sha256", key)
@@ -188,12 +232,15 @@ export function memberReach(
         folder,
         viewer.role === "member" ? ruleLevel(rule, viewer) : "edit",
       ]),
+      groups: ruledGroups.map(([id]) => [id, groupLevel(id)]),
     },
     hasLevel: (level) =>
       atFolder("") === level ||
       [...rules.exact.keys()].some((folder) => atFolder(folder) === level),
-    groupLevel: () => level,
-    hasGroupLevel: (wanted) => wanted === level,
+    groupLevel,
+    // A Group no rule names takes the member level.
+    hasGroupLevel: (wanted) =>
+      groupDefault === wanted || ruledGroups.some(([id]) => groupLevel(id) === wanted),
     signature,
     visibilitySignature,
     keyedSignature,
@@ -209,6 +256,11 @@ export function memberReach(
           return level === null || level === atFolder(accessRuleFolder(path))
             ? []
             : [{ path, level }];
+        }),
+        groupDefault,
+        groups: ruledGroups.flatMap(([channelWireId]) => {
+          const at = groupLevel(channelWireId);
+          return at === null || at === groupDefault ? [] : [{ channelWireId, level: at }];
         }),
       };
     },

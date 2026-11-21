@@ -295,7 +295,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_members",
     {
       description:
-        "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone or end membership.",
+        "Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); show or set what members can do in one Group (group is a Group name or id; level comment lets them post, view lets them read, none hides the Group, null removes the Group's own access so it takes the member level; leave level out to read it); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level and a Group's access, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone, hide a Group, or end membership.",
       inputSchema: { request: AgentMembersRequest },
     },
     async ({ request }) => {
@@ -980,11 +980,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_create_group",
     {
       description:
-        "Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.",
+        "Create a Chats group and its folder, as New group does. `name` is the group's name, 1 to 80 characters with a letter or number; its folder is the name as a slug. `purpose` says what the group is for. `type` is posts, chat, or both, the default. `level` sets what members can do in it as it is made: comment lets them post, view lets them read, none hides it from them. A group made with a level has no folder, and needs a connection. A name already taken is refused; find that group with dohc_list_groups. Returns the group's id, name, slug, and kind for dohc_start_group_chat.",
       inputSchema: {
         name: z.string().min(1).max(80),
         purpose: z.string().max(200).optional(),
         type: z.enum(["posts", "chat", "both"]).optional(),
+        level: z.enum(["comment", "view", "none"]).optional(),
       },
     },
     async (args) => text(await createGroup(ctx, args)),

@@ -1,12 +1,15 @@
 import type { createChatLinksReader } from "../workspaces/chatLinks";
-import { createJoinedGroup } from "../workspaces/joinedGroupCreate";
+import { createJoinedGroup, type JoinedGroupInput } from "../workspaces/joinedGroupCreate";
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { CHATS_STOPPED, chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
-import { createActorPresentationRequest } from "../workspaces/actorPresentation";
+import {
+  createActorPresentationRequest,
+  ownActorPresentation,
+} from "../workspaces/actorPresentation";
 import type { ActorPresentation, ChatDecisionRecord, ChatThreadWorkRecord } from "./bridgeContract";
 import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { createGroup } from "../workspaces/groupCreate";
@@ -155,20 +158,6 @@ export function chatMessageForIpc(
   };
 }
 
-// In a joined workspace every other person shows their account name, so the
-// viewer's own messages say "You", whatever name this computer wrote them under.
-function namedForViewer<
-  Record extends {
-    authorKind: string;
-    authorDisplayName: string;
-    presentation: ActorPresentation | null;
-  },
->(scope: Pick<ChatScope, "kind">, record: Record): Record {
-  return scope.kind === "share" && record.authorKind === "human" && record.presentation?.self
-    ? { ...record, authorDisplayName: "You" }
-    : record;
-}
-
 type StoreDecision = Awaited<ReturnType<DesktopLinkedChatStore["listThreadDecisions"]>>[number];
 
 function chatDecisionForIpc(decision: StoreDecision): ChatDecisionRecord {
@@ -264,7 +253,12 @@ export function registerChatsIpcHandlers<
   // owner's workspace and decides the role.
   createJoinedWorkspaceGroup(
     view: RegistryEntry["shareView"],
-    input: { name: string; type?: "posts" | "chat" | "both"; purpose?: string },
+    input: JoinedGroupInput,
+  ): Promise<{ channelWireId: string }>;
+  // The owner's New group with a level: the relay creates it with its rule.
+  createOwnedWorkspaceGroup(
+    workspaceId: string,
+    input: JoinedGroupInput,
   ): Promise<{ channelWireId: string }>;
   // Calls back after each write or pull that changed this workspace's chats.
   subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
@@ -297,11 +291,38 @@ export function registerChatsIpcHandlers<
     automationCollectionOf,
     agentWaitsForTrust,
     createJoinedWorkspaceGroup,
+    createOwnedWorkspaceGroup,
     subscribeChatWrites,
     pullJoinedWorkspace,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
+  // In a joined workspace every other person shows their account name, so the
+  // viewer's own messages say "You", whatever name this computer wrote them under.
+  // A rebuilt copy pulls them back without the key this computer wrote, so the
+  // account that opened the copy also marks them, and gives them this person's colour.
+  // The relay names every pulled author by that same account id.
+  function namedForViewer<
+    Record extends {
+      authorKind: string;
+      authorDisplayName: string;
+      authorUserId?: string;
+      presentation: ActorPresentation | null;
+    },
+  >(scope: Pick<ChatScope, "kind" | "workspace">, record: Record): Record {
+    if (scope.kind !== "share" || record.authorKind !== "human") return record;
+    if (record.presentation?.self === true) return { ...record, authorDisplayName: "You" };
+    const viewer = scope.workspace.shareView?.recipientUserId;
+    if (viewer === undefined || record.authorUserId !== viewer) return record;
+    const mine = ownActorPresentation(localInstallationId(), currentCredentials());
+    return {
+      ...record,
+      authorDisplayName: "You",
+      presentation: record.presentation
+        ? { ...record.presentation, hue: mine.hue, self: true }
+        : mine,
+    };
+  }
   const readFileMentions = createChatFileMentionsReader({
     requireChatScope,
     syncWorkspaceSharedChannels,
@@ -1058,6 +1079,7 @@ export function registerChatsIpcHandlers<
           name: input.name,
           ...(input.type ? { type: input.type } : {}),
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          ...(input.level !== undefined ? { level: input.level } : {}),
         },
         () => operation.assertCurrent(),
       );
@@ -1067,6 +1089,32 @@ export function registerChatsIpcHandlers<
     }
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     assertWritableWorkspace(workspace);
+    if (input.level !== undefined) {
+      if (input.folderPath !== undefined)
+        throw new Error("A Group made with an access level has no folder of its own.");
+      const scope = await requireChatScope(input.workspaceId);
+      const { channel, channelWireId } = await createJoinedGroup(
+        {
+          createJoinedWorkspaceGroup: (_view, groupInput) =>
+            createOwnedWorkspaceGroup(workspace.workspaceId, groupInput),
+          subscribeChatWrites,
+          pullJoinedWorkspace: async (workspaceId) => {
+            activity.queueCloudSync(workspaceId);
+          },
+        },
+        scope,
+        {
+          name: input.name,
+          ...(input.type ? { type: input.type } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+          level: input.level,
+        },
+        () => operation.assertCurrent(),
+      );
+      return CreateChatChannelResult.parse({
+        channel: { ...chatChannelForIpc(channel), wireId: channelWireId },
+      });
+    }
     const channel = await createGroup(
       linkedChatStoreFor(workspace),
       (folderPath) => ensureGroupFolder(workspace, folderPath),

@@ -1,6 +1,8 @@
 import { Layers, MessagesSquare, Newspaper, TriangleAlert, type LucideIcon } from "lucide-react";
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import type { GroupRuleLevel, MemberLevel } from "@dohc/security-contract/workspace-members";
 import { Overlay } from "../Overlay";
+import { GroupAccessPicker, pickedGroupLevel } from "./GroupSettingsDialog";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { useRadioGroup } from "../ui/SegmentedControl";
 import { isComposingKey } from "../ui/keys";
@@ -10,8 +12,15 @@ export type GroupType = "chat" | "posts" | "both";
 const TYPES: ReadonlyArray<{ value: GroupType; label: string; line: string; icon: LucideIcon }> = [
   { value: "chat", label: "Chat", line: "One conversation, with threads.", icon: MessagesSquare },
   { value: "posts", label: "Posts", line: "Topics, each with its replies.", icon: Newspaper },
-  { value: "both", label: "Both", line: "Posts and a chat in one group.", icon: Layers },
+  { value: "both", label: "Both", line: "Posts and a chat in one Group.", icon: Layers },
 ];
+
+/**
+ * Whether New group offers the Members picker: the member level when it can,
+ * "offline" when the relay can't be reached, and null when no one else is in
+ * the workspace.
+ */
+export type NewGroupAccess = { memberLevel: MemberLevel } | "offline" | null;
 
 const FIELD =
   "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle aria-invalid:border-danger aria-invalid:focus:border-danger! aria-invalid:focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!";
@@ -20,12 +29,38 @@ const FIELD =
 // create stays in the dialog with what was typed, and says why above Create.
 export function NewGroupDialog(props: {
   // Resolves to null once the group exists, or to why it couldn't be made.
-  onCreate: (input: { name: string; type: GroupType; purpose: string }) => Promise<string | null>;
+  // `level` is set only when the person picked one.
+  onCreate: (input: {
+    name: string;
+    type: GroupType;
+    purpose: string;
+    level?: GroupRuleLevel;
+  }) => Promise<string | null>;
+  // Read once on open. Absent, or until it answers, New group has no picker.
+  access?: () => Promise<NewGroupAccess>;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("");
   const [type, setType] = useState<GroupType>("chat");
+  const [access, setAccess] = useState<NewGroupAccess>(null);
+  // Null follows the member level.
+  const [level, setLevel] = useState<GroupRuleLevel | null>(null);
+  const accessRef = useRef(props.access);
+  useEffect(() => {
+    let current = true;
+    accessRef.current?.().then(
+      (answer) => {
+        if (current) setAccess(answer);
+      },
+      () => {
+        if (current) setAccess("offline");
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, []);
   const [nameMissing, setNameMissing] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +81,12 @@ export function NewGroupDialog(props: {
     setBusy(true);
     setFailure(null);
     try {
-      const failed = await props.onCreate({ name: name.trim(), type, purpose: purpose.trim() });
+      const failed = await props.onCreate({
+        name: name.trim(),
+        type,
+        purpose: purpose.trim(),
+        ...(level !== null && access !== null && access !== "offline" ? { level } : {}),
+      });
       if (failed !== null) setFailure(failed);
     } finally {
       busyRef.current = false;
@@ -183,6 +223,31 @@ export function NewGroupDialog(props: {
               })}
             </div>
           </div>
+          {access !== null ? (
+            <div data-testid="chats-new-channel-access" className="flex flex-col gap-2">
+              <span className="dohc-section-label">Access</span>
+              {access === "offline" ? (
+                <p
+                  data-testid="chats-new-channel-access-offline"
+                  className="m-0 text-[12px] text-muted"
+                >
+                  Members will see this Group. Choose access in Group settings once you&apos;re
+                  connected.
+                </p>
+              ) : (
+                <GroupAccessPicker
+                  level={level}
+                  memberLevel={access.memberLevel}
+                  disabled={busy}
+                  onChange={(picked) =>
+                    setLevel(
+                      picked === null ? null : pickedGroupLevel(picked, null, access.memberLevel),
+                    )
+                  }
+                />
+              )}
+            </div>
+          ) : null}
         </div>
         <div className="flex flex-col gap-3">
           {failure ? (
@@ -191,7 +256,7 @@ export function NewGroupDialog(props: {
               data-testid="chats-new-channel-error"
               className="m-0 flex items-start gap-2 text-[12px] text-danger"
             >
-              <TriangleAlert size={14} aria-hidden className="mt-px shrink-0" />
+              <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
               {failure}
             </p>
           ) : null}

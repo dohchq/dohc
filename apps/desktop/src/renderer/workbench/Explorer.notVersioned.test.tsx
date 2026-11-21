@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { Explorer, type ExplorerProps } from "./Explorer";
@@ -263,4 +263,114 @@ it("pressing Delete again asks once, and a question never follows the person to 
   );
   await waitFor(() => expect(screen.queryByTestId("not-versioned-confirm")).toBeNull());
   expect(deleteWorkspacePath).not.toHaveBeenCalled();
+});
+
+describe("Explorer, for a move main says may change who can see the item", () => {
+  const accessRefusal = () =>
+    new Error(
+      "Error invoking remote method 'desktop:move-workspace-path': AccessChangeError: Moving draft.md into team may change who can see it. People who could read it may keep a copy.",
+    );
+  function renderWithTeam() {
+    const props = {
+      ...explorerProps(),
+      files: [{ path: "draft.md", kind: "file" as const }],
+      folders: ["team"],
+    };
+    render(<Explorer {...props} />);
+    return props;
+  }
+  function dragInto(path: string, folder: string) {
+    const dataTransfer = {
+      effectAllowed: "move",
+      dropEffect: "move",
+      files: [],
+      types: [],
+      setData: vi.fn(),
+    };
+    fireEvent.dragStart(row(path), { dataTransfer });
+    fireEvent.dragOver(row(folder), { dataTransfer });
+    fireEvent.drop(row(folder), { dataTransfer });
+  }
+
+  // main finds which folders above it hold a rule, and compares no rules.
+  it("asks before the folder's access rules apply, and Cancel moves nothing", async () => {
+    const props = renderWithTeam();
+    moveWorkspacePath.mockRejectedValueOnce(accessRefusal());
+    dragInto("draft.md", "team");
+    const dialog = await screen.findByTestId("access-change-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Move draft.md into team?");
+    expect(dialog.textContent).toContain(
+      "It will follow the access rules for team, which may change who can see it. People who could read it may keep a copy.",
+    );
+    fireEvent.click(screen.getByTestId("cancel-access-change"));
+    await waitFor(() => expect(screen.queryByTestId("access-change-confirm")).toBeNull());
+    expect(moveWorkspacePath).toHaveBeenCalledTimes(1);
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("moves once the person agrees, telling main they did", async () => {
+    const props = renderWithTeam();
+    moveWorkspacePath.mockRejectedValueOnce(accessRefusal());
+    dragInto("draft.md", "team");
+    fireEvent.click(await screen.findByTestId("confirm-access-change"));
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-1",
+        fromPath: "draft.md",
+        toPath: "team/draft.md",
+        confirmAccessChange: true,
+      }),
+    );
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a move's question when another move in the batch asks it after Not versioned", async () => {
+    const props = {
+      ...explorerProps(),
+      files: [
+        { path: "draft.md", kind: "file" as const },
+        { path: "clip.mp4", kind: "file" as const },
+      ],
+      folders: ["team"],
+    };
+    render(<Explorer {...props} />);
+    const access = (name: string) =>
+      new Error(
+        `Error invoking remote method 'desktop:move-workspace-path': AccessChangeError: Moving ${name} into team may change who can see it. People who could read it may keep a copy.`,
+      );
+    moveWorkspacePath.mockImplementation(
+      async (input: { fromPath: string; confirmNotVersioned?: boolean }) => {
+        if (input.fromPath === "draft.md") throw access("draft.md");
+        if (!input.confirmNotVersioned)
+          throw new Error(
+            "Error invoking remote method 'desktop:move-workspace-path': NotVersionedError: This change also happens in Main, because clip.mp4 isn't versioned.\nclip.mp4",
+          );
+        throw access("clip.mp4");
+      },
+    );
+    fireEvent.click(row("draft.md"));
+    fireEvent.click(row("clip.mp4"), { ctrlKey: true });
+    dragInto("draft.md", "team");
+    fireEvent.click(await screen.findByTestId("confirm-not-versioned"));
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledTimes(3));
+    const dialog = await screen.findByTestId("access-change-confirm");
+    expect(within(dialog).getByRole("heading").textContent).toBe("Move 2 items?");
+    moveWorkspacePath.mockResolvedValue({ path: "" });
+    fireEvent.click(screen.getByTestId("confirm-access-change"));
+    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledTimes(5));
+    expect(moveWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      fromPath: "draft.md",
+      toPath: "team/draft.md",
+      confirmAccessChange: true,
+    });
+    expect(moveWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      fromPath: "clip.mp4",
+      toPath: "team/clip.mp4",
+      confirmNotVersioned: true,
+      confirmAccessChange: true,
+    });
+    expect(props.onError).not.toHaveBeenCalled();
+  });
 });

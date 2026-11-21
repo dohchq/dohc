@@ -9,6 +9,7 @@ import {
   shareViewIsPresent,
 } from "./shareViewMarker";
 import { recordedShareSelector } from "./shareViewRecords";
+import { storedShareViewReach } from "./shareViewReach";
 
 // The registry -> renderer projection. The registry file is data, not a
 // contract: a record can be hand-edited, half-written by a crash, or written
@@ -91,6 +92,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         ? {
             membership: true as const,
             ...(raw.role === "admin" || raw.role === "member" ? { role: raw.role } : {}),
+            ...storedGroupLevels(raw),
           }
         : {}),
       ...(raw.ended === true ? { ended: true } : {}),
@@ -161,6 +163,20 @@ export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): Works
 
 // The recovery folder a rebuild saved into, when the record names one inside
 // the copy's recovery root.
+// A membership's Group levels from the reach stored with it. Without a
+// stored reach, Chats gives every Group the member level. A stored reach it
+// can't read gives every Group View, since the write gate takes no post then.
+function storedGroupLevels(raw: Record<string, unknown>) {
+  if (raw.reach === undefined) return {};
+  const reach = storedShareViewReach(raw);
+  return {
+    groupLevels:
+      reach === null
+        ? { groupDefault: "view" as const, groups: [] }
+        : { groupDefault: reach.groupDefault, groups: [...reach.groups] },
+  };
+}
+
 function accessSaved(raw: unknown): { accessSaved?: { folder: string; count: number } } {
   if (
     !isRecord(raw) ||

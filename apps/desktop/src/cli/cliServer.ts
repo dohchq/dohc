@@ -1,3 +1,4 @@
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
@@ -136,6 +137,10 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import type { ChatDispatchService, QuietRunRefusal } from "../agents/chatDispatchService";
+import {
+  agentIdForChannelWireId,
+  GENERAL_CHANNEL_WIRE_ID,
+} from "@dohc/security-contract/chat-wire-ids";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import { chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -541,6 +546,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     name: string;
     purpose?: string;
     type?: ChatChannelType;
+    level?: GroupRuleLevel;
   }): Promise<ChatChannel>;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
@@ -3078,6 +3084,29 @@ const DECLARED_WRITERS: {
   },
 };
 
+// The Group `dohc members group` names, by its wire id: an ordinary Group,
+// never General, a direct message or an agent's chat.
+async function membersGroup(
+  chats: ChatsHost,
+  input: string,
+): Promise<{ name: string; wireId: string }> {
+  const channel = resolveChannel(input, await loadChannels(chats));
+  const wireId =
+    channel.engine.kind === "channel"
+      ? await chats.store.getChannelWireId({
+          workspaceId: chats.workspaceId,
+          channelId: channel.engine.id,
+        })
+      : null;
+  if (
+    wireId === null ||
+    wireId === GENERAL_CHANNEL_WIRE_ID ||
+    agentIdForChannelWireId(wireId) !== null
+  )
+    throw new CliCommandError(`${channel.cli.name} has no Group access rule.`);
+  return { name: channel.cli.name, wireId };
+}
+
 async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -3151,12 +3180,26 @@ async function dispatchWorkspace(
         grantId: request.args.grantId,
         connectionId: request.args.connectionId,
       });
-    case "members":
+    case "members": {
       // A joined workspace reaches the owner's Members with the person's own
       // account. Any other share view has none.
       if ((context.readOnly && !context.joined) || !context.members)
         throw new CliCommandError("Open the original workspace to manage its members.");
-      return context.members(request.args.request);
+      const asked = request.args.request;
+      if (asked.action !== "group") return context.members(asked);
+      const group = await membersGroup(chats, asked.group);
+      const result = await context.members({ ...asked, group: group.wireId });
+      if (result.status !== "ready") return result;
+      if (result.view.groupRules === null)
+        throw new CliCommandError("Only the owner and admins see a Group's access.");
+      return {
+        status: "group",
+        name: group.name,
+        level:
+          result.view.groupRules.find((rule) => rule.channelWireId === group.wireId)?.level ?? null,
+        memberLevel: result.view.memberLevel,
+      };
+    }
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.refresh();
@@ -4397,6 +4440,7 @@ async function dispatchWorkspace(
         name: request.args.name,
         ...(request.args.purpose !== undefined ? { purpose: request.args.purpose } : {}),
         ...(request.args.type ? { type: request.args.type } : {}),
+        ...(request.args.level ? { level: request.args.level } : {}),
       });
       await notifyWrite(options, context);
       return { group: groupForCli(channel) };

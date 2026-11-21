@@ -337,6 +337,15 @@ struct ReachParams {
     visibility_signature: String,
     root_level: Option<String>,
     folders: Vec<ReachFolderParams>,
+    group_default: String,
+    groups: Vec<ReachGroupParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReachGroupParams {
+    channel_wire_id: String,
+    level: String,
 }
 
 #[derive(Deserialize)]
@@ -977,6 +986,8 @@ pub(super) fn share_grant(
 fn share_reach(reach: ReachParams) -> Result<dohc_engine_sync::ShareReach, WireError> {
     const MAX_SIGNATURE_CHARS: usize = 512;
     const MAX_FOLDERS: usize = 100_000;
+    const MAX_GROUPS: usize = 100_000;
+    const MAX_WIRE_ID_CHARS: usize = 256;
     let invalid = |reason: &'static str| WireError::new(ErrorCode::InvalidParams, reason);
     let level = |value: &str| {
         dohc_engine_sync::ShareAccess::parse(value)
@@ -1001,11 +1012,29 @@ fn share_reach(reach: ReachParams) -> Result<dohc_engine_sync::ShareReach, WireE
             return Err(invalid("a reach lists each folder once"));
         }
     }
+    if reach.groups.len() > MAX_GROUPS {
+        return Err(invalid("a reach lists at most 100000 Groups"));
+    }
+    let group_default = level(&reach.group_default)?;
+    let mut groups = std::collections::BTreeMap::new();
+    for group in reach.groups {
+        if group.channel_wire_id.is_empty()
+            || group.channel_wire_id.chars().count() > MAX_WIRE_ID_CHARS
+        {
+            return Err(invalid("a reach Group id must be 1 to 256 characters"));
+        }
+        let level = level(&group.level)?;
+        if groups.insert(group.channel_wire_id, level).is_some() {
+            return Err(invalid("a reach lists each Group once"));
+        }
+    }
     Ok(dohc_engine_sync::ShareReach {
         signature: reach.signature,
         visibility_signature: reach.visibility_signature,
         root_level,
         folders,
+        group_default,
+        groups,
     })
 }
 
@@ -4505,7 +4534,14 @@ mod tests {
         let reach = |root: Value, folders: Value| {
             json!({
                 "signature": "r1", "visibilitySignature": "v1", "rootLevel": root, "folders": folders,
+                "groupDefault": "view", "groups": [],
             })
+        };
+        let with_groups = |default: Value, groups: Value| {
+            let mut listed = reach(json!("view"), json!([]));
+            listed["groupDefault"] = default;
+            listed["groups"] = groups;
+            listed
         };
         let grant = read(
             reach(json!("view"), json!([{ "path": "Plans", "level": "edit" }])),
@@ -4523,6 +4559,22 @@ mod tests {
         assert!(
             read(reach(Value::Null, json!([])), true).is_ok(),
             "a hidden root reads"
+        );
+        let grouped = read(
+            with_groups(
+                json!("comment"),
+                json!([{ "channelWireId": "wire-news", "level": "view" }]),
+            ),
+            true,
+        )
+        .expect("a membership's Group levels read");
+        assert_eq!(
+            grouped.group_level("wire-news"),
+            dohc_engine_sync::ShareAccess::View
+        );
+        assert_eq!(
+            grouped.group_level("wire-team"),
+            dohc_engine_sync::ShareAccess::Comment
         );
         for (refused, whole_workspace) in [
             (reach(json!("view"), json!([])), false),
@@ -4546,7 +4598,36 @@ mod tests {
                 true,
             ),
             (
-                json!({ "signature": "", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] }),
+                json!({ "signature": "", "visibilitySignature": "v1", "rootLevel": "view", "folders": [], "groupDefault": "view", "groups": [] }),
+                true,
+            ),
+            (
+                json!({ "signature": "r1", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] }),
+                true,
+            ),
+            (with_groups(json!("none"), json!([])), true),
+            (
+                with_groups(
+                    json!("view"),
+                    json!([{ "channelWireId": "", "level": "view" }]),
+                ),
+                true,
+            ),
+            (
+                with_groups(
+                    json!("view"),
+                    json!([{ "channelWireId": "wire-news", "level": "none" }]),
+                ),
+                true,
+            ),
+            (
+                with_groups(
+                    json!("view"),
+                    json!([
+                        { "channelWireId": "wire-news", "level": "view" },
+                        { "channelWireId": "wire-news", "level": "edit" },
+                    ]),
+                ),
                 true,
             ),
         ] {

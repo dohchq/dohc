@@ -293,6 +293,7 @@ import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import {
   createJoinedWorkspaceGroupAction,
+  createOwnedWorkspaceGroupAction,
   createWorkspaceMembersActions,
   membersPlace,
 } from "./ipc/workspaceMembersActions";
@@ -7143,6 +7144,13 @@ const createJoinedWorkspaceGroup = createJoinedWorkspaceGroupAction<CloudSession
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),
 });
+// The owner's New group with a level, made by the relay with its rule.
+const createOwnedWorkspaceGroup = createOwnedWorkspaceGroupAction<CloudSessionCredentials>({
+  credentials: async (workspaceId) =>
+    (await remoteForWorkspace(requireWorkspace(workspaceId))).credentials,
+  relayResponse: (credentials, path, init) =>
+    relayShareResponseWithCredentials(credentials, path, init),
+});
 // The pull a New group in a joined workspace starts itself, so the Group arrives with no window open.
 const pullJoinedWorkspace = (workspaceId: string) =>
   withStaleSensitiveWorkspaceOperation(requireWorkspace(workspaceId).rootPath, (lease) =>
@@ -7323,6 +7331,20 @@ const { startDesktopCliServer } = createDesktopCliServer({
     (
       await createJoinedGroup(
         { createJoinedWorkspaceGroup, subscribeChatWrites, pullJoinedWorkspace },
+        { workspace, store },
+        input,
+        assertCurrent,
+      )
+    ).channel,
+  createOwnedGroupWithLevel: async (workspace, store, input, assertCurrent) =>
+    (
+      await createJoinedGroup(
+        {
+          createJoinedWorkspaceGroup: (_view, groupInput) =>
+            createOwnedWorkspaceGroup(workspace.workspaceId, groupInput),
+          subscribeChatWrites,
+          pullJoinedWorkspace: async (workspaceId) => activity.queueCloudSync(workspaceId),
+        },
         { workspace, store },
         input,
         assertCurrent,
@@ -11199,6 +11221,7 @@ function registerIpcHandlers(): void {
     agentWaitsForTrust: (workspaceId, messageId) =>
       chatDispatchService.waitsForTrust(workspaceId, messageId),
     createJoinedWorkspaceGroup,
+    createOwnedWorkspaceGroup,
     subscribeChatWrites,
     pullJoinedWorkspace,
   });

@@ -425,6 +425,7 @@ describe("share-level tool profiles", () => {
               viewer: { memberId: "m-ana", role: "member" },
               memberLevel: "comment",
               inviteLink: null,
+              groupRules: null,
               people: [],
             },
           };
@@ -461,6 +462,7 @@ describe("share-level tool profiles", () => {
         viewer: { memberId: "m-ana", role: "member" },
         memberLevel: "comment",
         inviteLink: null,
+        groupRules: null,
         people: [],
       },
     });

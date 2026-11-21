@@ -55,6 +55,7 @@ import {
   removeEmptyWorkspaceFolder,
 } from "./workspaceFiles";
 import { storedEntryPath, StoredEntryIdentityUnavailable } from "./storedEntryPath";
+import { AccessChangeError, moveAccessWarning } from "./moveAccessWarning";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   beginPendingRecovery,
@@ -543,7 +544,22 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
           reason: notVersionedReason(paths),
         });
     }
-    return prepareMoveWorkspacePath(operation, input, author, options);
+    // An agent's move goes, and its answer carries the warning a person is asked.
+    // A path the move refuses gets no warning; the move's answer names it.
+    let accessWarning: string | null = null;
+    try {
+      accessWarning = await moveAccessWarning(
+        rootPath,
+        checkedPath(input.fromPath),
+        checkedPath(input.toPath),
+      );
+    } catch {}
+    const move = await prepareMoveWorkspacePath(operation, input, author, options);
+    if (!accessWarning) return move;
+    return async () => {
+      const result = await move();
+      return result.ok ? { ...result, accessWarning } : result;
+    };
   });
 }
 
@@ -586,7 +602,13 @@ function historyOff(
 
 export async function moveWorkspacePathByHand(
   operation: PathChangeOperation,
-  input: { fromPath: string; toPath: string; confirmNotVersioned?: boolean },
+  input: {
+    fromPath: string;
+    toPath: string;
+    confirmNotVersioned?: boolean;
+    // The person agreed that the move may change who can see the item.
+    confirmAccessChange?: boolean;
+  },
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
   options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & {
     capture:
@@ -625,6 +647,15 @@ export async function moveWorkspacePathByHand(
     );
     const destinationError = workspaceDestinationError(prepared.physicalToPath, process.platform);
     if (destinationError) throw new Error(destinationError);
+    // Under the lock, so a rule written before the move runs is counted.
+    if (!input.confirmAccessChange) {
+      const warning = await moveAccessWarning(
+        rootPath,
+        prepared.physicalFromPath,
+        prepared.physicalToPath,
+      );
+      if (warning) throw new AccessChangeError(warning);
+    }
     if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
       if (!options.capture) {
         throw historyOff(prepared.physicalFromPath, "move", true);

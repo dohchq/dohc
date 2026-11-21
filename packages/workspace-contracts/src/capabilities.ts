@@ -395,6 +395,19 @@ const LISTED_CAPABILITIES = {
       mcpReason: MEMBERS_MCP_REASON,
     },
   ),
+  "members.group.rule": capability(
+    "Show or set what members can do in one Group: post, view, or nothing.",
+    {
+      ipc: ["workspaceMembers"],
+      mcp: {
+        owner: ["dohc_members"],
+        view: ["dohc_members"],
+        comment: ["dohc_members"],
+        edit: ["dohc_members"],
+      },
+      mcpReason: MEMBERS_MCP_REASON,
+    },
+  ),
   "members.role.set": capability("Make a member an admin, or an admin a member.", {
     ipc: ["workspaceMembers"],
     mcp: {

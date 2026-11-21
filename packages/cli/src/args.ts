@@ -34,6 +34,7 @@ import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { AgentMembersRequest } from "./members";
+import type { GroupRuleLevel } from "@dohc/security-contract/workspace-members";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -102,7 +103,13 @@ type CliCommandBody =
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
   | { verb: "ownerAppResponses"; request: OwnerAppResponsesRequest }
   | { verb: "groups" }
-  | { verb: "groupCreate"; name: string; purpose?: string; type?: "posts" | "chat" | "both" }
+  | {
+      verb: "groupCreate";
+      name: string;
+      purpose?: string;
+      type?: "posts" | "chat" | "both";
+      level?: GroupRuleLevel;
+    }
   | { verb: "threads"; group: string }
   | {
       verb: "watch";
@@ -370,6 +377,9 @@ function streamPosition(value: string): CliStreamPosition {
 function noExtraArgs(tokens: readonly string[], verb: string): void {
   if (tokens.length > 0) fail(`${verb} does not accept '${tokens[0]}'`);
 }
+
+// The CLI's words for a Group's levels, and the stored level each names.
+const GROUP_LEVEL_WORDS = { post: "comment", view: "view", none: "none" } as const;
 
 function membersRequest(value: unknown): AgentMembersRequest {
   const parsed = AgentMembersRequest.safeParse(value);
@@ -973,8 +983,16 @@ const CHAT_VERBS = {
         value: "posts|chat|both",
         text: "Choose what the Group holds. The default is both.",
       },
+      {
+        name: "--level",
+        value: "post|view|none",
+        text: "Set what members can do in the Group as it is made. With none, members never see it.",
+      },
     ],
-    notes: ["The folder is the Group's name as a slug. A Group with the same name is refused."],
+    notes: [
+      "The folder is the Group's name as a slug. A Group with the same name is refused.",
+      "A Group made with --level has no folder. Choosing a level needs a connection.",
+    ],
     parse: (input) => {
       const [name, ...extra] = input.operands;
       if (!name) fail("create-group requires a name");
@@ -983,11 +1001,18 @@ const CHAT_VERBS = {
       if (type !== undefined && type !== "posts" && type !== "chat" && type !== "both")
         fail("--type must be posts, chat or both");
       const purpose = lastValue(input, "--purpose");
+      const word = lastValue(input, "--level");
+      const level =
+        word === undefined || !Object.hasOwn(GROUP_LEVEL_WORDS, word)
+          ? undefined
+          : GROUP_LEVEL_WORDS[word as keyof typeof GROUP_LEVEL_WORDS];
+      if (word !== undefined && level === undefined) fail("--level must be post, view or none");
       return {
         verb: "groupCreate",
         name,
         ...(purpose !== undefined ? { purpose } : {}),
         ...(type !== undefined ? { type } : {}),
+        ...(level !== undefined ? { level } : {}),
       };
     },
   },
@@ -2192,7 +2217,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
       "List, invite, and remove the workspace's members, set what they can do, and manage the invite link.",
     notes: [
       "Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows.",
-      "Members see names and roles. Admins also invite people, remove members, let them back in, set the member level, and manage the invite link. Only the owner changes roles or ends membership.",
+      "Members see names and roles. Admins also invite people, remove members, let them back in, set the member level and a Group's access, and manage the invite link. Only the owner changes roles or ends membership.",
       "A person is a member id from dohc members list, or the email of an invite or a person.",
     ],
     verbs: {
@@ -2273,6 +2298,43 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           if (change === "reset")
             return { verb: "members", request: { action: "link", change: "reset" } };
           return fail("Choose on, off, or reset.");
+        },
+      },
+      group: {
+        capabilityId: "members.group.rule",
+        summary:
+          "Show or set what members can do in a Group: post, view, or none. Admins and the owner always post.",
+        operands: "<group>",
+        flags: [
+          { name: "--level", value: "post|view|none", text: "Set the Group's access." },
+          { name: "--clear", text: "Remove the Group's access, so it takes the member level." },
+        ],
+        notes: [
+          "A Group is a name or id from dohc chat groups. General, direct messages and agents' chats have no access of their own.",
+          "With none, members no longer see the Group. People who read it may keep a copy.",
+        ],
+        parse: (input) => {
+          const [group, ...extra] = input.operands;
+          noExtraArgs(extra, "members group");
+          if (!group) return fail("Name a Group.");
+          const level = lastValue(input, "--level");
+          const clear = input.flags.has("--clear");
+          if (level !== undefined && clear) return fail("Choose --level or --clear, not both.");
+          if (clear)
+            return {
+              verb: "members",
+              request: membersRequest({ action: "group", group, level: null }),
+            };
+          if (level === undefined)
+            return { verb: "members", request: membersRequest({ action: "group", group }) };
+          const stored = Object.hasOwn(GROUP_LEVEL_WORDS, level)
+            ? GROUP_LEVEL_WORDS[level as keyof typeof GROUP_LEVEL_WORDS]
+            : undefined;
+          if (stored === undefined) return fail("Choose post, view, or none.");
+          return {
+            verb: "members",
+            request: membersRequest({ action: "group", group, level: stored }),
+          };
         },
       },
       end: {

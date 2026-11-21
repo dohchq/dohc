@@ -311,7 +311,7 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
         });
         if let Some((signature, visibility)) = state.share_signatures.get(share_id) {
             page["reach"] = json!({
-                "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [],
+                "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [], "groupDefault": "view", "groups": [],
             });
             // This fake's log holds only the share's ops.
             page["logHead"] = json!(
@@ -3168,7 +3168,7 @@ async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
         "shareId": "membership",
         "grantedSelector": {
             "paths": [], "access": "view", "wholeWorkspace": true,
-            "reach": { "signature": "r1", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] },
+            "reach": { "signature": "r1", "visibilitySignature": "v1", "rootLevel": "view", "folders": [], "groupDefault": "view", "groups": [] },
         },
     });
     let manifest = scratch.path().join(".dohc/local/rebuild.json");

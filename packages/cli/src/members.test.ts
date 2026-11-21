@@ -9,6 +9,7 @@ const view = {
   viewer: { memberId: "owner", role: "owner" },
   memberLevel: "comment",
   inviteLink: { enabled: true, url: "https://share.test/join#token" },
+  groupRules: [{ channelWireId: "wire-news", level: "view" }],
   people: [
     {
       memberId: "owner",
@@ -71,6 +72,11 @@ describe("dohc members", () => {
     [["link", "off"], { action: "link", change: "turn-off" }],
     [["link", "reset"], { action: "link", change: "reset" }],
     [["end", "--everyone"], { action: "end" }],
+    [["group", "Team"], { action: "group", group: "Team" }],
+    [["group", "Team", "--level", "post"], { action: "group", group: "Team", level: "comment" }],
+    [["group", "Team", "--level", "view"], { action: "group", group: "Team", level: "view" }],
+    [["group", "Team", "--level", "none"], { action: "group", group: "Team", level: "none" }],
+    [["group", "Team", "--clear"], { action: "group", group: "Team", level: null }],
   ])("parses members %j", (operands, request) => {
     expect(parseCliArguments(["members", ...operands], {})).toMatchObject({
       verb: "members",
@@ -87,6 +93,10 @@ describe("dohc members", () => {
     [["remove"], "Provide a member id or an email."],
     [["end"], "Run dohc members end --everyone to confirm."],
     [["list", "extra"], "members list does not accept"],
+    [["group"], "Name a Group."],
+    [["group", "Team", "--level", "comment"], "Choose post, view, or none."],
+    [["group", "Team", "--level", "constructor"], "Choose post, view, or none."],
+    [["group", "Team", "--level", "view", "--clear"], "Choose --level or --clear, not both."],
   ])("refuses members %j", (operands, message) => {
     expect(() => parseCliArguments(["members", ...operands], {})).toThrow(message);
   });
@@ -209,6 +219,53 @@ describe("dohc members", () => {
     ).toBe(false);
   });
 
+  it.each([
+    ["comment", "Members can post in Team."],
+    ["view", "Members can read Team but not post."],
+    ["none", "Members can't see Team."],
+    [null, "Team has no access of its own: members can comment, as everywhere."],
+  ] as const)("prints a Group at %s", async (level, line) => {
+    const request = vi.fn(async () => ({
+      status: "group",
+      name: "Team",
+      level,
+      memberLevel: "comment",
+    }));
+    const result = await executeCli({
+      argv: ["members", "group", "Team"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(`${line}
+`);
+  });
+
+  // New group with a level, for agents: the stored level goes to the same relay create.
+  it("creates a Group with a level", () => {
+    expect(
+      parseCliArguments(["chat", "create-group", "Board", "--level", "post"], {}),
+    ).toMatchObject({
+      verb: "groupCreate",
+      name: "Board",
+      level: "comment",
+    });
+    expect(
+      parseCliArguments(["chat", "create-group", "Board", "--level", "none"], {}),
+    ).toMatchObject({
+      verb: "groupCreate",
+      name: "Board",
+      level: "none",
+    });
+    expect(() =>
+      parseCliArguments(["chat", "create-group", "Board", "--level", "edit"], {}),
+    ).toThrow("--level must be post, view or none");
+    expect(() =>
+      parseCliArguments(["chat", "create-group", "Board", "--level", "constructor"], {}),
+    ).toThrow("--level must be post, view or none");
+  });
+
   it("pins results to the contract", () => {
     expect(parseCliResult("members", { status: "done" })).toEqual({ status: "done" });
     expect(parseCliResult("members", { status: "ready", view })).toMatchObject({ status: "ready" });
@@ -216,6 +273,14 @@ describe("dohc members", () => {
       parseCliResult("members", { status: "ready", view: { ...view, token: "secret" } }),
     ).toThrow();
     expect(() => parseCliResult("members", { status: "refused", view })).toThrow();
+    expect(() =>
+      parseCliResult("members", {
+        status: "group",
+        name: "Team",
+        level: "edit",
+        memberLevel: "comment",
+      }),
+    ).toThrow();
   });
 
   const owner = view.people[0]!;
@@ -236,6 +301,7 @@ describe("dohc members", () => {
     viewer: { memberId: "m1", role: "member" },
     memberLevel: "comment",
     inviteLink: null,
+    groupRules: null,
   };
   const ready = (value: unknown) => () =>
     parseCliResult("members", { status: "ready", view: value });
@@ -254,8 +320,10 @@ describe("dohc members", () => {
     ).toThrow();
   });
 
-  it("refuses a manager's view without the invite link", () => {
+  it("refuses a manager's view without the invite link or Group rules, and a member's with them", () => {
     expect(ready({ ...view, inviteLink: null })).toThrow();
+    expect(ready({ ...view, groupRules: null })).toThrow();
+    expect(ready({ ...memberView, groupRules: [], people: [sam] })).toThrow();
   });
 
   it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, an unreadable level, and a colour slot outside the hues", () => {

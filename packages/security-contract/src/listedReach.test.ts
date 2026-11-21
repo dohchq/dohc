@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { highestListedLevel, levelAtPath, parseListedReach, type ListedReach } from "./listedReach";
+import {
+  highestListedLevel,
+  levelAtPath,
+  listedGroupLevel,
+  parseListedReach,
+  type ListedReach,
+} from "./listedReach";
 
 const reach: ListedReach = {
   signature: "r1",
@@ -9,7 +15,16 @@ const reach: ListedReach = {
     { path: "Plans", level: "edit" },
     { path: "Plans/Budget", level: "view" },
   ],
+  groupDefault: "comment",
+  groups: [{ channelWireId: "channel_news", level: "view" }],
 };
+
+describe("listedGroupLevel", () => {
+  it("gives a listed Group its level and any other Group the default", () => {
+    expect(listedGroupLevel(reach, "channel_news")).toBe("view");
+    expect(listedGroupLevel(reach, "channel_team")).toBe("comment");
+  });
+});
 
 describe("levelAtPath", () => {
   it("gives each listed folder its own level", () => {
@@ -68,5 +83,13 @@ describe("parseListedReach", () => {
       }),
     ).toBeNull();
     expect(parseListedReach({ ...reach, folders: [{ path: "a", level: "admin" }] })).toBeNull();
+    expect(parseListedReach({ ...reach, groupDefault: undefined })).toBeNull();
+    expect(parseListedReach({ ...reach, groups: undefined })).toBeNull();
+    expect(
+      parseListedReach({ ...reach, groups: [{ channelWireId: "", level: "view" }] }),
+    ).toBeNull();
+    expect(
+      parseListedReach({ ...reach, groups: [{ channelWireId: "channel_news", level: null }] }),
+    ).toBeNull();
   });
 });

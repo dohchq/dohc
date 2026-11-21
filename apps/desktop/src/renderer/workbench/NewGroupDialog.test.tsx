@@ -82,4 +82,76 @@ describe("NewGroupDialog", () => {
     fireEvent.click(screen.getByTestId("chats-new-channel-cancel"));
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("sends a picked Members level, and none while the Group follows the member level", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "comment" })}
+        onClose={vi.fn()}
+      />,
+    );
+    const post = await screen.findByRole("radio", { name: "Can post" });
+    expect(post.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("chats-group-access-follows").textContent).toBe(
+      "Follows the member level, Comment.",
+    );
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+        level: "view",
+      }),
+    );
+  });
+
+  it("follows the member level again when the pick comes back to it", async () => {
+    const onCreate = vi.fn(async () => null);
+    render(
+      <NewGroupDialog
+        onCreate={onCreate}
+        access={async () => ({ memberLevel: "view" })}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: "No access" }));
+    fireEvent.click(screen.getByRole("radio", { name: "View only" }));
+    fireEvent.change(nameField(), { target: { value: "Announcements" } });
+    fireEvent.click(screen.getByTestId("chats-new-channel-submit"));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenLastCalledWith({
+        name: "Announcements",
+        type: "chat",
+        purpose: "",
+      }),
+    );
+    expect(screen.getByTestId("chats-group-access-follows")).toBeTruthy();
+  });
+
+  it("says members will see the Group with no connection, and has no picker until someone else is here", async () => {
+    render(<NewGroupDialog onCreate={vi.fn()} access={async () => "offline"} onClose={vi.fn()} />);
+    expect((await screen.findByTestId("chats-new-channel-access-offline")).textContent).toBe(
+      "Members will see this Group. Choose access in Group settings once you're connected.",
+    );
+    expect(screen.queryByRole("radio", { name: "No access" })).toBeNull();
+    cleanup();
+    const alone = deferred<null>();
+    render(<NewGroupDialog onCreate={vi.fn()} access={() => alone.promise} onClose={vi.fn()} />);
+    alone.resolve(null);
+    await alone.promise;
+    expect(screen.queryByTestId("chats-new-channel-access")).toBeNull();
+  });
 });

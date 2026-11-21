@@ -1586,6 +1586,8 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             visibility_signature: "v1".to_owned(),
             root_level: Some(ShareAccess::View),
             folders: [("Plans".to_owned(), level)].into(),
+            group_default: ShareAccess::View,
+            groups: Default::default(),
         }),
         ..grant(ShareAccess::View)
     };
@@ -1657,7 +1659,8 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
     drop(pushes);
 
     // The reverse: a Comment member under a View rule everywhere still posts
-    // in its Groups, which take the member level, not the files' level.
+    // in its Groups, which take the member level, not the files' level. The
+    // relay lists that level as the reach's Group default.
     journal_local_replication_op(
         &mut engine,
         "ws",
@@ -1670,10 +1673,13 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
         &NoFaults,
     )
     .expect("journal a later Group post");
-    let ruled = ShareGrant {
+    let mut ruled = ShareGrant {
         access: ShareAccess::Comment,
         ..listed(ShareAccess::View)
     };
+    if let Some(reach) = ruled.reach.as_mut() {
+        reach.group_default = ShareAccess::Comment;
+    }
     assert_eq!(
         client
             .push_share_view_groups(&mut engine, "ws", "share", &ruled, &NoFaults)

@@ -103,6 +103,7 @@ import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { fileManagerName } from "../../workspaces/explorerMenu";
 import {
+  accessChangeWarning,
   isLiveEditingRefusal,
   isLiveFolderRefusal,
   isLivePageOwnedRefusal,
@@ -423,6 +424,42 @@ type AskNotVersioned = {
 };
 
 const NOT_VERSIONED_ICON = { delete: Trash2, rename: PenLine, move: FolderInput } as const;
+
+// Moves main refused because the folders holding access rules above them
+// differ: what to ask, and the moves to run once the person agrees.
+type AskAccessChange = {
+  workspaceId: string;
+  moves: Array<{ fromPath: string; toPath: string }>;
+  go: () => void;
+};
+
+// main finds which folders above an item hold a rule but compares no rules,
+// so the words say the rules will apply, not that access will change.
+function accessChangeConfirmText(moves: AskAccessChange["moves"]): {
+  title: string;
+  body: string;
+} {
+  const [move] = moves;
+  if (moves.length !== 1 || !move) {
+    return {
+      title: `Move ${moves.length} items?`,
+      body: "They will follow the access rules where they land, which may change who can see them. People who could read them may keep a copy.",
+    };
+  }
+  const name = basenameOf(move.fromPath);
+  const into = dirnameOf(move.toPath);
+  const from = dirnameOf(move.fromPath);
+  const keep = "People who could read it may keep a copy.";
+  if (into)
+    return {
+      title: `Move ${name} into ${basenameOf(into)}?`,
+      body: `It will follow the access rules for ${basenameOf(into)}, which may change who can see it. ${keep}`,
+    };
+  return {
+    title: `Move ${name} out of ${basenameOf(from)}?`,
+    body: `It will no longer follow the access rules for ${basenameOf(from)}, which may change who can see it. ${keep}`,
+  };
+}
 
 // Memoized row: primitives + stable callbacks only, so a selection change
 // re-renders the rows whose state changed, not the whole tree. Exported for
@@ -773,6 +810,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setNotVersionedAsks((asks) => asks.filter((ask) => ask.workspaceId === workspaceId));
   }
   const askNotVersioned = notVersionedAsks[0] ?? null;
+  const [accessAsk, setAccessAsk] = useState<AskAccessChange | null>(null);
+  if (accessAsk && accessAsk.workspaceId !== workspaceId) setAccessAsk(null);
   const queueNotVersioned = useCallback(
     (ask: AskNotVersioned) =>
       setNotVersionedAsks((asks) =>
@@ -1174,10 +1213,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const runChanges = useCallback(
     async function runChangesOnce<Result>(
       changes: PendingTreeChange[],
-      run: (change: PendingTreeChange, confirmed: boolean) => Promise<Result>,
+      run: (
+        change: PendingTreeChange,
+        confirmed: boolean,
+        accessConfirmed: boolean,
+      ) => Promise<Result>,
       options: {
         // The person agreed to change files the active version does not track.
         confirmed?: boolean;
+        // The person agreed that these moves may change who can see the items.
+        accessConfirmed?: boolean;
         afterBegin?: () => void;
         failed?: (change: PendingTreeChange, cause: unknown) => void;
         mayHaveRun?: (cause: unknown) => boolean;
@@ -1217,10 +1262,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         // Changes main refused because they reach files the version does not
         // track. They ask once, together, and run again if the person agrees.
         const unversioned: Array<{ change: PendingTreeChange; paths: string[] }> = [];
+        // Moves main refused because they may change who can see an item.
+        // They too ask once, together.
+        const accessChanged: PendingTreeChange[] = [];
         let mayHaveRun = false;
         for (const change of changes) {
           try {
-            const result = await run(change, options.confirmed === true);
+            const result = await run(
+              change,
+              options.confirmed === true,
+              options.accessConfirmed === true,
+            );
             if (afterRun(change)) setPending((current) => [...current, change]);
             succeeded.push({ change, result });
           } catch (cause) {
@@ -1228,6 +1280,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const notVersioned = options.confirmed ? null : notVersionedPaths(cause);
             if (notVersioned?.length) {
               unversioned.push({ change, paths: notVersioned });
+              continue;
+            }
+            if (!options.accessConfirmed && accessChangeWarning(cause)) {
+              accessChanged.push(change);
               continue;
             }
             if (options.mayHaveRun?.(cause)) mayHaveRun = true;
@@ -1258,6 +1314,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 answered: options.answered,
                 action,
                 confirmed: options.confirmed,
+                accessConfirmed: options.accessConfirmed,
               });
             const again =
               isLiveFolderRefusal(cause) || livePage
@@ -1289,6 +1346,32 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 { ...options, confirmed: true },
               ),
           });
+        }
+        if (accessChanged.length > 0) {
+          const moves = accessChanged.map((change) => ({
+            fromPath: sourcePath(change),
+            toPath: "toPath" in change ? change.toPath : sourcePath(change),
+          }));
+          const go = () =>
+            void runChangesOnce(
+              accessChanged.map((change) => ({ ...change, id: nextChangeId() })),
+              run,
+              { ...options, accessConfirmed: true },
+            );
+          // A move asked after Not versioned joins the question still waiting,
+          // so one answer runs both.
+          setAccessAsk((waiting) =>
+            waiting?.workspaceId === workspaceId
+              ? {
+                  workspaceId,
+                  moves: [...waiting.moves, ...moves],
+                  go: () => {
+                    waiting.go();
+                    go();
+                  },
+                }
+              : { workspaceId, moves, go },
+          );
         }
         // Pages live editing refused report together, with the way to Live
         // documents. Each folder it refused reports alone, so its notice keeps
@@ -1340,6 +1423,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     answered: options.answered,
                     action,
                     confirmed: options.confirmed,
+                    accessConfirmed: options.accessConfirmed,
                   })
               : undefined,
             group.map(({ change }) => change),
@@ -1520,13 +1604,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (changes.length > 0) setSelection(new Set());
       void runChanges(
         changes,
-        (change, confirmedRun) =>
+        (change, confirmedRun, accessConfirmedRun) =>
           change.kind === "file" || change.kind === "folder"
             ? bridge().moveWorkspacePath({
                 workspaceId,
                 fromPath: change.fromPath,
                 toPath: change.toPath,
                 ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+                ...(accessConfirmedRun ? { confirmAccessChange: true as const } : {}),
               })
             : Promise.resolve(undefined),
         { answered: announce, confirmed },
@@ -1561,13 +1646,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             toPath,
           },
         ],
-        async (_change, confirmedRun) => {
+        async (_change, confirmedRun, accessConfirmedRun) => {
           try {
             return await bridge().moveWorkspacePath({
               workspaceId,
               fromPath: path,
               toPath,
               ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+              ...(accessConfirmedRun ? { confirmAccessChange: true as const } : {}),
             });
           } catch (cause) {
             if (document.activeElement === rowFor(toPath)) {
@@ -2933,6 +3019,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             setConfirmDelete(null);
           }}
         />
+      ) : null}
+
+      {accessAsk && !askNotVersioned ? (
+        <ConfirmDialog
+          title={accessChangeConfirmText(accessAsk.moves).title}
+          icon={FolderInput}
+          confirmLabel="Move"
+          testId="access-change-confirm"
+          cancelTestId="cancel-access-change"
+          confirmTestId="confirm-access-change"
+          onCancel={() => setAccessAsk(null)}
+          onConfirm={() => {
+            setAccessAsk(null);
+            accessAsk.go();
+          }}
+        >
+          {accessChangeConfirmText(accessAsk.moves).body}
+        </ConfirmDialog>
       ) : null}
 
       {askNotVersioned ? (

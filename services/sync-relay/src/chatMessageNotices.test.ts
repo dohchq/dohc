@@ -12,6 +12,7 @@ import {
   json,
   jsonBody,
   logOp,
+  putBlob,
   request,
   resetOpSeq,
   testHandler,
@@ -23,7 +24,13 @@ afterEach(closeTestStorages);
 const OWNER = "owner";
 const WORKSPACE = "workspace-mentions";
 const EVENTS = "wire-events";
-const NAMES: Record<string, string> = { owner: "Kim", ana: "Ana", bo: "Bo" };
+const NAMES: Record<string, string> = {
+  owner: "Kim",
+  ana: "Ana",
+  bo: "Bo",
+  ben: "Ben",
+  cara: "Cara",
+};
 const browserKey = createECDH("prime256v1");
 browserKey.generateKeys();
 
@@ -78,6 +85,44 @@ async function seed() {
       ],
     });
     expect(response.status, await response.clone().text()).toBe(200);
+  };
+  // Appends ops from the owner's computer, one after another.
+  const ownerAppends = async (
+    ...ops: Array<{ opKind: string; payload: Record<string, unknown> }>
+  ) => {
+    for (const op of ops) {
+      const originSeq = storage.maxOriginSeq(WORKSPACE, "origin-owner") + 1;
+      const response = await post(h, OWNER, `/sync/${WORKSPACE}/log`, {
+        originId: "origin-owner",
+        ops: [{ ...op, originSeq, recordedAtMs: 1000 + originSeq }],
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+    }
+  };
+  // Writes a file, or moves one, keeping its object id.
+  const files = new Map<string, { path: string; sha: string }>();
+  const ownerWrite = async (objectId: string, path: string, text: string) => {
+    const sha = await putBlob(h, OWNER, WORKSPACE, text);
+    const before = files.get(objectId);
+    await ownerAppends({
+      opKind: "moment.append",
+      payload: {
+        momentId: `m-${objectId}-${files.size}-${path}`,
+        versionId: "main",
+        objectId,
+        path,
+        recordedAtMs: 1000,
+        operation: before && before.path !== path ? "rename" : "write",
+        payloadBeforeBlobSha256: before?.sha ?? null,
+        payloadBeforePath: before?.path ?? null,
+        ...(before && before.path !== path ? { beforePath: before.path } : {}),
+        payloadAfterBlobSha256: sha,
+        payloadAfterPath: path,
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      },
+    });
+    files.set(objectId, { path, sha });
   };
   const ownerOps = await post(h, OWNER, `/sync/${WORKSPACE}/log`, {
     originId: "origin-owner",
@@ -164,7 +209,30 @@ async function seed() {
       )
       .all(userId)
       .map((row) => ({ message: String(row.message_id), reason: String(row.reason) }));
-  return { storage, h, ownerSays, member, bindPush, notices, pushes };
+  // One page of chat Notices, and the cursor that follows it.
+  const page = async (userId: string, cursor?: string) => {
+    const response = await h(
+      request(userId, `/sync/notices?limit=200${cursor ? `&cursor=${cursor}` : ""}`),
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const read = await json(response);
+    return {
+      notices: (read.notices as RelayNotice[]).filter((row) => row.kind === "chat-message"),
+      nextCursor: String(read.nextCursor),
+    };
+  };
+  return {
+    storage,
+    h,
+    ownerSays,
+    ownerAppends,
+    ownerWrite,
+    member,
+    bindPush,
+    notices,
+    page,
+    pushes,
+  };
 }
 
 describe("mention and reply Notices", () => {
@@ -240,6 +308,30 @@ describe("mention and reply Notices", () => {
     expect(s.pushes("ana")).toEqual([]);
   });
 
+  it("writes no Notice and no push for a member in a hidden Group, and still tells an admin", async () => {
+    const s = await seed();
+    await s.member("ana");
+    const ben = await s.member("ben");
+    expect(
+      (await post(s.h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    const hidden = await s.h(
+      request(OWNER, `/sync/${WORKSPACE}/members/groups/${EVENTS}/rule`, {
+        ...jsonBody({ level: "none" }),
+        method: "PUT",
+      }),
+    );
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+    s.bindPush("ana");
+    await s.ownerSays("hidden", "t-events", "@Ana @Ben the surprise is on Friday");
+    expect(await s.notices("ana")).toEqual([]);
+    expect(s.pushes("ana")).toEqual([]);
+    expect((await s.notices("ben")).map((row) => row.title)).toEqual([
+      "Kim mentioned you in #events",
+    ]);
+  });
+
   it("writes nothing for a removed member", async () => {
     const s = await seed();
     const ana = await s.member("ana");
@@ -287,4 +379,96 @@ describe("mention and reply Notices", () => {
       expect(fromNotices, userId).toEqual(fromPush);
     }
   });
+});
+
+describe("a Notice a member can no longer read", () => {
+  it("leaves a member nothing of a mention in a Group once it is hidden, and keeps an admin's and the owner's", async () => {
+    const s = await seed();
+    const ana = await s.member("ana");
+    const ben = await s.member("ben");
+    expect(
+      (await post(s.h, OWNER, `/sync/${WORKSPACE}/members/${ben.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    await ana.says("ask", "t-events", "@Kim are we on?");
+    await s.ownerSays("plan", "t-events", "@Ana @Ben the surprise is on Friday");
+    const held = await s.page("ana");
+    expect(JSON.stringify(held.notices)).toContain("#events");
+    const ben0 = await s.notices("ben");
+    const owner0 = await s.notices(OWNER);
+    expect(ben0).toHaveLength(1);
+    expect(owner0).toHaveLength(1);
+
+    const hidden = await s.h(
+      request(OWNER, `/sync/${WORKSPACE}/members/groups/${EVENTS}/rule`, {
+        ...jsonBody({ level: "none" }),
+        method: "PUT",
+      }),
+    );
+    expect(hidden.status, await hidden.clone().text()).toBe(200);
+
+    // Ana is still a member, and holds no row with a path.
+    for (const [name, read] of [
+      ["fresh", await s.page("ana")],
+      ["after the held cursor", await s.page("ana", held.nextCursor)],
+    ] as const) {
+      const text = JSON.stringify(read.notices);
+      expect(text, name).not.toContain("#events");
+      expect(text, name).not.toContain("surprise");
+      expect(read.notices, name).toEqual([
+        expect.objectContaining({
+          title: "dohc could not find this chat.",
+          body: "",
+          target: null,
+        }),
+      ]);
+    }
+    expect(await s.notices("ben")).toEqual(ben0);
+    expect(await s.notices(OWNER)).toEqual(owner0);
+  });
+
+  it.each(["the folder is hidden", "the file moves into a hidden folder"] as const)(
+    "leaves a member nothing of a mention in a file's Comments once %s",
+    async (how) => {
+      const s = await seed();
+      await s.member("cara");
+      await s.ownerWrite("object-budget", "Plans/Budget.md", "totals");
+      await s.ownerWrite("object-private-rule", "Private/access.yaml", "");
+      await s.ownerAppends({
+        opKind: "chat.thread.create",
+        payload: {
+          threadId: "t-budget",
+          title: "",
+          createdAtMs: 3,
+          linkedAtMs: 3,
+          linkedObjectId: "object-budget",
+        },
+      });
+      await s.ownerSays("c1", "t-budget", "@Cara the totals are off");
+      const held = await s.page("cara");
+      expect(JSON.stringify(held.notices), how).toContain("Budget");
+
+      if (how === "the folder is hidden") {
+        await s.ownerWrite("object-plans-rule", "Plans/access.yaml", "");
+      } else {
+        await s.ownerWrite("object-budget", "Private/Budget.md", "totals");
+      }
+
+      for (const [name, read] of [
+        ["fresh", await s.page("cara")],
+        ["after the held cursor", await s.page("cara", held.nextCursor)],
+      ] as const) {
+        const text = JSON.stringify(read.notices);
+        expect(text, `${how}, ${name}`).not.toContain("Budget");
+        expect(text, `${how}, ${name}`).not.toContain("totals are off");
+        expect(read.notices, `${how}, ${name}`).toEqual([
+          expect.objectContaining({
+            title: "dohc could not find this chat.",
+            body: "",
+            target: null,
+          }),
+        ]);
+      }
+    },
+  );
 });

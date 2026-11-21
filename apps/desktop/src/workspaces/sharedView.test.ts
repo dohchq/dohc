@@ -1054,6 +1054,8 @@ describe("shared view refresh", () => {
             visibilitySignature: "v",
             rootLevel: "edit",
             folders: [{ path: "docs/held", level: "view" }],
+            groupDefault: "edit",
+            groups: [],
           },
           shareId: SHARE_ID,
           ended: false,
@@ -3092,6 +3094,8 @@ describe("shareViewIdentitySelector", () => {
       visibilitySignature: "vis",
       rootLevel: "view",
       folders: [{ path: "team", level }],
+      groupDefault: "view",
+      groups: [],
     });
     expect(
       decide({ grantedSelector: member, reach: reach("edit"), relayUrl: "https://relay.example" }),

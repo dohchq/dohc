@@ -2422,7 +2422,12 @@ export async function listGroups(ctx: ToolContext) {
 // is refused; dohc_list_groups finds the group that has it.
 export async function createGroup(
   ctx: ToolContext,
-  args: { name: string; purpose?: string; type?: "posts" | "chat" | "both" },
+  args: {
+    name: string;
+    purpose?: string;
+    type?: "posts" | "chat" | "both";
+    level?: "comment" | "view" | "none";
+  },
 ) {
   const result = await requestCli(ctx, "groupCreate", args);
   if ("ok" in result) return result;

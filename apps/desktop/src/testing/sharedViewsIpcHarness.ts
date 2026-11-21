@@ -145,7 +145,14 @@ export async function createSharedViewsIpcHarness(
   const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => ({ access: "edit" }));
   const fetchReach = vi.fn<Dependencies["fetchShareViewReach"]>(async () => {
     steps.push("reach");
-    return { signature: "r1", visibilitySignature: "v1", rootLevel: "edit", folders: [] };
+    return {
+      signature: "r1",
+      visibilitySignature: "v1",
+      rootLevel: "edit",
+      groupDefault: "edit",
+      groups: [],
+      folders: [],
+    };
   });
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {

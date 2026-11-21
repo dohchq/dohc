@@ -310,7 +310,8 @@
       "members.remove",
       "members.readmit",
       "members.link.change",
-      "members.end"
+      "members.end",
+      "members.group.rule"
     ]
   },
   "public": {
@@ -436,6 +437,7 @@
     "members member": "members.role.set",
     "members let-back-in": "members.readmit",
     "members link": "members.link.change",
-    "members end": "members.end"
+    "members end": "members.end",
+    "members group": "members.group.rule"
   }
 }

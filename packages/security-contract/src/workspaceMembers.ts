@@ -52,6 +52,23 @@ export interface WorkspacePerson {
   removedAtMs: number | null;
 }
 
+/**
+ * A Group's rule: one level for every member. Group settings shows them as
+ * "Can post", "View only" and "No access". Admins and the owner always reach
+ * every Group at Edit.
+ */
+export const GROUP_RULE_LEVELS = ["comment", "view", "none"] as const;
+export type GroupRuleLevel = (typeof GROUP_RULE_LEVELS)[number];
+
+export function isGroupRuleLevel(value: unknown): value is GroupRuleLevel {
+  return typeof value === "string" && (GROUP_RULE_LEVELS as readonly string[]).includes(value);
+}
+
+export interface WorkspaceGroupRule {
+  channelWireId: string;
+  level: GroupRuleLevel;
+}
+
 export interface WorkspaceInviteLink {
   enabled: boolean;
   /** The link to copy. Null while the link is off. */
@@ -66,6 +83,11 @@ export interface WorkspaceMembersView {
   memberLevel: MemberLevel;
   /** Present only for the owner and admins. */
   inviteLink: WorkspaceInviteLink | null;
+  /**
+   * Each Group with a rule. Present only for the owner and admins, since it
+   * names Groups hidden from members. A Group not listed takes `memberLevel`.
+   */
+  groupRules: WorkspaceGroupRule[] | null;
   /**
    * Everyone in the workspace, owner first. Members see only active entries
    * and no emails. The owner and admins also see invites and removed accounts.
@@ -115,11 +137,16 @@ export const WORKSPACE_MEMBER_ROUTES = {
   /** POST {} → WorkspaceMembersView. Ends membership for everyone. */
   end: "/sync/:workspaceId/members/end",
   /**
-   * POST {shareId, name, type?, purpose?} → {ok, channelWireId, name}. Owner
-   * or admin, through the membership share. The relay writes an ordinary
-   * Group into the owner's workspace.
+   * POST {shareId, name, type?, purpose?, level?} → {ok, channelWireId, name}.
+   * Owner or admin, through the membership share. The relay writes an
+   * ordinary Group into the owner's workspace, and `level` as its rule.
    */
   groupCreate: "/sync/members/groups",
+  /**
+   * PUT {level: GroupRuleLevel | null} → WorkspaceMembersView. Owner or
+   * admin. Null clears the rule, so the Group takes the member level.
+   */
+  groupRule: "/sync/:workspaceId/members/groups/:channelWireId/rule",
   /** POST {token} → WorkspaceJoinPreview. Signed in. */
   joinPreview: "/sync/members/join-preview",
   /** POST {token} → WorkspaceJoinResult. Signed in. */
