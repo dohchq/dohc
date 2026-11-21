@@ -172,3 +172,32 @@ fn a_folder_a_file_replaces_gets_no_temp() {
     let _prepared = ws.prepare(&[&job]);
     assert!(!ws.temp(&job).exists());
 }
+
+#[test]
+fn a_target_whose_access_changed_since_preparation_gets_a_fresh_temp() {
+    let mut ws = Workspace::new("access");
+    let job = ws.job(0, "a.md", Some(b"before"), b"after");
+    let prepared = ws.prepare(&[&job]);
+    let temp = same_file::Handle::from_path(ws.temp(&job)).unwrap();
+    let target = ws.root.join("a.md");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    for readonly in [true, false] {
+        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(&target, permissions).unwrap();
+    }
+    assert_eq!(ws.run(&job, &prepared), JobOutcome::Completed);
+    assert!(same_file::Handle::from_path(&target).unwrap() != temp);
+    assert_eq!(ws.read("a.md"), b"after");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}

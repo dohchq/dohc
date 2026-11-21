@@ -1760,7 +1760,7 @@ fn materialize_ordinary_write(
     let tmp = temp_sibling(target, &job.job_id);
     let owner_only = crate::policy::normalized_path_is_secret(&job.target_path);
     let temp_file = if matches!(placement, OrdinaryWritePlacement::Target(_))
-        && prepared.take(&job.job_id, &tmp)
+        && prepared.take(&job.job_id, &tmp, target)
     {
         None
     } else {

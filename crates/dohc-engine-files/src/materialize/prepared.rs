@@ -16,8 +16,8 @@ const BYTE_BUDGET: usize = 64 << 20;
 /// Temps for ordinary writes, written and flushed many at a time before their
 /// jobs run. A job that takes its temp skips writing and flushing one, so its
 /// file is still on disk before it replaces the target. A job only takes the
-/// file that was flushed, unchanged since. Dropping this removes every temp no
-/// job took.
+/// file that was flushed, unchanged since, for a target whose access and
+/// content are unchanged too. Dropping this removes every temp no job took.
 #[derive(Default)]
 pub struct PreparedTemps {
     temps: RefCell<HashMap<String, PreparedTemp>>,
@@ -26,6 +26,7 @@ pub struct PreparedTemps {
 struct PreparedTemp {
     path: PathBuf,
     stamp: Stamp,
+    target: TargetStamp,
 }
 
 /// A file's identity, size, and the times that change when it is written.
@@ -42,6 +43,13 @@ struct Stamp {
 type Times = [i64; 4];
 #[cfg(windows)]
 type Times = u64;
+
+/// What a target was when its temp took its access: its stamp on Unix, its
+/// change time on Windows, or nothing there.
+#[cfg(unix)]
+type TargetStamp = Option<Stamp>;
+#[cfg(windows)]
+type TargetStamp = Option<i64>;
 
 struct Work<'a> {
     job: &'a MaterializationJob,
@@ -122,15 +130,16 @@ impl PreparedTemps {
     }
 
     /// Whether `job_id` has at `tmp` the file prepared and flushed for it,
-    /// unchanged since. Any other file there is left for the job to replace.
-    pub(super) fn take(&self, job_id: &str, tmp: &Path) -> bool {
+    /// unchanged since, and `target` is as it was then. Any other file there
+    /// is left for the job to replace.
+    pub(super) fn take(&self, job_id: &str, tmp: &Path, target: &Path) -> bool {
         let mut temps = self.temps.borrow_mut();
         if temps.get(job_id).is_none_or(|temp| temp.path != tmp) {
             return false;
         }
-        temps
-            .remove(job_id)
-            .is_some_and(|temp| path_stamp(tmp) == Some(temp.stamp))
+        temps.remove(job_id).is_some_and(|temp| {
+            path_stamp(tmp) == Some(temp.stamp) && target_stamp(target) == temp.target
+        })
     }
 
     /// Remove the temp prepared for `job_id`, for a job that ends without it.
@@ -168,6 +177,7 @@ fn prepare_one(
         Err(err) if err.kind() == ErrorKind::NotFound => {}
         _ => return None,
     }
+    let target = target_stamp(&work.target);
     let path = temp_sibling(&work.target, &work.job.job_id);
     let file = write_temp(&work.target, &path, &work.content, false).ok()?;
     let flushed = flusher.map(|flusher| flusher.flush(&file)).transpose();
@@ -176,7 +186,11 @@ fn prepare_one(
     match (flushed, stamp) {
         (Ok(flushed), Some(stamp)) => Some((
             work.job.job_id.clone(),
-            PreparedTemp { path, stamp },
+            PreparedTemp {
+                path,
+                stamp,
+                target,
+            },
             flushed,
         )),
         (_, stamp) => {
@@ -218,6 +232,16 @@ fn metadata_stamp(metadata: &std::fs::Metadata) -> Option<Stamp> {
             metadata.ctime_nsec(),
         ],
     })
+}
+
+#[cfg(unix)]
+fn target_stamp(path: &Path) -> TargetStamp {
+    path_stamp(path)
+}
+
+#[cfg(windows)]
+fn target_stamp(path: &Path) -> TargetStamp {
+    dohc_windows_files::change_time_at(path).ok().flatten()
 }
 
 #[cfg(windows)]

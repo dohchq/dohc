@@ -3,7 +3,7 @@ use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultAction, FaultInjector, FaultPoint};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -143,7 +143,10 @@ async fn a_job_stopped_after_taking_its_temp_finishes_on_replay() {
     let database = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 5).unwrap().actor;
-    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeBeforePreimageRevalidate);
+    let faults = Arc::new(StopFirstWrite {
+        root: scratch.path().to_path_buf(),
+        temps: Mutex::default(),
+    });
     let stopped = actor
         .set_active_version(
             switch(&scratch, "target", 6),
@@ -152,7 +155,17 @@ async fn a_job_stopped_after_taking_its_temp_finishes_on_replay() {
         )
         .await;
     assert!(stopped.is_err());
-    assert!(faults.fired());
+    let at_stop = faults
+        .temps
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a write stopped");
+    assert_eq!(
+        at_stop.len(),
+        2,
+        "the stopped job's temp and the one prepared beside it: {at_stop:?}"
+    );
     let left = temps(scratch.path());
     assert_eq!(
         left.len(),
@@ -168,6 +181,25 @@ async fn a_job_stopped_after_taking_its_temp_finishes_on_replay() {
     assert_files(scratch.path(), &TARGET);
     assert_eq!(temps(scratch.path()), Vec::<PathBuf>::new());
     supervisor.close(&database).unwrap();
+}
+
+/// Stops the first write just before it replaces its file, noting the temps
+/// on disk then.
+struct StopFirstWrite {
+    root: PathBuf,
+    temps: Mutex<Option<Vec<PathBuf>>>,
+}
+
+impl FaultInjector for StopFirstWrite {
+    fn poll(&self, point: FaultPoint) -> FaultAction {
+        let mut temps = self.temps.lock().unwrap();
+        if point == FaultPoint::MaterializeBeforePreimageRevalidate && temps.is_none() {
+            *temps = Some(self::temps(&self.root));
+            FaultAction::Crash
+        } else {
+            FaultAction::Continue
+        }
+    }
 }
 
 /// Stops every write just before it replaces its file.
