@@ -1,8 +1,8 @@
 import { useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ShareAccess } from "../ipc/bridgeContract";
+import type { ResendRelayShareInvitationResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import { bridge } from "./bridge";
-import { accessOptions } from "./EmailShareForm";
+import { accessOptions, invitationEmailNote } from "./EmailShareForm";
 import { ipcErrorMessage } from "./ipcError";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import {
@@ -258,6 +258,127 @@ function reportAccessChangeFailure(change: {
         );
     },
   });
+}
+
+export const invitationEmailNoticeIdentity = (grantId: string) =>
+  `share-invitation-email:${grantId}`;
+
+const SENDING_INVITATION = "Sending the email…";
+
+function invitationResendWords(answer: ResendRelayShareInvitationResult): string {
+  switch (answer.invitationEmail) {
+    case "sent":
+      return "Email invite sent.";
+    case "unavailable":
+      return "This server sends no email.";
+    case "limit":
+      return invitationEmailNote(answer);
+    case "recent":
+      return "Sent a moment ago. Try again in a minute.";
+    case "failed":
+      return "The email could not be sent.";
+  }
+}
+
+const invitationResends = new Set<string>();
+
+type InvitationResend = {
+  workspaceId: string;
+  person: Pick<SharedPerson, "shareId" | "grantId" | "name">;
+  report: ReportShellFailure | null;
+  clear: ((identity: string) => void) | null;
+  show: (answer: ResendRelayShareInvitationResult) => boolean;
+};
+
+async function resendInvitation(resend: InvitationResend): Promise<void> {
+  const { workspaceId, person } = resend;
+  if (invitationResends.has(person.grantId)) return;
+  invitationResends.add(person.grantId);
+  let answer: ResendRelayShareInvitationResult = { invitationEmail: "failed" };
+  let cause: unknown;
+  try {
+    answer = await bridge().resendRelayShareInvitation({
+      workspaceId,
+      shareId: person.shareId,
+      grantId: person.grantId,
+    });
+  } catch (error) {
+    cause = error;
+  } finally {
+    invitationResends.delete(person.grantId);
+  }
+  const shownOnRow = resend.show(answer);
+  const identity = invitationEmailNoticeIdentity(person.grantId);
+  if (answer.invitationEmail === "sent") resend.clear?.(identity);
+  else if (answer.invitationEmail === "failed" || !shownOnRow)
+    resend.report?.({
+      message: `dohc could not email ${person.name} their invitation.`,
+      cause: answer.invitationEmail === "failed" ? cause : new Error(invitationResendWords(answer)),
+      identity,
+      retry: () => void resendInvitation(resend),
+    });
+}
+
+/**
+ * Resend invitation for one person's row. `words` is what the row's detail
+ * line says: that the email is being sent, then the server's answer, until
+ * `forget` or the next send. A send that fails also goes to the shell with
+ * Try again, and so does any answer but "sent" that comes after the row has
+ * gone.
+ */
+export function useInvitationResend(
+  workspaceId: string,
+  person: Pick<SharedPerson, "shareId" | "grantId" | "name">,
+) {
+  const report = useContext(ShellErrorReporter);
+  const clear = useContext(ShellNoticeClear);
+  const [answer, setAnswer] = useState<ResendRelayShareInvitationResult | "sending" | null>(null);
+  const shown = useRef(false);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  return {
+    sending: answer === "sending",
+    failed: answer !== null && answer !== "sending" && answer.invitationEmail === "failed",
+    words:
+      answer === null
+        ? null
+        : answer === "sending"
+          ? SENDING_INVITATION
+          : invitationResendWords(answer),
+    forget: () => setAnswer((held) => (held === "sending" ? held : null)),
+    send: () => {
+      if (invitationResends.has(person.grantId)) return;
+      setAnswer("sending");
+      void resendInvitation({
+        workspaceId,
+        person: { shareId: person.shareId, grantId: person.grantId, name: person.name },
+        report,
+        clear,
+        show: (next) => {
+          if (shown.current) setAnswer(next);
+          return shown.current;
+        },
+      });
+    },
+  };
+}
+
+export function resendInvitationEntry(
+  resend: Pick<ReturnType<typeof useInvitationResend>, "sending" | "send">,
+  testId: string,
+): MenuEntry {
+  return {
+    id: "resend-invitation",
+    label: "Resend invitation",
+    testId,
+    disabled: resend.sending,
+    ...(resend.sending ? { description: "dohc is sending the email." } : {}),
+    onSelect: resend.send,
+  };
 }
 
 export function PersonAccessRow(props: {

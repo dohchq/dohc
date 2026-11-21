@@ -44,6 +44,7 @@ export type ShareGrantTransitionRoute =
   | { route: "share-grant-promote"; shareId: string; grantId: string }
   | { route: "share-grant-retune"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
+  | { route: "share-grant-invitation-email"; shareId: string; grantId: string }
   | { route: "share-undo"; shareId: string }
   | { route: "share-leave"; shareId: string }
   | { route: "share-revoke"; shareId: string };
@@ -115,6 +116,7 @@ export function createShareGrantRoutes(
     SyncRelayStorage,
     | "getShare"
     | "getShareGrant"
+    | "getShareLabels"
     | "getCurrentLinkCredential"
     | "workspaceIsOwnedBy"
     | "rotateLinkGrant"
@@ -532,6 +534,44 @@ export function createShareGrantRoutes(
       });
     }
     if (route.route === "share-grant-revoke") throw relayError("method_not_allowed");
+
+    if (route.route === "share-grant-invitation-email" && request.method === "POST") {
+      const input = await readJsonObject(request);
+      if (Object.keys(input).some((key) => key !== "workspaceId")) {
+        throw badRequest("request body contains an unknown field");
+      }
+      const workspaceId = parseWorkspaceId(input.workspaceId);
+      const { share, grant } = requireOwnedGrant("person", route.shareId, route.grantId, actor);
+      requireShareWorkspace(share, workspaceId);
+      const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+      const recipient = grant.principalUserId
+        ? { recipientUserId: grant.principalUserId }
+        : grant.principalEmail
+          ? { recipientEmail: grant.principalEmail }
+          : null;
+      if (!selector || "kind" in selector || grant.parentGrantId !== null || !recipient) {
+        throw notFound();
+      }
+      const browserInvitation: { browserInvitationUrl?: string } = namedBrowserInvitation(
+        share.workspaceId,
+        grant.grantId,
+        selector,
+        grant.access,
+      );
+      return jsonResponse({
+        ok: true,
+        ...(await emailShareInvitation({
+          inviterUserId: actor.userId,
+          ...recipient,
+          shareId: share.shareId,
+          grantId: grant.grantId,
+          subjectName: storage.getShareLabels(share.shareId, "member").subjectName,
+          access: grant.access,
+          browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,
+        })),
+      });
+    }
+    if (route.route === "share-grant-invitation-email") throw relayError("method_not_allowed");
 
     if (route.route === "share-revoke" && request.method === "POST") {
       const share = storage.getShare(route.shareId);
@@ -1008,6 +1048,7 @@ export function createShareGrantRoutes(
               inviterUserId: actor.userId,
               recipientEmail: email.trim().toLowerCase(),
               shareId,
+              grantId,
               subjectName,
               access,
               browserInvitationUrl: browserInvitation.browserInvitationUrl ?? null,

@@ -5394,6 +5394,32 @@ export const RelayShareGrantRetuneResponse = RetuneRelayShareGrantResult.extend(
   ok: z.literal(true),
 }).strict();
 
+export const ResendRelayShareInvitationPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: OPAQUE_ID,
+    grantId: OPAQUE_ID,
+  })
+  .strict();
+export type ResendRelayShareInvitationPayload = z.infer<typeof ResendRelayShareInvitationPayload>;
+
+export const ResendRelayShareInvitationResult = z.union([
+  z.object({ invitationEmail: z.enum(["sent", "unavailable", "recent", "failed"]) }).strict(),
+  z
+    .object({
+      invitationEmail: z.literal("limit"),
+      invitationEmailLimit: InvitationEmailLimit.strict(),
+    })
+    .strict(),
+]);
+export type ResendRelayShareInvitationResult = z.infer<typeof ResendRelayShareInvitationResult>;
+
+export const RelayShareInvitationResendResponse = z
+  .object({ ok: z.literal(true) })
+  .passthrough()
+  .transform(({ ok: _ok, ...answer }) => answer)
+  .pipe(ResendRelayShareInvitationResult);
+
 const RelayShareNamedGrantTransitionBase = {
   grantId: OPAQUE_ID,
   access: SHARE_ACCESS,

@@ -64,6 +64,8 @@ import {
   ResumeRelayShareDiscussionResult,
   RotateRelayShareLinkResult,
   RetuneRelayShareGrantResult,
+  RelayShareInvitationResendResponse,
+  ResendRelayShareInvitationResult,
   RevokeRelayShareGrantResult,
   RevokeRelayShareLinkResult,
   UnblockRelayShareDiscussionPrincipalResult,
@@ -2068,6 +2070,32 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
+  const resendRelayShareInvitation: Handlers["resendRelayShareInvitation"] = async (
+    input,
+    { operation },
+  ) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/invitation-email`,
+            {
+              method: "POST",
+              body: JSON.stringify({ workspaceId: operation.workspace.workspaceId }),
+            },
+          ),
+        );
+        const answer = RelayShareInvitationResendResponse.safeParse(relayResult);
+        return ResendRelayShareInvitationResult.parse(
+          answer.success ? answer.data : { invitationEmail: "failed" },
+        );
+      },
+      assertOriginalWorkspace,
+    );
+  };
+
   const revokeRelayShareGrant: Handlers["revokeRelayShareGrant"] = async (input, { operation }) => {
     return ownerRelayShareOperation(
       operation,
@@ -2180,6 +2208,7 @@ export function createRelaySharesIpcHandlers<
     resumeRelayShareDiscussion,
     promoteRelayShareGrant,
     retuneRelayShareGrant,
+    resendRelayShareInvitation,
     revokeRelayShareGrant,
   };
 }

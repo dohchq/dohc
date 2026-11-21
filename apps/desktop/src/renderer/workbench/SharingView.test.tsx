@@ -5,9 +5,10 @@ import { useMemo, useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
-import type { ShareProposalRow } from "../../ipc/bridgeContract";
+import type { ResendRelayShareInvitationResult, ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { automationShareWarning } from "../automationShareCheck";
+import { invitationEmailNote } from "../EmailShareForm";
 import { ShellErrorReporter, ShellNoticeClear } from "../shell/useShellError";
 import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import type { AccessFacts } from "./accessReason";
@@ -39,6 +40,14 @@ const bridgeMock = {
         paths: string[];
         access: "edit";
       }) => Promise<{ stops: AutomationStop[] }>
+    >(),
+  resendRelayShareInvitation:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        shareId: string;
+        grantId: string;
+      }) => Promise<ResendRelayShareInvitationResult>
     >(),
   retuneRelayShareGrant:
     vi.fn<
@@ -288,7 +297,7 @@ async function personMenu(person: HTMLElement) {
   return screen.getByRole("menu", { hidden: true });
 }
 
-const menuItem = (menu: HTMLElement, name: string) =>
+const menuItem = (menu: HTMLElement, name: string | RegExp) =>
   within(menu).getByRole("menuitem", { hidden: true, name });
 const menuRows = (menu: HTMLElement) =>
   [...menu.querySelectorAll('[role^="menuitem"]')].map((row) => row.getAttribute("data-testid"));
@@ -978,7 +987,154 @@ describe("copying a share's code or invitation", () => {
     expect(actions.className.split(" ")).not.toContain("absolute");
   });
 
-  it("puts a person's levels first in their menu, then Copy invitation, Copy share code and Remove access", async () => {
+  it("offers Resend invitation under Copy invitation to a person invited by email, and not to one who joined through a link", async () => {
+    answerWith({
+      granted: answer("granted", {
+        rows: [
+          ...ROWS,
+          granted({
+            shareId: "share-new",
+            grantId: "new",
+            recipientUserId: null,
+            recipientEmail: "new@example.com",
+          }),
+        ],
+      }),
+    });
+    bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
+    render(<CopyView />);
+    const [named, dependent, pending] = await people(await rowOf("share-1"));
+    const offered = async (person: HTMLElement) => {
+      const names = within(await personMenu(person))
+        .getAllByRole("menuitem", { hidden: true })
+        .map((row) => row.textContent);
+      await userEvent.keyboard("{Escape}");
+      return names;
+    };
+
+    expect(within(named!).getByTestId("sharing-person-detail").textContent).toBe(
+      "Invited by email",
+    );
+    expect(await offered(named!)).toEqual([
+      "Copy invitation",
+      "Resend invitation",
+      "Copy share code",
+      "Remove access",
+    ]);
+    expect(within(pending!).getByTestId("sharing-person-detail").textContent).toBe(
+      "Invited, not signed in yet",
+    );
+    expect(await offered(pending!)).toContain("Resend invitation");
+    expect(within(dependent!).getByTestId("sharing-person-detail").textContent).toBe(
+      "Joined through a link",
+    );
+    expect(await offered(dependent!)).toEqual(["Copy code", "Remove access"]);
+    expect(bridgeMock.resendRelayShareInvitation).not.toHaveBeenCalled();
+  });
+
+  it("resends an invitation once, cannot be picked again while it is sent, and says each answer on the person's second line", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    let sent: (answer: ResendRelayShareInvitationResult) => void = () => undefined;
+    bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(
+      new Promise((resolve) => {
+        sent = resolve;
+      }),
+    );
+    render(<CopyView />);
+    const [person] = await people(await rowOf("share-1"));
+    const detail = within(person!).getByTestId("sharing-person-detail");
+
+    await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-1",
+    });
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    expect(detail.textContent).toBe("Sending the email…");
+
+    const held = menuItem(await personMenu(person!), /^Resend invitation/);
+    expect(held.getAttribute("aria-disabled")).toBe("true");
+    expect(held.textContent).toBe("Resend invitationdohc is sending the email.");
+    await userEvent.click(held);
+    await userEvent.keyboard("{Escape}");
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledOnce();
+    expect(within(person!).getByTestId("sharing-person-access-grant-1")).toHaveProperty(
+      "disabled",
+      false,
+    );
+
+    await act(async () => sent({ invitationEmail: "sent" }));
+    expect(detail.textContent).toBe("Email invite sent.");
+    expect(within(person!).getByRole("status").textContent).toBe("Email invite sent.");
+
+    const limited = {
+      invitationEmail: "limit" as const,
+      invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
+    };
+    expect(invitationEmailNote(limited)).toContain("50 of 50 invitation emails");
+    for (const [next, words] of [
+      [{ invitationEmail: "unavailable" }, "This server sends no email."],
+      [limited, invitationEmailNote(limited)],
+      [{ invitationEmail: "recent" }, "Sent a moment ago. Try again in a minute."],
+    ] as const) {
+      bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(next);
+      await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+      await waitFor(() => expect(detail.textContent).toBe(words));
+    }
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(4);
+    expect(reportFailure).not.toHaveBeenCalled();
+
+    await userEvent.click(menuItem(await personMenu(person!), "Copy invitation"));
+    await waitFor(() => expect(detail.textContent).toBe("Invitation copied"));
+    await waitFor(() => expect(detail.textContent).toBe("Invited by email"), {
+      timeout: 2 * COPY_FEEDBACK_MS,
+    });
+  });
+
+  it("says a resend failed on the person's second line, and hands it to the shell with a Try again that sends again", async () => {
+    answerWith({ granted: answer("granted", { rows: [granted()] }) });
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
+    render(<CopyView />);
+    const [person] = await people(await rowOf("share-1"));
+    const detail = within(person!).getByTestId("sharing-person-detail");
+
+    await userEvent.click(menuItem(await personMenu(person!), "Resend invitation"));
+    await waitFor(() =>
+      expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+        message: "dohc could not email sam@example.com their invitation.",
+        cause: undefined,
+        identity: "share-invitation-email:grant-1",
+        retry: expect.any(Function),
+      }),
+    );
+    expect(detail.textContent).toBe("The email could not be sent.");
+    expect(detail.querySelector(".text-danger")).not.toBeNull();
+    expect(clearNotice).not.toHaveBeenCalled();
+
+    const down = new Error("relay down");
+    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(down);
+    await act(async () => reportFailure.mock.calls[0]![0].retry());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2);
+    expect(reportFailure).toHaveBeenCalledTimes(2);
+    expect(reportFailure.mock.calls[1]![0]).toMatchObject({
+      cause: down,
+      identity: "share-invitation-email:grant-1",
+    });
+
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
+    await act(async () => reportFailure.mock.calls[1]![0].retry());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+      grantId: "grant-1",
+    });
+    expect(clearNotice).toHaveBeenCalledExactlyOnceWith("share-invitation-email:grant-1");
+    expect(reportFailure).toHaveBeenCalledTimes(2);
+    expect(detail.textContent).toBe("Email invite sent.");
+  });
+
+  it("puts a person's levels first in their menu, then Copy invitation, Resend invitation, Copy share code and Remove access", async () => {
     answerWith({ granted: answer("granted", { rows: ROWS }) });
     bridgeMock.getShareCopyDetails.mockResolvedValue(INVITING);
     render(<CopyView />);
@@ -988,6 +1144,7 @@ describe("copying a share's code or invitation", () => {
       "sharing-person-access-grant-1-view",
       "sharing-person-access-grant-1-edit",
       "sharing-person-copy-grant-1",
+      "sharing-person-resend-grant-1",
       "sharing-person-copy-code-grant-1",
       "sharing-person-remove-grant-1",
     ]);
@@ -995,7 +1152,7 @@ describe("copying a share's code or invitation", () => {
       within(menu)
         .getAllByRole("menuitem", { hidden: true })
         .map((row) => row.textContent),
-    ).toEqual(["Copy invitation", "Copy share code", "Remove access"]);
+    ).toEqual(["Copy invitation", "Resend invitation", "Copy share code", "Remove access"]);
     await userEvent.click(menuItem(menu, "Copy share code"));
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(INVITING.shareCode));
     await waitFor(() =>
@@ -1130,7 +1287,7 @@ describe("copying a share's code or invitation", () => {
       within(menu)
         .getAllByRole("menuitem", { hidden: true })
         .map((row) => row.textContent),
-    ).toEqual(["Copy invitation", "Remove access"]);
+    ).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
     await userEvent.click(menuItem(menu, "Copy invitation"));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledExactlyOnceWith("dohc-share:share-1:https://relay.test"),
