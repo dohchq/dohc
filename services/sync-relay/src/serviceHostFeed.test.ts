@@ -18,6 +18,8 @@ import { stableJsonStringify } from "./canonicalJson";
 import { openSyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollment";
+import { appendLiveRoomEdit } from "./storage/liveRoomEdits";
+import * as Yjs from "yjs";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -938,6 +940,73 @@ it.each([
         .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
         .get(ws, "docs/a.md")!.blob_sha256,
     ).toBe(input.stored.sha256);
+  },
+);
+
+const ownerAuthor = [{ kind: "human", humanId: "owner-1", humanName: "Owner" }] as const;
+it.each([
+  { name: "the owner after a Stop", retire: true, account: true, clients: [42], takes: true },
+  { name: "the owner after a Pause", retire: false, account: true, clients: [42], takes: false },
+  {
+    name: "a push without the owner's name",
+    retire: true,
+    account: false,
+    clients: [42],
+    takes: false,
+  },
+  { name: "two new editor ids", retire: true, account: true, clients: [42, 43], takes: false },
+] as const)(
+  "lets the owner's room edit build on the owner's own edit from a Stop: $name",
+  async (input) => {
+    const f = await fixture();
+    retainServiceActivation(f.raw, namespace, true);
+    preparedStop(f.storage, {
+      workspaceId: ws,
+      path: "docs/a.md",
+      ownerUserId: "owner-1",
+      enabled: false,
+      retire: input.retire,
+      nowMs: 20,
+      guard() {},
+    });
+    const doc = new Yjs.Doc();
+    for (const clientId of input.clients) {
+      doc.clientID = clientId;
+      doc.getMap("frontmatter").set(`title-${clientId}`, "Owner");
+    }
+    const update = { content: Yjs.encodeStateAsUpdate(doc), sha256: "" };
+    update.sha256 = sha256Hex(update.content);
+    f.storage.putBlob({ workspaceId: ws, ...update, createdAtMs: 1 });
+    const op = parseLogOp({
+      originSeq: 0,
+      opKind: "ydoc.update",
+      recordedAtMs: 4,
+      payload: ydoc(binding.objectId, "docs/a.md", update),
+    });
+    if (input.account) op.admittedAuthorSnapshot = [...ownerAuthor];
+    f.storage.appendLogBatch({
+      workspaceId: ws,
+      originId: "owner-laptop",
+      ops: [op],
+      workReferences: { userId: "owner-1", references: [] },
+    });
+    doc.clientID = 42;
+    const before = Yjs.encodeStateVector(doc);
+    doc.getMap("frontmatter").set("title-42", "Owner again");
+    expect(
+      appendLiveRoomEdit(f.storage as unknown as StorageContext, {
+        document: {
+          workspaceId: ws,
+          mainVersionId: "main",
+          objectId: binding.objectId,
+          lineageClaimId: binding.lineageClaimId,
+        },
+        sender: [...ownerAuthor],
+        clients: [{ clientId: 42, inNote: true }],
+        updateBytes: Yjs.encodeStateAsUpdate(doc, before),
+        receivedAtMs: 30,
+      }).kind,
+    ).toBe(input.takes ? "written" : "refused");
   },
 );
 

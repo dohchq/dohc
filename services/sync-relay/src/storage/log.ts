@@ -37,7 +37,11 @@ import {
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
 import { recordPushDeliveries } from "./pushDeliveries";
-import { isOwnerSaveOfStoppedNote, isResumedHostSave } from "./serviceHostEnrollment";
+import {
+  bindStoppedNoteClient,
+  isOwnerSaveOfStoppedNote,
+  isResumedHostSave,
+} from "./serviceHostEnrollment";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -343,6 +347,13 @@ export function appendLogBatchInTransaction(
     )
       continue;
     if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
+    if (op.opKind === "ydoc.update" && owner !== undefined && op.admittedAuthorSnapshot)
+      bindStoppedNoteClient(storage, {
+        workspaceId: input.workspaceId,
+        userId: owner,
+        payloadJson: op.payloadJson,
+        authors: op.admittedAuthorSnapshot,
+      });
     // Keep "where is this object now?" answerable by primary
     // key. The relay_seq this row just took IS the order the guard in the
     // upsert compares, so a later moment always wins and an out-of-order
