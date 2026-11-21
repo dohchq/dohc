@@ -14,11 +14,13 @@ import {
   Palette,
   Pencil,
   Trash2,
+  UserX,
 } from "lucide-react";
 import {
   normalizeShareDiscussionDisplayName,
   SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
 } from "@dohc/security-contract/share-discussion";
+import { PERSONAL_AGENT_JOINED_NOTE as JOINED_NOTE } from "@dohc/security-contract/workspace-members";
 import {
   PERSONAL_AGENT_REACH_LIMIT,
   type PersonalAgent,
@@ -36,7 +38,7 @@ import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { formatChatTime } from "../time";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import { Pill, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu, MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -67,6 +69,56 @@ const REACH_MEANINGS =
   "View reads files and chats. Comment also posts in chats and Comments. " +
   "Edit also changes Collections, but no other files.";
 
+// A joined row offers no Edit. The roster gives no member's level, so it
+// offers Comment even to a member who holds only View.
+const JOINED_REACH_OPTIONS = REACH_OPTIONS.filter((option) => option.value !== "edit");
+
+type RosterWorkspace = PersonalAgentRoster["workspaces"][number];
+
+/** The workspaces a reach can name: owned ones first, then joined ones. */
+function reachable(roster: PersonalAgentRoster): RosterWorkspace[] {
+  const listed = roster.workspaces.filter((workspace) => workspace.role !== "ended");
+  return [
+    ...listed.filter((workspace) => workspace.role === "owner"),
+    ...listed.filter((workspace) => workspace.role !== "owner"),
+  ];
+}
+
+// A joined workspace takes no Collection change from an agent, so Edit acts as Comment there.
+function shownLevel(workspace: RosterWorkspace, level: Reach): Reach {
+  return workspace.role !== "owner" && level === "edit" ? "comment" : level;
+}
+
+// A joined workspace's mark: its person's role there.
+function RoleMark(props: { role: RosterWorkspace["role"] }) {
+  if (props.role !== "admin" && props.role !== "member") return null;
+  return (
+    <span data-testid="personal-agent-role" title={JOINED_NOTE} className="shrink-0">
+      <Pill>{props.role === "admin" ? "Admin" : "Member"}</Pill>
+    </span>
+  );
+}
+
+// What each level does, then the joined note when a joined row shows: under
+// the list on the page and in the reach sheet, as on the sign-in page.
+function ReachNotes(props: { joined: boolean; className?: string }) {
+  return (
+    <div className={`flex flex-col gap-1 ${props.className ?? ""}`}>
+      <p data-testid="personal-agent-reach-meanings" className="m-0 text-[12px] text-muted">
+        {REACH_MEANINGS}
+      </p>
+      {props.joined ? (
+        <p data-testid="personal-agent-joined-note" className="m-0 text-[12px] text-muted">
+          {JOINED_NOTE}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+const joinedIn = (listed: readonly RosterWorkspace[]) =>
+  listed.some((workspace) => workspace.role !== "owner");
+
 /** One personal agent and the server account that holds it. */
 export type PersonalEntry = {
   account: PersonalAgentsAccount;
@@ -82,9 +134,13 @@ export function personalEntries(accounts: readonly PersonalAgentsAccount[]): Per
   });
 }
 
-/** Whether this workspace syncs to the account's server, which an agent link needs. */
+/** Whether the account owns this workspace on its server or is a member there, which an agent link needs. */
 export function syncsTo(roster: PersonalAgentRoster | null, workspaceId: string): boolean {
-  return roster?.workspaces.some((workspace) => workspace.workspaceId === workspaceId) ?? false;
+  return (
+    roster?.workspaces.some(
+      (workspace) => workspace.workspaceId === workspaceId && workspace.role !== "ended",
+    ) ?? false
+  );
 }
 
 /** The link an agent signs in with to reach this workspace. */
@@ -118,25 +174,29 @@ function reportedWords(
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-/** The relay's answer to one change, or the words a failed call gives. */
+/**
+ * The relay's answer to one change, or the words a failed call gives. `what`
+ * names the change in a failure: "dohc could not <what>."
+ */
 export async function changePersonalAgent(
   account: PersonalAgentsAccount,
   agent: PersonalAgent,
   change: PersonalAgentChange,
-  failure: string,
+  what: string,
 ): Promise<PersonalAgentChangeResult> {
   try {
     return await bridge().changePersonalAgent({
       accountKey: account.accountKey,
       agentId: agent.agentId,
       change,
+      what,
     });
   } catch (cause) {
-    return { ok: false, error: ipcErrorMessage(cause, failure) };
+    return { ok: false, error: ipcErrorMessage(cause, `dohc could not ${what}.`) };
   }
 }
 
-/** Choose what an agent can reach in each workspace the account owns on its server. */
+/** Choose what an agent can reach in each workspace the account owns or joined on its server. */
 export function PersonalReachSheet(props: {
   account: PersonalAgentsAccount;
   roster: PersonalAgentRoster;
@@ -147,15 +207,19 @@ export function PersonalReachSheet(props: {
 }) {
   const { agent, roster } = props;
   const id = useId();
+  const listed = reachable(roster);
   const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(
     () =>
       new Map(
-        roster.workspaces.map(
+        listed.map(
           (workspace) =>
             [
               workspace.workspaceId,
-              agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ??
-                "none",
+              shownLevel(
+                workspace,
+                agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ??
+                  "none",
+              ),
             ] as const,
         ),
       ),
@@ -171,9 +235,13 @@ export function PersonalReachSheet(props: {
   );
   const save = async () => {
     if (saving) return;
-    const reach = [...choices].flatMap(([workspaceId, level]) =>
-      level === "none" ? [] : [{ workspaceId, level }],
-    );
+    // A workspace whose membership ended stays as it was until its own Remove.
+    const reach = [
+      ...[...choices].flatMap(([workspaceId, level]) =>
+        level === "none" ? [] : [{ workspaceId, level }],
+      ),
+      ...agent.reach.filter((entry) => !choices.has(entry.workspaceId)),
+    ];
     if (reach.length > PERSONAL_AGENT_REACH_LIMIT) {
       setFailure(`Choose up to ${PERSONAL_AGENT_REACH_LIMIT} workspaces.`);
       return;
@@ -184,7 +252,7 @@ export function PersonalReachSheet(props: {
       props.account,
       agent,
       { kind: "reach", reach },
-      "dohc could not save the reach.",
+      `change what ${agent.name} can reach`,
     );
     if (!open.current) {
       if (!result.ok) props.onLateFailure(result.error);
@@ -206,44 +274,48 @@ export function PersonalReachSheet(props: {
           event.preventDefault();
           void save();
         }}
-        className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       >
-        <div className="flex flex-col gap-1">
-          <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">
-            Change what {agent.name} can reach
-          </h2>
-          <p className="m-0 text-[12px] text-muted">{REACH_MEANINGS}</p>
-        </div>
-        {roster.workspaces.length === 0 ? (
+        <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">
+          Change what {agent.name} can reach
+        </h2>
+        {listed.length === 0 ? (
           <p className="m-0 text-[13px] text-muted">
             Sync a workspace to {props.account.host} to let {agent.name} reach it.
           </p>
         ) : (
-          <div className="max-h-[min(360px,50vh)] overflow-y-auto rounded-lg border border-line bg-bg">
-            {roster.workspaces.map((workspace) => {
-              const name = workspace.name ?? "Unnamed workspace";
-              return (
-                <div
-                  key={workspace.workspaceId}
-                  data-testid="personal-agent-reach-row"
-                  className={ROW}
-                >
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{name}</span>
-                  <span className="shrink-0">
-                    <SegmentedControl
-                      label={`What ${agent.name} can do in ${name}`}
-                      testId={`personal-agent-reach-${workspace.workspaceId}`}
-                      value={choices.get(workspace.workspaceId) ?? "none"}
-                      options={REACH_OPTIONS}
-                      disabled={saving}
-                      onChange={(level) =>
-                        setChoices((current) => new Map(current).set(workspace.workspaceId, level))
-                      }
-                    />
-                  </span>
-                </div>
-              );
-            })}
+          <div className="flex flex-col gap-2">
+            <div className="max-h-[min(360px,50vh)] overflow-y-auto rounded-lg border border-line bg-bg">
+              {listed.map((workspace) => {
+                const name = workspace.name ?? "Unnamed workspace";
+                return (
+                  <div
+                    key={workspace.workspaceId}
+                    data-testid="personal-agent-reach-row"
+                    data-role={workspace.role}
+                    className={ROW}
+                  >
+                    <span className="min-w-0 shrink truncate text-[13px] text-ink">{name}</span>
+                    <RoleMark role={workspace.role} />
+                    <span className="ml-auto shrink-0">
+                      <SegmentedControl
+                        label={`What ${agent.name} can do in ${name}`}
+                        testId={`personal-agent-reach-${workspace.workspaceId}`}
+                        value={choices.get(workspace.workspaceId) ?? "none"}
+                        options={workspace.role === "owner" ? REACH_OPTIONS : JOINED_REACH_OPTIONS}
+                        disabled={saving}
+                        onChange={(level) =>
+                          setChoices((current) =>
+                            new Map(current).set(workspace.workspaceId, level),
+                          )
+                        }
+                      />
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <ReachNotes joined={joinedIn(listed)} />
           </div>
         )}
         {failure ? (
@@ -282,17 +354,55 @@ export function PersonalReachSheet(props: {
  */
 export function PersonalAgentPage(props: {
   entry: PersonalEntry;
+  // The workspace's id on the server, which Sign in again's link names.
   workspaceId: string;
   nameField: ReactNode | null;
   onRename: () => void;
   onRemove: () => void;
-  // Saves one change, and says why in Notices when it fails.
-  onChange: (change: PersonalAgentChange, failure: string) => Promise<boolean>;
+  // Saves one change, and says why in Notices when it fails. `what` names the change there.
+  onChange: (change: PersonalAgentChange, what: string) => Promise<boolean>;
   onError?: (message: string) => void;
   onBack: () => void;
   backRef?: Ref<HTMLButtonElement>;
 }) {
   const { account, roster, agent } = props.entry;
+  const listed = reachable(roster);
+  // Workspaces this agent still reaches whose membership ended: each waits for its Remove.
+  const ended = roster.workspaces.filter(
+    (workspace) =>
+      workspace.role === "ended" &&
+      agent.reach.some((entry) => entry.workspaceId === workspace.workspaceId),
+  );
+  const [removing, setRemoving] = useState<string | null>(null);
+  const removeEnded = async (workspace: RosterWorkspace) => {
+    setRemoving(workspace.workspaceId);
+    await props.onChange(
+      {
+        kind: "reach",
+        reach: agent.reach.filter((entry) => entry.workspaceId !== workspace.workspaceId),
+      },
+      `remove ${workspace.name ?? "this workspace"} from ${agent.name}'s reach`,
+    );
+    setRemoving(null);
+  };
+  // A Remove that held focus goes with its row. Focus moves to the next Remove,
+  // else Change, else Agents, so it never drops to the page.
+  const page = useRef<HTMLElement>(null);
+  const focusedRemove = useRef<string | null>(null);
+  useEffect(() => {
+    const id = focusedRemove.current;
+    if (id === null || ended.some((workspace) => workspace.workspaceId === id)) return;
+    focusedRemove.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) return;
+    const find = (testId: string) =>
+      page.current?.querySelector<HTMLElement>(`[data-testid="${testId}"]:not(:disabled)`);
+    (
+      find("personal-agent-reach-remove") ??
+      find("personal-agent-reach") ??
+      find("agent-back")
+    )?.focus();
+  });
   const [menuOpen, setMenuOpen] = useState(false);
   const [reaching, setReaching] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -306,6 +416,7 @@ export function PersonalAgentPage(props: {
 
   return (
     <section
+      ref={page}
       data-testid="agent-page"
       data-agent-id={agent.agentId}
       data-status={agent.status}
@@ -412,10 +523,7 @@ export function PersonalAgentPage(props: {
               shape="agent"
               value={agent.hue}
               onChange={(hue) =>
-                void props.onChange(
-                  { kind: "hue", hue },
-                  `dohc could not change ${agent.name}'s color.`,
-                )
+                void props.onChange({ kind: "hue", hue }, `change ${agent.name}'s color`)
               }
             />
           </span>
@@ -427,7 +535,7 @@ export function PersonalAgentPage(props: {
         <>
           <div className="mb-1.5 mt-5 flex min-h-6 items-center gap-2">
             <h4 className="m-0 mr-auto text-[12px] font-medium text-subtle">Reach</h4>
-            {roster.workspaces.length > 0 ? (
+            {listed.length > 0 ? (
               <SecondaryButton
                 data-testid="personal-agent-reach"
                 size="row"
@@ -438,39 +546,75 @@ export function PersonalAgentPage(props: {
               </SecondaryButton>
             ) : null}
           </div>
-          {roster.workspaces.length === 0 ? (
-            <p className="m-0 text-[12px] text-muted">
+          {listed.length === 0 ? (
+            <p className="m-0 mb-1.5 text-[12px] text-muted">
               Sync a workspace to {account.host} to let {agent.name} reach it.
             </p>
-          ) : (
-            <>
-              <div data-testid="personal-agent-reach-list" className={BOX}>
-                {/* None rows stay, so the page lists every workspace Change offers. */}
-                {roster.workspaces.map((workspace) => {
-                  const shown = REACH_SHOWN[level(workspace.workspaceId)];
-                  const Icon = shown.icon;
-                  return (
-                    <PageRow
-                      key={workspace.workspaceId}
-                      testId="personal-agent-reach-entry"
-                      label={workspace.name ?? "Unnamed workspace"}
-                    >
-                      <span className={`${VALUE} ${shown.label === "None" ? "text-subtle" : ""}`}>
-                        <Icon size={12} aria-hidden />
-                        {shown.label}
+          ) : null}
+          {listed.length + ended.length > 0 ? (
+            <div data-testid="personal-agent-reach-list" className={BOX}>
+              {/* None rows stay, so the page lists every workspace Change offers. */}
+              {listed.map((workspace) => {
+                const shown = REACH_SHOWN[shownLevel(workspace, level(workspace.workspaceId))];
+                const Icon = shown.icon;
+                return (
+                  <PageRow
+                    key={workspace.workspaceId}
+                    testId="personal-agent-reach-entry"
+                    label={workspace.name ?? "Unnamed workspace"}
+                  >
+                    <RoleMark role={workspace.role} />
+                    <span className={`${VALUE} ${shown.label === "None" ? "text-subtle" : ""}`}>
+                      <Icon size={12} aria-hidden />
+                      {shown.label}
+                    </span>
+                  </PageRow>
+                );
+              })}
+              {ended.map((workspace) => {
+                const name = workspace.name ?? "Unnamed workspace";
+                return (
+                  <div
+                    key={workspace.workspaceId}
+                    data-testid="personal-agent-reach-ended"
+                    className={ROW}
+                  >
+                    <span className="flex min-w-0 shrink flex-col">
+                      <span className="truncate text-[13px] text-muted">{name}</span>
+                      <span
+                        data-testid="personal-agent-reach-ended-note"
+                        className="text-[12px] text-muted"
+                      >
+                        Reaches nothing here. If you rejoin, choose its reach again.
                       </span>
-                    </PageRow>
-                  );
-                })}
-              </div>
-              <p
-                data-testid="personal-agent-reach-meanings"
-                className="m-0 mt-1.5 text-[12px] text-muted"
-              >
-                {REACH_MEANINGS}
-              </p>
-            </>
-          )}
+                    </span>
+                    <span className={VALUE}>
+                      <span className="inline-flex shrink-0 items-center gap-1">
+                        <UserX size={12} aria-hidden />
+                        Membership ended
+                      </span>
+                      <SecondaryButton
+                        size="row"
+                        data-testid="personal-agent-reach-remove"
+                        aria-label={`Remove ${name} from what ${agent.name} can reach`}
+                        disabled={removing !== null}
+                        onFocus={() => (focusedRemove.current = workspace.workspaceId)}
+                        // Focus a person moves away is theirs. Focus lost to Removing… or the row going isn't.
+                        onBlur={(event) => {
+                          if (event.currentTarget.isConnected && !event.currentTarget.disabled)
+                            focusedRemove.current = null;
+                        }}
+                        onClick={() => void removeEnded(workspace)}
+                      >
+                        {removing === workspace.workspaceId ? "Removing…" : "Remove"}
+                      </SecondaryButton>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {listed.length > 0 ? <ReachNotes joined={joinedIn(listed)} className="mt-1.5" /> : null}
         </>
       )}
 
@@ -557,7 +701,7 @@ export function PersonalAgentPage(props: {
           onCancel={() => setSigningOut(false)}
           onConfirm={() => {
             setSigningOut(false);
-            void props.onChange({ kind: "sign-out" }, `dohc could not sign out ${agent.name}.`);
+            void props.onChange({ kind: "sign-out" }, `sign out ${agent.name}`);
           }}
         >
           <p className="m-0">Its posts and changes stay in History.</p>

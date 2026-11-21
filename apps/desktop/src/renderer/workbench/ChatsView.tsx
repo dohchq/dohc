@@ -116,6 +116,7 @@ import {
   type ChatMessageListHandle,
   MentionText,
   hasChatLinks,
+  AgentPerson,
   chatAuthorLabel,
   usePersonalAgentNames,
   type ChatReactionControls,
@@ -4005,6 +4006,7 @@ export function ChatsView(props: {
                           {chatAuthorLabel(item.message)}
                         </AgentName>
                       </span>
+                      <AgentPerson author={item.message} testId="chats-feed-person" />
                       {item.message.authorKind === "link" ? (
                         <LinkHolderMark testId="chats-feed-link-holder" />
                       ) : null}

@@ -22,6 +22,7 @@ import {
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList } from "./AgentList";
+import { PERSONAL_AGENT_JOINED_NOTE as JOINED_NOTE } from "@dohc/security-contract/workspace-members";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let _listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
@@ -600,11 +601,36 @@ function account(
       revision: 3,
       agents: [...agents],
       workspaces: [
-        { workspaceId: "ws-1", name: "Trip" },
-        { workspaceId: "ws-2", name: "Budget" },
+        { workspaceId: "ws-1", name: "Trip", role: "owner" },
+        { workspaceId: "ws-2", name: "Budget", role: "owner" },
       ],
     },
     failure: null,
+  };
+}
+
+// Grok Bot also reaches Community, which its person joined, at Edit, and Old club, whose membership ended.
+function joinedAccount(): PersonalAgentsAccount {
+  const grok: PersonalAgent = {
+    ...GROK,
+    reach: [
+      ...GROK.reach,
+      { workspaceId: "ws-3", level: "edit" },
+      { workspaceId: "ws-5", level: "comment" },
+    ],
+  };
+  const base = account([grok, NOVA]);
+  return {
+    ...base,
+    roster: {
+      ...base.roster!,
+      workspaces: [
+        { workspaceId: "ws-3", name: "Community", role: "member" },
+        ...base.roster!.workspaces,
+        { workspaceId: "ws-4", name: "Club", role: "admin" },
+        { workspaceId: "ws-5", name: "Old club", role: "ended" },
+      ],
+    },
   };
 }
 const personalIds = () =>
@@ -653,8 +679,156 @@ it("changes what an agent can reach from its sheet", async () => {
     accountKey: ACCOUNT_KEY,
     agentId: GROK_ID,
     change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }] },
+    what: "change what Grok Bot can reach",
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it("lists joined workspaces after owned ones, marked Member or Admin, with no Edit there", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  renderList();
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+  await openAgent("Grok Bot");
+  // Edit acts as Comment in a joined workspace, so the page says Comment.
+  expect(
+    page()
+      .getAllByTestId("personal-agent-reach-entry")
+      .map((row) => row.textContent),
+  ).toEqual(["TripComment", "BudgetView", "CommunityMemberComment", "ClubAdminNone"]);
+  expect(page().getAllByTestId("personal-agent-role")[0]!.title).toBe(JOINED_NOTE);
+  expect(page().getByTestId("personal-agent-joined-note").textContent).toBe(JOINED_NOTE);
+
+  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
+  expect(dialog.getAllByTestId("personal-agent-reach-row").map((row) => row.dataset.role)).toEqual([
+    "owner",
+    "owner",
+    "member",
+    "admin",
+  ]);
+  expect(dialog.getByTestId("personal-agent-joined-note").textContent).toBe(JOINED_NOTE);
+  const community = dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Community" });
+  expect(
+    within(community)
+      .getAllByRole("radio")
+      .map((radio) => radio.textContent),
+  ).toEqual(["None", "View", "Comment"]);
+  expect(community.querySelector("[aria-checked='true']")!.textContent).toBe("Comment");
+  expect(
+    within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" }))
+      .getAllByRole("radio")
+      .map((radio) => radio.textContent),
+  ).toEqual(["None", "View", "Comment", "Edit"]);
+  await userEvent.click(
+    within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Club" })).getByRole(
+      "radio",
+      { name: "View" },
+    ),
+  );
+  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
+  // The ended workspace stays as it was: only its own Remove drops it.
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: {
+      kind: "reach",
+      reach: [
+        { workspaceId: "ws-1", level: "comment" },
+        { workspaceId: "ws-2", level: "view" },
+        { workspaceId: "ws-3", level: "comment" },
+        { workspaceId: "ws-4", level: "view" },
+        { workspaceId: "ws-5", level: "comment" },
+      ],
+    },
+    what: "change what Grok Bot can reach",
+  });
+});
+
+it("gives an agent link on Add agent and Sign in again in a joined workspace, named by its id on the relay", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  renderList({ workspaceId: "local-copy", membersWorkspaceId: "ws-3", workspaceName: "Community" });
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+
+  await openAgent("Nova");
+  const copy = page().getByTestId<HTMLButtonElement>("personal-agent-link-copy");
+  expect(copy.disabled).toBe(false);
+  expect(page().queryByTestId("personal-agent-link-reason")).toBeNull();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+  await userEvent.click(copy);
+  expect(writeText).toHaveBeenCalledExactlyOnceWith("https://relay.test/mcp/agent/w/ws-3");
+  writeText.mockRestore();
+  await back();
+
+  await openAdd();
+  await userEvent.click(runsWith("link"));
+  expect(screen.getByTestId("agent-add-link").textContent).toContain("relay.test");
+  expect(screen.getByTestId("agent-add-link-note").textContent).not.toContain(
+    "Sync this workspace",
+  );
+});
+
+it("shows a workspace whose membership ended with Remove, and says why in a toast when Remove fails", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [joinedAccount()] });
+  const { onError } = renderList();
+  await waitFor(() => expect(personalIds().length).toBeGreaterThan(0));
+  await openAgent("Grok Bot");
+  const ended = page().getByTestId("personal-agent-reach-ended");
+  expect(ended.textContent).toBe(
+    "Old clubReaches nothing here. If you rejoin, choose its reach again.Membership endedRemove",
+  );
+  let answer: (result: { ok: false; error: string }) => void = () => {};
+  bridgeMock.changePersonalAgent.mockReturnValueOnce(
+    new Promise((resolve) => {
+      answer = resolve;
+    }),
+  );
+  const remove = within(ended).getByRole<HTMLButtonElement>("button", {
+    name: "Remove Old club from what Grok Bot can reach",
+  });
+  await userEvent.click(remove);
+  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
+    accountKey: ACCOUNT_KEY,
+    agentId: GROK_ID,
+    change: {
+      kind: "reach",
+      reach: [
+        { workspaceId: "ws-2", level: "view" },
+        { workspaceId: "ws-1", level: "comment" },
+        { workspaceId: "ws-3", level: "edit" },
+      ],
+    },
+    what: "remove Old club from Grok Bot's reach",
+  });
+  expect(remove.textContent).toBe("Removing…");
+  expect(remove.disabled).toBe(true);
+  act(() =>
+    answer({
+      ok: false,
+      error:
+        "dohc could not reach relay.test to remove Old club from Grok Bot's reach. Check your connection.",
+    }),
+  );
+  await waitFor(() => expect(remove.disabled).toBe(false));
+  expect(remove.textContent).toBe("Remove");
+  expect(onError).toHaveBeenCalledWith(
+    "dohc could not reach relay.test to remove Old club from Grok Bot's reach. Check your connection.",
+    undefined,
+    expect.any(Function),
+  );
+  // Once the relay drops it, the row goes. A Remove the person left keeps no claim on focus.
+  remove.focus();
+  await userEvent.click(page().getByText("Activity"));
+  expect(document.activeElement).toBe(document.body);
+  act(() => personalListener!({ accounts: [account()] }));
+  expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
+  expect(document.activeElement).toBe(document.body);
+  // A focused Remove hands focus to Change when its row goes.
+  act(() => personalListener!({ accounts: [joinedAccount()] }));
+  page().getByTestId("personal-agent-reach-remove").focus();
+  act(() => personalListener!({ accounts: [account()] }));
+  expect(page().queryByTestId("personal-agent-reach-ended")).toBeNull();
+  expect(document.activeElement).toBe(page().getByTestId("personal-agent-reach"));
+  expect(page().queryByTestId("personal-agent-joined-note")).toBeNull();
 });
 
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
@@ -703,6 +877,7 @@ it("signs an agent out after asking, and its page dims with no reach", async () 
     accountKey: ACCOUNT_KEY,
     agentId: GROK_ID,
     change: { kind: "sign-out" },
+    what: "sign out Grok Bot",
   });
   expect(screen.queryByRole("dialog")).toBeNull();
   act(() =>
@@ -730,6 +905,7 @@ it("removes a signed-out agent, and Undo brings it back signed out", async () =>
     accountKey: ACCOUNT_KEY,
     agentId: NOVA_ID,
     change: { kind: "remove" },
+    what: "remove Nova",
   });
   act(() => personalListener!({ accounts: [account([GROK])] }));
   expect(screen.queryByTestId("agent-page")).toBeNull();
@@ -741,6 +917,7 @@ it("removes a signed-out agent, and Undo brings it back signed out", async () =>
       accountKey: ACCOUNT_KEY,
       agentId: NOVA_ID,
       change: { kind: "restore" },
+      what: "bring back Nova",
     }),
   );
   act(() => personalListener!({ accounts: [account([GROK, NOVA])] }));
@@ -783,6 +960,7 @@ it("opens the agent a notice names on a page of its own, with that agent's reach
     accountKey: ACCOUNT_KEY,
     agentId: irisId,
     change: { kind: "reach", reach: [{ workspaceId: "ws-2", level: "comment" }] },
+    what: "change what Iris can reach",
   });
 });
 
@@ -796,13 +974,51 @@ it("opens a personal agent's page after it was renamed on another computer", asy
   );
 });
 
+it("holds a skeleton row where personal agents will appear until the first roster answers", async () => {
+  let answer: (event: PersonalAgentsEvent) => void = () => {};
+  bridgeMock.readPersonalAgents.mockReturnValueOnce(
+    new Promise((resolve) => {
+      answer = resolve;
+    }),
+  );
+  renderList();
+  // The local agents show at once; the personal ones wait under them.
+  const agents = await screen.findByTestId("agents");
+  expect(within(agents).getByTestId("personal-agents-loading").textContent).toBe(
+    "Loading your agents…",
+  );
+  expect(screen.queryByTestId("personal-agents-retry")).toBeNull();
+  expect(screen.queryByTestId("agents-empty")).toBeNull();
+  act(() => answer({ accounts: [account()] }));
+  await waitFor(() => expect(personalIds()).toEqual([GROK_ID, NOVA_ID]));
+  expect(screen.queryByTestId("personal-agents-loading")).toBeNull();
+
+  // A read again keeps the rows it has, with no skeleton.
+  act(() => personalListener?.({ accounts: [account()] }));
+  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
+  expect(screen.queryByTestId("personal-agents-loading")).toBeNull();
+});
+
+it("holds a skeleton row in place of the list while an account's first roster is unread", async () => {
+  bridgeMock.readPersonalAgents.mockResolvedValueOnce({
+    accounts: [{ ...account(), roster: null, failure: null }],
+  });
+  renderList({ settings: { ...SETTINGS, agents: {} } });
+  expect((await screen.findByTestId("personal-agents-loading")).textContent).toBe(
+    "Loading your agents…",
+  );
+  expect(screen.queryByTestId("agents-empty")).toBeNull();
+  expect(screen.queryByTestId("personal-agents-retry")).toBeNull();
+});
+
 it("says in the list that the account's agents couldn't be listed, with the cause in a toast", async () => {
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({
     accounts: [
       {
         ...account(),
         roster: null,
-        failure: "dohc could not reach relay.test. Check your connection.",
+        failure:
+          "dohc could not reach relay.test to list your personal agents. Check your connection.",
       },
     ],
   });
@@ -812,7 +1028,7 @@ it("says in the list that the account's agents couldn't be listed, with the caus
   );
   await waitFor(() =>
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not reach relay.test. Check your connection.",
+      "dohc could not reach relay.test to list your personal agents. Check your connection.",
       undefined,
       expect.any(Function),
       undefined,

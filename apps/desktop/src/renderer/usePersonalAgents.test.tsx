@@ -34,7 +34,7 @@ function event(name: string): PersonalAgentsEvent {
               reach: [{ workspaceId: "ws-a", level: "view" }],
             },
           ],
-          workspaces: [{ workspaceId: "ws-a", name: "Trip" }],
+          workspaces: [{ workspaceId: "ws-a", name: "Trip", role: "owner" }],
         },
         failure: null,
       },

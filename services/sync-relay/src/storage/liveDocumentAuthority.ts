@@ -2,7 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
 import { serviceHostDocumentEnabled, serviceHostDocumentEnrolled } from "./serviceHostEnrollment";
-import { personalReachIn, readPersonalAuthority } from "./personalAgents";
+import { ownedPersonalReachIn, readPersonalAuthority } from "./personalAgents";
 import {
   ordinaryActivationBaseline,
   ordinaryActivationBasisCharge,
@@ -1008,7 +1008,7 @@ function currentPersonalEdit(
     connection.agentId !== actor.agentId
   )
     return null;
-  return personalReachIn(storage, connection, actor.workspaceId)?.level === "edit"
+  return ownedPersonalReachIn(storage, connection, actor.workspaceId)?.level === "edit"
     ? connection
     : null;
 }

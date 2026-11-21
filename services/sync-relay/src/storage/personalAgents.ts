@@ -9,6 +9,9 @@ import {
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { constantTimeHashEqual } from "../linkSecurity";
 import { personalAgentOrigin } from "../relayLogInputs";
+import { authorizeShareGrantAction } from "../shareAuthorization";
+import { isWorkspaceSelector } from "../shareFilter";
+import type { WorkspaceShareSelector } from "../workspaceReach";
 import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import {
   AGENT_AUTHORIZATION_CODE_TTL_MS,
@@ -26,9 +29,11 @@ import {
 } from "./agentConnections";
 import type { StorageContext } from "./context";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
+import { capReach } from "./memberReach";
 import { advanceNoticeHead, noticePersonalAgentSignedIn } from "./notices";
 import { nullableText } from "./rows";
 import type { SqliteDb } from "./types";
+import { getWorkspaceMembership, workspaceMemberGrantId } from "./workspaceMembers";
 import { workspaceIsOwnedBy } from "./workspaces";
 
 export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
@@ -45,9 +50,30 @@ export interface PersonalReachChoice {
   level: PersonalReachLevel;
 }
 
-export interface PersonalReach extends PersonalReachChoice {
+export interface PersonalReachRow extends PersonalReachChoice {
   /** The workspace's log head when it entered reach. A wait starts there. */
   startSeq: number;
+}
+
+/** The person's place in a workspace in an agent's reach. */
+export type PersonalWorkspaceRole = "owner" | "admin" | "member";
+
+/**
+ * What a personal agent reaches in one workspace: its person's reach there,
+ * capped at the level the person chose for it. Every read and post asks
+ * `selector`, owned workspace or joined, so none reads one flat level.
+ */
+export interface PersonalReach {
+  workspaceId: string;
+  /** The workspace's log head when it entered reach. A wait starts there. */
+  startSeq: number;
+  /** The account owns the workspace. Writes need it; in a joined workspace the agent only reads and posts. */
+  owned: boolean;
+  role: PersonalWorkspaceRole;
+  /** An owned workspace's is an admin's reach, rule files included. */
+  selector: WorkspaceShareSelector;
+  /** The level the agent holds where no rule narrows it, which its workspace list shows. */
+  listedLevel: PersonalReachLevel;
 }
 
 export interface PersonalAgentRow {
@@ -64,7 +90,7 @@ export interface PersonalAgentRow {
   /** When the agent last signed in. Null for an agent whose last sign-in the relay didn't record. */
   signedInAtMs: number | null;
   lastActionAtMs: number | null;
-  reach: PersonalReach[];
+  reach: PersonalReachRow[];
 }
 
 export interface PersonalAuthorizationRow {
@@ -220,7 +246,7 @@ export function initializePersonalAgentSchema(db: SqliteDb): void {
 const AGENT_COLUMNS = `agent_id, owner_user_id, name, hue, reported_product, status, epoch, created_at_ms, last_action_at_ms,
   reported_version, signed_in_at_ms`;
 
-function reachOf(storage: StorageContext, agentId: string): PersonalReach[] {
+function reachOf(storage: StorageContext, agentId: string): PersonalReachRow[] {
   return storage.db
     .prepare(`SELECT workspace_id, level, start_seq FROM sync_relay_personal_agent_reach
     WHERE agent_id = ? ORDER BY workspace_id`)
@@ -267,6 +293,34 @@ function bumpRoster(storage: StorageContext, ownerUserId: string): number {
   return Number(row?.revision);
 }
 
+/**
+ * An account that becomes a member starts its personal agents with no reach
+ * there. Reach chosen under an earlier membership, which Settings lists as
+ * ended, waits for the person to choose again, and so does a code allowed then
+ * and not yet redeemed, whether for an agent or a new one. Call it in the
+ * transaction that starts the membership.
+ */
+export function startPersonalAgentsInMembership(
+  storage: StorageContext,
+  workspaceId: string,
+  ownerUserId: string,
+): void {
+  const dropped = storage.db
+    .prepare(
+      `DELETE FROM sync_relay_personal_agent_reach WHERE workspace_id = ? AND agent_id IN
+       (SELECT agent_id FROM sync_relay_personal_agents WHERE owner_user_id = ?)`,
+    )
+    .run(workspaceId, ownerUserId);
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_personal_agent_authorizations
+       WHERE owner_user_id = ? AND status = 'allowed' AND EXISTS
+       (SELECT 1 FROM json_each(reach_json) WHERE json_extract(value, '$.workspaceId') = ?)`,
+    )
+    .run(ownerUserId, workspaceId);
+  if (dropped.changes > 0) bumpRoster(storage, ownerUserId);
+}
+
 export function personalRosterRevision(storage: StorageContext, ownerUserId: string): number {
   const row = storage.db
     .prepare("SELECT revision FROM sync_relay_personal_agent_rosters WHERE owner_user_id = ?")
@@ -294,10 +348,78 @@ export function ownsWorkspace(
   );
 }
 
-function reachIsOwned(
+/**
+ * The person's reach as a member of a workspace they joined, through their
+ * current grant on its share, or null when they aren't an active member.
+ */
+function joinedSelector(
+  storage: StorageContext,
+  userId: string,
+  workspaceId: string,
+): WorkspaceShareSelector | null {
+  if (workspaceIsDeleted(storage, workspaceId)) return null;
+  const grantId = workspaceMemberGrantId(storage, workspaceId, userId);
+  if (grantId === null) return null;
+  const current = authorizeShareGrantAction({
+    storage,
+    grantId,
+    principal: { kind: "user", userId },
+    action: "read",
+  });
+  return current.ok &&
+    current.share.workspaceId === workspaceId &&
+    isWorkspaceSelector(current.effectiveSelector)
+    ? current.effectiveSelector
+    : null;
+}
+
+function lowerLevel(a: PersonalReachLevel, b: PersonalReachLevel): PersonalReachLevel {
+  return PERSONAL_REACH_LEVELS.indexOf(a) <= PERSONAL_REACH_LEVELS.indexOf(b) ? a : b;
+}
+
+/** A reach row resolved for the account: owned, joined as an active member, or null. */
+function resolvePersonalReach(
+  storage: StorageContext,
+  ownerUserId: string,
+  row: PersonalReachRow,
+): PersonalReach | null {
+  const { workspaceId, startSeq, level } = row;
+  if (ownsWorkspace(storage, ownerUserId, workspaceId)) {
+    const reach = storage.memberReach(workspaceId, ownerUserId, "admin", "edit");
+    return {
+      workspaceId,
+      startSeq,
+      owned: true,
+      role: "owner",
+      selector: { kind: "workspace", role: "admin", reach: capReach(reach, level) },
+      listedLevel: level,
+    };
+  }
+  const joined = joinedSelector(storage, ownerUserId, workspaceId);
+  if (!joined) return null;
+  return {
+    workspaceId,
+    startSeq,
+    owned: false,
+    role: joined.role,
+    selector: { ...joined, reach: capReach(joined.reach, level) },
+    listedLevel: joined.role === "admin" ? level : lowerLevel(level, joined.reach.evaluated.level),
+  };
+}
+
+/**
+ * Each workspace appears once: one the account owns at View, Comment, or Edit,
+ * or one it is an active member of at View or Comment. A member's agent never
+ * writes a member's files, so Edit there would only promise what no route
+ * grants. A change may keep an entry the agent already holds at the same
+ * level, such as one whose membership ended, so dropping one such workspace
+ * never needs the others dropped too.
+ */
+function reachIsAllowed(
   storage: StorageContext,
   ownerUserId: string,
   reach: readonly PersonalReachChoice[],
+  held: readonly PersonalReachChoice[] = [],
 ): boolean {
   return (
     reach.length <= PERSONAL_AGENT_REACH_LIMIT &&
@@ -305,7 +427,12 @@ function reachIsOwned(
     reach.every(
       (entry) =>
         (PERSONAL_REACH_LEVELS as readonly string[]).includes(entry.level) &&
-        ownsWorkspace(storage, ownerUserId, entry.workspaceId),
+        (held.some(
+          (kept) => kept.workspaceId === entry.workspaceId && kept.level === entry.level,
+        ) ||
+          ownsWorkspace(storage, ownerUserId, entry.workspaceId) ||
+          (entry.level !== "edit" &&
+            joinedSelector(storage, ownerUserId, entry.workspaceId) !== null)),
     )
   );
 }
@@ -347,16 +474,21 @@ function writeReach(
 }
 
 /**
- * Appends the agent's DM in each workspace that just entered its reach, from
- * the agent's own origin. Every computer that holds the DM already converges
- * on its wire id, so a repeat costs one small op.
+ * Appends the agent's DM in each workspace its account owns that just entered
+ * its reach, from the agent's own origin. A joined workspace gets none: a
+ * member's agent has no chat of its own there. Every computer that holds the
+ * DM already converges on its wire id, so a repeat costs one small op.
  */
 function appendPersonalDms(
   storage: StorageContext,
   agentId: string,
-  workspaceIds: readonly string[],
+  ownerUserId: string,
+  added: readonly string[],
   nowMs: number,
 ): void {
+  const workspaceIds = added.filter((workspaceId) =>
+    ownsWorkspace(storage, ownerUserId, workspaceId),
+  );
   if (workspaceIds.length === 0) return;
   const name = String(
     storage.db
@@ -532,7 +664,7 @@ export function cancelPersonalAuthorization(
 /**
  * Allow turns the request into a single-use code bound to the account, its
  * fence epoch read at consent, the chosen reach, and, when signing in again,
- * the agent's epoch. Every workspace in the reach must be the account's.
+ * the agent's epoch. `reachIsAllowed` decides the reach.
  */
 export function allowPersonalAuthorization(
   storage: StorageContext,
@@ -552,7 +684,7 @@ export function allowPersonalAuthorization(
     if (
       !pending ||
       input.reach.length === 0 ||
-      !reachIsOwned(storage, input.ownerUserId, input.reach)
+      !reachIsAllowed(storage, input.ownerUserId, input.reach)
     )
       return null;
     let agentId: string | null = null;
@@ -621,8 +753,9 @@ export function personalCredentialOwner(
 
 /**
  * Redeems a code once, in one transaction. It checks the code's bindings,
- * the account's fence against `fenceEpoch` read just before, that the account
- * still owns every workspace, and, when signing in again, the agent's epoch.
+ * the account's fence against `fenceEpoch` read just before, that
+ * `reachIsAllowed` still allows the reach, and, when signing in again, the
+ * agent's epoch.
  * It then creates or reuses the agent, writes its reach, and issues the
  * connection's tokens. Signing in again ends the agent's other connections.
  * Any mismatch spends the code; replaying a redeemed code ends its connection.
@@ -671,7 +804,7 @@ export function redeemPersonalAuthorizationCode(
       return spend();
     const ownerUserId = String(row.owner_user_id);
     const reach = parseReach(row.reach_json);
-    if (reach.length === 0 || !reachIsOwned(storage, ownerUserId, reach)) return spend();
+    if (reach.length === 0 || !reachIsAllowed(storage, ownerUserId, reach)) return spend();
 
     let agentId: string;
     if (row.agent_id !== null) {
@@ -727,7 +860,7 @@ export function redeemPersonalAuthorizationCode(
         agentId,
       );
     const newlyReached = writeReach(storage, agentId, reach);
-    appendPersonalDms(storage, agentId, newlyReached, nowMs);
+    appendPersonalDms(storage, agentId, ownerUserId, newlyReached, nowMs);
     storage.db
       .prepare(`INSERT INTO sync_relay_personal_agent_connections (
         connection_id, agent_id, owner_user_id, client_id, resource_hash, agent_epoch, fence_epoch, connected_at_ms
@@ -753,8 +886,13 @@ export function redeemPersonalAuthorizationCode(
     const address = String(row.workspace_id);
     noticePersonalAgentSignedIn(storage, {
       ownerUserId,
-      // The address the agent signed in at, or a workspace in reach once the account no longer owns it.
-      workspaceId: ownsWorkspace(storage, ownerUserId, address) ? address : reach[0]!.workspaceId,
+      // The address the agent signed in at, or a workspace in reach, an owned one first, once the account no longer owns it.
+      workspaceId: ownsWorkspace(storage, ownerUserId, address)
+        ? address
+        : (
+            reach.find((entry) => ownsWorkspace(storage, ownerUserId, entry.workspaceId)) ??
+            reach[0]!
+          ).workspaceId,
       connectionId: input.connectionId,
       agentId,
       agentName: String(
@@ -807,35 +945,70 @@ function connectionIsCurrent(
   );
 }
 
+function reachRowIn(
+  storage: StorageContext,
+  agentId: string,
+  workspaceId: string,
+): PersonalReachRow | null {
+  const row = storage.db
+    .prepare(`SELECT level, start_seq FROM sync_relay_personal_agent_reach
+    WHERE agent_id = ? AND workspace_id = ?`)
+    .get(agentId, workspaceId);
+  return row
+    ? {
+        workspaceId,
+        level: String(row.level) as PersonalReachLevel,
+        startSeq: Number(row.start_seq),
+      }
+    : null;
+}
+
 /**
- * The agent's reach in one workspace its account still owns, or null. The
- * route checks the level it needs.
+ * The agent's reach in one workspace its account owns or is an active member
+ * of, or null. The route asks the selector for the level it needs.
  */
 export function personalReachIn(
   storage: StorageContext,
   connection: PersonalConnectionRow,
   workspaceId: string,
 ): PersonalReach | null {
-  const row = storage.db
-    .prepare(`SELECT level, start_seq FROM sync_relay_personal_agent_reach
-    WHERE agent_id = ? AND workspace_id = ?`)
-    .get(connection.agentId, workspaceId);
-  if (!row || !ownsWorkspace(storage, connection.ownerUserId, workspaceId)) return null;
-  return {
-    workspaceId,
-    level: String(row.level) as PersonalReachLevel,
-    startSeq: Number(row.start_seq),
-  };
+  const row = reachRowIn(storage, connection.agentId, workspaceId);
+  return row && resolvePersonalReach(storage, connection.ownerUserId, row);
 }
 
-/** Every workspace in the agent's reach that its account still owns. */
-export function ownedPersonalReach(
+/** Whether the agent's reach names the workspace, whether or not its account still reaches it. */
+export function personalReachNames(
+  storage: StorageContext,
+  connection: PersonalConnectionRow,
+  workspaceId: string,
+): boolean {
+  return reachRowIn(storage, connection.agentId, workspaceId) !== null;
+}
+
+/**
+ * The agent's reach row in one workspace its account owns, or null. Writes
+ * take only this: in a workspace its person joined, a member's agent only
+ * reads and posts, never changes a Collection or a live document.
+ */
+export function ownedPersonalReachIn(
+  storage: StorageContext,
+  connection: PersonalConnectionRow,
+  workspaceId: string,
+): PersonalReachRow | null {
+  const row = reachRowIn(storage, connection.agentId, workspaceId);
+  return row && ownsWorkspace(storage, connection.ownerUserId, workspaceId) ? row : null;
+}
+
+/** Every workspace in the agent's reach that its account owns or is an active member of, owned first. */
+export function currentPersonalReach(
   storage: StorageContext,
   connection: PersonalConnectionRow,
 ): PersonalReach[] {
-  return reachOf(storage, connection.agentId).filter((entry) =>
-    ownsWorkspace(storage, connection.ownerUserId, entry.workspaceId),
-  );
+  const resolved = reachOf(storage, connection.agentId).flatMap((row) => {
+    const reach = resolvePersonalReach(storage, connection.ownerUserId, row);
+    return reach ? [reach] : [];
+  });
+  return [...resolved.filter((entry) => entry.owned), ...resolved.filter((entry) => !entry.owned)];
 }
 
 /** Rotates a refresh token of a current connection. Reusing a recently used one ends the connection. */
@@ -916,33 +1089,76 @@ export function readPersonalAuthority(
   return rowToConnection(row);
 }
 
+/** Where an account stands in a workspace a reach names or can name. */
+export type PersonalRosterRole = PersonalWorkspaceRole | "ended";
+
 export interface PersonalRoster {
   revision: number;
   agents: PersonalAgentRow[];
-  /** The workspaces the account owns here, which a reach can name. */
-  workspaces: { workspaceId: string; name: string | null }[];
+  /**
+   * The workspaces a reach can name: those the account owns, then those it is
+   * an active member of. Last, any an agent's reach still names that the
+   * account no longer reaches, so the person can take it out.
+   */
+  workspaces: { workspaceId: string; name: string | null; role: PersonalRosterRole }[];
 }
 
 export function listPersonalAgents(storage: StorageContext, ownerUserId: string): PersonalRoster {
-  return storage.readTx(() => ({
-    revision: personalRosterRevision(storage, ownerUserId),
-    agents: storage.db
+  return storage.readTx(() => {
+    const revision = personalRosterRevision(storage, ownerUserId);
+    const agents = storage.db
       .prepare(`SELECT ${AGENT_COLUMNS} FROM sync_relay_personal_agents
       WHERE owner_user_id = ? AND status != 'removed' ORDER BY created_at_ms, agent_id`)
       .all(ownerUserId)
-      .map((row) => rowToAgent(storage, row)),
-    workspaces: accountIsFenced(storage, ownerUserId)
-      ? []
-      : storage.db
-          .prepare(`SELECT workspace_id, display_name
+      .map((row) => rowToAgent(storage, row));
+    if (accountIsFenced(storage, ownerUserId)) return { revision, agents, workspaces: [] };
+    const owned = storage.db
+      .prepare(`SELECT workspace_id, display_name
       FROM sync_relay_workspaces WHERE owner_user_id = ? ORDER BY workspace_id`)
-          .all(ownerUserId)
-          .filter((row) => !workspaceIsDeleted(storage, String(row.workspace_id)))
-          .map((row) => ({
-            workspaceId: String(row.workspace_id),
-            name: nullableText(row.display_name),
-          })),
-  }));
+      .all(ownerUserId)
+      .filter((row) => !workspaceIsDeleted(storage, String(row.workspace_id)))
+      .map((row) => ({
+        workspaceId: String(row.workspace_id),
+        name: nullableText(row.display_name),
+        role: "owner" as const,
+      }));
+    const joined = storage.db
+      .prepare(`SELECT workspace_id FROM sync_relay_workspace_members
+      WHERE user_id = ? AND state = 'active' ORDER BY workspace_id`)
+      .all(ownerUserId)
+      .flatMap((row) => {
+        const workspaceId = String(row.workspace_id);
+        const selector = joinedSelector(storage, ownerUserId, workspaceId);
+        return selector
+          ? [{ workspaceId, name: membershipName(storage, workspaceId), role: selector.role }]
+          : [];
+      });
+    const listed = new Set([...owned, ...joined].map((workspace) => workspace.workspaceId));
+    const ended = [
+      ...new Set(agents.flatMap((agent) => agent.reach.map((entry) => entry.workspaceId))),
+    ]
+      .filter((workspaceId) => !listed.has(workspaceId))
+      .sort()
+      .map((workspaceId) => ({
+        workspaceId,
+        // Only the membership the account was removed from keeps its entry, so
+        // a membership started again for others never tells it a new name.
+        name: storage.db
+          .prepare(
+            "SELECT 1 FROM sync_relay_workspace_members WHERE workspace_id = ? AND user_id = ?",
+          )
+          .get(workspaceId, ownerUserId)
+          ? membershipName(storage, workspaceId)
+          : null,
+        role: "ended" as const,
+      }));
+    return { revision, agents, workspaces: [...owned, ...joined, ...ended] };
+  });
+}
+
+/** The name members know a workspace by, or null when it has no members. */
+export function membershipName(storage: StorageContext, workspaceId: string): string | null {
+  return getWorkspaceMembership(storage, workspaceId)?.workspaceName ?? null;
 }
 
 export type PersonalAgentChange =
@@ -1012,7 +1228,7 @@ export function changePersonalAgent(
           .run(input.change.hue, agent.agentId);
         break;
       case "reach": {
-        if (!reachIsOwned(storage, input.ownerUserId, input.change.reach))
+        if (!reachIsAllowed(storage, input.ownerUserId, input.change.reach, agent.reach))
           return { ok: false, reason: "invalid" };
         const kept = new Map(
           input.change.reach.map((entry) => [
@@ -1029,7 +1245,13 @@ export function changePersonalAgent(
           )
           .map((entry) => entry.workspaceId);
         added = writeReach(storage, agent.agentId, input.change.reach);
-        appendPersonalDms(storage, agent.agentId, added, Math.trunc(input.nowMs));
+        appendPersonalDms(
+          storage,
+          agent.agentId,
+          input.ownerUserId,
+          added,
+          Math.trunc(input.nowMs),
+        );
         storage.db
           .prepare(
             "DELETE FROM sync_relay_personal_agent_authorizations WHERE agent_id = ? AND status != 'redeemed'",

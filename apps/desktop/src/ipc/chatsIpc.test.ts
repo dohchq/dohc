@@ -791,6 +791,13 @@ describe("chat message IPC identity", () => {
         chatMessageForIpc({ ...message, authorAgentId: "codex" }, () => null, neutralPresentation),
       ),
     ).toMatchObject({ authorAgentId: "codex" });
+    // A member's personal agent posts through the relay, which names it by its p- id.
+    const personal = "p-abcdefghijklmnopqrstuvwxyz";
+    expect(
+      ChatMessageRecord.parse(
+        chatMessageForIpc({ ...message, authorAgentId: personal }, () => null, neutralPresentation),
+      ),
+    ).toMatchObject({ authorAgentId: personal });
     expect(
       ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation)),
     ).not.toHaveProperty("authorAgentId");

@@ -52,7 +52,9 @@ const TOKEN_A = "A".repeat(43),
 const REACH = {
   ok: true,
   agent: { agentId: "p-aaaaaaaaaaaaaaaaaaaaaaaaaa", name: "Trip helper", handle: "Triphelper" },
-  workspaces: [{ workspaceId: "trip", name: "Trip", level: "edit", dmChannelWireId: "wire-dm" }],
+  workspaces: [
+    { workspaceId: "trip", name: "Trip", level: "edit", role: "owner", dmChannelWireId: "wire-dm" },
+  ],
 };
 const BINDING = {
   workspaceId: "trip",

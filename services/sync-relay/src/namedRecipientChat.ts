@@ -123,6 +123,7 @@ const linkId = (value: unknown): value is string =>
 function linkProvenanceHolds(p: Record<string, unknown>, originId: string): boolean {
   // A personal agent's post names the account, the agent, and the connection
   // it signed in with, from that agent's own origin, as every desktop checks.
+  // It may also name the person, which the relay writes.
   if (originId.startsWith(PERSONAL_AGENT_ORIGIN_PREFIX)) {
     return (
       p.authorKind === "agent" &&
@@ -132,15 +133,10 @@ function linkProvenanceHolds(p: Record<string, unknown>, originId: string): bool
       p.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX) &&
       originId === personalAgentOrigin(p.authorAgentId) &&
       String(p.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX) &&
-      ![
-        "linkGrantId",
-        "linkPrincipalId",
-        "authorOwnerDisplayName",
-        "chainDepth",
-        "authorReported",
-        "work",
-        "origin",
-      ].some((key) => Object.hasOwn(p, key))
+      (!Object.hasOwn(p, "authorOwnerDisplayName") || linkId(p.authorOwnerDisplayName)) &&
+      !["linkGrantId", "linkPrincipalId", "chainDepth", "authorReported", "work", "origin"].some(
+        (key) => Object.hasOwn(p, key),
+      )
     );
   }
   if (p.authorKind !== "link") {
@@ -754,6 +750,7 @@ export function createNamedRecipientChat(options: {
             signal: controller.signal,
             maxResponseBytes: limits.maxResponseBytes,
             busyCode: "share_access_rate_limited",
+            personOf: accountNames(options.lookupUserDisplayName),
             project: (message) => message,
           }),
         );
@@ -779,6 +776,19 @@ export function createNamedRecipientChat(options: {
     return Promise.race([work, cancelled]);
   };
   return handle;
+}
+
+/** Each account's name, looked up once: "Unnamed" for one with none, as a post names it. */
+function accountNames(lookup: LogAuthorNameLookup | undefined) {
+  const names = new Map<string, Promise<string>>();
+  return (userId: string) => {
+    let name = names.get(userId);
+    if (!name) {
+      name = accountDisplayName(lookup, userId).then((found) => found ?? "Unnamed");
+      names.set(userId, name);
+    }
+    return name;
+  };
 }
 
 /** A current file's Comments: the threads whose first create binds this file and no other. */
@@ -837,6 +847,8 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   signal: AbortSignal;
   maxResponseBytes: number;
   busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
+  /** Names the person on a personal agent's post written while the relay found no name. */
+  personOf?(userId: string): Promise<string>;
   project(message: PagedChatMessage): Message;
 }) {
   const { query, authorize, project } = input;
@@ -847,8 +859,10 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
   if (!following && query.has("hold")) throw badRequest("hold requires since");
   const hold = following ? parseLinkLogHold(query.get("hold")) : 0;
   let position = following ? since : query.has("before") ? cursor(query.get("before")) : null;
+  let pageStart = position;
   const readPage = () =>
     readAuthorized(input.storage, authorize, (selector) => {
+      pageStart = position;
       const page = {
         workspaceId: input.workspaceId,
         cursor: position,
@@ -976,6 +990,44 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       if (caughtUp()) page = readPage();
       if (!caughtUp()) break;
     }
+  }
+  // A personal agent's post written while the relay found no name for its
+  // person names only its account, so an agent's name alone could pass for
+  // anyone's: the page names the account's person.
+  // A rule can change while the names are looked up, so the page is read again
+  // from the same cursor under the reader's current reach, with no wait
+  // between that read and the answer. Each pass names at least one more
+  // account, so a page of at most `limit` posts ends the loop.
+  const { personOf } = input;
+  if (personOf) {
+    const names = new Map<string, string>();
+    const unnamed = () => [
+      ...new Set(
+        page.messages.flatMap((message) =>
+          message.authorKind === "agent" &&
+          message.authorUserId !== null &&
+          message.authorOwnerDisplayName === null &&
+          !names.has(message.authorUserId)
+            ? [message.authorUserId]
+            : [],
+        ),
+      ),
+    ];
+    for (let accounts = unnamed(); accounts.length > 0; accounts = unnamed()) {
+      await Promise.all(accounts.map(async (userId) => names.set(userId, await personOf(userId))));
+      position = pageStart;
+      page = readPage();
+    }
+    page = {
+      ...page,
+      messages: page.messages.map((message) =>
+        message.authorKind === "agent" &&
+        message.authorUserId !== null &&
+        message.authorOwnerDisplayName === null
+          ? { ...message, authorOwnerDisplayName: names.get(message.authorUserId)! }
+          : message,
+      ),
+    };
   }
   authorize();
   // A delete can commit while the page waits. Read deletion again in the turn

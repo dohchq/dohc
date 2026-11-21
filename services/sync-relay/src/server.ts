@@ -1182,7 +1182,7 @@ export function createSyncRelayHandler({
     limiter: linkReadRateLimiter,
     admitBlobBytes: admitLinkBlobBytes,
     maxFiles: linkCurrentFileLimit,
-    copies: serverCopies,
+    lookupUserDisplayName,
     collectionWrites: createPersonalCollectionWriteRoute({
       storage,
       rateLimiter: collectionWriteRateLimiter,

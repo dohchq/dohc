@@ -43,3 +43,8 @@ export function escapeHiddenText(json: string): string {
 export function isConnectedAgentId(agentId: string | undefined): boolean {
   return canonicalClaimedName(agentId) === UNNAMED_AGENT_ID;
 }
+
+/** Whether an agent id is a personal agent's. Only the relay writes one. */
+export function isPersonalAgentId(agentId: string | undefined): boolean {
+  return agentId?.startsWith("p-") === true;
+}

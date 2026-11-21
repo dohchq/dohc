@@ -422,16 +422,20 @@ export function createAgentConnectionRoutes(input: {
     return session;
   }
 
-  // The signed-in account owns the workspace the link was copied from, and
-  // this browser signed in at or after the account's last password change.
-  // A sign-in that read the old hash before a reset and inserts its session
-  // after the reset commits begins after the change, so it passes.
+  // The signed-in account owns the workspace the link was copied from or is an
+  // active member there, and this browser signed in at or after the account's
+  // last password change. A sign-in that read the old hash before a reset and
+  // inserts its session after the reset commits begins after the change, so it passes.
   async function personalConsentContext(request: Request, requestId: string) {
     const { fence } = input.personalAgents;
     const pending = storage.readPersonalAuthorization(hash("request", requestId), nowMs());
     if (!pending || !fence) throw new Refused();
     const session = await accountSession(request);
-    if (!storage.workspaceIsOwnedBy(pending.workspaceId, session.userId)) throw new Refused();
+    const roster = storage.listPersonalAgents(session.userId);
+    const linked = roster.workspaces.find(
+      (workspace) => workspace.workspaceId === pending.workspaceId,
+    );
+    if (!linked || linked.role === "ended") throw new Refused();
     let credentials: ConsentCredentials | null;
     try {
       credentials = await fence.readConsentCredentials(session.userId, session.sessionId);
@@ -440,7 +444,7 @@ export function createAgentConnectionRoutes(input: {
     }
     if (!credentials) throw new Refused();
     if (!credentials.sessionCurrent) throw relayError("sign_in_again");
-    return { pending, session, credentials };
+    return { pending, session, credentials, roster };
   }
 
   async function readPersonalConsent(
@@ -448,8 +452,7 @@ export function createAgentConnectionRoutes(input: {
     body: Record<string, unknown>,
   ): Promise<Response> {
     fields(body, ["requestId"]);
-    const { pending, session } = await personalConsentContext(request, text(body.requestId, 64));
-    const roster = storage.listPersonalAgents(session.userId);
+    const { pending, roster } = await personalConsentContext(request, text(body.requestId, 64));
     return jsonResponse({
       ok: true,
       reportedClientName: pending.reportedName,
@@ -457,7 +460,12 @@ export function createAgentConnectionRoutes(input: {
       expiresAtMs: pending.expiresAtMs,
       workspaceId: pending.workspaceId,
       levels: PERSONAL_REACH_LEVELS,
-      workspaces: roster.workspaces,
+      // Joined workspaces too: Allow replaces an existing agent's reach with
+      // what this page lists. One whose membership ended can't be chosen. The
+      // role lets the page offer Edit only in a workspace the account owns.
+      workspaces: roster.workspaces.flatMap(({ workspaceId, name, role }) =>
+        role === "ended" ? [] : [{ workspaceId, name, role }],
+      ),
       agents: roster.agents.map((agent) => ({
         agentId: agent.agentId,
         name: agent.name,

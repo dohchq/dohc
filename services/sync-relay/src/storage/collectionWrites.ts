@@ -60,7 +60,7 @@ import {
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { PersonalCredential } from "./personalAgentChat";
 import {
-  personalReachIn,
+  ownedPersonalReachIn,
   readPersonalAuthority,
   type PersonalConnectionRow,
 } from "./personalAgents";
@@ -629,7 +629,7 @@ function personalWriter(
 ): { connection: PersonalConnectionRow; name: string } {
   const connection = readPersonalAuthority(storage, input.check, input.fenceEpoch, nowMs);
   if (!connection || connection.connectionId !== input.connectionId) throw notFound();
-  const reach = personalReachIn(storage, connection, input.workspaceId);
+  const reach = ownedPersonalReachIn(storage, connection, input.workspaceId);
   if (!reach) throw relayError("personal_agent_out_of_reach");
   if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
   const agent = storage.db

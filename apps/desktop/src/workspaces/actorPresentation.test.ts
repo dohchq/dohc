@@ -242,6 +242,13 @@ describe("chat presentation admission", () => {
         await r.present(message({ author: { kind: "human", displayName: "Claude" } }), thread),
       ).not.toHaveProperty("connected");
     }
+    // Only the relay writes a personal agent's id, so its post keeps its kind.
+    const personalPost = message({
+      author: { kind: "agent", displayName: "Scout" },
+      authorAgentId: "p-scout",
+    });
+    for (const [r, thread] of shares)
+      expect(await r.present(personalPost, thread)).not.toHaveProperty("connected");
     // This device's own agent posts in a joined channel keep the key it wrote.
     expect(await shares[1][0].present(local("agent"), "shared")).not.toHaveProperty("connected");
     expect(await shares[1][0].present(post, "t")).toMatchObject({ connected: true });

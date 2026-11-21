@@ -20,6 +20,7 @@ import {
   ACTOR_HUES,
   actorHueSlot,
   isConnectedAgentId,
+  isPersonalAgentId,
 } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { ActorPresentation } from "../ipc/bridgeContract";
@@ -224,10 +225,11 @@ export function createActorPresentationRequest(
     const workspaceId = input.readWorkspace()?.workspaceId;
     if (workspaceId === undefined) throw new Error("Chat workspace closed.");
     // A share serves no run id, so an agent post that came through one could be a run's or a
-    // connected agent's. This device's own posts keep the key it wrote.
+    // connected agent's. This device's own posts keep the key it wrote, and a personal
+    // agent's post keeps the id only the relay writes.
     const connected =
       message.author.kind === "agent" &&
-      (shared && message.authorActorKey === undefined
+      (shared && message.authorActorKey === undefined && !isPersonalAgentId(message.authorAgentId)
         ? "unknown"
         : isConnectedAgentId(key.kind === "agent" ? key.claimedName : message.authorAgentId));
     return presentationFor(

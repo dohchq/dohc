@@ -10,6 +10,7 @@ import { formatChatTime, formatShortTime } from "../time";
 import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import {
+  AgentPerson,
   chatAuthorLabel,
   DeletedMessageLine,
   MessageReactions,
@@ -295,6 +296,7 @@ export function PostCard(props: {
                 "Unknown author"
               )}
             </span>
+            {message ? <AgentPerson author={message} testId="chats-post-person" /> : null}
             {isAgent ? (
               <AgentBadge
                 testIdPrefix="chats-post"

@@ -46,7 +46,7 @@ import {
   SERVICE_HOST_MAX_WORKSPACES,
 } from "../liveHostingLimits";
 import type { PersonalCredential } from "./personalAgentChat";
-import { personalReachIn, readPersonalAuthority } from "./personalAgents";
+import { ownedPersonalReachIn, readPersonalAuthority } from "./personalAgents";
 
 export { SERVICE_HOST_MAX_DOCUMENTS, SERVICE_HOST_MAX_WORKSPACES };
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -875,7 +875,7 @@ function authorizeIntent(
     nowMs,
   );
   if (!connection || connection.connectionId !== input.personal.connectionId) throw notFound();
-  const reach = personalReachIn(storage, connection, workspaceId);
+  const reach = ownedPersonalReachIn(storage, connection, workspaceId);
   if (!reach) throw relayError("personal_agent_out_of_reach");
   if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
   return connection.ownerUserId;

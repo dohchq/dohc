@@ -86,6 +86,8 @@ function personalRoster(now: number) {
         reach: [
           { workspaceId: WORKSPACE_ID, level: "comment" },
           { workspaceId: "budget", level: "view" },
+          { workspaceId: "community", level: "comment" },
+          { workspaceId: "old-club", level: "comment" },
         ],
       },
       {
@@ -101,9 +103,13 @@ function personalRoster(now: number) {
         reach: [],
       },
     ],
+    // Owned first, then joined, then one Grok Bot reaches whose membership ended.
     workspaces: [
-      { workspaceId: WORKSPACE_ID, name: "Trip" },
-      { workspaceId: "budget", name: "Budget" },
+      { workspaceId: WORKSPACE_ID, name: "Trip", role: "owner" },
+      { workspaceId: "budget", name: "Budget", role: "owner" },
+      { workspaceId: "community", name: "Community garden", role: "member" },
+      { workspaceId: "club", name: "Book club", role: "admin" },
+      { workspaceId: "old-club", name: "Old club", role: "ended" },
     ],
   };
 }
@@ -204,12 +210,28 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await expect(agentPage).toHaveAttribute("data-agent-id", GROK);
     await expect(agentPage).toHaveAttribute("data-status", "active");
     await expect(agentPage.getByTestId("personal-agent-activity")).toContainText("Grok 4.1");
+    await expect(agentPage.getByTestId("personal-agent-role")).toHaveText(["Member", "Admin"]);
+    await expect(agentPage.getByTestId("personal-agent-reach-ended")).toContainText(
+      "Membership ended",
+    );
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents-personal-page");
 
+    const remove = agentPage.getByTestId("personal-agent-reach-remove");
+    await agentPage.getByTestId("personal-agent-reach").focus();
+    for (
+      let presses = 0;
+      presses < 4 && !(await remove.evaluate((element) => element === document.activeElement));
+      presses += 1
+    ) {
+      await page.keyboard.press("Tab");
+    }
+    await expect(remove).toBeFocused();
+    await shoot(page, section, "settings-agents-personal-remove-focus");
+
     await agentPage.getByTestId("personal-agent-reach").click();
     const reachSheet = page.getByTestId("personal-agent-reach-sheet");
-    await expect(reachSheet.getByTestId("personal-agent-reach-row")).toHaveCount(2);
+    await expect(reachSheet.getByTestId("personal-agent-reach-row")).toHaveCount(4);
     await page.mouse.move(0, 0);
     await shoot(page, reachSheet, "settings-agents-personal-reach");
     await reachSheet.getByTestId("personal-agent-reach-cancel").click();

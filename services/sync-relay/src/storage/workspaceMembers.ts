@@ -8,6 +8,7 @@ import {
   type WorkspaceRole,
 } from "@dohc/security-contract/workspace-members";
 import { accountIsFenced } from "./accountDeletion";
+import { startPersonalAgentsInMembership } from "./personalAgents";
 import type { StorageContext } from "./context";
 import {
   insertShare,
@@ -599,7 +600,10 @@ export function inviteWorkspaceMember(
       }),
     );
     queueAddedNotice(storage, grantId, nowMs);
-    if (recipient !== null) forgetReplicaCurrentViewCaches(storage, input.workspaceId);
+    if (recipient !== null) {
+      startPersonalAgentsInMembership(storage, input.workspaceId, recipient);
+      forgetReplicaCurrentViewCaches(storage, input.workspaceId);
+    }
     return { ok: true };
   });
 }
@@ -760,6 +764,7 @@ export function letWorkspaceMemberBackIn(
         `UPDATE ${MEMBERS} SET grant_id = ?, role = 'member', state = 'active', joined_at_ms = ?, ended_at_ms = NULL WHERE member_id = ?`,
       )
       .run(grantId, nowMs, entry.memberId);
+    startPersonalAgentsInMembership(storage, input.workspaceId, entry.userId);
     insertShareGrant(
       storage,
       grantFor({
@@ -961,6 +966,7 @@ export function joinWorkspace(
        VALUES (?, ?, ?, ?, NULL, 'member', 'active', ?)`,
       )
       .run(input.newMemberId(), membership.workspaceId, grantId, input.userId, nowMs);
+    startPersonalAgentsInMembership(storage, membership.workspaceId, input.userId);
     insertShareGrant(
       storage,
       grantFor({
@@ -1023,6 +1029,7 @@ export function claimWorkspaceInvitesInTransaction(
         `UPDATE ${MEMBERS} SET user_id = ?, email = NULL, state = 'active', joined_at_ms = ? WHERE member_id = ?`,
       )
       .run(userId, Math.trunc(nowMs), invite.memberId);
+    startPersonalAgentsInMembership(storage, invite.workspaceId, userId);
     forgetReplicaCurrentViewCaches(storage, invite.workspaceId);
   }
 }

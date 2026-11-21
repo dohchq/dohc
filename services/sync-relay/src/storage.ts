@@ -2412,6 +2412,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
     visible?: (path: string) => boolean;
+    pastHidden?: true;
   }): number | null {
     return currentFilesStorage.currentFileBlobByteLength(this, input);
   }
@@ -2789,7 +2790,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     credential: personalAgentChatStorage.PersonalCredential,
     workspaceId: string,
     nowMs: number,
-  ): personalAgentStorage.PersonalReach | null {
+  ): personalAgentChatStorage.PersonalReachRead {
     return personalAgentChatStorage.readPersonalReach(this, credential, workspaceId, nowMs);
   }
 

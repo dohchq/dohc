@@ -117,11 +117,13 @@ function ChatMessage({
   message,
   replies,
   canReply,
+  readerUserId,
   onDelete,
 }: {
   message: NamedChatMessage;
   replies?: Replies;
   canReply: boolean;
+  readerUserId: string | undefined;
   onDelete?: () => void;
 }) {
   // Attachments are out of scope, so no image source is allowed.
@@ -135,7 +137,9 @@ function ChatMessage({
   const sent = new Date(message.createdAtMs),
     dated = !Number.isNaN(sent.getTime());
   const owner = agent ? message.authorOwnerDisplayName : null,
-    unnamed = owner !== null && message.authorDisplayName === "Agent";
+    unnamed = owner !== null && message.authorDisplayName === "Agent",
+    // An agent posts as its person's account, so the reader's own agent shares their id.
+    yours = readerUserId !== undefined && message.authorUserId === readerUserId;
   return (
     <li className="chat-message" data-seq={message.relaySeq} data-author-kind={message.authorKind}>
       <p className="chat-meta">
@@ -146,9 +150,11 @@ function ChatMessage({
             aria-label={message.authorKind === "automation" ? "Automation" : "Agent"}
           />
         )}
-        <span className="chat-author">{authorName(message)}</span>
+        <span className="chat-author">{unnamed && yours ? "Your agent" : authorName(message)}</span>
         {message.authorKind === "link" && <LinkHolderMark />}
-        {owner && !unnamed && <span className="chat-owner">{owner}'s agent</span>}
+        {owner && !unnamed && (
+          <span className="chat-owner">{yours ? "Your agent" : `${owner}'s agent`}</span>
+        )}
         {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
         {onDelete && message.deletedAtMs === undefined && (
           <button
@@ -395,6 +401,8 @@ function threadView(
 
 /** How a channel view reads, follows and posts: through a named account, or through a share link. */
 export interface ChatChannelClient {
+  /** The signed-in reader, whose own agent's posts read "Your agent". A link holder has none. */
+  readerUserId?: string;
   access: NamedChatAccess;
   readHistory(
     before: number | null,
@@ -963,6 +971,7 @@ export function ChannelView({
                     message={message}
                     replies={view?.replies.get(message.relaySeq)}
                     canReply={access === "read-write"}
+                    readerUserId={client.readerUserId}
                     {...(remove?.can(message)
                       ? {
                           onDelete: () =>

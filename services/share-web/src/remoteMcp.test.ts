@@ -998,7 +998,13 @@ function personalFixture() {
           ok: true,
           agent: { agentId: "agent", name: "Trip helper", handle: "Triphelper" },
           workspaces: [
-            { workspaceId: "trip", name: "Trip", level: "comment", dmChannelWireId: "wire-dm" },
+            {
+              workspaceId: "trip",
+              name: "Trip",
+              level: "comment",
+              role: "owner",
+              dmChannelWireId: "wire-dm",
+            },
           ],
         });
       }

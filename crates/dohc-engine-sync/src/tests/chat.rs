@@ -1007,12 +1007,12 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
             "chat.message.append",
             personal_message_payload("personal-message:dm", "personal-thread:t"),
         ),
-        envelope(
-            PERSONAL_ORIGIN,
-            3,
-            "chat.message.append",
-            personal_message_payload("personal-message:group", "thread-imported"),
-        ),
+        envelope(PERSONAL_ORIGIN, 3, "chat.message.append", {
+            // The relay names the person, so every desktop shows whose agent it is.
+            let mut payload = personal_message_payload("personal-message:group", "thread-imported");
+            payload["authorOwnerDisplayName"] = json!("Ana");
+            payload
+        }),
     ];
     for op in &ops {
         assert_eq!(
@@ -1041,6 +1041,11 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
             None
         )
     );
+    let named = LinkedChatStore::new(&mut engine)
+        .get_message("ws", "personal-message:group")
+        .expect("read the named personal post");
+    assert_eq!(named.author_owner_display_name.as_deref(), Some("Ana"));
+    assert_eq!(read.author_owner_display_name, None);
     for message_id in ["personal-message:dm", "personal-message:group"] {
         assert_eq!(
             message_connections(&engine, message_id),
@@ -1106,7 +1111,7 @@ fn a_personal_agent_post_that_is_not_the_agents_own_is_refused() {
         ("authorAgentId", json!("helper")),
         ("agentConnectionId", json!("")),
         ("agentConnectionId", json!(" connection-1")),
-        ("authorOwnerDisplayName", json!("Ana")),
+        ("authorOwnerDisplayName", json!("")),
         ("origin", json!("cli")),
         ("chainDepth", json!(1)),
         ("linkGrantId", json!("grant-1")),
@@ -1494,6 +1499,10 @@ fn no_other_origin_writes_as_a_personal_agent() {
     fields.remove("authorAgentId");
     fields.remove("agentConnectionId");
     forged.push(taken);
+    // Only the relay names the person on a personal agent's post.
+    let mut claimed = personal_message_payload("personal-message:claimed", "thread-imported");
+    claimed["authorOwnerDisplayName"] = json!("Ana");
+    forged.push(claimed);
     // The fixture wrote the peer's first three ops.
     for (origin, first) in [("peer", 3), ("shared:s:peer", 0), (LINK_ORIGIN, 0)] {
         for (seq, payload) in forged.iter().enumerate() {
@@ -1508,7 +1517,7 @@ fn no_other_origin_writes_as_a_personal_agent() {
     }
     let taken = envelope(
         "peer",
-        7,
+        8,
         "chat.thread.create",
         personal_thread_payload("personal-thread:taken", "channel-imported"),
     );
@@ -1533,7 +1542,7 @@ fn no_other_origin_writes_as_a_personal_agent() {
     assert_eq!(
         apply_chat_envelope(
             &mut engine,
-            &envelope("peer", 8, "chat.message.append", own),
+            &envelope("peer", 9, "chat.message.append", own),
             &NoFaults
         )
         .expect("an agent you run"),

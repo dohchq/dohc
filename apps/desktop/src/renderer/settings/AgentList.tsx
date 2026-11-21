@@ -52,6 +52,7 @@ import { RestrictedAgentsBand } from "../RestrictedMode";
 import type { ErrorDetailField } from "../shell/copyDetails";
 import { IconButton, RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAgentsListening } from "../useAgentsListening";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { usePersonalAgents, type PersonalAgentsState } from "../usePersonalAgents";
@@ -626,6 +627,9 @@ function BrokenAgentRow(props: { problem: AgentProblem; onOpenSettingsFile: () =
  */
 export function AgentList(props: {
   workspaceId: string;
+  // A joined workspace's id on the relay. Its agent link names this id, not
+  // the copy's own.
+  membersWorkspaceId?: string;
   // What the open workspace goes by, for its agent link.
   workspaceName: string;
   settings: DesktopUserSettings;
@@ -670,6 +674,7 @@ export function AgentList(props: {
   const listening = useAgentsListening();
   // Opening Settings › Agents reads the relay again.
   const personal = usePersonalAgents(workspaceId, true);
+  const linkWorkspaceId = props.membersWorkspaceId ?? workspaceId;
   // What the read failures below have told this workspace's Notices. It
   // outlives the list while a page is open.
   const reportedAccounts = useMemo(() => new Map<string, string>(), [workspaceId]);
@@ -693,6 +698,21 @@ export function AgentList(props: {
   const personalKnown =
     personal.state.status === "ready" &&
     personal.state.accounts.every((account) => account.roster !== null);
+  // Until each account's first roster answers or fails, a skeleton row holds
+  // the personal agents' place. A read again keeps the rows it has instead.
+  const personalLoading =
+    personal.state.status === "loading" ||
+    (personal.state.status === "ready" &&
+      personal.state.accounts.some(
+        (account) => account.roster === null && account.failure === null,
+      )) ? (
+      <SkeletonRows
+        rows={2}
+        label="Loading your agents…"
+        testId="personal-agents-loading"
+        className="px-4 py-4"
+      />
+    ) : null;
   const [checking, setChecking] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, CheckState>>({});
   // A check's answer belongs to the workspace that asked for it.
@@ -1068,24 +1088,22 @@ export function AgentList(props: {
   const changePersonal = async (
     entry: PersonalEntry,
     next: PersonalAgentChange,
-    failure: string,
+    what: string,
   ): Promise<boolean> => {
-    const result = await changePersonalAgent(entry.account, entry.agent, next, failure);
+    const result = await changePersonalAgent(entry.account, entry.agent, next, what);
     if (!result.ok)
       onError?.(result.error, undefined, async () => {
-        await changePersonal(entry, next, failure);
+        await changePersonal(entry, next, what);
       });
     return result.ok;
   };
   const removePersonal = async (entry: PersonalEntry) => {
     const { agent } = entry;
-    if (!(await changePersonal(entry, { kind: "remove" }, `dohc could not remove ${agent.name}.`)))
-      return;
+    if (!(await changePersonal(entry, { kind: "remove" }, `remove ${agent.name}`))) return;
     setRenaming((current) => (current === agent.agentId ? null : current));
     onNotice?.(
       `Removed ${agent.name}.`,
-      () =>
-        void changePersonal(entry, { kind: "restore" }, `dohc could not bring back ${agent.name}.`),
+      () => void changePersonal(entry, { kind: "restore" }, `bring back ${agent.name}`),
     );
   };
 
@@ -1216,7 +1234,7 @@ export function AgentList(props: {
           <PersonalAgentPage
             key={`${personalPage.account.accountKey}:${agent.agentId}`}
             entry={personalPage}
-            workspaceId={workspaceId}
+            workspaceId={linkWorkspaceId}
             nameField={
               renaming === agent.agentId ? (
                 <AgentNameField
@@ -1224,11 +1242,7 @@ export function AgentList(props: {
                   name={agent.name}
                   problem={(value) => personalNameProblem(value, takenByOthers)}
                   onSave={(name) =>
-                    changePersonal(
-                      personalPage,
-                      { kind: "name", name },
-                      `dohc could not rename ${agent.name}.`,
-                    )
+                    changePersonal(personalPage, { kind: "name", name }, `rename ${agent.name}`)
                   }
                   onDone={() =>
                     setRenaming((current) => (current === agent.agentId ? null : current))
@@ -1238,7 +1252,7 @@ export function AgentList(props: {
             }
             onRename={() => setRenaming(agent.agentId)}
             onRemove={() => void removePersonal(personalPage)}
-            onChange={(next, failure) => changePersonal(personalPage, next, failure)}
+            onChange={(next, what) => changePersonal(personalPage, next, what)}
             onError={(message) => onError?.(message)}
             onBack={closePage}
             backRef={back}
@@ -1301,8 +1315,12 @@ export function AgentList(props: {
             >
               No agents yet.
             </p>
-          ) : null
-        ) : listed.length === 0 && entries.length === 0 ? null : (
+          ) : (
+            personalLoading
+          )
+        ) : listed.length === 0 && entries.length === 0 ? (
+          personalLoading
+        ) : (
           <div data-testid="agents" className="rounded-lg border border-line bg-panel">
             {listed.map((row) =>
               row.kind === "broken" ? (
@@ -1334,6 +1352,7 @@ export function AgentList(props: {
                 onOpen={() => openPage(entry.agent.agentId)}
               />
             ))}
+            {personalLoading}
           </div>
         )}
         <ArchivedAgents
@@ -1403,7 +1422,7 @@ export function AgentList(props: {
           mcpConfig={mcpConfig}
           mcpUnavailable={mcpUnavailable}
           mcpAgentId={idFor(false, "agent")}
-          agentLink={agentLinkChoice(personal.state, workspaceId, props.workspaceName)}
+          agentLink={agentLinkChoice(personal.state, linkWorkspaceId, props.workspaceName)}
           takenElsewhere={takenByPersonal}
           adding={adding}
           addError={addError}

@@ -39,10 +39,12 @@ export interface PersonalAgentRosterCache {
   revisionSeen(accountKey: string, revision: number): void;
   // The signed-in account may have changed.
   accountChanged(): void;
+  // `what` names the change for a failure's words, such as "rename Sprout".
   change(
     accountKey: string,
     agentId: string,
     change: PersonalAgentChange,
+    what: string,
   ): Promise<PersonalAgentChangeResult>;
 }
 
@@ -135,7 +137,7 @@ function failureWords(error: unknown, host: string, what: string): string {
     error instanceof TypeError ||
     (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
   ) {
-    return `dohc could not reach ${host}. Check your connection.`;
+    return `dohc could not reach ${host} to ${what}. Check your connection.`;
   }
   return `${host} could not ${what}.`;
 }
@@ -214,6 +216,7 @@ export function createPersonalAgentRoster(deps: {
           workspaces: answer.workspaces.map((workspace) => ({
             workspaceId: workspace.workspaceId,
             name: workspace.name,
+            role: workspace.role,
           })),
         },
         failure: null,
@@ -295,7 +298,7 @@ export function createPersonalAgentRoster(deps: {
       void refresh();
     },
 
-    async change(accountKey, agentId, change) {
+    async change(accountKey, agentId, change, what) {
       const session = await deps.session();
       if (!session || session.key !== accountKey) return { ok: false, error: OTHER_ACCOUNT };
       const host = hostOf(session.origin);
@@ -330,7 +333,7 @@ export function createPersonalAgentRoster(deps: {
           if (error.refresh) void refresh();
           return { ok: false, error: error.message };
         }
-        return { ok: false, error: failureWords(error, host, `change ${name}`) };
+        return { ok: false, error: failureWords(error, host, what) };
       }
     },
   };

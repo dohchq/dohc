@@ -2333,9 +2333,14 @@ pub enum ReplicatedMessageAuthor {
 ///
 /// A personal agent's message comes from that agent's relay origin. It is an
 /// agent message by that agent for an account, names the agent's connection,
-/// carries no link, owner, origin, chain depth, reported agent or work report, stays within
-/// the link body cap, and uses the personal message id prefix. The relay
-/// checks that the account is the workspace's owner.
+/// carries no link, origin, chain depth, reported agent or work report, stays
+/// within the link body cap, and uses the personal message id prefix. It may
+/// carry the person's display name, which the relay writes; no client writes
+/// to a personal agent's origin. The relay checks that the account owns the
+/// workspace or is an active member of it.
+///
+/// `owner_name` says the message names an owner. `other_account_fields` says
+/// it carries an origin, chain depth, reported agent or work report.
 ///
 /// No other message names a link, an agent connection or a personal agent, or
 /// uses either prefix. Ids must already be in their stored form.
@@ -2349,6 +2354,7 @@ pub fn validate_replicated_link_author(
     agent_connection_id: Option<&str>,
     author_user_id: Option<&str>,
     author_agent_id: Option<&str>,
+    owner_name: bool,
     other_account_fields: bool,
     body: &str,
 ) -> Result<ReplicatedMessageAuthor, DomainError> {
@@ -2394,6 +2400,7 @@ pub fn validate_replicated_link_author(
                 && connection_id.is_none_or(id)
                 && author_user_id.is_none()
                 && author_agent_id.is_none()
+                && !owner_name
                 && !other_account_fields
                 && body.len() <= MAX_LINK_MESSAGE_BODY_BYTES
                 && message_id.starts_with(LINK_MESSAGE_ID_PREFIX)
@@ -9654,6 +9661,7 @@ mod replicated_origin_tests {
                 None,
                 None,
                 false,
+                false,
                 "Hi",
             )
         };
@@ -9692,6 +9700,7 @@ mod replicated_origin_tests {
                 None,
                 None,
                 false,
+                false,
                 "Hi",
             )
         };
@@ -9728,6 +9737,31 @@ mod replicated_origin_tests {
         connection: Option<&str>,
         other_account_fields: bool,
     ) -> Result<ReplicatedMessageAuthor, crate::DomainError> {
+        named_author(
+            origin,
+            kind,
+            message_id,
+            link,
+            user,
+            agent,
+            connection,
+            false,
+            other_account_fields,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn named_author(
+        origin: &str,
+        kind: &str,
+        message_id: &str,
+        link: bool,
+        user: Option<&str>,
+        agent: Option<&str>,
+        connection: Option<&str>,
+        owner_name: bool,
+        other_account_fields: bool,
+    ) -> Result<ReplicatedMessageAuthor, crate::DomainError> {
         validate_replicated_link_author(
             origin,
             message_id,
@@ -9737,9 +9771,65 @@ mod replicated_origin_tests {
             connection,
             user,
             agent,
+            owner_name,
             other_account_fields,
             "Hi",
         )
+    }
+
+    #[test]
+    fn only_the_relay_names_a_person_on_an_agent_post_it_vouches_for() {
+        let origin = format!("relay:personal-agent:{PERSONAL}");
+        let personal = named_author(
+            &origin,
+            "agent",
+            "personal-message:m",
+            false,
+            Some("owner"),
+            Some(PERSONAL),
+            Some("connection-1"),
+            true,
+            false,
+        );
+        assert_eq!(
+            personal.expect("a personal agent post naming its person"),
+            ReplicatedMessageAuthor::PersonalAgent {
+                agent_id: PERSONAL.to_owned(),
+                connection_id: "connection-1".to_owned(),
+            }
+        );
+        // A client can't write a personal agent's post with the name, nor a link post.
+        for origin in ["origin_1", "shared:s:origin_1"] {
+            assert!(
+                named_author(
+                    origin,
+                    "agent",
+                    "personal-message:m",
+                    false,
+                    Some("owner"),
+                    Some(PERSONAL),
+                    Some("connection-1"),
+                    true,
+                    false,
+                )
+                .is_err(),
+                "{origin}"
+            );
+        }
+        assert!(
+            named_author(
+                "relay:share-link:p",
+                "link",
+                "link-message:m",
+                true,
+                None,
+                None,
+                None,
+                true,
+                false,
+            )
+            .is_err()
+        );
     }
 
     #[test]

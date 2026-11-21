@@ -164,8 +164,15 @@ export async function personalRouteFixture(
     for (const client of clients) client.abort();
   });
 
-  /** A personal agent of the workspace's owner, signed in at `level`, as its sign-in commits it. */
-  function agent(name: string, level: "view" | "comment" | "edit" = "edit") {
+  /**
+   * A personal agent of the workspace's owner, or of `ownerUserId`, signed in
+   * with the workspace in reach at `level`, as its sign-in commits it.
+   */
+  function agent(
+    name: string,
+    level: "view" | "comment" | "edit" = "edit",
+    ownerUserId = "owner-1",
+  ) {
     const agentId = `p-${[...createHash("sha256").update(name).digest()]
       .slice(0, 26)
       .map((byte) => "abcdefghijklmnopqrstuvwxyz234567"[byte % 32])
@@ -175,13 +182,13 @@ export async function personalRouteFixture(
     const check = agentAccessCheck(token, RESOURCE, LINK_KEY)!;
     f.raw
       .prepare(
-        "INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms) VALUES (?,'owner-1',?,'olive','active',1,0)",
+        "INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms) VALUES (?,?,?,'olive','active',1,0)",
       )
-      .run(agentId, name);
+      .run(agentId, ownerUserId, name);
     f.raw
       .prepare(`INSERT INTO sync_relay_personal_agent_connections(connection_id,agent_id,owner_user_id,client_id,resource_hash,agent_epoch,fence_epoch,connected_at_ms)
-      VALUES (?,?,'owner-1','client',?,1,0,0)`)
-      .run(connectionId, agentId, check.resourceHash);
+      VALUES (?,?,?,'client',?,1,0,0)`)
+      .run(connectionId, agentId, ownerUserId, check.resourceHash);
     f.raw
       .prepare(
         "INSERT INTO sync_relay_personal_agent_tokens(token_hash,connection_id,kind,issued_at_ms,expires_at_ms) VALUES (?,?,'access',0,?)",
@@ -215,7 +222,17 @@ export async function personalRouteFixture(
         }),
       );
     };
-    return { agentId, open };
+    /** The scope a live ticket for this agent's connection carries. */
+    const ticketScope = {
+      kind: "personal" as const,
+      workspaceId: scope.workspaceId,
+      agentId,
+      connectionId,
+      accessTokenHash: check.accessTokenHash,
+      resourceHash: check.resourceHash,
+      fenceEpoch: 0,
+    };
+    return { agentId, open, ticketScope };
   }
 
   return {

@@ -9,7 +9,11 @@ import {
   type AccessRuleSet,
   type ReachViewer,
 } from "@dohc/security-contract/access-rules";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import {
+  SHARE_ACCESS_VALUES,
+  shareAccessRank,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { accountEmail, ruleEmailRetired } from "./accountEmails";
 import { accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
@@ -77,6 +81,32 @@ export interface MemberReach {
   objectVisible(objectId: string): boolean;
   objectPath(objectId: string): string | null;
   nearestRule(path: string): string;
+}
+
+/**
+ * A reach no higher than `cap` anywhere: a personal agent's, at most its
+ * person's reach and at most the level the person chose for it. What it
+ * reaches doesn't change, so `signature`, `visibilitySignature`, `listed` and
+ * `evaluated` stay the person's.
+ */
+export function capReach(reach: MemberReach, cap: ShareAccess): MemberReach {
+  const rank = shareAccessRank(cap);
+  const lower = (level: ShareAccess | null): ShareAccess | null =>
+    level !== null && shareAccessRank(level) > rank ? cap : level;
+  // The capped reach holds `wanted` where the person holds it, or, for the cap, anything above it too.
+  const holds = (wanted: ShareAccess, held: (level: ShareAccess) => boolean) =>
+    shareAccessRank(wanted) < rank
+      ? held(wanted)
+      : wanted === cap &&
+        SHARE_ACCESS_VALUES.some((level) => shareAccessRank(level) >= rank && held(level));
+  return {
+    ...reach,
+    hasLevel: (wanted) => holds(wanted, reach.hasLevel),
+    groupLevel: (id) => lower(reach.groupLevel(id)),
+    hasGroupLevel: (wanted) => holds(wanted, reach.hasGroupLevel),
+    levelAt: (path) => lower(reach.levelAt(path)),
+    folderLevel: (folder) => lower(reach.folderLevel(folder)),
+  };
 }
 
 /**
