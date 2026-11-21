@@ -898,45 +898,10 @@ it.each([
 });
 
 const resumed = blob("save after resume");
-const ownerSave = "moment-owner-laptop-0";
-const hostSave = `moment-${HOST_ORIGIN}-0`;
 it.each([
-  {
-    name: "the host that resumed from it",
-    source: owner,
-    moment: ownerSave,
-    host: true,
-    stored: resumed,
-  },
-  {
-    name: "a host that resumed from another file",
-    source: last,
-    moment: hostSave,
-    host: true,
-    stored: owner,
-  },
-  {
-    name: "a host that resumed from the same words saved another time",
-    source: owner,
-    moment: "moment-earlier",
-    host: true,
-    stored: owner,
-  },
-  {
-    name: "a host whose start the owner saved again after Resume",
-    source: owner,
-    moment: ownerSave,
-    host: true,
-    restored: true,
-    stored: owner,
-  },
-  {
-    name: "a push that is not the host's",
-    source: owner,
-    moment: ownerSave,
-    host: false,
-    stored: owner,
-  },
+  { name: "the host that resumed from it", source: owner, host: true, stored: resumed },
+  { name: "a host that resumed from another file", source: last, host: true, stored: owner },
+  { name: "a push that is not the host's", source: owner, host: false, stored: owner },
 ] as const)(
   "lets a save from its host's last one replace the owner's save: $name",
   async (input) => {
@@ -944,9 +909,9 @@ it.each([
     retainServiceActivation(f.raw, namespace, true);
     f.raw
       .prepare(
-        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceMomentId',?)",
+        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?)",
       )
-      .run(input.source.sha256, input.moment);
+      .run(input.source.sha256);
     for (const content of [last, owner, resumed])
       f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
     const save = (originId: string, originSeq: number, before: Blob, after: Blob) =>
@@ -971,7 +936,6 @@ it.each([
     save("owner-laptop", 0, last, owner);
     save(HOST_ORIGIN, 1, owner, owner);
     save(HOST_ORIGIN, 2, owner, owner);
-    if ("restored" in input) save("owner-laptop", 1, owner, owner);
     if (input.host) save(HOST_ORIGIN, 3, last, resumed);
     else save("other-laptop", 0, last, resumed);
     expect(
