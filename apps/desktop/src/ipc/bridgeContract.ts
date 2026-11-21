@@ -6233,9 +6233,6 @@ export const SetAsideDraftChange = z
   .object({ key: SET_ASIDE_DRAFT_KEY, raw: z.string().nullable() })
   .strict();
 export type SetAsideDraftChange = z.infer<typeof SetAsideDraftChange>;
-// Set-aside drafts, one file each in dohc's own folder, shared by every
-// window. A write or removal answers true once it is on disk, and only while
-// the file still holds ifCurrent. Every window hears each change first.
 export const setAsideDraftOperations = {
   listSetAsideDrafts: {
     capabilityId: "document.aside.list",

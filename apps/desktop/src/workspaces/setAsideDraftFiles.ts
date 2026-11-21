@@ -23,11 +23,6 @@ function tracksPath(raw: string): boolean {
   );
 }
 
-/**
- * The set-aside drafts of every window, one file each. A write or removal
- * applies only while the file holds what the caller last saw, and answers
- * true once the change is on disk. `changed` hears each change first.
- */
 export function setAsideDraftFiles(
   directory: string,
   changed: (change: SetAsideDraftChange) => void,

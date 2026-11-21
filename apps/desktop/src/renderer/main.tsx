@@ -26,8 +26,7 @@ initKeyboardNavigation();
 installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run
 // left behind go back into the store, so the first paint already carries their
-// notices and nothing has to re-render to find them. A window that cannot read
-// them still opens.
+// notices and nothing has to re-render to find them.
 const container = document.getElementById("root");
 void restoreOrphanedDrafts()
   .catch(() => undefined)

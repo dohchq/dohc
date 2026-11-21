@@ -18,8 +18,6 @@ type StoredOrphanedDraft = {
   capturedAtMs: number;
   recovery?: DraftRecoveryIdentity;
 };
-// What main's draft files hold, as this window last heard. Main tells every
-// window of each change, so another window's writes show here too.
 const files = new Map<string, string>();
 const fileListeners = new Set<() => void>();
 // Numeric handles belong to this renderer. Each durable recovery owns one file,
@@ -28,7 +26,6 @@ const keys = new Map<number, string>();
 const expected = new Map<number, string>();
 const ownedKeys = new Set<string>();
 const pending = new Map<number, number>();
-// Drafts whose newest write failed. A file may still hold their older text.
 const refused = new Set<number>();
 let stopHearing: (() => void) | null = null;
 let heldWhileListing: SetAsideDraftChange[] | null = null;
@@ -85,7 +82,6 @@ function apply(change: SetAsideDraftChange): void {
   notifyFiles();
 }
 
-/** Hears every change to the draft files, and every answer main gives. */
 export function onDraftFilesChanged(listener: () => void): () => void {
   fileListeners.add(listener);
   return () => fileListeners.delete(listener);
@@ -98,7 +94,6 @@ function hear(): void {
   });
 }
 
-/** Reads main's draft files, and keeps this window's copy current after. */
 export async function loadDraftFiles(): Promise<void> {
   heldWhileListing = [];
   try {
@@ -112,11 +107,11 @@ export async function loadDraftFiles(): Promise<void> {
 }
 
 function send(
-  id: number | undefined,
+  ids: readonly number[],
   request: () => Promise<boolean>,
   onAnswer: (written: boolean) => void = () => undefined,
 ): Promise<boolean> {
-  if (id !== undefined) pending.set(id, (pending.get(id) ?? 0) + 1);
+  for (const id of ids) pending.set(id, (pending.get(id) ?? 0) + 1);
   const answer = (async () => {
     try {
       hear();
@@ -127,7 +122,7 @@ function send(
   })();
   const settled = answer.then((written) => {
     onAnswer(written);
-    if (id !== undefined) {
+    for (const id of ids) {
       const left = (pending.get(id) ?? 1) - 1;
       if (left > 0) pending.set(id, left);
       else pending.delete(id);
@@ -141,7 +136,7 @@ function send(
 }
 function removeIfCurrent(key: string | undefined, raw: string | undefined): void {
   if (key === undefined || raw === undefined) return;
-  void send(undefined, () => bridge().removeSetAsideDraft({ key, ifCurrent: raw }));
+  void send([], () => bridge().removeSetAsideDraft({ key, ifCurrent: raw }));
 }
 
 export function loadStoredDrafts(
@@ -183,7 +178,9 @@ export function loadStoredDrafts(
       else {
         const normalized = serialize(restored);
         expected.set(id, normalized);
-        void send(id, () => bridge().writeSetAsideDraft({ key, raw: normalized, ifCurrent: raw }));
+        void send([id], () =>
+          bridge().writeSetAsideDraft({ key, raw: normalized, ifCurrent: raw }),
+        );
       }
     }
     result.push(restored);
@@ -201,7 +198,7 @@ function write(
   expected.set(draft.id, raw);
   ownedKeys.add(key);
   return send(
-    draft.id,
+    [draft.id],
     () => bridge().writeSetAsideDraft({ key, raw, ifCurrent }),
     (written) => {
       if (written) refused.delete(draft.id);
@@ -217,7 +214,6 @@ function write(
     },
   );
 }
-/** Answers whether the draft is on disk. Until then it is pending. */
 export function storeDraft(draft: StoredOrphanedDraft): Promise<boolean> {
   return write(draft, crypto.randomUUID(), null);
 }
@@ -242,7 +238,6 @@ export function isStoredDraftCurrent(id: number): boolean {
     raw = expected.get(id);
   return !refused.has(id) && key !== undefined && raw !== undefined && files.get(key) === raw;
 }
-/** Whether main has yet to answer a write of this draft. */
 export function isStoredDraftPending(id: number): boolean {
   return pending.has(id);
 }
@@ -280,7 +275,12 @@ export function remapStoredDraftPaths(
   const dropped = new Set<number>();
   const handles = new Map<string, number[]>();
   for (const [id, key] of keys) handles.set(key, [...(handles.get(key) ?? []), id]);
-  for (const [key, raw] of [...files]) {
+  const held = new Map(files);
+  for (const [id, key] of keys) {
+    const sent = expected.get(id);
+    if (pending.has(id) && sent !== undefined) held.set(key, sent);
+  }
+  for (const [key, raw] of held) {
     const ids = handles.get(key) ?? [];
     const row = parse(raw);
     if (unsupportedVersion(row) || !valid(row) || row.workspaceId !== workspaceId) continue;
@@ -294,7 +294,7 @@ export function remapStoredDraftPaths(
       }
     } else {
       const next = serialize({ ...row, path });
-      void send(undefined, () => bridge().writeSetAsideDraft({ key, raw: next, ifCurrent: raw }));
+      void send(ids, () => bridge().writeSetAsideDraft({ key, raw: next, ifCurrent: raw }));
       // Only advance handles that still describe the bytes just remapped.
       // Another window's replacement must not make stale local text durable.
       for (const id of ids) if (expected.get(id) === raw) expected.set(id, next);
@@ -302,11 +302,9 @@ export function remapStoredDraftPaths(
   }
   return dropped;
 }
-/** Settles once main has answered every write of this draft. */
 export async function storedDraftSettled(id: number): Promise<void> {
   while (pending.has(id)) await Promise.all([...inFlight]);
 }
-/** Test seam: settles once main has answered every write and removal sent so far. */
 export async function draftFileWritesSettled(): Promise<void> {
   while (inFlight.size > 0) await Promise.all([...inFlight]);
 }
