@@ -346,3 +346,54 @@ fn a_pulled_edit_over_the_owners_unsaved_edit_of_a_stopped_note_sends_the_owners
         );
     }
 }
+
+#[test]
+fn an_owner_save_with_a_link_editor_keeps_local_authors_and_records_no_refusal() {
+    let mut f = fixture_joined(true);
+    let link = r#"[{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"}]"#;
+    let dohc_engine_storage::TxnOutcome::Committed((payload, local, refusals)) = f
+        .store
+        .write_with(&NoFaults, |tx| {
+            let head: String = tx
+                .query_row(
+                    "SELECT latest_moment_id FROM snapshots WHERE object_id=?1",
+                    [&f.key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            tx.execute(
+                "UPDATE moments SET author_json=?1 WHERE moment_id=?2",
+                params![link, head],
+            )
+            .map_err(SyncError::persist)?;
+            crate::enrolment::journal_owner_save_in_tx(tx, &f.key, &head)?;
+            Ok::<(String, Option<String>, i64), SyncError>((
+                tx.query_row(
+                    "SELECT payload_json FROM replication_log WHERE imported=0 AND op_kind='moment.append' \
+                     AND json_extract(payload_json,'$.momentId')=?1",
+                    [&head],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                tx.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id=?1",
+                    [&head],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                tx.query_row("SELECT COUNT(*) FROM replication_pending_refusals", [], |row| {
+                    row.get(0)
+                })
+                .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .unwrap()
+    else {
+        panic!("the save commits");
+    };
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["authors"], json!([{"kind":"unattributed"}]));
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert_eq!(local.as_deref(), Some(link));
+    assert_eq!(refusals, 0);
+}

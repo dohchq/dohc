@@ -591,12 +591,21 @@ pub fn journal_owner_save_in_tx(
     moment_id: &str,
 ) -> Result<(), SyncError> {
     if file_version_is_publishable_in_tx(tx, key, moment_id)? {
-        journal_file_version_in_tx(tx, key, moment_id, &mut FileExportBudget::default())?;
+        journal_file_version_in_tx(
+            tx,
+            key,
+            moment_id,
+            &mut FileExportBudget::default(),
+            crate::outbound::omit_unproven_hosted_authors,
+        )?;
     }
     Ok(())
 }
 
-pub fn journal_owner_head_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<(), SyncError> {
+pub(crate) fn journal_owner_head_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), SyncError> {
     if !crate::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
         return Ok(());
     }
@@ -657,7 +666,13 @@ pub(crate) fn backfill_file_versions_in_tx(
             object_id,
         };
         if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
-            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+            journal_file_version_in_tx(
+                tx,
+                &key,
+                &moment_id,
+                &mut file_budget,
+                crate::outbound::mark_unproven_hosted_authors,
+            )?;
         }
     }
     Ok(())
@@ -769,6 +784,7 @@ pub(crate) fn journal_file_version_in_tx(
     key: &DocKey,
     moment_id: &str,
     budget: &mut FileExportBudget,
+    unproven: fn(&mut serde_json::Value) -> bool,
 ) -> Result<bool, SyncError> {
     let last = last_file_export_in_tx(tx, key)?;
     let (current, _) =
@@ -817,7 +833,13 @@ pub(crate) fn journal_file_version_in_tx(
     if blobs.values().sum::<i64>() > 20 * 1024 * 1024 {
         return Ok(false);
     }
-    crate::outbound::journal_moment_append_from_in_tx(tx, &key.workspace_id, moment_id, &before)?;
+    crate::outbound::journal_moment_append_from_in_tx(
+        tx,
+        &key.workspace_id,
+        moment_id,
+        &before,
+        unproven,
+    )?;
     budget.blobs = blobs;
     Ok(true)
 }

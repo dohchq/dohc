@@ -259,6 +259,7 @@ pub fn originate_ydoc_base_in_tx(
             key,
             &moment_id,
             &mut crate::enrolment::FileExportBudget::default(),
+            crate::outbound::mark_unproven_hosted_authors,
         )?
     {
         return Ok(BaseOrigination::NothingToDo);
