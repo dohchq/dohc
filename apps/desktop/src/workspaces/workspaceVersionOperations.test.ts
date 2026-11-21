@@ -206,8 +206,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
   private dropHeadAfter: string | null = null;
 
-  /// Model a head that vanished between the resolve write and the desktop's
-  /// read-back: a concurrent delete, or an engine that acked a write it lost.
   dropHeadAfterBinaryResolve(path: string): void {
     this.dropHeadAfter = path;
   }
@@ -303,14 +301,16 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
+          result: {
+            conflict: settledConflictForWire(resolved),
+            placed: true,
+            write: null,
+            delete: null,
+          },
         };
       }
 
       if (resolution === "apply-incoming" && existing.incoming.contentKind === "binary") {
-        // Binary bytes never ride in a resolve result: the daemon writes the
-        // head and reports `write: null`. The desktop has to read the head
-        // back to mirror it, which is the branch under test.
         const source = await super.sendRequest({
           id: this.internalRequestId--,
           method: VERSIONED_METHOD.binaryRead,
@@ -334,7 +334,8 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
             origin: String(local.metadataOrigin),
           },
         });
-        if (this.dropHeadAfter === existing.path) {
+        const placed = this.dropHeadAfter !== existing.path;
+        if (!placed) {
           this.dropHeadAfter = null;
           await super.sendRequest({
             id: this.internalRequestId--,
@@ -350,7 +351,12 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         this.conflicts.set(key, resolved);
         return {
           id: request.id,
-          result: { conflict: settledConflictForWire(resolved), write: null, delete: null },
+          result: {
+            conflict: settledConflictForWire(resolved),
+            placed,
+            write: null,
+            delete: null,
+          },
         };
       }
 
@@ -379,6 +385,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
           id: request.id,
           result: {
             conflict: settledConflictForWire(resolved),
+            placed: true,
             write: null,
             delete: deletion?.result ?? null,
           },
@@ -442,6 +449,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         id: request.id,
         result: {
           conflict: settledConflictForWire(resolved),
+          placed: true,
           write: {
             ...settled,
             snapshot: settledSnapshotForWire(settled.snapshot as JsonObject),
@@ -776,14 +784,12 @@ describe("mergeVersionIntoMain", () => {
       kind: "apply-incoming",
     });
 
-    // The engine reports no text write for bytes, so the folder only follows if
-    // the desktop reads the resolved head back and mirrors it.
     expect(resolved.conflict.resolution).toBe("applied-incoming");
     expect(await readBytes(root, "logo.png")).toEqual(draftBytes);
     await engine.stop();
   });
 
-  it("refuses a binary resolution whose engine head vanished", async () => {
+  it("reports a binary resolution the engine could not place", async () => {
     // Going quiet here would leave the folder on the losing bytes while the
     // engine reports the conflict resolved -- divergence the user cannot see.
     //

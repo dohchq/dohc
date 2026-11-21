@@ -364,6 +364,7 @@ type VersionedTextMergeResult =
 type VersionedTextConflictResolveResult = {
   kind: "resolved";
   conflict: VersionedTextConflictRecord;
+  placed: boolean;
   write?: VersionedTextWriteResult;
   delete?: VersionedTextDeleteResult;
 };

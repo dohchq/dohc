@@ -412,7 +412,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   { method: WORKSPACE_METHOD.conflictsOpen, valid: { inserted: true } },
   {
     method: WORKSPACE_METHOD.conflictsResolve,
-    valid: { conflict, write: null, delete: null },
+    valid: { conflict, placed: true, write: null, delete: null },
   },
   {
     method: WORKSPACE_METHOD.collectionsList,
@@ -2221,6 +2221,7 @@ describe("VersionedLiveAdapter", () => {
 
     const resolved = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
       conflict: withheld,
+      placed: true,
       write: null,
       delete: null,
     }) as { conflict: ConflictRecord };

@@ -227,6 +227,7 @@ describe("workspace wire schemas", () => {
   it("preserves arbitrary write and delete objects", () => {
     const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.conflictsResolve, {
       conflict,
+      placed: true,
       write: { nested: { values: [1, true, null] } },
       delete: { path: "old.md", reason: "replaced" },
     });
