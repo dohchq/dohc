@@ -82,20 +82,6 @@ impl Workspace {
     }
 }
 
-/// Rewrite `path` with `bytes` of the same length and give it back its
-/// modification time, so its size and time still match its preparation.
-fn rewrite_keeping_stamp(path: &Path, bytes: &[u8]) {
-    use std::io::Write as _;
-    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .unwrap();
-    file.write_all(bytes).unwrap();
-    file.set_modified(modified).unwrap();
-}
-
 #[test]
 fn each_job_places_the_temp_prepared_for_it() {
     let mut ws = Workspace::new("taken");
@@ -104,15 +90,18 @@ fn each_job_places_the_temp_prepared_for_it() {
         ws.job(1, "notes/b.md", None, b"after b"),
     ];
     let prepared = ws.prepare(&jobs.iter().collect::<Vec<_>>());
-    // A temp the job wrote itself would hold "after".
-    for job in &jobs {
-        rewrite_keeping_stamp(&ws.temp(job), b"PREPARE");
-    }
+    let temps: Vec<_> = jobs
+        .iter()
+        .map(|job| same_file::Handle::from_path(ws.temp(job)).unwrap())
+        .collect();
     for job in &jobs {
         assert_eq!(ws.run(job, &prepared), JobOutcome::Completed);
     }
-    assert_eq!(ws.read("notes/a.md"), b"PREPARE");
-    assert_eq!(ws.read("notes/b.md"), b"PREPARE");
+    for (path, temp) in ["notes/a.md", "notes/b.md"].into_iter().zip(temps) {
+        assert!(same_file::Handle::from_path(ws.root.join(path)).unwrap() == temp);
+    }
+    assert_eq!(ws.read("notes/a.md"), b"after a");
+    assert_eq!(ws.read("notes/b.md"), b"after b");
     drop(prepared);
     let mut left: Vec<_> = std::fs::read_dir(ws.root.join("notes"))
         .unwrap()

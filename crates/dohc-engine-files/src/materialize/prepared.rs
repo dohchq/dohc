@@ -28,19 +28,20 @@ struct PreparedTemp {
     stamp: Stamp,
 }
 
-/// A file's identity, size, and modification time.
+/// A file's identity, size, and the times that change when it is written.
+/// On Unix that includes the change time, which no program can set.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
     device: u64,
     index: u64,
     len: u64,
-    modified: Modified,
+    times: Times,
 }
 
 #[cfg(unix)]
-type Modified = (i64, i64);
+type Times = [i64; 4];
 #[cfg(windows)]
-type Modified = u64;
+type Times = u64;
 
 struct Work<'a> {
     job: &'a MaterializationJob,
@@ -199,7 +200,12 @@ fn metadata_stamp(metadata: &std::fs::Metadata) -> Option<Stamp> {
         device: metadata.dev(),
         index: metadata.ino(),
         len: metadata.len(),
-        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        times: [
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ],
     })
 }
 
@@ -210,7 +216,7 @@ fn file_stamp(file: &File) -> Option<Stamp> {
         device: information.volume_serial_number(),
         index: information.file_index(),
         len: information.file_size(),
-        modified: information.last_write_time()?,
+        times: information.last_write_time()?,
     })
 }
 
