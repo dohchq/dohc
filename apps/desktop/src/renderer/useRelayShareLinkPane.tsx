@@ -37,6 +37,7 @@ import {
   useLinkAgentDisconnects,
 } from "./shareLinkAgents";
 import {
+  SHARE_ACCESS_DESCRIPTIONS,
   SHARE_ACCESS_WORDS,
   SHARE_ROW_INSET,
   ShareAccessLevel,
@@ -190,12 +191,6 @@ type OwnerConfirmation =
       grantId: string;
       name: string;
     };
-
-const NEW_LINK_WORDS: Record<LinkAccess, string> = {
-  view: "Anyone with the link can read this without an account.",
-  comment: "Anyone with the link can read this and comment.",
-  edit: "Anyone with the link can edit this and see the full History.",
-};
 
 function newLinkReach(target: RelayShareTarget): string {
   const reach =
@@ -1995,7 +1990,7 @@ export function useRelayShareLinkPane(props: {
             access={draft.access}
             options={draft.supported.map((value) => ({
               value,
-              description: NEW_LINK_WORDS[value],
+              description: SHARE_ACCESS_DESCRIPTIONS[value],
             }))}
             note={newLinkReach(props.target)}
             disabled={linkControlsBusy}

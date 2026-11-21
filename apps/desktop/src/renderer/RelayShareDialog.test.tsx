@@ -27,7 +27,7 @@ const VERSION_WARNING = `The link shows this version as it is now. ${RELAY_READS
 const PATHS_WARNING = `If files are added to this selection later, the link includes them. ${RELAY_READS}`;
 
 // The line under the invite field once a person is invited.
-const INVITED = /^Invited .*send it to them.$/;
+const INVITED = /^Invited .*This server sends no email\.$/;
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -863,7 +863,7 @@ describe("RelayShareDialog", () => {
       versionId: "version-7",
     });
     expect((await screen.findByText(INVITED)).textContent).toBe(
-      "Invited friend@dohc.test. Copy the invitation and send it to them.",
+      "Invited friend@dohc.test. This server sends no email.",
     );
     expect(field.value).toBe("");
     expect(document.activeElement).toBe(field);
@@ -888,8 +888,8 @@ describe("RelayShareDialog", () => {
     expect(row.textContent).toBe("No linkCan viewCreate link");
     expect(screen.queryByText(PATHS_WARNING)).toBeNull();
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
     await user.click(screen.getByTestId("share-link-create-access"));
     expect(screen.getByText(PATHS_WARNING).tagName).toBe("P");
@@ -2858,8 +2858,8 @@ codex mcp login dohc-share`);
       "Separate linkIts own commentsCan viewCreate link",
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
     await chooseNewLinkAccess(user, "Can comment");
     await user.click(create);
@@ -6809,9 +6809,9 @@ describe("people and links on one surface", () => {
     expect(
       screen.getAllByRole("menuitemradio", { hidden: true }).map((level) => level.textContent),
     ).toEqual([
-      expect.stringMatching(/^Can view/),
-      "Can comment",
-      expect.stringMatching(/^Can edit/),
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
+      "Can editCan make changes and see History.",
     ]);
     expect(
       screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
@@ -8270,9 +8270,7 @@ describe("people and links on one surface", () => {
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
       expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
       await act(async () => {});
-      expect(Boolean(screen.queryByTestId("share-code-copy"))).toBe(
-        browserInvitationUrl !== undefined,
-      );
+      expect(screen.queryByRole("button", { name: "Copy share code" })).toBeNull();
 
       await user.click(screen.getByTestId("share-person-access-grant-1"));
       expect(
@@ -8478,9 +8476,7 @@ describe("advertised public Edit release", () => {
           onClose={() => {}}
         />,
       );
-      expect(await newLinkLevels(user)).toContain(
-        "Can editAnyone with the link can edit this and see the full History.",
-      );
+      expect(await newLinkLevels(user)).toContain("Can editCan make changes and see History.");
       await chooseNewLinkAccess(user, "Can edit");
       await user.click(await screen.findByTestId("share-link-create"));
       expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
@@ -8505,8 +8501,8 @@ describe("advertised public Edit release", () => {
       />,
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
   });
 });

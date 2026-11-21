@@ -404,9 +404,7 @@ confidentialTest.describe("View link lifecycle", () => {
         await expect(dialog).toContainText(
           "The sync relay serves the link, so it can read this content.",
         );
-        await expect(dialog).toContainText(
-          "Anyone with the link can read this without an account.",
-        );
+        await expect(dialog).toContainText("Can read, but not change.");
         await page.keyboard.press("Escape");
 
         await dialog.getByRole("button", { name: "Create link", exact: true }).click();
