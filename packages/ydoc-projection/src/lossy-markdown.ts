@@ -135,9 +135,7 @@ export function checkMarkdownWitness(
     return false;
   }
   // Today's projection decides, not the recorded one: an update that changes
-  // how dohc writes a note changes its projection but not its meaning. A
-  // document read before dohc kept a piece as the file spells it holds that
-  // piece another way, so only today's own projection vouches for it.
+  // how dohc writes a note changes its projection but not its meaning.
   return sameMarkdownMeaning(source, canonical) && (!sealed || projectionSha === sha256(canonical));
 }
 

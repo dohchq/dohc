@@ -1018,9 +1018,6 @@ export const DohcMathBlock = Node.create({
 // Their text is the source too, for a plain-text copy.
 const sealedSource = (node: { attrs: Record<string, unknown> }) => String(node.attrs.source ?? "");
 
-// A sealed block's source ends with the line breaks its token read. Sealed
-// blocks with no blank line between them are one block, since the writer
-// puts a blank line between blocks.
 export function joinSealedBlocks(content: JSONContent[]): JSONContent[] {
   const joined: JSONContent[] = [];
   let tight = false;
@@ -1295,8 +1292,6 @@ function markdownLists(projected = false) {
         const opensBlank =
           /^[ \t]*\n/u.test(item.text ?? "") &&
           /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? "");
-        // An item starts with a paragraph, so a sealed block on its first line
-        // is that paragraph's one piece.
         const first = content[0];
         if (first?.type === "rawBlock" && !opensBlank) {
           const source = String(first.attrs?.source ?? "").replace(/\n[ \t\n]*$/u, "");

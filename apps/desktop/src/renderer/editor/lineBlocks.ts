@@ -558,8 +558,6 @@ export function blockForLine(body: string, line: number): LineBlock {
             (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
-    // The editor seals a definition and the definition or raw HTML right
-    // under it as one block.
     const joinsSealed: boolean =
       definitionEnded && (definition !== null || HTML_BLOCK_RE.test(text));
     const opens: boolean = (kind === "heading" || interrupts || !open) && !resumes && !joinsSealed;

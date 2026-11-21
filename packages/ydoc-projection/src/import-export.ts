@@ -73,15 +73,13 @@ const PARSE_REFERENCE_RE = new RegExp(
 // open and close one.
 let parseReferences: ReadonlyMap<string, string> = new Map();
 let parseTabs: ReadonlyMap<string, string> = new Map();
-// The definitions of the note a parsed piece belongs to.
 let noteLinks: TokensList["links"] | undefined;
 let rawHtmlMarkup = { lt: "<", gt: ">", used: false };
 
 // Raw HTML and link reference definitions are sealed: the document holds the
 // file's source, references and all, and both writers write it back. Tiptap
 // would read HTML through the DOM in a browser, which drops a comment and
-// turns tags into marks, and it drops a definition. A block's source keeps
-// its trailing line breaks until `joinSealedBlocks` reads them.
+// turns tags into marks, and it drops a definition.
 const sealedBlock = (token: { raw?: string }): JSONContent => ({
   type: "rawBlock",
   attrs: { source: token.raw ?? "" },
@@ -111,7 +109,6 @@ const MarkdownHtml = Extension.create({
   },
 });
 
-// A definition the serializer wrote as references is the text it holds.
 const MarkdownDefinition = Extension.create({
   name: "markdownDefinition",
   markdownTokenName: "def",
@@ -346,9 +343,8 @@ function fileAngles(text: string): string {
   return replaced;
 }
 
-// An inline piece the document holds as the file spells it. A gathered HTML
-// run's raw holds only the closing tag the lexer consumed, so its source is
-// the whole run.
+// A gathered HTML run's raw holds only the closing tag marked consumed, so
+// its source is the whole run.
 function sealedInline(raw: string, source = raw): Tokens.Generic {
   return { type: "dohcRawInline", raw, dohcSource: source };
 }
@@ -358,13 +354,11 @@ function inlineSource(token: Token): string {
   return typeof source === "string" ? source : token.raw;
 }
 
-// The arrays the lexer read inline content into.
 const inlineRuns = new WeakSet<Token[]>();
 
 // Tiptap marks only text, so a link or other mark on a picture or a sealed
 // piece would drop, and such a run is sealed whole. A table cell writes its
-// line break as `<br>`, which the editor holds as the cell's text. Inner
-// runs settle first, so each run looks only at its own pieces.
+// line break as `<br>`, which the editor holds as the cell's text.
 function settleSealedRuns(tokens: Token[], inCell: boolean): void {
   const inline = inlineRuns.has(tokens);
   tokens.forEach((token, index) => {
@@ -501,8 +495,6 @@ const markdownParser = new Marked({
       token.tag = `]${count}`;
       return token;
     },
-    // The document holds no reference, so a link or picture through one is
-    // sealed.
     reflink(src, links) {
       const token = Tokenizer.prototype.reflink.call(this, src, links);
       return token && token.type !== "text"
