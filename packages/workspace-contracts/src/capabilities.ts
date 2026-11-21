@@ -314,6 +314,9 @@ const LISTED_CAPABILITIES = {
   "share.grant.access.set": capability("Change a person's access on a share.", {
     ipc: ["retuneRelayShareGrant"],
   }),
+  "share.grant.invitation.resend": capability("Email a person their share invitation again.", {
+    ipc: ["resendRelayShareInvitation"],
+  }),
   "share.grant.revoke": capability("Revoke a share grant.", { ipc: ["revokeRelayShareGrant"] }),
   "share.live.document.stop": capability("Stop live editing for a document.", {
     ipc: ["stopOwnerLiveDocument"],

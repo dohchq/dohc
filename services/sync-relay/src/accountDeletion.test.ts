@@ -751,11 +751,13 @@ async function fixture() {
     expect(
       admitShareInvitationEmail(storage, {
         inviterUserId,
+        grantId: `invited-by-${inviterUserId}`,
         nowMs: Date.now(),
         limit: 50,
         windowMs: 86_400_000,
+        grantIntervalMs: 60_000,
       }),
-    ).toEqual({ admitted: true });
+    ).toMatchObject({ admitted: true });
   const manager = (afterPhase?: (phase: "fenced" | "runtime" | "sql") => void) =>
     createAccountDeletionRoute({
       storage,
