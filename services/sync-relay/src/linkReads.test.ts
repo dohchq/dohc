@@ -189,6 +189,22 @@ it("shows the owner's latest save of a note that is not live, even when two comp
   });
   expect(await shown()).toEqual([second]);
 
+  const member = await putBlob(h, "a member's edit\n");
+  storage.appendLogBatch({
+    workspaceId: WORKSPACE,
+    originId: "relay:share-member:share:recipient:device",
+    ops: [
+      moment(0, "docs/shared.md", "a member's edit\n", 5_000, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "second computer\n",
+      }),
+    ].map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
+  });
+  expect(await shown()).toEqual([member]);
+  await save("origin-a", "owner after the member\n", 6_000);
+  expect(await shown()).toEqual([member]);
+
   const records = await save("origin-a", "records: []\n", 4_000, {
     path: "docs/tasks.yaml",
     objectId: "object-tasks",

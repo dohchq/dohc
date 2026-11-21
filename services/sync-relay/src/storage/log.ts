@@ -357,7 +357,12 @@ export function appendLogBatchInTransaction(
     const ownerSave =
       owner === undefined || op.opKind !== "moment.append"
         ? undefined
-        : { workspaceId: input.workspaceId, userId: owner, payloadJson: op.payloadJson };
+        : {
+            workspaceId: input.workspaceId,
+            userId: owner,
+            payloadJson: op.payloadJson,
+            recordedAtMs: op.recordedAtMs,
+          };
     const ownerSaveReplacesStoredFile =
       ownerSave !== undefined &&
       (isOwnerSaveOfStoppedNote(storage, ownerSave) ||
