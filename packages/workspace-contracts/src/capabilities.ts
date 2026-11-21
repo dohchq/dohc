@@ -861,6 +861,19 @@ const LISTED_CAPABILITIES = {
   "chat.reaction.set": capability("Set the local person's reaction to added or removed.", {
     ipc: ["setChatReaction"],
   }),
+  "chat.message.delete": capability(
+    "Delete a message in a Group or a file's Comments: your own, or any as the owner or an admin.",
+    {
+      ipc: ["workspaceMembers"],
+      mcp: {
+        owner: ["dohc_members"],
+        view: ["dohc_members"],
+        comment: ["dohc_members"],
+        edit: ["dohc_members"],
+      },
+      mcpReason: MEMBERS_MCP_REASON,
+    },
+  ),
   "chat.message.link": capability("Make a web link to a message in a workspace that syncs.", {
     ipc: ["makeMessageLink"],
   }),

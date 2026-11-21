@@ -107,6 +107,7 @@ The relay refuses any other file, including a change to an existing record, and 
 The relay names the agent, on behalf of its owner, as the author. It checks the agent's sign-in and level again when it commits, so a write that arrives after the owner narrows the reach or signs the agent out is refused.
 A large write body is admitted only while some workspace in reach is at Edit. share-web holds one per agent, whichever of its tokens sends it, within the four in all, and the write goes in an MCP request of its own.
 `dohc_read_discussion` reads every thread on a current file by its path, or one thread by its id. A thread on a file since deleted still reads and takes replies, with the path the file last had. A thread whose file's current or last path is secret is not found.
+`dohc_delete_message` deletes one of the agent's own messages, at any level. The relay checks that the message came from this agent, never from its person or another agent.
 `dohc_list_workspaces` also gives the agent's name, the handle people mention it by after an @, and its direct messages with the owner in each workspace.
 `dohc_list_groups` lists a workspace's Groups by channel. It reads them through the server's copy of the workspace, so a server that keeps no copies refuses it and says the DM still works.
 `dohc_wait_for_messages` answers the owner's posts in the agent's direct messages, mentions of it, and replies in threads it posted in, across every workspace in reach.
@@ -329,7 +330,7 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
   Access is `read-only` or `read-write`, including the desktop's append restrictions.
   `maxPostBytes` bounds the complete UTF-8 POST JSON at both services. `maxBodyBytes` bounds the normalized message body.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&limit=50` returns the newest page first.
-  The response is `{shareId, channelWireId, messages, nextCursor, olderCursor}`.
+  The response is `{shareId, channelWireId, messages, deleted, nextCursor, olderCursor}`.
   Messages appear in descending relay sequence order. The limit defaults to 100 and cannot exceed 100.
   Save the first page's `nextCursor` to follow new messages.
   Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
@@ -339,7 +340,9 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
   Empty pages can advance through other channels. Follow and older cursors include those scanned rows.
   Older-page watermarks must not replace the saved following cursor.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
-  The response is `{shareId, channelWireId, messages, nextCursor, hasMore}`.
+  The response is `{shareId, channelWireId, messages, deleted, nextCursor, hasMore}`.
+  `deleted` lists `{messageId, threadId, deletedAtMs, relaySeq}` for each message deleted in the pages the read scanned.
+  A delete names the message, not its place in the log, so a follow that has passed the message still hears of it.
   Messages appear in ascending relay sequence order. Save each returned cursor, including on empty pages.
   If `hasMore` is true, read the next page immediately.
   Hold defaults to zero and accepts integer milliseconds from zero through 30,000.
@@ -391,8 +394,16 @@ The thread and message use the existing named log append, including its transact
 The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
 The ordinary recipient log route reserves `browser-chat` for these server-assigned sequences.
 
+`POST /api/named-chat/messages/delete` deletes one message. Send `{shareId, threadId, messageId}`.
+It answers `{shareId, deleted: {messageId, threadId, deletedAtMs}}`, and the same answer again on a retry.
+It works only on a workspace member's share. The owner and an admin delete any message they can read. A member deletes only messages the relay admitted for their account.
+The share's level does not matter: a member at View still deletes their own message.
+Every refusal, including another share's recipient, receives 404, so the answer never confirms a message the caller cannot delete.
+The relay replaces the message with a tombstone and removes every Notice of it. People who already read it may keep a copy.
+
 A workspace member's share reaches every Group and every current file.
-`channels` lists every Group. A follow without `channelWireId` returns every Group's new messages, and each message names its `channelWireId`.
+`channels` lists every Group, and the listing adds `moderates`, true for the owner and an admin. A page offers Delete on other people's messages only when it is true.
+A follow without `channelWireId` returns every Group's new messages, and each message names its `channelWireId`.
 Name a file with `path=<path>` instead of `channelWireId` to read, follow, or post on its Comments.
 Those responses carry `path` in place of `channelWireId`.
 A new post starts a thread bound to the file. A reply's `threadId` must be one of that file's threads.
@@ -410,6 +421,7 @@ If one message's metadata cannot fit alone, the relay returns a minimal omission
 Its message ID is `omitted:<relaySeq>`; its thread ID and display names are empty, and its user ID is null.
 The marker retains the sequence, author kind, and timestamp, with a null body and `bodyTooLarge: true`.
 Other messages and later pages remain readable.
+A deleted message keeps its line: its IDs, author, and time, with `deletedAtMs`, a null `body`, and `bodyTooLarge: false`.
 No engine is needed to read this JSON.
 
 Oversized posts return 413 with `payload_too_large`. Full request pools return 429 with `share_access_rate_limited`.

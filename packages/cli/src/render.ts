@@ -429,7 +429,8 @@ const GROUP_LEVEL_LINES = {
 // The owner's id names no one a verb can act on, so its row ends at the email.
 function renderMembers(result: CliResultByVerb["members"]): string {
   if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
-  if (result.status === "done") return "You left this workspace.";
+  // Agents can't leave, so only a delete finishes with done.
+  if (result.status === "done") return "Message deleted.";
   if (result.status === "group") {
     const name = lineSafe(result.name);
     if (result.level === null)
@@ -702,6 +703,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderReply(result as CliResultByVerb["reply"]);
     case "react":
       return renderReact(result as CliResultByVerb["react"]);
+    case "chatDelete": {
+      const deleted = result as CliResultByVerb["chatDelete"];
+      return `deleted ${deleted.messageId} in ${deleted.threadId}`;
+    }
     case "grep":
       return renderGrep(result as CliResultByVerb["grep"], {
         filesWithMatches: options.grepFilesWithMatches ?? false,

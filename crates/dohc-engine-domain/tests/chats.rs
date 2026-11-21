@@ -1781,6 +1781,352 @@ fn a_workspace_without_an_account_keeps_local_counts_and_journals_no_mark() {
     assert_eq!(thread_read_ops(&store), 0);
 }
 
+/// Threads read up to a local count, read by the account when `account`, and
+/// then each with messages the relay deleted.
+fn store_with_deleted_messages(account: bool) -> (ScratchDir, EngineStore) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        agent_thread(&mut chats, "only", &[("o0", 10)]);
+        agent_thread(&mut chats, "first", &[("f0", 20), ("f1", 30)]);
+        agent_thread(&mut chats, "read", &[("r0", 40), ("r1", 50)]);
+        agent_thread(&mut chats, "partly", &[("p0", 60), ("p1", 70)]);
+        // Equal times show as a, b, z, zz, in another order than they arrived.
+        agent_thread(
+            &mut chats,
+            "late",
+            &[("a", 75), ("z", 75), ("b", 75), ("zz", 75)],
+        );
+        for (thread_id, messages) in [("file-a", ["fa0", "fa1"].as_slice()), ("file-b", &["fb0"])] {
+            chats
+                .create_thread(
+                    &CreateFileThread {
+                        workspace_id: WS.to_owned(),
+                        thread_id: thread_id.to_owned(),
+                        title: "About a file".to_owned(),
+                        linked_object_id: format!("object-{thread_id}"),
+                        linked_path_hint: None,
+                        now_ms: 5,
+                        request_id: thread_id.to_owned(),
+                    },
+                    &NO_FAULTS,
+                )
+                .expect("file thread");
+            for (at, message_id) in messages.iter().enumerate() {
+                chats
+                    .send_message(
+                        &agent_message(thread_id, message_id, 80 + at as i64),
+                        &NO_FAULTS,
+                    )
+                    .expect("file message");
+            }
+        }
+    }
+    set_local_count(&store, "read", 2);
+    set_local_count(&store, "partly", 1);
+    set_local_count(&store, "late", 1);
+    if account {
+        assert!(
+            LinkedChatStore::new(&mut store)
+                .seed_account_reads(WS, ACCOUNT, true, 100, &NO_FAULTS)
+                .expect("seed")
+        );
+    }
+    for (thread_id, message_id) in [
+        ("only", "o0"),
+        ("first", "f0"),
+        ("read", "r1"),
+        ("partly", "p0"),
+        ("late", "z"),
+        ("file-a", "fa0"),
+        ("file-b", "fb0"),
+    ] {
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread_id, message_id, 200)
+            })
+            .expect("delete");
+    }
+    (scratch, store)
+}
+
+#[test]
+fn a_deleted_message_is_never_unread() {
+    for account in [false, true] {
+        let (_scratch, mut store) = store_with_deleted_messages(account);
+        let chats = LinkedChatStore::new(&mut store);
+        let mut threads: Vec<_> = chats
+            .list_channel_threads(WS, "gen-1", None, 10)
+            .expect("summaries")
+            .into_iter()
+            .map(|summary| {
+                (
+                    summary.thread.thread_id,
+                    summary.message_count,
+                    summary.last_read_sequence,
+                    summary.unread_count,
+                )
+            })
+            .collect();
+        threads.sort();
+        // The read place is the arrival position of the first unread message
+        // that isn't deleted, in the order the thread shows: "late" shows
+        // a, b, z, zz, so its place is b's. With nothing unread, it is the count.
+        assert_eq!(
+            threads,
+            vec![
+                ("first".to_owned(), 2, 1, 1),
+                ("late".to_owned(), 4, 2, 2),
+                ("only".to_owned(), 1, 1, 0),
+                ("partly".to_owned(), 2, 1, 1),
+                ("read".to_owned(), 2, 2, 0),
+            ],
+            "account: {account}; counting a deleted message as unread -> a badge leads to a post with nothing to read"
+        );
+        let group = chats
+            .list_channels(WS)
+            .expect("channels")
+            .into_iter()
+            .find(|summary| summary.channel.channel_id == "gen-1")
+            .map(|summary| summary.unread_count);
+        assert_eq!(group, Some(4), "account: {account}");
+        let files: Vec<_> = chats
+            .list_unread_file_threads(WS, None, 10)
+            .expect("file threads")
+            .into_iter()
+            .map(|row| (row.thread_id, row.message_count, row.last_read_sequence))
+            .collect();
+        assert_eq!(
+            files,
+            vec![("file-a".to_owned(), 2, 0)],
+            "account: {account}"
+        );
+    }
+}
+
+fn erase(store: &mut EngineStore, thread_id: &str, message_id: &str) {
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread_id, message_id, 200)
+        })
+        .expect("delete");
+}
+
+#[test]
+fn a_deleted_poll_keeps_no_choices_or_answer() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &StartChannelThread {
+                needs_decision: true,
+                options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
+                ..start_thread("gen-1", "t1", "poll", "Which?", ChatActorKind::Human, 10)
+            },
+            &NO_FAULTS,
+        )
+        .expect("poll");
+    chats
+        .send_message(&send_msg("t1", "answer", None, "Quasar", 20), &NO_FAULTS)
+        .expect("answer");
+    chats
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: WS.to_owned(),
+                thread_id: "t1".to_owned(),
+                message_id: "poll".to_owned(),
+                resolved_by_message_id: "answer".to_owned(),
+                chosen_option: Some("Quasar".to_owned()),
+                now_ms: 30,
+                request_id: "resolve".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("resolve");
+    drop(chats);
+    erase(&mut store, "t1", "poll");
+    let kept: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_decisions WHERE workspace_id=?1 AND message_id='poll'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("decision rows");
+    assert_eq!(kept, 0, "a deleted poll's choices and answer stay on disk");
+    let chats = LinkedChatStore::new(&mut store);
+    assert!(
+        chats
+            .list_thread_decisions(WS, "t1", None, 10)
+            .expect("decisions")
+            .is_empty(),
+        "a reader still lists the deleted poll"
+    );
+}
+
+#[test]
+fn a_file_chat_shows_no_deleted_words_once_its_first_comment_goes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    // A file chat a comment started has no title: it shows its first
+    // message's first line. A reply stamped at the same time with a lower id
+    // shows first, as one from a computer with an earlier clock can.
+    for (thread_id, title, reply_id) in [
+        ("held", "", "held-reply"),
+        ("sorts-first", "", "a-reply"),
+        ("typed", "Launch notes", "typed-reply"),
+    ] {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .create_thread(
+                &CreateFileThread {
+                    workspace_id: WS.to_owned(),
+                    thread_id: thread_id.to_owned(),
+                    title: title.to_owned(),
+                    linked_object_id: format!("object-{thread_id}"),
+                    linked_path_hint: None,
+                    now_ms: 5,
+                    request_id: thread_id.to_owned(),
+                },
+                &NO_FAULTS,
+            )
+            .expect("file thread");
+        let opening = format!("{thread_id}-opening");
+        chats
+            .send_message(
+                &send_msg(thread_id, &opening, None, "  Quasar secret  \nmore", 10),
+                &NO_FAULTS,
+            )
+            .expect("first comment");
+        let reply_at = if thread_id == "sorts-first" { 10 } else { 20 };
+        chats
+            .send_message(
+                &send_msg(thread_id, reply_id, None, "Reply", reply_at),
+                &NO_FAULTS,
+            )
+            .expect("reply");
+        drop(chats);
+        erase(&mut store, thread_id, &opening);
+    }
+    let chats = LinkedChatStore::new(&mut store);
+    let mut titles: Vec<_> = chats
+        .list_threads(WS)
+        .expect("threads")
+        .into_iter()
+        .map(|thread| (thread.thread_id, thread.title))
+        .collect();
+    titles.sort();
+    let untitled = dohc_engine_domain::chats::chat_thread_display_title("", None);
+    let expected = vec![
+        ("held".to_owned(), untitled),
+        ("sorts-first".to_owned(), "Reply".to_owned()),
+        ("typed".to_owned(), "Launch notes".to_owned()),
+    ];
+    assert_eq!(
+        titles, expected,
+        "a deleted first comment's words stay in its thread's title"
+    );
+    drop(chats);
+    let headers: Vec<(String, String)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT thread_id, text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id=?1 AND message_id=?2 ORDER BY thread_id",
+            )?;
+            stmt.query_map(
+                rusqlite::params![WS, dohc_engine_domain::CHAT_THREAD_HEADER_MESSAGE_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect()
+        })
+        .expect("search headers");
+    assert_eq!(
+        headers, expected,
+        "search still finds a deleted first comment by its thread's title"
+    );
+}
+
+#[test]
+fn deleting_a_message_redraws_a_live_bookmark_and_leaves_a_snapshot() {
+    // A thread has one bookmark per person, so each mode gets its own store.
+    for (mode, redrawn) in [(BookmarkMode::Live, true), (BookmarkMode::Snapshot, false)] {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        let mut store = open(&db, 1);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        chats
+            .start_channel_thread(
+                &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 10),
+                &NO_FAULTS,
+            )
+            .expect("start");
+        chats
+            .send_message(&send_msg("t1", "m1", None, "Quasar plans", 20), &NO_FAULTS)
+            .expect("send");
+        let saved = chats
+            .save_bookmark(
+                &SaveBookmark {
+                    workspace_id: WS.to_owned(),
+                    owner_user_id: "owner".to_owned(),
+                    target_kind: BookmarkTargetKind::Thread,
+                    target_id: "t1".to_owned(),
+                    mode,
+                    destination_path: "bookmarks/thread.md".to_owned(),
+                    now_ms: 30,
+                },
+                &NO_FAULTS,
+            )
+            .expect("save");
+        let ready = chats
+            .mark_bookmark_ready(
+                WS,
+                "owner",
+                &saved.bookmark_id,
+                saved.generation,
+                40,
+                None,
+                None,
+                &NO_FAULTS,
+            )
+            .expect("ready");
+        assert!(ready.applied);
+        drop(chats);
+        erase(&mut store, "t1", "m1");
+        let after: Vec<_> = LinkedChatStore::new(&mut store)
+            .list_bookmarks(WS, "owner", None)
+            .expect("bookmarks")
+            .into_iter()
+            .map(|bookmark| (bookmark.generation, bookmark.projection_state))
+            .collect();
+        let generation = ready.bookmark.generation;
+        let expected = if redrawn {
+            (generation + 1, "pending".to_owned())
+        } else {
+            (generation, "ready".to_owned())
+        };
+        assert_eq!(
+            after,
+            vec![expected],
+            "{mode:?}: a live bookmark keeps the deleted message's words, or a snapshot changes"
+        );
+    }
+}
+
 #[test]
 fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -453,6 +453,50 @@ describe("a joined workspace", () => {
     expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
   });
 
+  // A joined workspace reaches its server through the share's access check,
+  // and its sync status can read "synced" while the Members read failed.
+  it("reads the Delete role again when the access check answers after a failed read", async () => {
+    const bridge = makeShareBridge();
+    bridge.workspaceMembers.mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, role: "member" } }));
+    await waitFor(() => expect(bridge.workspaceMembers).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
+    const checks = bridge.checkSharedViewAccess.mock.calls.length;
+    bridge.workspaceMembers.mockResolvedValue({
+      status: "ready",
+      view: {
+        workspaceId: "relay-ws",
+        workspaceName: "Community",
+        viewer: { memberId: "member-me", role: "member" },
+        memberLevel: "comment",
+        inviteLink: null,
+        groupRules: null,
+        people: [],
+      },
+    });
+    bridge.checkSharedViewAccess.mockResolvedValue({
+      status: "current",
+      access: "comment",
+      role: "member",
+    });
+    fireEvent(window, new Event("online"));
+    await waitFor(() =>
+      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThan(checks),
+    );
+    await waitFor(() => expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2));
+    // A read that answered is not repeated by the next check.
+    const answered = bridge.checkSharedViewAccess.mock.calls.length;
+    fireEvent(window, new Event("online"));
+    await waitFor(() =>
+      expect(bridge.checkSharedViewAccess.mock.calls.length).toBeGreaterThan(answered),
+    );
+    await act(async () => {
+      await bridge.checkSharedViewAccess.mock.results.at(-1)!.value;
+    });
+    expect(bridge.workspaceMembers).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["comment", "member", false, false],
     ["edit", "member", true, false],

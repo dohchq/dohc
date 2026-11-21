@@ -321,6 +321,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   ],
   retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
+  delete: [["chat", "delete", "msg_1"]],
   grep: [
     [
       "chat",
@@ -754,6 +755,7 @@ function declaredSocketVerbs(command: string): Record<string, CliSocketVerb> {
 export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   ...declaredSocketVerbs("chat"),
   "create-group": "groupCreate",
+  delete: "chatDelete",
   ...Object.fromEntries(
     Object.values<DeclaredWrite>(DECLARED_WRITES).flatMap(({ cli, socket }) =>
       "none" in cli || cli.command[0] !== "chat" ? [] : [[cli.command[1], socket.verb]],

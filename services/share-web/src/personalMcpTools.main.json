@@ -1,5 +1,37 @@
 [
   {
+    "name": "dohc_delete_message",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The message's threadId, from dohc_read_channel or dohc_read_discussion."
+        },
+        "messageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The messageId of a message you posted."
+        }
+      },
+      "required": [
+        "workspace",
+        "threadId",
+        "messageId"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
     "name": "dohc_edit_document",
     "inputSchema": {
       "type": "object",

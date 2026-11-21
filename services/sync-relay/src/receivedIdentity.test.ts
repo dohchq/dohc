@@ -36,6 +36,7 @@ const chat: ChatShareThreadResolver = {
   threadFileBinding: () => ({ kind: "object", objectId: "real-object" }),
   objectCurrentPath: (id) => (id === "real-object" ? "docs/a.md" : "private/a.md"),
   objectIdAtPath: () => "real-object",
+  messageDeleted: () => false,
 };
 function served(
   opKind: string,

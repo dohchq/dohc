@@ -18,7 +18,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { isComposingKey, isSendKey } from "../ui/keys";
-import { SmilePlus } from "lucide-react";
+import { Ban, SmilePlus } from "lucide-react";
 import { EmptyState } from "../ui/controls";
 import {
   memo,
@@ -186,6 +186,20 @@ export function MentionText(props: {
 // Common reactions lead the searchable Unicode catalog.
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
 const QUICK_REACTION_EMOJIS = ["👍", "🙌"] as const;
+// What a message the relay deleted shows under its author and time. Its
+// replies stay; its reactions, attachments and actions do not.
+export function DeletedMessageLine(props: { testId: string; className?: string }) {
+  return (
+    <p
+      data-testid={props.testId}
+      className={`m-0 flex items-center gap-1.5 text-[13px] leading-[22px] text-muted ${props.className ?? ""}`}
+    >
+      <Ban size={13} aria-hidden className="shrink-0 text-subtle" />
+      Message deleted
+    </p>
+  );
+}
+
 export const TOOLBAR_BUTTON =
   "grid size-7 place-items-center rounded-md transition-colors duration-75 hover:bg-hover hover:text-ink disabled:opacity-50 disabled:cursor-default";
 
@@ -1151,15 +1165,19 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                     </time>
                   </span>
                 ) : null}
-                <ChatMarkdown
-                  body={message.body}
-                  candidates={candidates}
-                  attachments={message.attachments}
-                  testId={`${props.testIdPrefix}-message-body`}
-                  onOpenPath={props.onOpenPath}
-                />
+                {message.deletedAtMs !== undefined ? (
+                  <DeletedMessageLine testId={`${props.testIdPrefix}-message-deleted`} />
+                ) : (
+                  <ChatMarkdown
+                    body={message.body}
+                    candidates={candidates}
+                    attachments={message.attachments}
+                    testId={`${props.testIdPrefix}-message-body`}
+                    onOpenPath={props.onOpenPath}
+                  />
+                )}
                 {props.renderMessageFooter?.(message)}
-                {props.reactionControls ? (
+                {props.reactionControls && message.deletedAtMs === undefined ? (
                   <MessageReactions
                     testIdPrefix={props.testIdPrefix}
                     messageId={message.id}

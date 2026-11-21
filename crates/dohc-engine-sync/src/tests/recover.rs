@@ -1041,3 +1041,51 @@ fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() 
         1
     );
 }
+
+#[test]
+fn recovery_counts_a_message_the_relay_deleted_as_shared() {
+    let (_scratch, _path, mut engine) = open_store();
+    let append = |message_id: &str| {
+        json!({
+            "messageId": message_id,
+            "threadId": "recovery-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Text the relay later deleted",
+            "createdAtMs": 2_000
+        })
+    };
+    let a = journal_test_op(&mut engine, "chat.message.append", &append("message-a"));
+    let b = journal_test_op(&mut engine, "chat.message.append", &append("message-b"));
+    // The relay keeps A's coordinate as its tombstone.
+    let tombstone = json!({
+        "messageId": "message-a",
+        "threadId": "recovery-thread",
+        "authorKind": "human",
+        "authorDisplayName": "Ada",
+        "createdAtMs": 2_000,
+        "deletedAtMs": 2_100
+    });
+    let client = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops: vec![
+                envelope("local", a, "chat.message.tombstone", tombstone),
+                envelope("local", b, "chat.message.append", append("message-b")),
+            ],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]));
+    let recovered = client
+        .recover_origin(&mut engine, "ws", "recovered", &NoFaults)
+        .expect("recover past a tombstone");
+    assert_eq!(
+        (recovered.shared_prefix_length, recovered.preserved_ops),
+        (2, 0),
+        "a re-sent A would bring its text back, and B with it"
+    );
+}

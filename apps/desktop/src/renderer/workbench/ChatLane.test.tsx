@@ -270,6 +270,23 @@ describe("ChatLane", () => {
     expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
   });
 
+  it("puts the New divider above the message the read place names, past a deleted one", async () => {
+    // The engine's place skips the deleted message; the unread count leaves it out.
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 3, lastReadSequence: 2, unreadCount: 1 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({ id: "m1", body: "Seen" }),
+        message({ id: "m2", body: "", deletedAtMs: 50 }),
+        message({ id: "m3", body: "Unread" }),
+      ],
+    });
+    render(lane());
+    const divider = await screen.findByTestId("chats-lane-new-divider");
+    expect(divider.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("m3");
+  });
+
   it("orders equal-time messages by ID, so the New divider sits above every unread one", async () => {
     // Arrival is a, z, b at one time. The account read a; the engine's first
     // unread by (time, ID) is b, two messages in arrival order.

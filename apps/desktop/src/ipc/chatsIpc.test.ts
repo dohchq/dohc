@@ -589,7 +589,7 @@ const mutations = [
   {
     name: "create",
     channel: chatOperations.createFileChat.channel,
-    payload: { workspaceId: "workspace", path: "notes/a.md", title: "Notes" },
+    payload: { workspaceId: "workspace", path: "notes/a.md" },
     method: "createThread",
   },
   {

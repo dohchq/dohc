@@ -28,6 +28,7 @@ import type { AccessContext } from "./accessReason";
 import { ChatComposer, ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
+import { useMessageDelete } from "./messageDelete";
 import { AgentThreadLines } from "./AgentThreadLines";
 
 // The composer's replacement when this person cannot comment. The shell
@@ -45,26 +46,7 @@ function ReadOnlyNotice({ reason }: { reason: string }) {
   );
 }
 
-// One function for every render, so typing in the composer keeps the list's memo.
-function copyLinkAction(message: ChatMessageRecord) {
-  return <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />;
-}
-
 const NEW_COMMENT_COMPOSER = "linked-chat-new-composer-input";
-
-// A comment's chat takes its title from the comment's first line. A chat
-// title holds 200 UTF-16 units, so this cut counts those, on whole characters.
-const TITLE_MAX = 200;
-export function commentTitle(body: string): string {
-  const line = body.trim().split("\n", 1)[0]!.trim();
-  if (line.length <= TITLE_MAX) return line;
-  let kept = "";
-  for (const character of line) {
-    if (kept.length + character.length > TITLE_MAX - 1) break;
-    kept += character;
-  }
-  return `${kept.trimEnd()}…`;
-}
 
 const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
@@ -177,15 +159,35 @@ export function LinkedChatsPanel(props: {
   // workspace switch bumps both.
   const liveToken = useRef(0);
   const threadsToken = useRef(0);
+  // The open chat's message reads, numbered as they start. An answer older
+  // than the one shown is dropped, so a slow first read can't bring back a
+  // message deleted since.
+  const messageReads = useRef({ started: 0, shown: 0 });
+  // The one read of an open chat's messages, for opening it and for activity.
+  const readMessages = useCallback(
+    (threadId: string) => bridge().listChatMessages({ workspaceId, threadId }),
+    [workspaceId],
+  );
+  // The one read of this file's chats, for loading the list and reading it again.
+  const readThreads = useCallback(
+    (path: string) => bridge().listFileChats({ workspaceId, path }),
+    [workspaceId],
+  );
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
   const currentThreadsKey = useRef(threadsKey);
   currentThreadsKey.current = threadsKey;
   const { notices } = props;
+  // The full load in flight. Activity while it reads marks it stale, so it
+  // reads again once it shows its answer, which predates that activity.
+  const threadsLoad = useRef<{ stale: boolean } | null>(null);
+  const rereadAfterLoad = useRef<() => void>(() => {});
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++threadsToken.current;
+    const load = { stale: false };
+    threadsLoad.current = load;
     const current = () =>
       token === threadsToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
@@ -198,7 +200,7 @@ export function LinkedChatsPanel(props: {
     setThreadsState({ status: "loading" });
     while (current()) {
       try {
-        const result = await bridge().listFileChats({ workspaceId, path: filePath });
+        const result = await readThreads(filePath);
         if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
           setThreadsState((state) =>
@@ -216,14 +218,66 @@ export function LinkedChatsPanel(props: {
           fileObjectId: result.fileObjectId,
           threads: result.threads,
         });
+        threadsLoad.current = null;
+        if (load.stale) rereadAfterLoad.current();
         return;
       } catch (error) {
         if (!current()) return;
+        threadsLoad.current = null;
         fail(ipcErrorMessage(error, "Could not load Chats for this file."), error);
         return;
       }
     }
-  }, [filePath, notices, threadsKey, workspaceId]);
+  }, [filePath, notices, readThreads, threadsKey]);
+
+  // A delete, a pull or an agent changes a listed chat's title without this
+  // panel. Workspace activity and opening a chat read the list again, without
+  // its loading state: one read at a time, and one more after it if another
+  // was asked for meanwhile. A file switch or a full reload drops its answer.
+  const threadsReread = useRef({ reading: false, again: false });
+  const rereadThreads = useCallback(async () => {
+    const load = threadsLoad.current;
+    if (load) {
+      load.stale = true;
+      return;
+    }
+    const reread = threadsReread.current;
+    if (reread.reading) {
+      reread.again = true;
+      return;
+    }
+    reread.reading = true;
+    do {
+      reread.again = false;
+      if (!filePath) break;
+      const token = threadsToken.current;
+      try {
+        const result = await readThreads(filePath);
+        if (
+          token !== threadsToken.current ||
+          currentThreadsKey.current !== threadsKey ||
+          isWorkspaceUpdatingResponse(result)
+        )
+          continue;
+        setThreadsState((current) =>
+          current.status === "ready" && current.key === threadsKey
+            ? { ...current, fileObjectId: result.fileObjectId, threads: result.threads }
+            : current,
+        );
+      } catch {
+        // The list keeps what it shows; the next activity reads again.
+      }
+    } while (reread.again);
+    reread.reading = false;
+  }, [filePath, readThreads, threadsKey]);
+  rereadAfterLoad.current = () => void rereadThreads();
+  useEffect(() => {
+    if (!filePath) return;
+    return bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === undefined || event.workspaceId === workspaceId)
+        void rereadThreads();
+    });
+  }, [filePath, rereadThreads, workspaceId]);
 
   // File, tab or workspace switch: drop everything stale and reload. The file
   // that leaves About takes its Notices row with it. A tab switch counts even
@@ -232,6 +286,9 @@ export function LinkedChatsPanel(props: {
   const { tabPath } = props;
   useEffect(() => {
     liveToken.current += 1;
+    // A read still out for the last file keeps its own record, so it never
+    // swallows this file's.
+    threadsReread.current = { reading: false, again: false };
     setActiveThread(null);
     setMessages([]);
     setComposer("");
@@ -251,19 +308,23 @@ export function LinkedChatsPanel(props: {
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
+      const read = ++messageReads.current.started;
       setActiveThread(thread);
       setMessages([]);
       setMessagesLoading(true);
       try {
         const ticket = reactions.ticket();
         const [result, reactionResult] = await Promise.all([
-          bridge().listChatMessages({ workspaceId, threadId: thread.id }),
+          readMessages(thread.id),
           bridge().listChatReactions({ workspaceId, threadId: thread.id }),
         ]);
         // What the server holds is news for every surface, still open or not.
         reactions.ingest([{ threadId: thread.id, ...reactionResult, ticket }]);
         if (token !== liveToken.current) return;
-        setMessages(result.messages);
+        if (read > messageReads.current.shown) {
+          messageReads.current.shown = read;
+          setMessages(result.messages);
+        }
         // Everything on screen is read. Reporting waits for the write to
         // land: the navigator refetches on that signal, and refetching earlier
         // would read the same count back.
@@ -288,7 +349,7 @@ export function LinkedChatsPanel(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [props.onError, props.onThreadRead, reactions, workspaceId],
+    [props.onError, props.onThreadRead, reactions, readMessages, workspaceId],
   );
 
   // The chat this panel shows, and none once it unmounts.
@@ -371,11 +432,7 @@ export function LinkedChatsPanel(props: {
       const token = ++liveToken.current;
       setSending(true);
       try {
-        const { thread } = await bridge().createFileChat({
-          workspaceId,
-          path: filePath,
-          title: commentTitle(trimmed),
-        });
+        const { thread } = await bridge().createFileChat({ workspaceId, path: filePath });
         if (token !== liveToken.current) return;
         setCommenting(null);
         setThreadsState((current) =>
@@ -449,7 +506,12 @@ export function LinkedChatsPanel(props: {
         return;
       }
       if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-      setMessages((current) => [...current, result.message]);
+      // A read after the save may already show it, maybe deleted since.
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id)
+          ? current
+          : [...current, result.message],
+      );
       listRef.current?.scrollToEnd();
     } catch (error) {
       if (token !== liveToken.current) return;
@@ -495,6 +557,58 @@ export function LinkedChatsPanel(props: {
 
   const activeThreadId = activeThread?.id ?? null;
   const activeChatThreadIds = useMemo(() => [activeThreadId], [activeThreadId]);
+  // Another copy's delete, a pull or an agent changes the open chat without
+  // this panel. Workspace activity reads its messages again, as the Chats view
+  // does: one read at a time, and one more after it if activity came meanwhile,
+  // so a steady stream of activity still shows each answer. A message sent here
+  // while a read ran stays at the end.
+  useEffect(() => {
+    if (activeThreadId === null) return;
+    let active = true;
+    let reading = false;
+    let again = false;
+    const readAgain = async () => {
+      reading = true;
+      do {
+        again = false;
+        const read = ++messageReads.current.started;
+        try {
+          const fresh = (await readMessages(activeThreadId)).messages;
+          if (!active || read <= messageReads.current.shown) continue;
+          messageReads.current.shown = read;
+          const ids = new Set(fresh.map((message) => message.id));
+          setMessages((current) => [
+            ...fresh,
+            ...current.filter((message) => !ids.has(message.id)),
+          ]);
+        } catch {
+          // The open chat keeps what it shows; the next activity reads again.
+        }
+      } while (again && active);
+      reading = false;
+    };
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+      if (reading) again = true;
+      else void readAgain();
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [activeThreadId, readMessages, workspaceId]);
+
+  // An untitled chat shows its opening message's first line, and "New chat"
+  // once that message is deleted. The list it was opened from, or a search,
+  // can predate its messages, so opening it reads the list again, and its
+  // heading takes the title the list holds.
+  useEffect(() => {
+    if (activeThreadId !== null) void rereadThreads();
+  }, [activeThreadId, rereadThreads]);
+  const listedTitle =
+    threadsState.status === "ready" && threadsState.key === threadsKey
+      ? threadsState.threads.find((thread) => thread.id === activeThreadId)?.title
+      : undefined;
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,
@@ -503,6 +617,22 @@ export function LinkedChatsPanel(props: {
       readOnly,
     }),
     [threadReactions, toggleReaction, readOnly],
+  );
+  const messageDelete = useMessageDelete({
+    workspaceId,
+    viewerAuthorId: threadReactions.viewerAuthorId,
+    enabled: true,
+  });
+  const deleteAction = messageDelete.action;
+  // Stable while typing in the composer, so the list keeps its memo.
+  const rowActions = useCallback(
+    (message: ChatMessageRecord) => (
+      <>
+        <CopyMessageLink messageId={message.id} testId="linked-chat-copy-link" />
+        {deleteAction(message, "linked-chat-delete")}
+      </>
+    ),
+    [deleteAction],
   );
 
   if (activeThread) {
@@ -527,7 +657,7 @@ export function LinkedChatsPanel(props: {
             data-testid="linked-chat-title"
             className="min-w-0 flex-1 truncate text-[12px] font-medium text-ink"
           >
-            {activeThread.title}
+            {listedTitle ?? activeThread.title}
           </span>
         </div>
         <ChatMessageList
@@ -540,8 +670,9 @@ export function LinkedChatsPanel(props: {
           listRef={listRef}
           onOpenPath={props.onOpenPath}
           reactionControls={reactionControls}
-          rowActions={copyLinkAction}
+          rowActions={rowActions}
         />
+        {messageDelete.dialog}
         <AgentThreadLines
           workspaceId={workspaceId}
           chatThreadIds={activeChatThreadIds}

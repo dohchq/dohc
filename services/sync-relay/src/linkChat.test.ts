@@ -19,6 +19,7 @@ import {
   chatMessageAppend,
   chatThreadCreate,
   closeTestStorages,
+  expectNoDeletedDigest,
   inspectDatabase,
   json,
   jsonBody,
@@ -1425,5 +1426,127 @@ describe("client pushes of a link post", () => {
         }),
       ]);
     }
+  });
+});
+
+describe("a deleted message on a link's page", () => {
+  function ownerDelete(f: Fixture, messageId: string, threadId: string) {
+    return f.h(
+      request(
+        OWNER,
+        `/sync/${workspaceId}/chat/messages/${encodeURIComponent(messageId)}/delete`,
+        jsonBody({ threadId }),
+      ),
+    );
+  }
+
+  async function linkPost(f: Fixture, capability: string, fields: Record<string, unknown>) {
+    const posted = await postChat(f, capability, fields);
+    expect(posted.status, await posted.clone().text()).toBe(200);
+    return (await json(posted)).message as { messageId: string; threadId: string };
+  }
+
+  it("keeps a link holder at its lifetime limit after the owner deletes one of its posts", async () => {
+    const f = await fixture(released, new DiscussionActivityHub(), {
+      discussionLifetimeMessageLimit: 2,
+    });
+    const link = await readWriteLink(f);
+    const first = await linkPost(f, link.capability, { idempotencyKey: "a-1" });
+    await linkPost(f, link.capability, { idempotencyKey: "a-2" });
+    const removed = await ownerDelete(f, first.messageId, first.threadId);
+    expect(removed.status, await removed.clone().text()).toBe(200);
+
+    await expectRefused(
+      await postChat(f, link.capability, { idempotencyKey: "a-3" }),
+      413,
+      "discussion_limit_reached",
+    );
+  });
+
+  it("answers a retry of a deleted link post with its deleted line, and refuses a changed one", async () => {
+    const f = await fixture();
+    const link = await readWriteLink(f);
+    const posted = await linkPost(f, link.capability, { body: "buy my coins" });
+    expect((await ownerDelete(f, posted.messageId, posted.threadId)).status).toBe(200);
+
+    const retried = await postChat(f, link.capability, { body: "buy my coins" });
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    const answer = await json(retried);
+    expect(answer.message).toMatchObject({
+      messageId: posted.messageId,
+      threadId: posted.threadId,
+      body: null,
+      deletedAtMs: expect.any(Number),
+    });
+    expect(JSON.stringify(answer)).not.toContain("buy my coins");
+    expectNoDeletedDigest(storagePath(f.storage), answer);
+    await expectRefused(
+      await postChat(f, link.capability, { body: "something else" }),
+      409,
+      "conflict",
+    );
+    // No second message: the post's one append is now its tombstone.
+    expect(
+      linkOps(await ownerLog(f))
+        .filter((op) => op.opKind.startsWith("chat.message."))
+        .map((op) => op.opKind),
+    ).toEqual(["chat.message.tombstone"]);
+  });
+
+  it("reads a deleted message as its line, with no body and no digest", async () => {
+    const f = await fixture();
+    const link = await groupLink(f);
+    const capability = String(link.exchanged.capabilityToken);
+    expect((await ownerDelete(f, "owner-first", "thread-team")).status).toBe(200);
+
+    const page = await json(await readChat(f, capability, history));
+    expect(page.messages).toContainEqual(
+      expect.objectContaining({ messageId: "owner-first", body: null }),
+    );
+    expect(JSON.stringify(page)).not.toContain("welcome");
+    expectNoDeletedDigest(storagePath(f.storage), page);
+  });
+
+  it("answers a held follow with no text of a message deleted while it waits", async () => {
+    const f = await fixture();
+    const link = await groupLink(f);
+    const capability = String(link.exchanged.capabilityToken);
+    const latest = (await json(await readChat(f, capability, history))).nextCursor;
+    const wait = f.activity.wait.bind(f.activity);
+    // The message arrives as the follow waits, and its page holds it. The
+    // delete commits before the follow answers.
+    vi.spyOn(f.activity, "wait").mockImplementationOnce((group, actor, options) => {
+      appendOwnerOps(f.storage, "owner-later", [
+        chatMessageAppend("gone", "thread-team", "the deleted words", {
+          authorUserId: OWNER,
+          authorDisplayName: "Ada",
+        }),
+      ]);
+      return wait(group, actor, {
+        ...options,
+        shouldPark: () => {
+          const park = options.shouldPark();
+          expect(park).toBe(false);
+          expect(
+            f.storage.deleteWorkspaceMessage({
+              workspaceId,
+              threadId: "thread-team",
+              messageId: "gone",
+              actor: { kind: "account", userId: OWNER },
+              nowMs: 9_000,
+            }).ok,
+          ).toBe(true);
+          return park;
+        },
+      });
+    });
+
+    const followed = await readChat(f, capability, `${history}&since=${String(latest)}&hold=30000`);
+    expect(followed.status, await followed.clone().text()).toBe(200);
+    const page = await json(followed);
+    expect(page.messages).toEqual([
+      expect.objectContaining({ messageId: "gone", body: null, deletedAtMs: 9_000 }),
+    ]);
+    expect(JSON.stringify(page)).not.toContain("the deleted words");
   });
 });

@@ -8,6 +8,7 @@ import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as workspaceMembersStorage from "./storage/workspaceMembers";
+import * as messageDeletesStorage from "./storage/messageDeletes";
 import * as directMessagesStorage from "./storage/directMessages";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -1968,6 +1969,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   setWorkspaceGroupRule(...args: Parameters<SyncRelayStorage["setWorkspaceGroupRule"]>) {
     return workspaceMembersStorage.setWorkspaceGroupRule(this, ...args);
+  }
+  deleteWorkspaceMessage(...args: Parameters<SyncRelayStorage["deleteWorkspaceMessage"]>) {
+    return messageDeletesStorage.deleteWorkspaceMessage(this, ...args);
+  }
+  deletedMessageCount(...args: Parameters<SyncRelayStorage["deletedMessageCount"]>) {
+    return messageDeletesStorage.deletedMessageCount(this, ...args);
+  }
+  messageDeleted(...args: Parameters<SyncRelayStorage["messageDeleted"]>) {
+    return messageDeletesStorage.messageDeleted(this, ...args);
+  }
+  deletedMessageTimes(...args: Parameters<SyncRelayStorage["deletedMessageTimes"]>) {
+    return messageDeletesStorage.deletedMessageTimes(this, ...args);
   }
   resolveDirectPick(...args: Parameters<SyncRelayStorage["resolveDirectPick"]>) {
     return directMessagesStorage.resolveDirectPick(this, ...args);

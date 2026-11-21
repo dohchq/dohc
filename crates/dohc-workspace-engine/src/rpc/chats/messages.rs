@@ -281,6 +281,8 @@ pub(super) struct MessageWire<'a> {
     author_reported: Option<&'a dohc_engine_domain::ChatReportedAgent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     work: Option<&'a dohc_engine_domain::ChatWorkReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted_at_ms: Option<i64>,
 }
 
 impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
@@ -310,6 +312,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
             author_agent_id: message.author_agent_id.as_deref(),
             author_reported: message.author_reported.as_ref(),
             work: message.work.as_ref(),
+            deleted_at_ms: message.deleted_at_ms,
         }
     }
 }
@@ -923,6 +926,7 @@ mod tests {
             author_reported: None,
             work: None,
             attachments: Vec::new(),
+            deleted_at_ms: None,
         }
     }
 

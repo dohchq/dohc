@@ -118,6 +118,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+import { MessageDeleteRole } from "./workbench/messageDelete";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
@@ -675,6 +676,36 @@ function InvalidSitePathFallback({
 
   return null;
 }
+
+// What the workspace's chats and Collections read once per workspace visit.
+function WorkspaceReads(props: {
+  workspaceId: string;
+  deleteRoleKey: string;
+  admitted: boolean;
+  shareAccessCurrent: EventTarget;
+  children: ReactNode;
+}) {
+  return (
+    <CollectionFieldMarksProvider workspaceId={props.workspaceId}>
+      <MessageDeleteRole
+        workspaceId={props.workspaceId}
+        refreshKey={props.deleteRoleKey}
+        admitted={props.admitted}
+        shareAccessCurrent={props.shareAccessCurrent}
+      >
+        {props.children}
+      </MessageDeleteRole>
+    </CollectionFieldMarksProvider>
+  );
+}
+
+// The sync states in which the workspace last reached its server.
+const REACHED_STATES: ReadonlySet<SyncStatusResult["state"]> = new Set([
+  "synced",
+  "syncing",
+  "local-changes",
+  "conflict",
+]);
 
 /**
  * A record's body in a Collection tab's record panel. While it is on the page, the shell knows which record's
@@ -2729,6 +2760,16 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  // Delete reads the role again when the workspace reaches its server again,
+  // or the relay names a new membership role. Before the first status, the
+  // server counts as reached, so an opening online reads once.
+  const serverReached =
+    syncStatus === null || (!syncStatus.syncFailure && REACHED_STATES.has(syncStatus.state));
+  const deleteRoleKey = `${serverReached} ${membershipRole ?? ""}`;
+  // A shared view reaches its server through the share's access check, so its
+  // sync status can read "synced" while Delete's role read failed. Each
+  // current answer lets a failed read try again.
+  const [shareAccessCurrent] = useState(() => new EventTarget());
   // Closed shared notes whose edits wait for the server. Rows read the marks
   // themselves, so a change leaves the Explorer and every other row alone; an
   // open note's editor shows its own state.
@@ -3203,6 +3244,7 @@ export function DesktopWorkspaceShell(props: {
     },
     onVerified: (result) => {
       if (!shareView) return;
+      if (result.status === "current") shareAccessCurrent.dispatchEvent(new Event("current"));
       if (
         result.status === "ended" ||
         result.status === "needs-reopen" ||
@@ -8189,7 +8231,12 @@ export function DesktopWorkspaceShell(props: {
       <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
         <AgentColorContext.Provider value={setAgentColor}>
           <CustomizeContext.Provider value={customizeContext}>
-            <CollectionFieldMarksProvider workspaceId={workspaceId}>
+            <WorkspaceReads
+              workspaceId={workspaceId}
+              deleteRoleKey={deleteRoleKey}
+              admitted={workspaceIsReady}
+              shareAccessCurrent={shareAccessCurrent}
+            >
               <ShellErrorReporter.Provider value={reportShellFailure}>
                 <MessageLinks.Provider value={makeMessageLink}>
                   <WorkReferences.Provider value={workReferenceLinks}>
@@ -10248,7 +10295,7 @@ export function DesktopWorkspaceShell(props: {
                   </WorkReferences.Provider>
                 </MessageLinks.Provider>
               </ShellErrorReporter.Provider>
-            </CollectionFieldMarksProvider>
+            </WorkspaceReads>
           </CustomizeContext.Provider>
         </AgentColorContext.Provider>
       </AgentSettingsProvider>

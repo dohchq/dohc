@@ -45,6 +45,7 @@ export function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
     createdAtMs: message.createdAtMs,
     body: message.body,
     bodyTooLarge: message.bodyTooLarge,
+    ...(message.deletedAtMs === undefined ? {} : { deletedAtMs: message.deletedAtMs }),
   };
 }
 
@@ -113,6 +114,7 @@ export function createLinkChatRoutes(options: {
     | "getShareLabels"
     | "getLinkPrincipalForGrantProfile"
     | "workspaceIsOwnedBy"
+    | "deletedMessageTimes"
     | "findThreadCreateLane"
     | "findThreadFirstMessageId"
   >;

@@ -8,10 +8,11 @@ import type { AgentThreadLinesEvent, ChatThreadRecord } from "../../ipc/bridgeCo
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
 import { AgentThreadLinesProvider } from "./AgentThreadLines";
 import { deferred, type Deferred } from "../../testing/deferred";
-import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
+import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile } from "./About";
 import type { AccessContext } from "./accessReason";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 
 function stubAnimationFrames() {
   let nextId = 0;
@@ -71,14 +72,16 @@ function LinkedChatsPanel(
     Partial<Pick<PanelProps, "notices">>,
 ) {
   return (
-    <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel
-        notices={notices}
-        accessContext={accessContext}
-        links={links}
-        {...props}
-      />
-    </ReactionStoreProvider>
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ReactionStoreProvider workspaceId={props.workspaceId}>
+        <ProductionLinkedChatsPanel
+          notices={notices}
+          accessContext={accessContext}
+          links={links}
+          {...props}
+        />
+      </ReactionStoreProvider>
+    </WorkspaceSessionProvider>
   );
 }
 
@@ -101,7 +104,9 @@ const bridgeMock = {
   requestAccessRefresh: vi.fn(),
   readAgentThreadLines: vi.fn(),
   onAgentThreadLines: vi.fn(),
+  onWorkspaceActivity: vi.fn(),
 };
+const activity = new Set<(event: { workspaceId?: string }) => void>();
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
 // message into view after load.
@@ -114,6 +119,13 @@ beforeEach(() => {
     threads: [searchThread],
   });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  activity.clear();
+  bridgeMock.onWorkspaceActivity.mockImplementation(
+    (callback: (event: { workspaceId?: string }) => void) => {
+      activity.add(callback);
+      return () => activity.delete(callback);
+    },
+  );
   bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
   bridgeMock.getObjectAccess.mockImplementation(async (input: { ref: unknown }) => ({
     ref: input.ref,
@@ -342,6 +354,244 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
 });
 
+describe("LinkedChatsPanel live thread", () => {
+  const comment = (id: string, author: string, body: string, at: number) => ({
+    presentation: { group: "fixture", hue: null, self: false },
+    id,
+    threadId: "thread-1",
+    authorKind: "human" as const,
+    authorDisplayName: author,
+    body,
+    createdAtMs: at,
+  });
+  const maya = comment("message-1", "Maya", "Plant beans in May?", 1_700_000_000_000);
+  const sam = comment("message-2", "Sam", "Spam from Sam", 1_700_000_060_000);
+  const samDeleted = { ...sam, body: "", deletedAtMs: 1_700_000_120_000 };
+  const workspaceChanged = () =>
+    act(() => {
+      for (const callback of activity) callback({ workspaceId: "workspace-1" });
+    });
+  const openPanel = () =>
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />,
+    );
+
+  it("shows a comment deleted elsewhere while its thread is open", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />,
+    );
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+
+    // The delete lands from the relay; main says the workspace changed.
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [maya, { ...sam, body: "", deletedAtMs: 1_700_000_120_000 }],
+    });
+    act(() => {
+      for (const callback of activity) callback({ workspaceId: "workspace-1" });
+    });
+
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    expect(chat.textContent).not.toContain("Spam from Sam");
+    expect(chat.textContent).toContain("Plant beans in May?");
+  });
+
+  it("reads an untitled thread's heading again when its opening comment is deleted", async () => {
+    const opened = { ...searchThread, title: "Plant beans in May?" };
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [opened] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={opened}
+        onError={vi.fn()}
+      />,
+    );
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+    expect(screen.getByTestId("linked-chat-title").textContent).toBe("Plant beans in May?");
+
+    // The engine titles an untitled thread by its opening message, and "New
+    // chat" once that message is deleted.
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [{ ...opened, title: "New chat", path: "notes/plan.md" }],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [{ ...maya, body: "", deletedAtMs: 1_700_000_120_000 }, sam],
+    });
+    workspaceChanged();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+    );
+    expect(chat.textContent).not.toContain("Plant beans in May?");
+  });
+
+  describe("an untitled chat whose opening comment is deleted while it is closed", () => {
+    const untitled = { ...searchThread, title: "Plant beans in May?" };
+    const listPanel = async () => {
+      bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [untitled] });
+      render(
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="notes/plan.md" onError={vi.fn()} />,
+      );
+      await screen.findByText("Plant beans in May?");
+      // Another copy deletes the opening comment and this copy pulls it.
+      bridgeMock.listFileChats.mockResolvedValue({
+        fileObjectId: "object-1",
+        threads: [{ ...untitled, title: "New chat" }],
+      });
+      bridgeMock.listChatMessages.mockResolvedValue({
+        messages: [{ ...maya, body: "", deletedAtMs: 1_700_000_120_000 }, sam],
+      });
+    };
+    const expectNewChatOpen = async () => {
+      const chat = await screen.findByTestId("linked-chat-thread");
+      await within(chat).findByText("Spam from Sam");
+      await waitFor(() =>
+        expect(screen.getByTestId("linked-chat-title").textContent).toBe("New chat"),
+      );
+      expect(document.body.textContent).not.toContain("Plant beans in May?");
+    };
+
+    it("takes the list's title off the row once the delete's activity arrives", async () => {
+      await listPanel();
+      workspaceChanged();
+      await waitFor(() => expect(screen.queryByText("Plant beans in May?")).toBeNull());
+      fireEvent.click(screen.getByText("New chat"));
+      await expectNewChatOpen();
+    });
+
+    it("heads the chat with the engine's title when it opens before any activity", async () => {
+      await listPanel();
+      fireEvent.click(screen.getByText("Plant beans in May?"));
+      await expectNewChatOpen();
+    });
+
+    it("reads the list again when the delete's activity lands during the first read", async () => {
+      const first = deferred<{ fileObjectId: string; threads: (typeof untitled)[] }>();
+      bridgeMock.listFileChats.mockReturnValueOnce(first.promise);
+      bridgeMock.listFileChats.mockResolvedValue({
+        fileObjectId: "object-1",
+        threads: [{ ...untitled, title: "New chat" }],
+      });
+      render(
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="notes/plan.md" onError={vi.fn()} />,
+      );
+      await waitFor(() => expect(activity.size).toBe(1));
+      workspaceChanged();
+      // The first read answers with the list from before the delete.
+      await act(async () => first.resolve({ fileObjectId: "object-1", threads: [untitled] }));
+      await screen.findByText("New chat");
+      expect(screen.queryByText("Plant beans in May?")).toBeNull();
+    });
+  });
+
+  it("keeps a delete that lands while the thread's first read is still out", async () => {
+    // The first read holds the old words until its reactions answer.
+    const firstReactions = deferred<{ reactions: []; viewerAuthorId: string }>();
+    bridgeMock.listChatReactions.mockReturnValueOnce(firstReactions.promise);
+    bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    // The file's list and the open chat each listen.
+    await waitFor(() => expect(activity.size).toBe(2));
+
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    workspaceChanged();
+    // The panel still shows its loading state; the activity's read has answered.
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    await act(async () => firstReactions.resolve({ reactions: [], viewerAuthorId: "me" }));
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    expect(chat.textContent).not.toContain("Spam from Sam");
+  });
+
+  it("shows a sent comment once when a read already showed it", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya] });
+    const sent = deferred<{ message: typeof sam }>();
+    bridgeMock.sendChatMessage.mockReturnValue(sent.promise);
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Plant beans in May?");
+
+    fireEvent.change(screen.getByTestId("linked-chat-composer"), {
+      target: { value: "Spam from Sam" },
+    });
+    fireEvent.click(screen.getByTestId("linked-chat-send"));
+    // The comment saved, and another change's activity reads it before the send answers.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, sam] });
+    workspaceChanged();
+    await within(chat).findByText("Spam from Sam");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await act(async () => sent.resolve({ message: sam }));
+
+    expect(within(chat).getAllByText("Spam from Sam")).toHaveLength(1);
+    // Two rows with one id would share a React key.
+    expect(errors.mock.calls.flat().join(" ")).not.toContain("same key");
+    errors.mockRestore();
+  });
+
+  it("keeps a sent comment's tombstone when a read showed its delete first", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya] });
+    const sent = deferred<{ message: typeof sam }>();
+    bridgeMock.sendChatMessage.mockReturnValue(sent.promise);
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Plant beans in May?");
+
+    fireEvent.change(screen.getByTestId("linked-chat-composer"), {
+      target: { value: "Spam from Sam" },
+    });
+    fireEvent.click(screen.getByTestId("linked-chat-send"));
+    // An admin deletes it before the send answers, and a read shows the delete.
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    workspaceChanged();
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    await act(async () => sent.resolve({ message: sam }));
+
+    expect(chat.textContent).not.toContain("Spam from Sam");
+    expect(within(chat).getAllByTestId("linked-chat-message")).toHaveLength(2);
+  });
+
+  it("reads once at a time while activity keeps coming, and shows each answer", async () => {
+    bridgeMock.listChatMessages.mockResolvedValueOnce({ messages: [maya, sam] });
+    openPanel();
+    const chat = await screen.findByTestId("linked-chat-thread");
+    await within(chat).findByText("Spam from Sam");
+
+    const held = deferred<{ messages: (typeof maya)[] }>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(held.promise);
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [maya, samDeleted] });
+    for (let event = 0; event < 5; event += 1) {
+      workspaceChanged();
+      await act(async () => {});
+    }
+    // The first open read and one held read: activity during it waits.
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2);
+
+    await act(async () => held.resolve({ messages: [maya, samDeleted] }));
+    await within(chat).findByTestId("linked-chat-message-deleted");
+    // One more read for the activity that came meanwhile, then none.
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3));
+    await act(async () => {});
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("LinkedChatsPanel initialThread consumption", () => {
   it("clears the parent state on consumption so a History<->Chats remount shows the list, not the stale thread", async () => {
     const user = userEvent.setup();
@@ -480,8 +730,9 @@ describe("LinkedChatsPanel thread and file reads", () => {
     await screen.findByTestId("linked-chat-thread");
     await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1));
 
+    const listReads = bridgeMock.listFileChats.mock.calls.length;
     await act(async () => notices.report.mock.calls[0]![0].retry());
-    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(listReads + 1);
     await act(async () => {
       messagesRead.resolve({ messages: [message] });
       await messagesRead.promise;
@@ -682,15 +933,17 @@ describe("LinkedChats reactions through the workspace store", () => {
   ) {
     return (
       <div key={testId} data-testid={testId}>
-        <ProductionLinkedChatsPanel
-          workspaceId="workspace-1"
-          filePath="docs/plan.md"
-          initialThread={initialThread}
-          onError={onError}
-          notices={notices}
-          accessContext={accessContext}
-          links={links}
-        />
+        <WorkspaceSessionProvider workspaceId="workspace-1">
+          <ProductionLinkedChatsPanel
+            workspaceId="workspace-1"
+            filePath="docs/plan.md"
+            initialThread={initialThread}
+            onError={onError}
+            notices={notices}
+            accessContext={accessContext}
+            links={links}
+          />
+        </WorkspaceSessionProvider>
       </div>
     );
   }
@@ -801,16 +1054,36 @@ describe("LinkedChatsPanel comment on the file", () => {
     fireEvent.keyDown(composer, { key: "Enter" });
   }
 
-  it("starts the file's chat titled by the comment's first line, posts the comment, then opens it", async () => {
-    bridgeMock.createFileChat.mockResolvedValue({ thread: created });
+  it("starts the file's chat untitled, posts the comment, then heads it with the comment's first line", async () => {
+    // An untitled chat reads "New chat" until its first message lands.
+    bridgeMock.createFileChat.mockResolvedValue({ thread: { ...created, title: "New chat" } });
     bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1" } });
     renderPanel();
+    await screen.findByTestId("linked-chat-new");
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [{ ...created, path: "docs/plan.md" }],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          presentation: { group: "fixture", hue: null, self: true },
+          id: "m1",
+          threadId: "thread-new",
+          authorKind: "human",
+          authorDisplayName: "You",
+          body: "Tighten the intro\nIt runs long.",
+          createdAtMs: 2,
+        },
+      ],
+    });
     await writeComment("Tighten the intro\nIt runs long.");
-    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByTestId("linked-chat-title").textContent).toBe("Tighten the intro"),
+    );
     expect(bridgeMock.createFileChat).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
       path: "docs/plan.md",
-      title: "Tighten the intro",
     });
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
@@ -855,14 +1128,6 @@ describe("LinkedChatsPanel comment on the file", () => {
     fireEvent.keyDown(screen.getByTestId("linked-chat-new-composer"), { key: "Escape" });
     expect(screen.queryByTestId("linked-chat-new-composer")).toBeNull();
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
-  });
-});
-
-describe("commentTitle", () => {
-  it("cuts a long first line with no space before the …, on whole characters", () => {
-    expect(commentTitle(`${"a".repeat(198)} bbb\nmore`)).toBe(`${"a".repeat(198)}…`);
-    // A chat title holds 200 UTF-16 units. Each emoji takes two, and none is split.
-    expect(commentTitle("🎉".repeat(150))).toBe(`${"🎉".repeat(99)}…`);
   });
 });
 

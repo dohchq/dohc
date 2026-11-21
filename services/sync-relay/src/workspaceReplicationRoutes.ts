@@ -76,6 +76,7 @@ export function createWorkspaceReplicationRoutes(
     | "workspaceIsOwnedBy"
     | "listWorkReferences"
     | "prepareWorkReferenceRegistration"
+    | "deletedMessageCount"
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
@@ -272,38 +273,50 @@ export function createWorkspaceReplicationRoutes(
         });
       }
       const limit = parseLimit(url.searchParams.get("limit"));
-      const page = storage.fetchLogPage({
-        workspaceId: route.workspaceId,
-        sinceRelaySeq: since,
-        limit,
-      });
-      const mappings =
-        url.searchParams.get("includeReferences") === "false"
-          ? { references: [], nextAfter: null, hasMore: false }
-          : await storage.listWorkReferences({
-              workspaceId: route.workspaceId,
-              reader: { kind: "user", userId: actor.userId },
-              after: url.searchParams.get("referenceAfter") || undefined,
-            });
-      guard();
-      const response = jsonResponse({
-        ok: true,
-        ...(mappings.references.length || mappings.nextAfter
-          ? {
-              workReferences: mappings.references,
-              nextReferenceAfter: mappings.nextAfter,
-              referenceHasMore: mappings.hasMore,
-            }
-          : {}),
-        ops: page.rows.map(servedLogOp),
-        // A hidden epoch floor is a read filter, not a served log row. An
-        // empty response therefore cannot advance the caller's cursor: the
-        // strict page contract requires nextCursor to equal the final
-        // relaySeq, or the requested cursor when no row was served.
-        nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
-        hasMore: page.hasMore,
-      });
-      onLogRead?.(request, route.workspaceId, page.rows);
+      // A delete rewrites the stored rows of a page held across the reference
+      // read. A page read before a delete builds once more from the request's
+      // cursors, and a second stale build answers busy. Each build serializes
+      // its answer in the same turn as its last deletion check, so no delete
+      // can commit between them.
+      const buildAnswer = async (): Promise<Response | null> => {
+        const mark = storage.deletedMessageCount(route.workspaceId);
+        const page = storage.fetchLogPage({
+          workspaceId: route.workspaceId,
+          sinceRelaySeq: since,
+          limit,
+        });
+        const mappings =
+          url.searchParams.get("includeReferences") === "false"
+            ? { references: [], nextAfter: null, hasMore: false }
+            : await storage.listWorkReferences({
+                workspaceId: route.workspaceId,
+                reader: { kind: "user", userId: actor.userId },
+                after: url.searchParams.get("referenceAfter") || undefined,
+              });
+        guard();
+        if (storage.deletedMessageCount(route.workspaceId) !== mark) return null;
+        const response = jsonResponse({
+          ok: true,
+          ...(mappings.references.length || mappings.nextAfter
+            ? {
+                workReferences: mappings.references,
+                nextReferenceAfter: mappings.nextAfter,
+                referenceHasMore: mappings.hasMore,
+              }
+            : {}),
+          ops: page.rows.map(servedLogOp),
+          // A hidden epoch floor is a read filter, not a served log row. An
+          // empty response therefore cannot advance the caller's cursor: the
+          // strict page contract requires nextCursor to equal the final
+          // relaySeq, or the requested cursor when no row was served.
+          nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
+          hasMore: page.hasMore,
+        });
+        onLogRead?.(request, route.workspaceId, page.rows);
+        return response;
+      };
+      const response = (await buildAnswer()) ?? (await buildAnswer());
+      if (!response) throw relayError("server_busy");
       return response;
     }
 

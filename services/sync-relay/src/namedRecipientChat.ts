@@ -28,11 +28,14 @@ import {
   PERSONAL_AGENT_ID_PREFIX,
   PERSONAL_AGENT_ORIGIN_PREFIX,
   PERSONAL_MESSAGE_ID_PREFIX,
+  MESSAGE_DELETE_OP_KIND,
+  MESSAGE_TOMBSTONE_OP_KIND,
   type LogAuthorNameLookup,
 } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import { readAuthorized, type AuthorizedShareAction } from "./shareAuthorization";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import {
   chatSideOf,
   filterOpForShare,
@@ -43,6 +46,7 @@ import {
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
+import { deletedMessageKey } from "./storage/messageDeletes";
 import { commentFileOf, currentFileAt, type CommentFile } from "./storage/personalAgentChat";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 import { workspaceChatAccess, workspaceFileReach, workspaceGroupReachable } from "./workspaceReach";
@@ -65,6 +69,8 @@ export interface NamedChatMessage {
   createdAtMs: number;
   body: string | null;
   bodyTooLarge: boolean;
+  /** A deleted message's line: who wrote it and when, with no body. */
+  deletedAtMs?: number;
 }
 
 /**
@@ -77,6 +83,14 @@ export type ThreadedChatMessage = NamedChatMessage & {
   parentMessageId: string | null;
   startsPost: boolean;
 };
+
+/** A delete an open follow passes. The reader replaces that message's line. */
+export interface DeletedChatMessage {
+  messageId: string;
+  threadId: string;
+  deletedAtMs: number;
+  relaySeq: number;
+}
 
 /** A message in a follow of every Group a workspace share reaches names its Group. */
 type PagedChatMessage = ThreadedChatMessage & { channelWireId?: string };
@@ -151,6 +165,7 @@ export function messageFromOp(
   op: Record<string, unknown>,
   originId: string,
 ): NamedChatMessage | null {
+  if (op.opKind === MESSAGE_TOMBSTONE_OP_KIND) return deletedLineFromOp(op);
   if (op.opKind !== "chat.message.append" || !op.payload || typeof op.payload !== "object")
     return null;
   const p = op.payload as Record<string, unknown>;
@@ -181,6 +196,46 @@ export function messageFromOp(
   };
 }
 
+// The line a deleted message leaves. The relay wrote the tombstone from an
+// append it admitted, so its author fields need no second provenance check.
+function deletedLineFromOp(op: Record<string, unknown>): NamedChatMessage | null {
+  const p = op.payload as Record<string, unknown> | null;
+  if (
+    !p ||
+    typeof op.relaySeq !== "number" ||
+    typeof p.messageId !== "string" ||
+    typeof p.threadId !== "string" ||
+    typeof p.authorDisplayName !== "string" ||
+    typeof p.createdAtMs !== "number" ||
+    typeof p.deletedAtMs !== "number" ||
+    !["human", "agent", "automation", "link"].includes(String(p.authorKind))
+  )
+    return null;
+  return {
+    relaySeq: op.relaySeq,
+    messageId: p.messageId,
+    threadId: p.threadId,
+    authorUserId: typeof p.authorUserId === "string" ? p.authorUserId : null,
+    authorDisplayName: p.authorDisplayName,
+    authorKind: p.authorKind as NamedChatMessage["authorKind"],
+    linkAgent: false,
+    authorOwnerDisplayName:
+      typeof p.authorOwnerDisplayName === "string" ? p.authorOwnerDisplayName : null,
+    createdAtMs: p.createdAtMs,
+    body: null,
+    bodyTooLarge: false,
+    deletedAtMs: p.deletedAtMs,
+  };
+}
+
+/** A message's line once it is deleted. */
+export function asDeletedLine<Message extends NamedChatMessage>(
+  message: Message,
+  deletedAtMs: number,
+): Message {
+  return { ...message, body: null, bodyTooLarge: false, linkAgent: false, deletedAtMs };
+}
+
 function displayName(value: unknown): string {
   if (typeof value !== "string" || !value.isWellFormed()) throw badRequest("invalid display name");
   const name = value.trim();
@@ -207,7 +262,7 @@ export function createNamedRecipientChat(options: {
   resolveActor: ResolveActor;
   lookupUserDisplayName?: LogAuthorNameLookup;
   claimPendingShares(userId: string, signal?: AbortSignal): Promise<void>;
-  activity: Pick<DiscussionActivityHub, "wait">;
+  activity: Pick<DiscussionActivityHub, "wait" | "wakeLog">;
   publicOrigin: string;
   exchangeKey: string;
   limits: NamedLiveBrowserHttpLimits;
@@ -243,9 +298,11 @@ export function createNamedRecipientChat(options: {
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const channels = url.pathname === "/sync/named-chat/channels";
+    const deleting = url.pathname === "/sync/named-chat/messages/delete";
     if (
-      (!channels && url.pathname !== "/sync/named-chat/messages") ||
+      (!channels && !deleting && url.pathname !== "/sync/named-chat/messages") ||
       (request.method !== "GET" && (channels || request.method !== "POST")) ||
+      (deleting && request.method !== "POST") ||
       request.signal.aborted ||
       request.headers.get("origin") !== options.publicOrigin ||
       !verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)
@@ -303,19 +360,23 @@ export function createNamedRecipientChat(options: {
           if (!value || typeof value !== "object" || Array.isArray(value))
             throw badRequest("invalid request");
           input = value as Record<string, unknown>;
-          const allowed = new Set([
-            "shareId",
-            "channelWireId",
-            "path",
-            "id",
-            "threadId",
-            "lane",
-            "parentMessageId",
-            "body",
-            "authorKind",
-            "authorDisplayName",
-            "authorUserId",
-          ]);
+          const allowed = new Set(
+            deleting
+              ? ["shareId", "threadId", "messageId"]
+              : [
+                  "shareId",
+                  "channelWireId",
+                  "path",
+                  "id",
+                  "threadId",
+                  "lane",
+                  "parentMessageId",
+                  "body",
+                  "authorKind",
+                  "authorDisplayName",
+                  "authorUserId",
+                ],
+          );
           if (Object.keys(input).some((key) => !allowed.has(key)))
             throw relayError("share_op_rejected");
         } else {
@@ -375,6 +436,21 @@ export function createNamedRecipientChat(options: {
         };
         const authority = action("read");
         if (authority.share.workspaceId !== share.workspaceId) throw notFound();
+        // Deleting reads the account's role and reach in the workspace, not
+        // the share's level: a member at View still deletes their own message.
+        if (deleting) {
+          const deleted = storage.deleteWorkspaceMessage({
+            workspaceId: share.workspaceId,
+            threadId: parseString(input.threadId, "threadId", MESSAGE_DELETE_ID_MAX_CHARS),
+            messageId: parseString(input.messageId, "messageId", MESSAGE_DELETE_ID_MAX_CHARS),
+            actor: { kind: "account", userId: actor.userId },
+            nowMs: options.nowMs(),
+          });
+          if (!deleted.ok) throw notFound();
+          if (!deleted.repeated) options.activity.wakeLog(share.workspaceId);
+          const { messageId, threadId, deletedAtMs } = deleted.tombstone.payload;
+          return json({ shareId, deleted: { messageId, threadId, deletedAtMs } });
+        }
         // A workspace share reaches every ordinary Group, one follow for them all.
         // Any other share reaches one channel.
         const workspace = isWorkspaceSelector(authority.effectiveSelector);
@@ -418,11 +494,14 @@ export function createNamedRecipientChat(options: {
           };
           if (!chat) {
             const groups = storage.listChannelCreates(share.workspaceId);
+            const role = storage.workspaceRoleOf(share.workspaceId, actor.userId)?.role;
             const fresh = recheck().effectiveSelector;
             if (!isWorkspaceSelector(fresh)) throw notFound();
             const files = workspaceFileReach(fresh);
             return json({
               ...listing,
+              // The page offers Delete on others' messages; the delete route decides.
+              moderates: role === "owner" || role === "admin",
               channels: groups
                 .filter((group) => workspaceGroupReachable(fresh, group.channelWireId, resolver!))
                 .map((group) => ({
@@ -744,6 +823,7 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
     | "findThreadCreateLane"
     | "findThreadFirstMessageId"
     | "readShareTx"
+    | "deletedMessageTimes"
   >;
   resolver: ChatShareThreadResolver;
   workspaceId: string;
@@ -783,6 +863,9 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
           : input.storage.fetchChatMessages({ ...page, channelWireId: input.channelWireId });
       position = result.nextCursor;
       const messages: PagedChatMessage[] = [];
+      // The deletes this page passes. An open follow is past each deleted
+      // message's coordinate, so it learns of the delete from these.
+      const deleted: DeletedChatMessage[] = [];
       const lanes = new Map<string, "posts" | "chat">();
       const laneOf = (threadId: string): "posts" | "chat" => {
         const lane =
@@ -802,6 +885,18 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
           );
         return firsts.get(message.threadId) === message.messageId;
       };
+      // Where a thread's messages are read: on the file, in the named channel,
+      // or in a Group this share reaches.
+      const placed = (threadId: string): { channelWireId?: string } | null => {
+        if (comments) return comments.onFile(threadId) ? {} : null;
+        if (input.channelWireId !== null) return {};
+        // A file's Comments are not a Group.
+        const channelWireId = input.resolver.threadChannelWireId(threadId);
+        return isWorkspaceSelector(selector) &&
+          workspaceGroupReachable(selector, channelWireId, input.resolver)
+          ? { channelWireId }
+          : null;
+      };
       for (const row of result.rows) {
         if (row.settlementAdmission?.status === "refused") continue;
         const decision = filterOpForShare(
@@ -811,6 +906,23 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
           input.resolver,
           "chat",
         );
+        if (row.opKind === MESSAGE_DELETE_OP_KIND) {
+          const op = decision.allowed ? (decision.payload as Record<string, unknown>) : null;
+          if (
+            op &&
+            typeof op.messageId === "string" &&
+            typeof op.threadId === "string" &&
+            typeof op.deletedAtMs === "number" &&
+            placed(op.threadId)
+          )
+            deleted.push({
+              messageId: op.messageId,
+              threadId: op.threadId,
+              deletedAtMs: op.deletedAtMs,
+              relaySeq: row.relaySeq,
+            });
+          continue;
+        }
         const read = decision.allowed
           ? messageFromOp(
               { relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload },
@@ -826,24 +938,12 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
           lane,
           startsPost(read, lane),
         );
-        if (comments) {
-          if (comments.onFile(message.threadId)) messages.push(message);
-          continue;
-        }
-        if (input.channelWireId !== null) {
-          messages.push(message);
-          continue;
-        }
-        // A file's Comments are not a Group.
-        const channelWireId = input.resolver.threadChannelWireId(message.threadId);
-        if (
-          isWorkspaceSelector(selector) &&
-          workspaceGroupReachable(selector, channelWireId, input.resolver)
-        )
-          messages.push({ ...message, channelWireId });
+        const place = placed(message.threadId);
+        if (place) messages.push({ ...message, ...place });
       }
       return {
         messages,
+        deleted,
         nextCursor: following ? result.nextCursor : result.latestCursor,
         ...(following
           ? { hasMore: result.hasMore }
@@ -878,6 +978,15 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
     }
   }
   authorize();
+  // A delete can commit while the page waits. Read deletion again in the turn
+  // that builds the answer, so no deleted body leaves.
+  const deletedAt = input.storage.deletedMessageTimes(input.workspaceId, page.messages);
+  page.messages = page.messages.map((message) => {
+    const at = deletedAt.get(deletedMessageKey(message));
+    return at === undefined || message.deletedAtMs !== undefined
+      ? message
+      : asDeletedLine(message, at);
+  });
   const envelope = {
     shareId: input.shareId,
     ...(input.comments

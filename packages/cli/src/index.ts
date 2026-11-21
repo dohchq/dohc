@@ -581,6 +581,12 @@ function buildCliRequest(
           emoji: command.emoji,
         },
       };
+    case "chatDelete":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, message: command.message },
+      };
     case "grep":
       return {
         verb: command.verb,

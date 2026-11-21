@@ -4,13 +4,15 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::chats::{
-    DEFAULT_AGENT_ID, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX, PERSONAL_AGENT_ID_PREFIX,
-    PERSONAL_AGENT_ORIGIN_PREFIX, PERSONAL_THREAD_ID_PREFIX, agent_channel_slug,
-    agent_channel_wire_id, agent_id_for_channel_wire_id, bump_chat_conversation_revision,
-    channel_collision_slug, chat_thread_display_title, free_agent_channel_slug,
-    index_replicated_chat_message_search_rows, is_agent_channel_slug, is_agent_id,
-    normalize_reported_agent, normalize_work_report, personal_agent_may_post_in,
-    replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row, work_report_json,
+    DEFAULT_AGENT_ID, DeletedMessageLine, LINK_ORIGIN_PREFIX, LINK_THREAD_ID_PREFIX,
+    MESSAGE_DELETE_ORIGIN_PREFIX, PERSONAL_AGENT_ID_PREFIX, PERSONAL_AGENT_ORIGIN_PREFIX,
+    PERSONAL_THREAD_ID_PREFIX, agent_channel_slug, agent_channel_wire_id,
+    agent_id_for_channel_wire_id, bump_chat_conversation_revision, channel_collision_slug,
+    chat_thread_display_title, deleted_message, erase_deleted_message, free_agent_channel_slug,
+    index_replicated_chat_message_search_rows, insert_deleted_message, is_agent_channel_slug,
+    is_agent_id, normalize_reported_agent, normalize_work_report, personal_agent_may_post_in,
+    record_message_delete, replicated_source_origin, truncate_slug_base,
+    upsert_chat_search_index_row, work_report_json,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
@@ -332,7 +334,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     return Err(SyncError::CoordinateDiverged);
                 }
                 advance_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, acked)?;
-                return redelivered(tx, envelope, None);
+                return redelivered(tx, envelope, Some(row));
             }
             if envelope.origin_seq != expected
                 && !crate::deferred::passes_held_work(tx, envelope, acked)?
@@ -672,10 +674,14 @@ fn redelivered<T>(
     envelope: &ReplicationEnvelope,
     journaled: Option<(String, String, i64)>,
 ) -> Result<Admission<T>, SyncError> {
-    if let Some(row) = journaled
-        && !coordinate_matches(&row, envelope)?
-    {
-        return Err(SyncError::CoordinateDiverged);
+    if let Some(row) = journaled {
+        if !coordinate_matches(&row, envelope)? {
+            return Err(SyncError::CoordinateDiverged);
+        }
+        // The relay's tombstone of the message this journal appended there.
+        if row.0 != envelope.op_kind {
+            record_tombstone_in_tx(tx, envelope, decode(&envelope.payload)?)?;
+        }
     }
     if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx, envelope)? {
         return Ok(Admission::Refused(refusal));
@@ -689,16 +695,9 @@ fn coordinate_matches(
     existing: &(String, String, i64),
     envelope: &ReplicationEnvelope,
 ) -> Result<bool, SyncError> {
-    if existing.0 != envelope.op_kind || existing.2 != envelope.recorded_at_ms {
-        return Ok(false);
-    }
     let existing_payload: serde_json::Value =
         serde_json::from_str(&existing.1).map_err(|_| SyncError::CoordinateDiverged)?;
-    crate::relay::replication_payloads_match(
-        &envelope.op_kind,
-        &existing_payload,
-        &envelope.payload,
-    )
+    crate::relay::relay_op_matches_journal(&existing.0, &existing_payload, existing.2, envelope)
 }
 
 /// The built-in `chat.*` receiver apply dispatch. Structural rows use
@@ -854,6 +853,32 @@ struct MessageAppend {
     work: Option<dohc_engine_domain::ChatWorkReport>,
 }
 
+/// The line the relay keeps at a deleted message's coordinate.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageTombstone {
+    message_id: String,
+    thread_id: String,
+    author_kind: String,
+    author_display_name: String,
+    author_owner_display_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    author_user_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    parent_message_id: Option<String>,
+    created_at_ms: i64,
+    deleted_at_ms: i64,
+}
+
+/// The relay's delete of a message, from a `relay:message-delete:` origin.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MessageDelete {
+    message_id: String,
+    thread_id: String,
+    deleted_at_ms: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DecisionSet {
@@ -980,6 +1005,8 @@ fn apply_chat_mutation(
         "chat.channel.create" => none(apply_channel(tx, op, decode(&op.payload)?)),
         "chat.thread.create" => none(apply_thread(tx, op, decode(&op.payload)?)),
         "chat.message.append" => apply_message(tx, op, decode(&op.payload)?),
+        "chat.message.tombstone" => none(record_tombstone_in_tx(tx, op, decode(&op.payload)?)),
+        "chat.message.delete" => none(apply_message_delete(tx, op, decode(&op.payload)?)),
         "chat.decision.set"
         | "chat.reaction.set"
         | "chat.follow.set"
@@ -1810,6 +1837,35 @@ fn apply_message(
             }
         }
     }
+    // The relay deleted it before this append applied: it goes in deleted.
+    if let Some((thread_id, deleted_at_ms)) =
+        deleted_message(tx, &op.workspace_id, &payload.message_id)
+            .map_err(|error| map_chat_rule(error, "chat message delete is invalid"))?
+    {
+        if thread_id != payload.thread_id {
+            return Err(SyncError::InvalidInput {
+                reason: "a message delete names another thread",
+            });
+        }
+        insert_deleted_message(
+            tx,
+            &op.workspace_id,
+            &DeletedMessageLine {
+                thread_id: &payload.thread_id,
+                message_id: &payload.message_id,
+                author_kind: &payload.author_kind,
+                author_display_name: &author_display_name,
+                author_user_id: author_user_id.as_deref(),
+                author_owner_display_name: owner_name.as_deref(),
+                author_agent_id: payload.author_agent_id.as_deref(),
+                parent_message_id: payload.parent_message_id.as_deref(),
+                created_at_ms: payload.created_at_ms,
+                deleted_at_ms,
+            },
+        )
+        .map_err(|error| map_chat_rule(error, "deleted chat message is invalid"))?;
+        return Ok(Vec::new());
+    }
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2",
@@ -1933,6 +1989,157 @@ fn apply_message(
     .map_err(|error| map_chat_rule(error, "Group automation claim failed"))
 }
 
+/// Stores a message the relay deleted as its line, or clears the stored
+/// message. A fresh copy pulls the tombstone in place of the append; the
+/// journal that wrote the append gets it as a redelivery.
+fn record_tombstone_in_tx(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    payload: MessageTombstone,
+) -> Result<(), SyncError> {
+    let invalid = || SyncError::InvalidInput {
+        reason: "chat message tombstone is invalid",
+    };
+    if payload.message_id.is_empty()
+        || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
+        || payload.thread_id.is_empty()
+        || !matches!(
+            payload.author_kind.as_str(),
+            "human" | "agent" | "automation" | "link"
+        )
+        || payload
+            .parent_message_id
+            .as_ref()
+            .is_some_and(String::is_empty)
+        || !is_persisted_safe_integer(payload.created_at_ms)
+        || !is_persisted_safe_integer(payload.deleted_at_ms)
+    {
+        return Err(invalid());
+    }
+    let owner_name = normalize_agent_owner_name(
+        payload.author_kind != "human",
+        payload.author_owner_display_name.as_deref(),
+    )
+    .map_err(|_| invalid())?;
+    let author_display_name =
+        normalize_display_name(&payload.author_display_name).map_err(|_| invalid())?;
+    let author_user_id =
+        normalize_author_user_id(payload.author_user_id.as_deref()).map_err(|_| invalid())?;
+    if author_user_id != payload.author_user_id
+        || (payload.author_kind == "link" && (author_user_id.is_some() || owner_name.is_some()))
+    {
+        return Err(invalid());
+    }
+    if !record_message_delete(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        payload.deleted_at_ms,
+    )
+    .map_err(|error| map_chat_rule(error, "chat message tombstone is invalid"))?
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "a message delete names another thread",
+        });
+    }
+    let thread_exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2)",
+            params![op.workspace_id, payload.thread_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !thread_exists {
+        return park_chat_coordinate(tx, op, "message-thread", &payload.thread_id);
+    }
+    insert_deleted_message(
+        tx,
+        &op.workspace_id,
+        &DeletedMessageLine {
+            thread_id: &payload.thread_id,
+            message_id: &payload.message_id,
+            author_kind: &payload.author_kind,
+            author_display_name: &author_display_name,
+            author_user_id: author_user_id.as_deref(),
+            author_owner_display_name: owner_name.as_deref(),
+            author_agent_id: None,
+            parent_message_id: payload.parent_message_id.as_deref(),
+            created_at_ms: payload.created_at_ms,
+            deleted_at_ms: payload.deleted_at_ms,
+        },
+    )
+    .map_err(|error| map_chat_rule(error, "chat message tombstone is invalid"))?;
+    erase_stored(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        payload.deleted_at_ms,
+    )
+}
+
+/// The relay's delete. It clears the message if this copy holds it, and is
+/// kept so an append that applies later goes in deleted.
+fn apply_message_delete(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    payload: MessageDelete,
+) -> Result<(), SyncError> {
+    if !replicated_source_origin(&op.origin_id).starts_with(MESSAGE_DELETE_ORIGIN_PREFIX) {
+        return Err(SyncError::InvalidInput {
+            reason: "only the relay deletes a message",
+        });
+    }
+    if payload.message_id.is_empty()
+        || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
+        || payload.thread_id.is_empty()
+        || !is_persisted_safe_integer(payload.deleted_at_ms)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat message delete is invalid",
+        });
+    }
+    if !record_message_delete(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        payload.deleted_at_ms,
+    )
+    .map_err(|error| map_chat_rule(error, "chat message delete is invalid"))?
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "a message delete names another thread",
+        });
+    }
+    erase_stored(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        &payload.message_id,
+        payload.deleted_at_ms,
+    )
+}
+
+fn erase_stored(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    deleted_at_ms: i64,
+) -> Result<(), SyncError> {
+    if erase_deleted_message(tx, workspace_id, thread_id, message_id, deleted_at_ms)
+        .map_err(|error| map_chat_rule(error, "chat message delete is invalid"))?
+    {
+        Ok(())
+    } else {
+        Err(SyncError::InvalidInput {
+            reason: "a message delete names another thread",
+        })
+    }
+}
+
 fn apply_decision(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
@@ -1972,6 +2179,23 @@ fn apply_decision(
             Some(chosen.to_owned())
         }
     };
+    // A deleted message keeps no poll, whether its delete or its tombstone
+    // came first.
+    let tombstoned: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages \
+             WHERE workspace_id=?1 AND message_id=?2 AND deleted_at_ms IS NOT NULL)",
+            params![op.workspace_id, p.message_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if tombstoned
+        || deleted_message(tx, &op.workspace_id, &p.message_id)
+            .map_err(|error| map_chat_rule(error, "chat decision target is invalid"))?
+            .is_some()
+    {
+        return Ok(());
+    }
     let options_json = encode_poll_options(&options);
     let prior_thread_id = tx
         .query_row(
@@ -2319,6 +2543,13 @@ fn apply_attachment(
                 reason: "chat attachment target message belongs to another thread",
             });
         }
+    }
+    // A deleted message keeps no attachment.
+    if deleted_message(tx, &op.workspace_id, &p.message_id)
+        .map_err(|error| map_chat_rule(error, "chat attachment target is invalid"))?
+        .is_some()
+    {
+        return Ok(());
     }
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_attachments \

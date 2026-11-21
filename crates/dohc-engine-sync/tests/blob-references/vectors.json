@@ -834,6 +834,22 @@
       "blobs": {}
     },
     {
+      "name": "chat message tombstone names no blobs",
+      "opKind": "chat.message.tombstone",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat message delete names no blobs",
+      "opKind": "chat.message.delete",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
       "name": "chat decision set names no blobs",
       "opKind": "chat.decision.set",
       "workspaceId": "workspace",

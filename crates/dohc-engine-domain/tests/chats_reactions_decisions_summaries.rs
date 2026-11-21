@@ -988,6 +988,168 @@ fn resolve_receipts_keep_written_lost_and_no_op_after_the_cell_changes() {
 }
 
 #[test]
+fn a_resolve_receipt_keeps_no_poll_words_once_the_poll_is_deleted() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .start_channel_thread(
+            &StartChannelThread {
+                options: vec!["Quasar".to_owned(), "Pulsar".to_owned()],
+                body: "Which?".to_owned(),
+                request_id: None,
+                ..keyed_post("unused", "thread", "opening", 20)
+            },
+            &NO_FAULTS,
+        )
+        .expect("poll");
+    chats
+        .send_message(
+            &SendMessage {
+                request_id: None,
+                ..keyed_reply("unused", "reply-one", "cy", 25)
+            },
+            &NO_FAULTS,
+        )
+        .expect("answer");
+    let answer = ResolveDecision {
+        chosen_option: Some("Quasar".to_owned()),
+        ..keyed_resolve("answer-one", "reply-one", 30)
+    };
+    let before = local_journal(&store);
+    receipted(&mut store)
+        .resolve_decision(&answer, &NO_FAULTS)
+        .expect("resolve");
+    let rows = added_rows(&before, &local_journal(&store));
+    let recorded = receipt(&store, "answer-one");
+    assert_eq!(
+        recorded.as_ref().map(|receipt| receipt.3.clone()),
+        Some(coordinates_of(&rows))
+    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::chats::erase_deleted_message(tx, WS, "thread", "opening", 200)
+        })
+        .expect("delete");
+    let kept: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT result_json FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = 'answer-one'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("receipt result");
+    assert!(
+        !kept.contains("Quasar") && !kept.contains("Pulsar"),
+        "a deleted poll's choices stay in its receipt: {kept}"
+    );
+    assert_eq!(
+        receipt(&store, "answer-one"),
+        recorded,
+        "the receipt still says where its write went"
+    );
+    let mut chats = receipted(&mut store);
+    for (what, request) in [
+        ("an exact retry", answer.clone()),
+        (
+            "a fresh request",
+            ResolveDecision {
+                request_id: "answer-fresh".to_owned(),
+                ..answer.clone()
+            },
+        ),
+    ] {
+        let error = chats
+            .resolve_decision(&request, &NO_FAULTS)
+            .expect_err(what);
+        assert_eq!(error.code(), "decision-not-found", "{what}: {error:?}");
+    }
+}
+
+#[test]
+fn a_start_receipt_keeps_no_deleted_opening_as_its_title() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let post = StartChannelThread {
+        body: "Quasar secret\nsecond line".to_owned(),
+        needs_decision: false,
+        ..keyed_post("post-key", "post-thread", "post-opening", 20)
+    };
+    let lane_opening = StartChannelThread {
+        body: "Pulsar secret".to_owned(),
+        needs_decision: false,
+        lane: ChatThreadLane::Chat,
+        ..keyed_post("lane-one", "lane-thread", "lane-opening", 30)
+    };
+    let lane_reply = StartChannelThread {
+        body: "Later words".to_owned(),
+        needs_decision: false,
+        lane: ChatThreadLane::Chat,
+        ..keyed_post("lane-two", "lane-other", "lane-reply", 40)
+    };
+    let mut chats = receipted(&mut store);
+    let (started, _) = chats.start_channel_thread(&post, &NO_FAULTS).expect("post");
+    assert_eq!(started.title, "Quasar secret");
+    chats
+        .start_channel_thread(&lane_opening, &NO_FAULTS)
+        .expect("lane opening");
+    let (joined, _) = chats
+        .start_channel_thread(&lane_reply, &NO_FAULTS)
+        .expect("lane reply");
+    assert_eq!(
+        (joined.thread_id.as_str(), joined.title.as_str()),
+        ("lane-thread", "Pulsar secret"),
+        "the later start joins the lane an earlier request opened"
+    );
+    let recorded = [receipt(&store, "post-key"), receipt(&store, "lane-two")];
+    for (thread, message) in [
+        ("post-thread", "post-opening"),
+        ("lane-thread", "lane-opening"),
+    ] {
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                dohc_engine_domain::chats::erase_deleted_message(tx, WS, thread, message, 200)
+            })
+            .expect("delete");
+    }
+    for key in ["post-key", "lane-one", "lane-two"] {
+        let kept: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT result_json FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = ?2",
+                    params![WS, key],
+                    |row| row.get(0),
+                )
+            })
+            .expect("receipt result");
+        assert!(
+            !kept.contains("Quasar") && !kept.contains("Pulsar"),
+            "{key}: a start receipt keeps a deleted opening's words: {kept}"
+        );
+    }
+    assert_eq!(
+        [receipt(&store, "post-key"), receipt(&store, "lane-two")],
+        recorded,
+        "the receipts still say where their writes went"
+    );
+    let journal = local_journal(&store);
+    let mut chats = receipted(&mut store);
+    for (what, request, thread_id) in [
+        ("an untitled post", &post, "post-thread"),
+        ("a start in an existing lane", &lane_reply, "lane-thread"),
+    ] {
+        let (thread, _) = chats.start_channel_thread(request, &NO_FAULTS).expect(what);
+        assert_eq!(
+            (thread.thread_id.as_str(), thread.title.as_str()),
+            (thread_id, "New chat"),
+            "{what}: a retry replays a deleted opening as the title"
+        );
+    }
+    assert_eq!(local_journal(&store), journal);
+}
+
+#[test]
 fn each_keyed_chat_write_commits_its_receipt_with_the_write() {
     let scratch = ScratchDir::new().expect("scratch");
     let path = engine_db_path(&scratch).expect("db path");

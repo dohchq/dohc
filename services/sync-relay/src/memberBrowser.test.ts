@@ -565,6 +565,7 @@ describe("a member's Chats in a browser", () => {
     expect(await json(listed)).toMatchObject({
       shareId: ana.shareId,
       userId: "ana",
+      moderates: false,
       channels: [{ channelWireId: GROUP, name: "team", kind: "channel", access: "read-write" }],
     });
     await setLevel(h, "view");
@@ -572,6 +573,13 @@ describe("a member's Chats in a browser", () => {
       channels: [{ channelWireId: GROUP, access: "read-only" }],
     });
     expect((await chat(h, `channels?grantId=${ana.grantId}`, "ben")).status).toBe(404);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana.memberId}/role`, { role: "admin" }))
+        .status,
+    ).toBe(200);
+    expect(await json(await chat(h, `channels?grantId=${ana.grantId}`, "ana"))).toMatchObject({
+      moderates: true,
+    });
   });
 
   it("follows every reached Group in one request, tags each message with its channel, and picks up a Group created later", async () => {

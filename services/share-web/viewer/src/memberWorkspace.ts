@@ -6,14 +6,18 @@ import {
   chatBodyTooLong,
   chatMessage,
   chatRequest,
+  deletedMessage,
+  deleteNamedChatMessage,
   followNamedChat,
   NamedChatError,
   normalizeChatBody,
   postNamedChatMessage,
   readNamedChatHistory,
+  type DeletedChatMessage,
   type NamedChatChannel,
   type NamedChatComments,
   type NamedChatMessage,
+  type NamedChatPlace,
 } from "./namedChat";
 import { RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 
@@ -33,6 +37,8 @@ export interface MemberGroups {
   userId: string;
   maxPostBytes: number;
   maxBodyBytes: number;
+  /** The owner or an admin, who can delete anyone's message. */
+  moderates: boolean;
   groups: NamedChatChannel[];
 }
 
@@ -48,6 +54,7 @@ export async function openMemberGroups(
   if (
     typeof value.shareId !== "string" ||
     typeof value.userId !== "string" ||
+    typeof value.moderates !== "boolean" ||
     !positive(value.maxPostBytes) ||
     !positive(value.maxBodyBytes) ||
     !Array.isArray(value.channels)
@@ -75,13 +82,28 @@ export async function openMemberGroups(
       maxBodyBytes,
     };
   });
-  return { shareId, userId, maxPostBytes, maxBodyBytes, groups };
+  return { shareId, userId, maxPostBytes, maxBodyBytes, moderates: value.moderates, groups };
+}
+
+/** A member deletes their own messages; the owner or an admin deletes any. The relay decides. */
+function memberRemove(
+  place: NamedChatPlace,
+  moderates: boolean,
+): NonNullable<ChatChannelClient["remove"]> {
+  const own = (message: NamedChatMessage) =>
+    message.authorKind === "human" && message.authorUserId === place.userId;
+  return {
+    can: (message) => message.deletedAtMs === undefined && (moderates || own(message)),
+    own,
+    run: (message, signal) => deleteNamedChatMessage(place, message, signal),
+  };
 }
 
 /** A current file's Comments: read, followed and posted by the file's path. */
-export function commentsClient(comments: NamedChatComments): ChatChannelClient {
+export function commentsClient(comments: NamedChatComments, moderates: boolean): ChatChannelClient {
   return {
     access: comments.access,
+    remove: memberRemove(comments, moderates),
     readHistory: (before, signal) => readNamedChatHistory(comments, before, signal),
     follow: (since, holdMs, signal) => followNamedChat(comments, since, holdMs, signal),
     post: (post, signal) => postNamedChatMessage(comments, post, signal),
@@ -92,6 +114,7 @@ export function commentsClient(comments: NamedChatComments): ChatChannelClient {
 
 export interface GroupPage {
   messages: { channelWireId: string; message: NamedChatMessage }[];
+  deleted: DeletedChatMessage[];
   nextCursor: number;
   hasMore: boolean;
 }
@@ -113,6 +136,7 @@ export async function followMemberGroups(
   if (
     value.shareId !== shareId ||
     !Array.isArray(value.messages) ||
+    !Array.isArray(value.deleted) ||
     typeof value.hasMore !== "boolean" ||
     !Number.isSafeInteger(value.nextCursor) ||
     Number(value.nextCursor) < 0
@@ -123,7 +147,12 @@ export async function followMemberGroups(
     const { channelWireId, ...fields } = item;
     return { channelWireId, message: chatMessage(fields) };
   });
-  return { messages, nextCursor: Number(value.nextCursor), hasMore: value.hasMore };
+  return {
+    messages,
+    deleted: value.deleted.map(deletedMessage),
+    nextCursor: Number(value.nextCursor),
+    hasMore: value.hasMore,
+  };
 }
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {
@@ -140,10 +169,16 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 
 // Enough for any Group a person reads at once. An older message is in the Group's history.
 const BUFFERED_PER_GROUP = 500;
+type FollowPage = {
+  messages: NamedChatMessage[];
+  deleted: DeletedChatMessage[];
+  nextCursor: number;
+  hasMore: boolean;
+};
 type Waiter = {
   wireId: string;
   since: number;
-  resolve(page: { messages: NamedChatMessage[]; nextCursor: number; hasMore: boolean }): void;
+  resolve(page: FollowPage): void;
   reject(error: unknown): void;
 };
 
@@ -160,6 +195,9 @@ export function createGroupFollow(options: {
   onEnded(reason: Ended): void;
 }) {
   const follow = options.follow ?? followMemberGroups;
+  // A delete names no Group, so every Group's view hears it; one it does not hold changes nothing.
+  // Each is kept with the cursor of the page that brought it.
+  let deletes: { at: number; deleted: DeletedChatMessage }[] = [];
   const buffers = new Map<string, NamedChatMessage[]>(),
     counted = new Map<string, number>(),
     waiters = new Set<Waiter>();
@@ -168,10 +206,11 @@ export function createGroupFollow(options: {
     loop: AbortController | null = null,
     over = false;
 
-  const ready = (wireId: string, since: number) => {
+  const ready = (wireId: string, since: number): FollowPage | null => {
     const messages = (buffers.get(wireId) ?? []).filter((item) => item.relaySeq > since);
-    return messages.length || cursor! > since
-      ? { messages, nextCursor: cursor!, hasMore: false }
+    const deleted = deletes.filter((item) => item.at > since).map((item) => item.deleted);
+    return messages.length || deleted.length || cursor! > since
+      ? { messages, deleted, nextCursor: cursor!, hasMore: false }
       : null;
   };
   const settle = () => {
@@ -208,6 +247,10 @@ export function createGroupFollow(options: {
       }
     }
     cursor = page.nextCursor;
+    deletes = [
+      ...deletes,
+      ...page.deleted.map((deleted) => ({ at: page.nextCursor, deleted })),
+    ].slice(-BUFFERED_PER_GROUP);
     if (counts.size) options.onMessages(counts);
     settle();
   };
@@ -271,34 +314,33 @@ export function createGroupFollow(options: {
     } else if (!loop) run();
     const page = ready(wireId, since);
     if (page) return Promise.resolve(page);
-    return new Promise<{ messages: NamedChatMessage[]; nextCursor: number; hasMore: boolean }>(
-      (resolve, reject) => {
-        const waiter: Waiter = {
-          wireId,
-          since,
-          resolve,
-          reject: (error) => {
-            signal.removeEventListener("abort", abort);
-            reject(error);
-          },
-        };
-        const abort = () => {
-          waiters.delete(waiter);
-          reject(signal.reason);
-        };
-        waiter.resolve = (value) => {
+    return new Promise<FollowPage>((resolve, reject) => {
+      const waiter: Waiter = {
+        wireId,
+        since,
+        resolve,
+        reject: (error) => {
           signal.removeEventListener("abort", abort);
-          resolve(value);
-        };
-        signal.addEventListener("abort", abort, { once: true });
-        waiters.add(waiter);
-      },
-    );
+          reject(error);
+        },
+      };
+      const abort = () => {
+        waiters.delete(waiter);
+        reject(signal.reason);
+      };
+      waiter.resolve = (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      waiters.add(waiter);
+    });
   };
   return {
-    client(group: NamedChatChannel): ChatChannelClient {
+    client(group: NamedChatChannel, moderates: boolean): ChatChannelClient {
       return {
         access: group.access,
+        remove: memberRemove(group, moderates),
         readHistory: (before, signal) => readNamedChatHistory(group, before, signal),
         follow: (since, _holdMs, signal) => followGroup(group.channelWireId, since, signal),
         post: (post, signal) => postNamedChatMessage(group, post, signal),

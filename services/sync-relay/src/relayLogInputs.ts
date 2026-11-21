@@ -42,6 +42,23 @@ export function workspaceAdminOrigin(memberId: string): string {
   return `${WORKSPACE_ADMIN_ORIGIN_PREFIX}${memberId}`;
 }
 
+// A message delete. Only the relay writes it, after it admits the deleter,
+// and every copy accepts the delete op only from this prefix. Every delete in
+// a workspace shares one origin, so the op does not say who deleted;
+// `deleted_by` keeps that on the relay.
+export const MESSAGE_DELETE_ORIGIN_PREFIX = "relay:message-delete:";
+export const MESSAGE_DELETE_ORIGIN = `${MESSAGE_DELETE_ORIGIN_PREFIX}workspace`;
+
+// The kinds only the relay writes: a refusal at a client's coordinate, a
+// deleted message at its append's coordinate, and the delete itself.
+export const MESSAGE_TOMBSTONE_OP_KIND = "chat.message.tombstone";
+export const MESSAGE_DELETE_OP_KIND = "chat.message.delete";
+const RELAY_ONLY_OP_KINDS: ReadonlySet<string> = new Set([
+  REFUSED_OP_KIND,
+  MESSAGE_TOMBSTONE_OP_KIND,
+  MESSAGE_DELETE_OP_KIND,
+]);
+
 // A desktop stores a received share's op under `shared:<shareId>:<source>` and
 // checks a link post against its source, so no client may write from it.
 export const SHARED_REPLAY_ORIGIN_PREFIX = "shared:";
@@ -132,6 +149,9 @@ function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void
   if (originId.startsWith(WORKSPACE_ADMIN_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for an admin's new Group");
   }
+  if (originId.startsWith(MESSAGE_DELETE_ORIGIN_PREFIX)) {
+    throw badRequest("originId is reserved for message deletes");
+  }
   if (originId.startsWith(SHARED_REPLAY_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for replayed share ops");
   }
@@ -184,7 +204,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
     throw badRequest("originSeq must be a non-negative integer");
   }
   const opKind = parseString(op.opKind, "opKind", MAX_OP_KIND_CHARS);
-  if (opKind === REFUSED_OP_KIND) throw badRequest("opKind is reserved for the relay");
+  if (RELAY_ONLY_OP_KINDS.has(opKind)) throw badRequest("opKind is reserved for the relay");
   if (!op.payload || typeof op.payload !== "object" || Array.isArray(op.payload)) {
     throw badRequest("payload must be a JSON object");
   }

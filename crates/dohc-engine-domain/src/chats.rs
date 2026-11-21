@@ -27,6 +27,7 @@
 //!   JSON `[createdAtMs, messageId]` body. A TS-minted cursor round-trips; any
 //!   decode/shape failure fails closed as `invalid-follow-target`.
 
+mod deleted;
 mod dispatch;
 mod pending_replay;
 mod reactions;
@@ -34,6 +35,11 @@ mod receipts;
 mod stream;
 mod thread_projection;
 
+pub use deleted::{
+    DeletedMessageLine, MESSAGE_DELETE_OP_KIND, MESSAGE_DELETE_ORIGIN_PREFIX,
+    MESSAGE_TOMBSTONE_OP_KIND, deleted_message, erase_deleted_message, insert_deleted_message,
+    record_message_delete,
+};
 pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
@@ -442,6 +448,8 @@ pub struct ChatMessage {
     /// Authoritative attachment hydration. This is always present, including
     /// as an empty vector, at the domain and RPC boundaries.
     pub attachments: Vec<ChatAttachment>,
+    /// When the relay deleted the message. A deleted message has an empty body.
+    pub deleted_at_ms: Option<i64>,
 }
 
 /// The caller's authorization result for naming a linked file in a read-only
@@ -744,6 +752,8 @@ pub struct ChannelOpeningMessage {
     pub author_agent_id: Option<String>,
     pub body_snippet: String,
     pub reactions: Vec<ChatReaction>,
+    /// When the relay deleted the message.
+    pub deleted_at_ms: Option<i64>,
 }
 
 /// The full aggregate consumed by desktop and MCP channel listings.
@@ -1076,6 +1086,7 @@ pub struct ResolveDecision {
 pub struct CreateFileThread {
     pub workspace_id: String,
     pub thread_id: String,
+    /// Empty for an untitled thread.
     pub title: String,
     pub linked_object_id: String,
     pub linked_path_hint: Option<String>,
@@ -1817,7 +1828,7 @@ pub fn upsert_chat_search_index_row(
 }
 
 /// Maintain the message row and an untitled thread's derived header for a
-/// replicated message that was inserted in the current transaction.
+/// message, local or replicated, inserted in the current transaction.
 pub fn index_replicated_chat_message_search_rows(
     conn: &Connection,
     workspace_id: &str,
@@ -1893,18 +1904,6 @@ fn normalize_optional_thread_title(title: Option<&str>) -> Result<String, Domain
             Ok(normalized)
         }
     }
-}
-
-/// Required-title variant used by file-linked thread creation.
-fn normalize_thread_title(title: &str) -> Result<String, DomainError> {
-    let normalized = title.trim_matches(is_js_trim_ws);
-    if normalized.is_empty() || normalized.encode_utf16().count() > MAX_THREAD_TITLE_CHARS {
-        return Err(DomainError::chat(
-            "invalid-thread-title",
-            "Thread title is required.",
-        ));
-    }
-    Ok(normalized.to_owned())
 }
 
 fn normalize_attachment_object_id(object_id: &str) -> Result<String, DomainError> {
@@ -3160,8 +3159,7 @@ impl<'a> LinkedChatStore<'a> {
             }
             let account = account_read_scope(conn, workspace_id)?;
             // CROSS JOIN keeps the bounded page before the thread lookups.
-            let mut stmt = conn
-                .prepare_cached(
+            let sql = format!(
                     "WITH page AS ( \
                        SELECT ch.* FROM chat_channels ch \
                        WHERE ch.workspace_id = ?1 \
@@ -3185,18 +3183,18 @@ impl<'a> LinkedChatStore<'a> {
                               THEN MAX( \
                                 (SELECT COUNT(*) FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
-                                - COALESCE((SELECT rs.last_read_sequence \
-                                            FROM chat_thread_read_state rs \
-                                            WHERE rs.workspace_id = t.workspace_id \
-                                              AND rs.thread_id = t.thread_id), 0), \
-                                0) \
+                                - COALESCE(rs.last_read_sequence, 0), \
+                                0) - {deleted_by_count} \
                               ELSE (SELECT COUNT(*) FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
                                    AND (a.last_read_message_id IS NULL \
                                      OR (m.created_at_ms, m.message_id) \
                                         > (a.last_read_created_at_ms, a.last_read_message_id))) \
+                                - {deleted_by_mark} \
                               END) AS unread_count \
                        FROM page selected CROSS JOIN chat_threads t \
+                       LEFT JOIN chat_thread_read_state rs \
+                         ON rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id \
                        LEFT JOIN chat_account_thread_read_state a \
                          ON a.workspace_id = t.workspace_id AND a.account_user_id = ?5 \
                         AND a.thread_id = t.thread_id \
@@ -3205,7 +3203,11 @@ impl<'a> LinkedChatStore<'a> {
                        GROUP BY t.workspace_id, t.channel_id \
                      ) agg ON agg.workspace_id = ch.workspace_id AND agg.channel_id = ch.channel_id \
                      ORDER BY ch.created_at_ms, ch.channel_id",
-                )
+                deleted_by_count = deleted_unread_by_count("COALESCE(rs.last_read_sequence, 0)"),
+                deleted_by_mark = deleted_unread_by_mark(),
+            );
+            let mut stmt = conn
+                .prepare_cached(&sql)
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit, account], |row| {
@@ -3285,7 +3287,9 @@ impl<'a> LinkedChatStore<'a> {
             "workspace_id must not be empty",
         )?;
         let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
-        let title = normalize_thread_title(&input.title)?;
+        // A comment starts its chat untitled, so the thread shows its first
+        // message and a delete of that message takes the words with it.
+        let title = normalize_optional_thread_title(Some(&input.title))?;
         let object_id = normalize_attachment_object_id(&input.linked_object_id)?;
         let path_hint = input
             .linked_path_hint
@@ -3348,7 +3352,7 @@ impl<'a> LinkedChatStore<'a> {
                 &input.workspace_id,
                 &thread_id_c,
                 CHAT_THREAD_HEADER_MESSAGE_ID,
-                &title_c,
+                &chat_thread_display_title(&title_c, None),
             )
             .map_err(DomainError::sql_persist)?;
             let mut payload = serde_json::json!({
@@ -3376,7 +3380,7 @@ impl<'a> LinkedChatStore<'a> {
             Ok::<_, DomainError>(ChatThread {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: thread_id_c.clone(),
-                title: title_c.clone(),
+                title: chat_thread_display_title(&title_c, None),
                 created_at_ms: input.now_ms,
                 updated_at_ms: input.now_ms,
                 lane: ChatThreadLane::Posts,
@@ -3807,6 +3811,7 @@ impl<'a> LinkedChatStore<'a> {
                 author_reported: author_reported.clone(),
                 work: work.clone(),
                 attachments: message_attachments,
+                deleted_at_ms: None,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>((thread, message))
@@ -4035,16 +4040,15 @@ impl<'a> LinkedChatStore<'a> {
                     None,
                 )?;
             }
-            let message_search_text =
-                chat_message_search_text(&display_c, input.author_kind.as_str(), &body_c);
-            upsert_chat_search_index_row(
+            index_replicated_chat_message_search_rows(
                 tx,
                 &input.workspace_id,
                 &input.thread_id,
                 &input.message_id,
-                &message_search_text,
-            )
-            .map_err(DomainError::sql_persist)?;
+                &display_c,
+                input.author_kind.as_str(),
+                &body_c,
+            )?;
             let chain_depth = written_message_chain_depth(
                 tx,
                 &input.workspace_id,
@@ -4198,6 +4202,7 @@ impl<'a> LinkedChatStore<'a> {
                 author_reported: author_reported.clone(),
                 work: work.clone(),
                 attachments: message_attachments,
+                deleted_at_ms: None,
             };
             claims.extend(claim_group_message_in_tx(tx, &input.workspace_id, &group_message(&message, chain_depth))?);
             Ok::<_, DomainError>(message)
@@ -4251,7 +4256,9 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            // A deleted poll is gone, so a retry fails as a fresh resolve does.
             let kept = self.store.read_with(|conn| {
+                require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)?;
                 receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)
             })?;
             if let Some(decision) = kept {
@@ -4475,8 +4482,7 @@ impl<'a> LinkedChatStore<'a> {
             // index lookup, so a full page costs a fixed number of statements
             // instead of five point queries per thread.
             let page = {
-                let mut stmt = conn
-                    .prepare_cached(
+                let sql = format!(
                         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
                                 t.updated_at_ms, t.channel_id, t.linked_object_id, \
                                 t.linked_path_hint, t.linked_at_ms, t.lane, \
@@ -4490,9 +4496,7 @@ impl<'a> LinkedChatStore<'a> {
                                 (SELECT COUNT(*) FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id \
                                    AND m.thread_id = t.thread_id), \
-                                (SELECT r.last_read_sequence FROM chat_thread_read_state r \
-                                 WHERE r.workspace_id = t.workspace_id \
-                                   AND r.thread_id = t.thread_id), \
+                                r.last_read_sequence, \
                                 (SELECT COUNT(*) FROM chat_decisions d \
                                  JOIN chat_messages m ON m.workspace_id = d.workspace_id \
                                    AND m.thread_id = d.thread_id \
@@ -4511,6 +4515,7 @@ impl<'a> LinkedChatStore<'a> {
                                      (SELECT u.message_order FROM chat_messages u \
                                       WHERE u.workspace_id = t.workspace_id \
                                         AND u.thread_id = t.thread_id \
+                                        AND u.deleted_at_ms IS NULL \
                                         AND (a.last_read_message_id IS NULL \
                                           OR (u.created_at_ms, u.message_id) \
                                              > (a.last_read_created_at_ms, a.last_read_message_id)) \
@@ -4522,8 +4527,19 @@ impl<'a> LinkedChatStore<'a> {
                                    AND m.thread_id = t.thread_id \
                                    AND (a.last_read_message_id IS NULL \
                                      OR (m.created_at_ms, m.message_id) \
-                                        > (a.last_read_created_at_ms, a.last_read_message_id))) END \
+                                        > (a.last_read_created_at_ms, a.last_read_message_id))) \
+                                - {deleted_by_mark} END, \
+                                CASE WHEN ?8 IS NULL THEN {deleted_by_count} ELSE 0 END, \
+                                CASE WHEN ?8 IS NULL THEN \
+                                (SELECT u.message_order FROM chat_messages u \
+                                 WHERE u.workspace_id = t.workspace_id \
+                                   AND u.thread_id = t.thread_id \
+                                   AND u.deleted_at_ms IS NULL \
+                                   AND u.message_order >= COALESCE(r.last_read_sequence, 0) \
+                                 ORDER BY u.created_at_ms, u.message_id LIMIT 1) END \
                          FROM chat_threads t \
+                         LEFT JOIN chat_thread_read_state r \
+                           ON r.workspace_id = t.workspace_id AND r.thread_id = t.thread_id \
                          LEFT JOIN chat_account_thread_read_state a \
                            ON a.workspace_id = t.workspace_id AND a.account_user_id = ?8 \
                           AND a.thread_id = t.thread_id \
@@ -4531,7 +4547,11 @@ impl<'a> LinkedChatStore<'a> {
                            AND (?3 = 0 OR t.updated_at_ms < ?4 \
                              OR (t.updated_at_ms = ?4 AND t.thread_id < ?5)) \
                          ORDER BY t.updated_at_ms DESC, t.thread_id DESC LIMIT ?6",
-                    )
+                    deleted_by_count = deleted_unread_by_count("COALESCE(r.last_read_sequence, 0)"),
+                    deleted_by_mark = deleted_unread_by_mark(),
+                );
+                let mut stmt = conn
+                    .prepare_cached(&sql)
                     .map_err(DomainError::sql_corrupt)?;
                 let rows = stmt
                     .query_map(
@@ -4556,12 +4576,16 @@ impl<'a> LinkedChatStore<'a> {
                                     (Some(position), Some(unread)) => Some((position, unread)),
                                     _ => None,
                                 };
+                            let deleted_unread: i64 = row.get(18)?;
+                            let local_place: Option<i64> = row.get(19)?;
                             Ok(thread.map(|thread| {
                                 (
                                     thread,
                                     message_count,
                                     stored_read_sequence,
                                     account_read,
+                                    deleted_unread,
+                                    local_place,
                                     open_decision_count,
                                     opening_message_id,
                                 )
@@ -4577,6 +4601,8 @@ impl<'a> LinkedChatStore<'a> {
                 message_count,
                 stored_read_sequence,
                 account_read,
+                deleted_unread,
+                local_place,
                 open_decision_count,
                 opening_id,
             ) in page
@@ -4592,13 +4618,19 @@ impl<'a> LinkedChatStore<'a> {
                         reason: "channel summary read cursor is corrupt",
                     });
                 }
-                // An account's place counts the messages before its earliest
-                // unread one, so the New divider indexes that message.
+                // The place is the arrival position of the earliest unread
+                // message that isn't deleted, in the order the thread shows,
+                // so the New divider indexes that message. Unread is after
+                // the account's mark, or past the local read count. With none, the
+                // place is the count.
                 let (last_read_sequence, unread_count) = match account_read {
                     Some((position, unread)) => (position.min(message_count), unread.min(message_count)),
                     None => {
                         let read = stored_read_sequence.min(message_count);
-                        (read, message_count - read)
+                        (
+                            local_place.unwrap_or(message_count).min(message_count),
+                            message_count - read - deleted_unread,
+                        )
                     }
                 };
                 if !persisted_nonnegative_safe(open_decision_count) {
@@ -4631,7 +4663,7 @@ impl<'a> LinkedChatStore<'a> {
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                          author_display_name, author_user_id, parent_message_id, origin, body, \
                          created_at_ms, author_owner_display_name, automation_id, chain_depth, author_actor_key, \
-                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+                         link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
                          FROM chat_messages WHERE workspace_id = ?1 \
                            AND message_id IN (SELECT value FROM json_each(?2))",
                     )
@@ -4679,6 +4711,7 @@ impl<'a> LinkedChatStore<'a> {
                         link_author: message.link_author,
                         author_reported: message.author_reported,
                         author_agent_id: message.author_agent_id,
+                        deleted_at_ms: message.deleted_at_ms,
                     });
                 summaries.push(ChannelThreadSummary {
                     work: work.remove(&thread.thread_id),
@@ -5221,7 +5254,7 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
                      author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+                     automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
                      FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
                        AND message_order > ?3 ORDER BY message_order ASC LIMIT ?4",
                 )
@@ -5463,8 +5496,8 @@ impl<'a> LinkedChatStore<'a> {
             let account = account_read_scope(conn, workspace_id)?;
             // An account's place counts the messages before its earliest
             // unread one, and its unread are the messages after its mark.
-            let mut statement = conn
-                .prepare_cached(
+            // Neither count of unread counts a deleted message.
+            let sql = format!(
                     "WITH file_threads AS ( \
                         SELECT t.thread_id, \
                             (SELECT COUNT(*) FROM chat_messages m \
@@ -5491,8 +5524,12 @@ impl<'a> LinkedChatStore<'a> {
                                  AND (a.last_read_message_id IS NULL \
                                    OR (m.created_at_ms, m.message_id) \
                                       > (a.last_read_created_at_ms, a.last_read_message_id))) \
-                            END AS account_unread \
+                              - {deleted_by_mark} \
+                            END AS account_unread, \
+                            CASE WHEN ?5 IS NULL THEN {deleted_by_count} ELSE 0 END AS deleted_unread \
                         FROM chat_threads t \
+                        LEFT JOIN chat_thread_read_state r \
+                          ON r.workspace_id = t.workspace_id AND r.thread_id = t.thread_id \
                         LEFT JOIN chat_account_thread_read_state a \
                           ON a.workspace_id = t.workspace_id AND a.account_user_id = ?5 \
                          AND a.thread_id = t.thread_id \
@@ -5504,14 +5541,18 @@ impl<'a> LinkedChatStore<'a> {
                     SELECT thread_id, message_count, last_read_sequence \
                     FROM file_threads \
                     WHERE (account_unread IS NULL \
-                           AND message_count > MIN(last_read_sequence, message_count)) \
+                           AND message_count - MIN(last_read_sequence, message_count) > deleted_unread) \
                        OR account_unread > 0 \
                        OR thread_id = '' \
                        OR message_count < 0 OR message_count > ?4 \
                        OR last_read_sequence < 0 OR last_read_sequence > ?4 \
                     ORDER BY thread_id \
                     LIMIT ?3",
-                )
+                deleted_by_count = deleted_unread_by_count("COALESCE(r.last_read_sequence, 0)"),
+                deleted_by_mark = deleted_unread_by_mark(),
+            );
+            let mut statement = conn
+                .prepare_cached(&sql)
                 .map_err(DomainError::sql_corrupt)?;
             let rows = statement
                 .query_map(
@@ -8011,6 +8052,30 @@ fn conservative_read_coordinate(
     .map_err(DomainError::sql_corrupt)
 }
 
+/// How many of thread `t`'s deleted messages come after its first
+/// `read_count` messages in arrival order. A read count still counts every
+/// message, so an unread count takes these off. `message_order` is a
+/// message's zero-based arrival position: each insert takes the next one, and
+/// a delete keeps its row.
+fn deleted_unread_by_count(read_count: &str) -> String {
+    format!(
+        "(SELECT COUNT(*) FROM chat_messages d \
+          WHERE d.workspace_id = t.workspace_id AND d.thread_id = t.thread_id \
+            AND d.deleted_at_ms IS NOT NULL \
+            AND d.message_order >= {read_count})"
+    )
+}
+
+/// How many of thread `t`'s deleted messages sort after the account mark `a`.
+fn deleted_unread_by_mark() -> &'static str {
+    "(SELECT COUNT(*) FROM chat_messages d \
+      WHERE d.workspace_id = t.workspace_id AND d.thread_id = t.thread_id \
+        AND d.deleted_at_ms IS NOT NULL \
+        AND (a.last_read_message_id IS NULL \
+          OR (d.created_at_ms, d.message_id) \
+             > (a.last_read_created_at_ms, a.last_read_message_id)))"
+}
+
 /// An account's place in one thread as the human read projections show it:
 /// how many messages come before the earliest unread one in arrival order,
 /// and how many are unread. A message is unread when it sorts after the mark.
@@ -8028,6 +8093,7 @@ fn account_thread_position(
                   AND m.message_order < COALESCE( \
                     (SELECT u.message_order FROM chat_messages u \
                      WHERE u.workspace_id = ?1 AND u.thread_id = ?3 \
+                       AND u.deleted_at_ms IS NULL \
                        AND (a.last_read_message_id IS NULL \
                          OR (u.created_at_ms, u.message_id) \
                             > (a.last_read_created_at_ms, a.last_read_message_id)) \
@@ -9089,7 +9155,7 @@ fn message_by_id(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
         params![workspace_id, message_id],
         map_message_row,
@@ -9109,7 +9175,7 @@ fn first_message_for_thread(
     conn.query_row(
         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms, author_owner_display_name, \
-         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work \
+         automation_id, chain_depth, author_actor_key, link_grant_id, link_principal_id, author_agent_id, author_reported, agent_connection_id, work, deleted_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
         params![workspace_id, thread_id],
@@ -9330,6 +9396,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         Ok(work) => work,
         Err(error) => return Ok(Err(error)),
     };
+    let deleted_at_ms: Option<i64> = row.get(21)?;
     let automation = match (automation_id, chain_depth) {
         (Some(automation_id), Some(chain_depth)) => Some(ChatMessageAutomation {
             automation_id,
@@ -9338,6 +9405,8 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
         _ => None,
     };
     // The table pairs both ids with the link kind, and an agent connection only with them.
+    // A deleted link message a copy first saw as a tombstone has empty ids:
+    // the tombstone names no link.
     let link_author = match (link_grant_id, link_principal_id) {
         (Some(grant_id), Some(principal_id)) => Some(ChatMessageLinkAuthor {
             grant_id,
@@ -9367,6 +9436,7 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             author_reported,
             work,
             attachments: Vec::new(),
+            deleted_at_ms,
         }),
     )
 }

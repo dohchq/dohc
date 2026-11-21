@@ -2,6 +2,7 @@ import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/sha
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import {
   linkChatOrigin,
+  MESSAGE_TOMBSTONE_OP_KIND,
   LINK_CHAT_MESSAGE_ID_PREFIX,
   LINK_CHAT_ORIGIN_PREFIX,
   LINK_CHAT_THREAD_ID_PREFIX,
@@ -18,6 +19,7 @@ import {
   readLinkEnrollment,
 } from "./linkEnrollment";
 import { appendLogBatchInTransaction, fetchChatMessage, maxOriginSeq } from "./log";
+import { deletedAppendDigests } from "./messageDeletes";
 import type { SyncRelayLogRow } from "./types";
 import { workspaceUsageBytes } from "./workspaces";
 import {
@@ -69,7 +71,8 @@ function linkPostIds(
   };
 }
 
-// A retry answers with its first post. The same key for another post conflicts.
+// A retry answers with its first post, or the post's tombstone once it is
+// deleted. The same key for another post conflicts.
 export function replayedLinkPost(
   storage: StorageContext,
   workspaceId: string,
@@ -83,10 +86,16 @@ export function replayedLinkPost(
   });
   if (!existing) return null;
   const stored = JSON.parse(existing.payloadJson) as { body?: unknown; threadId?: unknown };
-  return stored.body === body && stored.threadId === ids.threadId ? existing : "conflict";
+  if (stored.threadId !== ids.threadId) return "conflict";
+  if (existing.opKind === MESSAGE_TOMBSTONE_OP_KIND)
+    return deletedAppendDigests(storage, existing.relaySeq)?.bodySha256 === sha256Hex(body)
+      ? existing
+      : "conflict";
+  return stored.body === body ? existing : "conflict";
 }
 
-// One link principal's rate and lifetime, and every link principal's posts on the share.
+// One link principal's rate and lifetime, and every link principal's posts on
+// the share. A deleted post still counts: the delete keeps its origin.
 function linkPostLimitRefusal(
   storage: StorageContext,
   input: {
@@ -99,7 +108,8 @@ function linkPostLimitRefusal(
   if (input.principalId !== null) {
     const posted = storage.db
       .prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(recorded_at_ms > ?), 0) AS recent
-      FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'`)
+      FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?
+        AND op_kind IN ('chat.message.append', 'chat.message.tombstone')`)
       .get(
         input.createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
         input.workspaceId,
@@ -112,7 +122,7 @@ function linkPostLimitRefusal(
   }
   const sharePosts = storage.db
     .prepare(`SELECT COUNT(*) AS count FROM sync_relay_log
-    WHERE workspace_id = ? AND op_kind = 'chat.message.append' AND origin_id IN (
+    WHERE workspace_id = ? AND op_kind IN ('chat.message.append', 'chat.message.tombstone') AND origin_id IN (
       SELECT ? || principal.principal_id FROM sync_relay_link_principals AS principal
       JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
       WHERE grant.share_id = ?)`)

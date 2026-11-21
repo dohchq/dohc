@@ -2705,29 +2705,36 @@ export const ChatThreadWorkRecord = ChatWorkReportRecord.extend({
 });
 export type ChatThreadWorkRecord = z.infer<typeof ChatThreadWorkRecord>;
 
-export const ChatMessageRecord = z.object({
-  id: OPAQUE_ID,
-  threadId: OPAQUE_ID,
-  presentation: ActorPresentation,
-  authorKind: CHAT_MESSAGE_AUTHOR_KIND,
-  // A link author that is an agent, signed in with the link.
-  linkAgent: z.literal(true).optional(),
-  authorDisplayName: z.string().min(1).max(200),
-  authorOwnerDisplayName: z.string().min(1).max(200).optional(),
-  authorUserId: z.string().min(1).max(256).optional(),
-  authorReported: ChatReportedAgentRecord.optional(),
-  work: ChatWorkReportRecord.optional(),
-  // The agent in Settings that wrote it, which only main records.
-  authorAgentId: AgentId.optional(),
-  parentMessageId: OPAQUE_ID.optional(),
-  origin: z.literal("cli").optional(),
-  body: CHAT_BODY,
-  createdAtMs: z.number(),
-  automation: CHAT_MESSAGE_AUTOMATION.optional(),
-  // Optional on the wire so pre-phase-4 fixture objects and stored messages
-  // remain compatible. Main includes the engine's authoritative array.
-  attachments: z.array(ChatAttachmentRecord).optional(),
-});
+export const ChatMessageRecord = z
+  .object({
+    id: OPAQUE_ID,
+    threadId: OPAQUE_ID,
+    presentation: ActorPresentation,
+    authorKind: CHAT_MESSAGE_AUTHOR_KIND,
+    // A link author that is an agent, signed in with the link.
+    linkAgent: z.literal(true).optional(),
+    authorDisplayName: z.string().min(1).max(200),
+    authorOwnerDisplayName: z.string().min(1).max(200).optional(),
+    authorUserId: z.string().min(1).max(256).optional(),
+    authorReported: ChatReportedAgentRecord.optional(),
+    work: ChatWorkReportRecord.optional(),
+    // The agent in Settings that wrote it, which only main records.
+    authorAgentId: AgentId.optional(),
+    parentMessageId: OPAQUE_ID.optional(),
+    origin: z.literal("cli").optional(),
+    // Empty once the relay deleted the message.
+    body: z.string(),
+    createdAtMs: z.number(),
+    automation: CHAT_MESSAGE_AUTOMATION.optional(),
+    // Optional on the wire so pre-phase-4 fixture objects and stored messages
+    // remain compatible. Main includes the engine's authoritative array.
+    attachments: z.array(ChatAttachmentRecord).optional(),
+    // When the relay deleted the message. Its line shows only who wrote it and when.
+    deletedAtMs: z.number().int().optional(),
+  })
+  .refine((message) => message.body !== "" || message.deletedAtMs !== undefined, {
+    message: "Only a deleted message has an empty body.",
+  });
 export type ChatMessageRecord = z.infer<typeof ChatMessageRecord>;
 
 export const ChatFileMentionRecord = ChatFileMentionEntry;
@@ -2831,10 +2838,11 @@ export const ListFileChatsResponse = z.union([
 ]);
 export type ListFileChatsResponse = z.infer<typeof ListFileChatsResponse>;
 
+// A comment starts its file's chat untitled: the chat shows its first
+// message's first line, so a delete of that message takes the words with it.
 export const CreateFileChatPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
-  title: z.string().min(1).max(200),
 });
 export type CreateFileChatPayload = z.infer<typeof CreateFileChatPayload>;
 
@@ -3103,10 +3111,14 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
       authorUserId: z.string().min(1).max(256).optional(),
       createdAtMs: z.number(),
-      bodySnippet: z.string().min(1).max(500),
+      bodySnippet: z.string().max(500),
       automation: CHAT_MESSAGE_AUTOMATION.optional(),
       authorReported: ChatReportedAgentRecord.optional(),
       reactions: z.array(ChatReactionRecord),
+      deletedAtMs: z.number().int().optional(),
+    })
+    .refine((message) => message.bodySnippet !== "" || message.deletedAtMs !== undefined, {
+      message: "Only a deleted message has an empty snippet.",
     })
     .nullable()
     .optional(),

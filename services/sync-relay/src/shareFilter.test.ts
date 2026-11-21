@@ -60,10 +60,11 @@ function memberAt(level: ShareAccess): WorkspaceShareSelector {
 // A resolver that knows no file-linked thread and no object. Channel-share
 // cases carry it so their fixtures state the file half explicitly instead of
 // inheriting whatever a default would be.
-const NO_FILE_CHAT: ShareFileChatResolver = {
+const NO_FILE_CHAT: ShareFileChatResolver & Pick<ChatShareThreadResolver, "messageDeleted"> = {
   threadFileBinding: () => undefined,
   objectCurrentPath: () => undefined,
   objectIdAtPath: () => undefined,
+  messageDeleted: () => false,
 };
 
 function momentPayload(overrides: Record<string, unknown> = {}): string {
@@ -1688,7 +1689,8 @@ describe("file-chat share filter", () => {
   // docs/in.md is inside the selector; notes/out.md is not. `object-gone` was
   // deleted and `object-unknown` was never seen — the two halves of the
   // tri-state that must both deny.
-  const fileChat: ShareFileChatResolver = {
+  const fileChat: ShareFileChatResolver & Pick<ChatShareThreadResolver, "messageDeleted"> = {
+    messageDeleted: () => false,
     threadFileBinding: (threadId) =>
       threadId === "thread-in"
         ? { kind: "object", objectId: "object-in" }
@@ -1974,6 +1976,7 @@ describe("file-chat share filter", () => {
       threadFileBinding: () => ({ kind: "object", objectId: "object-secret" }),
       objectCurrentPath: () => ".env",
       objectIdAtPath: () => "object-secret",
+      messageDeleted: () => false,
     };
     expect(
       filterOpForShare(poisoned, "chat.message.append", message("thread-secret"), secretResolver)

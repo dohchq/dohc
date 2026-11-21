@@ -1,6 +1,7 @@
 import type { CliResultByVerb } from "@dohc/cli/protocol";
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
+import { MESSAGE_DELETE_ID_MAX_CHARS } from "@dohc/security-contract/workspace-members";
 import { runAccountOperation } from "./accountOperations";
 import {
   AGENT_CHAT_MAX_WAIT_MS,
@@ -51,6 +52,7 @@ export type PersonalAgentToolRoute = {
     | "workspaces"
     | "groups"
     | "post"
+    | "delete"
     | "wait"
     | "chat"
     | "discussion"
@@ -358,6 +360,24 @@ export function createPersonalAgentToolRoutes(input: {
       filePath: result.filePath,
     };
     return jsonResponse({ ok: true, message });
+  }
+
+  // The relay deletes only a message at the agent's own origin, in a place it
+  // reads. The storage write reads the agent's authority and reach again.
+  function deleteMessage(authority: PersonalAuthority, body: Record<string, unknown>): Response {
+    fields(body, ["workspaceId", "threadId", "messageId"], []);
+    const workspaceId = parseWorkspaceId(body.workspaceId);
+    const deleted = storage.deleteWorkspaceMessage({
+      workspaceId,
+      threadId: parseString(body.threadId, "threadId", MESSAGE_DELETE_ID_MAX_CHARS),
+      messageId: parseString(body.messageId, "messageId", MESSAGE_DELETE_ID_MAX_CHARS),
+      actor: { kind: "personal-agent", credential: credential(authority) },
+      nowMs: nowMs(),
+    });
+    if (!deleted.ok) throw notFound();
+    if (!deleted.repeated) activity.wakeLog(workspaceId);
+    const { messageId, threadId, deletedAtMs } = deleted.tombstone.payload;
+    return jsonResponse({ ok: true, workspaceId, messageId, threadId, deletedAtMs });
   }
 
   function pageOf(body: Record<string, unknown>): {
@@ -779,10 +799,12 @@ export function createPersonalAgentToolRoutes(input: {
         more: boolean;
       } = {
         ok: true,
-        // A file can move to a secret path while the wait holds, so each Comment's file is placed again.
+        // A file can move to a secret path while the wait holds, so each
+        // Comment's file is placed again. A message deleted meanwhile leaves.
         messages: result.found.filter(
           (message) =>
             inReach.has(message.workspaceId) &&
+            !storage.messageDeleted(message.workspaceId, message.threadId, message.messageId) &&
             (message.channelWireId !== null ||
               commentFileOf(storage, message.workspaceId, message.threadId) !== null),
         ),
@@ -857,6 +879,8 @@ export function createPersonalAgentToolRoutes(input: {
         return await groups(await linkAuthority.freshPersonal(authority), body, request.signal);
       case "post":
         return post(await linkAuthority.freshPersonal(authority), body);
+      case "delete":
+        return deleteMessage(await linkAuthority.freshPersonal(authority), body);
       case "wait":
         return await wait(authority, body, request.signal);
       case "chat":

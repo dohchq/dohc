@@ -3769,6 +3769,23 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("access_rule_holds.sql"),
         sets_user_version: None,
     },
+    // A message the relay deleted, and the line it leaves.
+    Migration {
+        ordinal: 107,
+        id: "v2-chat-deleted-messages",
+        sql: include_str!("chat_deleted_messages.sql"),
+        sets_user_version: None,
+    },
+    // A thread's deleted messages, which every unread count takes off its
+    // count. Without it each count reads every message row of the thread.
+    Migration {
+        ordinal: 108,
+        id: "v2-chat-deleted-messages-index",
+        sql: "CREATE INDEX idx_chat_messages_thread_deleted \
+              ON chat_messages(workspace_id, thread_id, message_order) \
+              WHERE deleted_at_ms IS NOT NULL;",
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5756,6 +5773,14 @@ mod tests {
             (
                 "v2-access-rule-holds",
                 "6f2ba17f8a826ebe0c14b9d7bd6d89a3f708f789bf99489512f5379349f621a6",
+            ),
+            (
+                "v2-chat-deleted-messages",
+                "9d8802c0f5572c45eecf7dc8224163cc3cccee3cbc814a4e8a213be1debc0a3c",
+            ),
+            (
+                "v2-chat-deleted-messages-index",
+                "266fc6765f0ac6efb2663fd7b4ec55d662db8ad2b8a6d60eb6c4db43a3a0c628",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

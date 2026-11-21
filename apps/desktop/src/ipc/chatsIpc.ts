@@ -155,6 +155,7 @@ export function chatMessageForIpc(
       ? { automation: automationForIpc(message.automation, collectionOf) }
       : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
+    ...(message.deletedAtMs === undefined ? {} : { deletedAtMs: message.deletedAtMs }),
   };
 }
 
@@ -476,7 +477,6 @@ export function registerChatsIpcHandlers<
     // the same scope, then chatWrites refuses it before persistence.
     const scope = await requireChatScope(input.workspaceId);
     const thread = await chatWrites.createFileThread(chatWritePlace(scope), {
-      title: input.title,
       linkedFile: async () => {
         const objectId = await chatFileObjectId(scope, input.path);
         if (!objectId) {
@@ -719,6 +719,9 @@ export function registerChatsIpcHandlers<
             reactions: reactionViewer
               ? reactionsForViewer(openingReactions, reactionViewer)
               : openingReactions,
+            ...(summary.openingMessage.deletedAtMs === undefined
+              ? {}
+              : { deletedAtMs: summary.openingMessage.deletedAtMs }),
           }
         : null,
     };

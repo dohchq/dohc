@@ -1,5 +1,7 @@
 import {
   type GroupRuleLevel,
+  MESSAGE_DELETE_OFFLINE,
+  MESSAGE_DELETE_REFUSED,
   WORKSPACE_MEMBER_ROUTES,
 } from "@dohc/security-contract/workspace-members";
 import { MembersResult, type MembersRequest } from "@dohc/cli/members";
@@ -69,6 +71,7 @@ const PHRASES: Record<MembersRequest["action"], string> = {
   leave: "leave this workspace",
   end: "end membership",
   group: "change this Group's access",
+  deleteMessage: "delete the message",
 };
 
 function failure(action: MembersRequest["action"], status: number): Error {
@@ -167,6 +170,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           path: string,
           body?: unknown,
           method: "POST" | "PUT" = "POST",
+          unreachable = MEMBERS_UNREACHABLE,
         ): Promise<{ status: number; data: unknown }> => {
           const init: RequestInit =
             body === undefined
@@ -181,7 +185,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
             response = await dependencies.relayResponse(credentials, path, init);
           } catch {
             session.assertCurrent();
-            throw new Error(MEMBERS_UNREACHABLE);
+            throw new Error(unreachable);
           }
           let data: unknown = null;
           if (response.ok) {
@@ -193,9 +197,10 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           } else {
             await response.body?.cancel().catch(() => undefined);
           }
-          // Every POST and PUT here is a change. Refresh before the currency check,
-          // because the relay made the change even if this window moved on.
-          if (body !== undefined && response.status === 200)
+          // Every other POST and PUT here changes Members. Refresh before the
+          // currency check, because the relay made the change even if this
+          // window moved on.
+          if (body !== undefined && response.status === 200 && request.action !== "deleteMessage")
             dependencies.sharesChanged(localWorkspaceId);
           session.assertCurrent();
           return { status: response.status, data };
@@ -315,6 +320,23 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
               { level: request.level },
               "PUT",
             );
+          case "deleteMessage": {
+            // The copy shows the deleted line when it pulls the delete, which
+            // the relay wakes it for.
+            const { status } = await call(
+              route(WORKSPACE_MEMBER_ROUTES.messageDelete, workspaceId).replace(
+                ":messageId",
+                encodeURIComponent(request.messageId),
+              ),
+              { threadId: request.threadId },
+              "POST",
+              MESSAGE_DELETE_OFFLINE,
+            );
+            // The relay answers not-found to every refusal.
+            if (status === 404) throw new Error(MESSAGE_DELETE_REFUSED);
+            changed(status);
+            return { status: "done" };
+          }
         }
       },
       assertMembersWorkspace,

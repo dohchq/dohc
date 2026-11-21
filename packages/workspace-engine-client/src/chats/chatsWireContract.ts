@@ -182,7 +182,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
   threadId: string;
-  title: string;
+  title?: string;
   linkedFile: ChatsJsonObject & { objectId: string; pathHint?: string };
   nowMs?: number;
 };
@@ -565,11 +565,13 @@ const ChatActorSchema = Schema.Union([
     kind: Schema.Literals(["human", "agent", "automation"]),
     displayName: Schema.String,
   }),
+  // A deleted link message a copy first saw as a tombstone names no link,
+  // and has empty ids. `linkNamedUnlessDeleted` allows only that.
   mutableStruct({
     kind: Schema.Literal("link"),
     displayName: Schema.String,
-    grantId: Schema.NonEmptyString,
-    principalId: Schema.NonEmptyString,
+    grantId: Schema.String,
+    principalId: Schema.String,
     agentConnectionId: Schema.optionalKey(Schema.NonEmptyString),
   }),
 ]);
@@ -590,6 +592,16 @@ const noAccountOnLinkMessage = Schema.makeFilter(
     message.author.kind !== "link" ||
     ACCOUNT_FIELDS.every((field) => message[field] === undefined) ||
     "A link message names no account.",
+);
+const linkNamedUnlessDeleted = Schema.makeFilter(
+  (message: {
+    author: { kind: string; grantId?: string; principalId?: string };
+    deletedAtMs?: number;
+  }) =>
+    message.author.kind !== "link" ||
+    message.deletedAtMs !== undefined ||
+    (message.author.grantId !== "" && message.author.principalId !== "") ||
+    "A link message names its link.",
 );
 const ChatMessageAutomationSchema = mutableStruct({
   automationId: Schema.String,
@@ -661,7 +673,11 @@ const ChatMessageSchema = mutableStruct({
   attachments: Schema.mutable(Schema.Array(ChatAttachmentSchema)),
   // Thread and stream reads name each open agent request. Absent when none.
   agentRequests: Schema.optionalKey(Schema.mutable(Schema.Array(ChatStreamAgentRequestSchema))),
-}).check(noAccountOnLinkMessage);
+  // Set once the relay deleted the message. Its body is then empty.
+  deletedAtMs: Schema.optionalKey(AnyInt),
+})
+  .check(noAccountOnLinkMessage)
+  .check(linkNamedUnlessDeleted);
 const ChatDecisionSchema = mutableStruct({
   threadId: Schema.String,
   messageId: Schema.String,
@@ -860,7 +876,10 @@ const ChatChannelOpeningMessageSchema = mutableStruct({
   authorReported: Schema.optionalKey(ChatReportedAgentSchema),
   authorAgentId: Schema.optionalKey(Schema.String),
   reactions: Schema.mutable(Schema.Array(ChatReactionSchema)),
-}).check(noAccountOnLinkMessage);
+  deletedAtMs: Schema.optionalKey(AnyInt),
+})
+  .check(noAccountOnLinkMessage)
+  .check(linkNamedUnlessDeleted);
 const ChatThreadWorkSchema = mutableStruct({
   status: ChatWorkStatusSchema,
   url: Schema.optionalKey(Schema.String),
