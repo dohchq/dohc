@@ -68,6 +68,7 @@ interface WatchedWorkspace {
   retainedCopies: NonNullable<SyncStatusResult["retainedCopies"]> | null;
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
   outsideChanges: NonNullable<SyncStatusResult["outsideChanges"]>;
+  heldAccessRules: NonNullable<SyncStatusResult["heldAccessRules"]>;
   // The engine's latest answer: Collection updates wait for an unfinished
   // pull. Asked at open and after sync passes, and kept as sync engines
   // attach and detach. Reads are numbered so an older answer that resolves
@@ -182,6 +183,7 @@ export interface WorkspaceCaptureHooks {
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   onOutsideChanges?: (changes: NonNullable<SyncStatusResult["outsideChanges"]>) => void;
+  onHeldAccessRules: (holds: NonNullable<SyncStatusResult["heldAccessRules"]>) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -360,6 +362,7 @@ export function createWorkspaceActivity(
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
       outsideChanges: w?.outsideChanges ?? [],
+      heldAccessRules: w?.heldAccessRules ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(collectionsWaitingForSync ? { collectionsWaitingForSync } : {}),
@@ -466,6 +469,7 @@ export function createWorkspaceActivity(
         retainedCopies: null,
         heldFiles: [],
         outsideChanges: [],
+        heldAccessRules: [],
         collectionsWaiting: false,
         collectionsWaitingAsked: 0,
         collectionsWaitingAnswered: 0,
@@ -546,6 +550,10 @@ export function createWorkspaceActivity(
                 return;
               entry.outsideChanges = changes;
               notify({ workspaceId: workspace.workspaceId });
+            },
+            onHeldAccessRules: (holds) => {
+              if (state.entry !== entry) return;
+              recordHeldAccessRules(workspace, state, holds);
             },
           });
           // stopAll may have raced the capture build; stop the capture no
@@ -926,6 +934,22 @@ export function createWorkspaceActivity(
     options.onHeldFiles?.(workspace.workspaceId, files);
   }
 
+  function recordHeldAccessRules(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+    holds: NonNullable<SyncStatusResult["heldAccessRules"]>,
+  ): void {
+    const entry = state.entry;
+    if (
+      !entry ||
+      entry.workspace.attachmentId !== workspace.attachmentId ||
+      JSON.stringify(holds) === JSON.stringify(entry.heldAccessRules)
+    )
+      return;
+    entry.heldAccessRules = holds;
+    notify({ workspaceId: workspace.workspaceId });
+  }
+
   function isOpen(state: WorkspaceActivityState): boolean {
     return state.entry !== null;
   }
@@ -1207,6 +1231,7 @@ export function createWorkspaceActivity(
     stopEngine,
     getStatus,
     recordHeldFiles,
+    recordHeldAccessRules,
     recordShareViewStoreRefusal,
     recordAtomicPlacementUnavailable,
     isOpen,

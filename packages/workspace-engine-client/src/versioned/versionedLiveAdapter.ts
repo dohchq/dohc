@@ -1,4 +1,8 @@
-import type { HeldNoteChangeInput, HeldNoteChangeResult } from "../workspace/workspaceWireContract";
+import type {
+  AccessRuleDecisionParams,
+  HeldNoteChangeInput,
+  HeldNoteChangeResult,
+} from "../workspace/workspaceWireContract";
 import {
   LinksEdgesInput,
   LinksEdgesResult,
@@ -8,6 +12,7 @@ import {
   LinksResolveResult,
 } from "@dohc/workspace-contracts/links";
 import type {
+  AccessRuleMergeOrder,
   HistoryOperationsStore,
   HistoryOperation,
   HistoryUndoResult,
@@ -764,11 +769,35 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return { entries: page.entries, nextAfterPath: page.nextCursor };
   }
 
+  // The order a merge writes, then deletes, these rule files in, so that no
+  // step widens anyone's reach past both Main before and after it. Null when
+  // no such order exists.
+  async accessRuleMergeOrder(input: {
+    workspaceId: string;
+    sourceVersionId: string;
+    targetVersionId: string;
+    writes: string[];
+    deletes: string[];
+  }): Promise<AccessRuleMergeOrder> {
+    this.assertWorkspace(input.workspaceId);
+    const order = await this.request(VERSIONED_METHOD.versionsRuleMergeOrder, {
+      workspaceId: input.workspaceId,
+      sourceVersionId: input.sourceVersionId,
+      targetVersionId: input.targetVersionId,
+      writes: input.writes,
+      deletes: input.deletes,
+    });
+    return "refused" in order
+      ? { kind: "refused", reason: order.refused, rules: order.rules }
+      : { kind: "ordered", writes: order.writes, deletes: order.deletes };
+  }
+
   async mergeTextFileFromVersion(input: {
     workspaceId: string;
     targetVersionId: string;
     sourceVersionId: string;
     path: string;
+    ruleOrder?: string[];
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
@@ -779,6 +808,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         targetVersionId: input.targetVersionId,
         sourceVersionId: input.sourceVersionId,
         path: input.path,
+        ...(input.ruleOrder !== undefined ? { ruleOrder: input.ruleOrder } : {}),
         origin: input.metadata.origin,
         ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined
@@ -1838,6 +1868,16 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   async retryHeldCapture(path: string) {
     return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
+  }
+
+  /** Keeps a held access rule as it is on disk, or puts back the recorded one. */
+  async decideAccessRule(input: AccessRuleDecisionParams & { decision: "accept" | "restore" }) {
+    const method =
+      input.decision === "accept"
+        ? WORKSPACE_METHOD.captureAcceptAccessRule
+        : WORKSPACE_METHOD.captureRestoreAccessRule;
+    const { versionId, folder, expectedSha256, expectedReason } = input;
+    return this.workspaceRequest(method, { versionId, folder, expectedSha256, expectedReason });
   }
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {

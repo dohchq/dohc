@@ -129,10 +129,19 @@ pub fn workspace_journals_file_moments_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
 ) -> Result<bool, SyncError> {
-    if workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
+    workspace_journals_file_moments(tx, workspace_id)
+}
+
+/// [`workspace_journals_file_moments_in_tx`] for a reader outside a write
+/// transaction.
+pub fn workspace_journals_file_moments(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    if workspace_replicates_with_relay(conn, workspace_id)? {
         return Ok(true);
     }
-    tx.query_row(
+    conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM share_view_file_lane WHERE workspace_id = ?1)",
         [workspace_id],
         |row| row.get(0),
@@ -170,6 +179,9 @@ pub(crate) fn journal_local_payload_json_in_tx(
     now_ms: i64,
 ) -> Result<i64, SyncError> {
     validate_local_payload_json(workspace_id, op_kind, payload_json)?;
+    if op_kind == "moment.append" {
+        check_moment_order(tx, workspace_id, payload_json)?;
+    }
     let origin_id: String = tx
         .query_row(
             "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
@@ -188,6 +200,62 @@ pub(crate) fn journal_local_payload_json_in_tx(
     )
     .map_err(SyncError::persist)?;
     Ok(origin_seq)
+}
+
+/// The check a file moment passes before it takes an origin seq: that the
+/// access rules of its folders were put in order first. The engine runtime
+/// installs it on its actor thread, where every store write runs; it reads
+/// what the runtime's ordering step cleared for the running command. This
+/// crate has no workspace root, so it cannot read a rule from disk itself.
+/// A thread with no check installed (this crate's tests, offline tools)
+/// journals as before.
+pub type MomentOrderCheck =
+    dyn Fn(&Transaction<'_>, &str, &serde_json::Value) -> Result<(), SyncError>;
+
+thread_local! {
+    static MOMENT_ORDER_CHECK: std::cell::RefCell<Option<std::rc::Rc<MomentOrderCheck>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Check every file moment this thread journals from now on with `check`.
+pub fn install_moment_order_check(check: std::rc::Rc<MomentOrderCheck>) {
+    MOMENT_ORDER_CHECK.with(|slot| *slot.borrow_mut() = Some(check));
+}
+
+thread_local! {
+    static REPLAYING_HISTORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread is journaling history committed before the workspace
+/// replicated. Enrolment orders those moments itself, rules first, so the
+/// check needs only to stop a rule on disk the store has not committed.
+pub fn replaying_history() -> bool {
+    REPLAYING_HISTORY.with(std::cell::Cell::get)
+}
+
+pub(crate) fn replay_history<R>(work: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REPLAYING_HISTORY.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(REPLAYING_HISTORY.with(|cell| cell.replace(true)));
+    work()
+}
+
+fn check_moment_order(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload_json: &str,
+) -> Result<(), SyncError> {
+    let Some(check) = MOMENT_ORDER_CHECK.with(|slot| slot.borrow().clone()) else {
+        return Ok(());
+    };
+    let payload = serde_json::from_str(payload_json).map_err(|_| SyncError::InvalidInput {
+        reason: "payload is not valid JSON",
+    })?;
+    check(tx, workspace_id, &payload)
 }
 
 /// The sequence of this replica's next own op. A hosted replica counts in its
@@ -302,6 +370,9 @@ pub fn journal_local_replication_op(
             .map_err(SyncError::corrupt)?;
         if identity != (origin_id.to_owned(), replication_epoch.to_owned(), stream_identity.to_owned()) {
             return Err(SyncError::CoordinateDiverged);
+        }
+        if op_kind == "moment.append" {
+            check_moment_order(tx, workspace_id, &payload_json)?;
         }
         let origin_seq =
             next_local_origin_seq(tx, workspace_id, origin_id, op_kind, &payload_json)?;

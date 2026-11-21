@@ -509,6 +509,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
+      heldAccessRules: [],
       retainedCopies: { count: 0, bytes: 0 },
     },
   },

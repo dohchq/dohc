@@ -52,6 +52,8 @@ export const WORKSPACE_METHOD = {
   captureRetry: "capture.retry",
   captureRetryHeld: "capture.retryHeld",
   captureOutsideChanges: "capture.outsideChanges",
+  captureAcceptAccessRule: "capture.acceptAccessRule",
+  captureRestoreAccessRule: "capture.restoreAccessRule",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -486,6 +488,18 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
     | null;
 };
 
+/**
+ * The owner's decision on a held folder of the active Version. `expectedSha256`
+ * and `expectedReason` are the hold's `observedSha256` and `reason`; the engine
+ * refuses with a conflict when the rule on disk changed since.
+ */
+export type AccessRuleDecisionParams = WorkspaceJsonObject & {
+  versionId: string;
+  folder: string;
+  expectedSha256: string | null;
+  expectedReason: "widened" | "removed";
+};
+
 export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & {
     selectors: Array<{ versionId: string | null; paths: string[] }>;
@@ -527,6 +541,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureRetry]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureOutsideChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecisionParams;
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecisionParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
@@ -1107,6 +1123,57 @@ const CaptureFileHoldSchema = mutableStruct({
   retryRequested: Schema.Boolean,
 });
 
+/** A reach a rule gives: a level, none, or the member's workspace level where no rule sets one. */
+const AccessRuleReachSchema = Schema.Union([
+  Schema.Literal("view"),
+  Schema.Literal("comment"),
+  Schema.Literal("edit"),
+  Schema.Literal("none"),
+  Schema.Literal("workspace"),
+]);
+
+/** A folder whose access rule changed outside dohc and waits for its owner. */
+const AccessRuleHoldSchema = mutableStruct({
+  /** Whether recording this change has a safe publication order. */
+  canAccept: Schema.Boolean,
+  versionId: Schema.NonEmptyString,
+  /** The folder's path; empty for the workspace's own rule. */
+  folder: Schema.String,
+  reason: Schema.Union([Schema.Literal("widened"), Schema.Literal("removed")]),
+  /** The rule's bytes on disk when it was judged; null when it is gone. */
+  observedSha256: Schema.NullOr(Schema.NonEmptyString),
+  recordedAtMs: Schema.Int,
+  /** The rule dohc recorded at the folder, when it is one text file. */
+  recordedRule: Schema.NullOr(Schema.String),
+  /** The rule file on disk, when there is exactly one. */
+  rulePath: Schema.NullOr(Schema.NonEmptyString),
+  /** `members` or a person's email, with the reach before and now; for a removal, now is what the folder falls back to. */
+  changes: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        who: Schema.NonEmptyString,
+        before: AccessRuleReachSchema,
+        after: AccessRuleReachSchema,
+      }),
+    ),
+  ),
+  /**
+   * Why dohc cannot show a rule, if it can't: `recorded` for the rule it
+   * recorded; for the rule on disk, `locked` while another program holds it,
+   * `several-files` for more than one spelling, else `on-disk`.
+   */
+  unreadable: Schema.NullOr(Schema.Literals(["recorded", "locked", "several-files", "on-disk"])),
+  /** For a removal, the folder whose rule then applies; null when none above does. */
+  fallsBackTo: Schema.NullOr(Schema.String),
+});
+
+/** A decision on a held folder. `kept` names the rule files from outside dohc that Restore kept as kept copies. */
+const AccessRuleDecidedSchema = mutableStruct({
+  folder: Schema.String,
+  decided: Schema.Literal(true),
+  kept: Schema.mutable(Schema.Array(Schema.String)),
+});
+
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 // Its bytes are in neither the note nor History. It ends when the file
@@ -1415,6 +1482,7 @@ const WorkspaceResultSchemas = {
     deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
     heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     outsideChanges: Schema.mutable(Schema.Array(OutsideChangeSchema)),
+    heldAccessRules: Schema.mutable(Schema.Array(AccessRuleHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
@@ -1519,6 +1587,8 @@ const WorkspaceResultSchemas = {
     ...CaptureFlushResultSchema.fields,
     retried: Schema.Boolean,
   }),
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecidedSchema,
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecidedSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),

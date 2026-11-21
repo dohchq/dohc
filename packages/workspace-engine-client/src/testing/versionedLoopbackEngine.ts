@@ -1,5 +1,6 @@
 import type { HistoryCursor, VersionRecord } from "../versioned/versionedWireContract";
 import { createHash, randomUUID } from "node:crypto";
+import { isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
@@ -245,7 +246,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
     optionalStrings: MUTATION_OPTIONAL_STRINGS,
     optionalI64: ["nowMs"],
-    optionalJson: ["author"],
+    optionalJson: ["author", "ruleOrder"],
   },
   [VERSIONED_METHOD.versionsCompare]: {
     requiredStrings: ["path", "sourceVersionId", "targetVersionId"],
@@ -327,6 +328,11 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.searchEnsureIndex]: {
     requiredStrings: ["workspaceId", "versionId"],
+  },
+  [VERSIONED_METHOD.versionsRuleMergeOrder]: {
+    requiredStrings: ["sourceVersionId", "targetVersionId"],
+    optionalStrings: ["workspaceId"],
+    optionalJson: ["writes", "deletes"],
   },
 } satisfies Record<VersionedMethod, SerdeParamShape>;
 
@@ -1200,6 +1206,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.compare(state, workspace, params);
       case VERSIONED_METHOD.versionsCompareFiles:
         return this.compareFiles(state, params);
+      // The loopback does not judge reach. It keeps the order it was given;
+      // the engine's order is tested in dohc-engine-files.
+      case VERSIONED_METHOD.versionsRuleMergeOrder:
+        return { writes: params.writes ?? [], deletes: params.deletes ?? [] };
       case VERSIONED_METHOD.secretsWrite:
         return this.secretWrite(state, workspace, params, parsedSecretWrite!);
       case VERSIONED_METHOD.secretsList:
@@ -2138,6 +2148,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
+    // As the engine does, a rule's merge carries its planned order, itself
+    // first, and no other file's does. The loopback checks only the shape.
+    const ruleOrder = params.ruleOrder;
+    if (isAccessRulePath(path)) {
+      if (!Array.isArray(ruleOrder) || ruleOrder[0] !== path) {
+        throw new Error("a rule merge takes ruleOrder");
+      }
+    } else if (ruleOrder !== undefined) {
+      throw new Error("ruleOrder is for rule files only");
+    }
     // Rust merge validates the addressable-path classification without
     // normalizing the lookup key. Run that check before generated ids and
     // request replay, then keep the caller's raw path below.

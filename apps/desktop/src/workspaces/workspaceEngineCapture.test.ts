@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { outsideWriteCopies } from "./outsideWriteCopies";
 import { protectedWriteCopies } from "./protectedWriteCopies";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readError } from "../ipc/errorWords";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -35,7 +36,10 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  MergeRuleConflictError,
+  MergeRuleOrderUnconfirmedError,
   MergeStoppedPartwayError,
+  MergeWidensAccessError,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
@@ -97,6 +101,19 @@ function sha256Utf8(text: string): string {
 }
 
 const WORKSPACE_ID = "engine-capture-test";
+const REMOVED_TEAM = {
+  versionId: "main",
+  folder: "team",
+  reason: "removed" as const,
+  observedSha256: null,
+  recordedAtMs: 1,
+  recordedRule: "members: view\n",
+  rulePath: null,
+  changes: [{ who: "members", before: "view" as const, after: "workspace" as const }],
+  canAccept: true,
+  unreadable: null,
+  fallsBackTo: null,
+};
 const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
 it.each(["text"])("replays a keyed %s restore without reversing a later edit", async (kind) => {
@@ -242,6 +259,7 @@ interface CaptureOptions {
   onRetainedCopies?: WorkspaceEngineCaptureOptions["onRetainedCopies"];
   onHeldFiles?: WorkspaceEngineCaptureOptions["onHeldFiles"];
   onOutsideChanges?: WorkspaceEngineCaptureOptions["onOutsideChanges"];
+  onHeldAccessRules?: WorkspaceEngineCaptureOptions["onHeldAccessRules"];
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -338,6 +356,62 @@ describe("merge materialization order", () => {
 
   // The engine places each text merge on disk before the next one starts.
 
+  // Members see a folder through its rule, so Main never journals a file
+  // before its folder's rule, or after that rule's delete.
+  it("merges rules before the files they cover and their deletes after them", async () => {
+    const root = await createTestScratch("dohc-rule-merge-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const merged: string[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        merged.push((request.params as { path: string }).path);
+      }
+      return await send(request);
+    });
+    const removed = ["crew/access.yaml", "crew/a.md", "crew/sub/access.yaml"];
+    for (const path of removed) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old\n" });
+      await write(root, path, "old\n");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const path of removed) {
+        await stores.store.deleteTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: draftId,
+          path,
+          metadata: { origin: "api" },
+        });
+      }
+      for (const path of ["team/Z.md", "team/sub/ACCESS.yaml", "team/access.yaml"]) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new\n" });
+      }
+      await engine.switchVersion("main");
+
+      await engine.mergeVersionIntoMain(draftId);
+      expect(merged).toEqual([
+        "team/access.yaml",
+        "team/sub/ACCESS.yaml",
+        "crew/a.md",
+        "team/Z.md",
+        "crew/sub/access.yaml",
+        "crew/access.yaml",
+      ]);
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it.each([
     ["names a failure after a file reached Main as stopped partway", 2, true],
     ["passes on a failure before any file reached Main", 1, false],
@@ -380,6 +454,266 @@ describe("merge materialization order", () => {
     } finally {
       await engine.stop();
     }
+  });
+});
+
+describe("merge rule order from the engine", () => {
+  // The engine judges the order (dohc-engine-files and the runtime's
+  // access_rule_order tests). Here it answers with fixed orders, in turn.
+  const VIEW_RULE = "members: view\n";
+  const TEAM = "team/access.yaml";
+  const OTHER = "team/other/access.yaml";
+  const PRIVATE = "team/private/access.yaml";
+  type Order = { writes: string[]; deletes: string[] } | { refused: string; rules: string[] };
+  type ConflictPage = Awaited<ReturnType<CaptureVersionedTextStore["listTextConflicts"]>>;
+  type MergeResult = Awaited<ReturnType<CaptureVersionedTextStore["mergeTextFileFromVersion"]>>;
+  async function mergeWithRuleOrder(options: {
+    orders: Order[];
+    // Team's rule merge conflicts, and its conflict stays open.
+    conflict?: boolean;
+    // Team's rule has a conflict open from an earlier merge.
+    openConflict?: boolean;
+    // A rule whose first merges the engine refuses because Main changed.
+    staleAt?: string;
+    staleTimes?: number;
+    runs?: number;
+  }) {
+    const root = await createTestScratch("dohc-merge-rule-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const orders = [...options.orders];
+    let staleAt = options.staleAt;
+    let staleTimes = options.staleTimes ?? 1;
+    const asked: unknown[] = [];
+    const merged: { path: string; ruleOrder?: string[] }[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === VERSIONED_METHOD.versionsRuleMergeOrder) {
+        const { writes, deletes } = request.params as { writes: string[]; deletes: string[] };
+        asked.push({ writes, deletes });
+        const order = orders.shift();
+        if (order) return { id: request.id, result: order };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        const { path, ruleOrder } = request.params as { path: string; ruleOrder?: string[] };
+        if (path === staleAt) {
+          if (--staleTimes === 0) staleAt = undefined;
+          throw Object.assign(new Error("rule-merge-order-changed"), {
+            wireError: { code: "CONFLICT", message: "rule-merge-order-changed", retry: "no" },
+          });
+        }
+        merged.push({ path, ...(ruleOrder ? { ruleOrder } : {}) });
+      }
+      return await send(request);
+    });
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, path: TEAM, text: VIEW_RULE });
+    await write(root, TEAM, VIEW_RULE);
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    // The loopback keeps no conflict ledger. The merge reads only these
+    // fields of an open conflict.
+    const open: string[] = options.openConflict ? [TEAM] : [];
+    let draftId = "";
+    vi.spyOn(stores.store, "listTextConflicts").mockImplementation(async () => ({
+      conflicts: open.map((path) => ({
+        id: `conflict-${path}`,
+        path,
+        sourceVersionId: draftId,
+        targetVersionId: "main",
+      })) as unknown as ConflictPage["conflicts"],
+      nextAfterConflictId: null,
+    }));
+    const mergeFile = stores.store.mergeTextFileFromVersion.bind(stores.store);
+    vi.spyOn(stores.store, "mergeTextFileFromVersion").mockImplementation(async (input) => {
+      if (!options.conflict || input.path !== TEAM) return await mergeFile(input);
+      merged.push({ path: input.path, ...(input.ruleOrder ? { ruleOrder: input.ruleOrder } : {}) });
+      open.push(input.path);
+      return { kind: "conflict" } as unknown as MergeResult;
+    });
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const [path, text] of [
+        [TEAM, "members: edit\n"],
+        [OTHER, VIEW_RULE],
+        [PRIVATE, VIEW_RULE],
+        ["team/private/a.md", "alpha\n"],
+      ] as const) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text });
+      }
+      await engine.switchVersion("main");
+      const failures: unknown[] = [];
+      const runs: (typeof merged)[] = [];
+      for (let run = 0; run < (options.runs ?? 1); run += 1) {
+        merged.length = 0;
+        failures.push(
+          await engine.mergeVersionIntoMain(draftId).then(
+            () => null,
+            (error: unknown) => error,
+          ),
+        );
+        runs.push([...merged]);
+      }
+      const onDisk = await readFile(join(root, TEAM), "utf8");
+      return { failure: failures[0], failures, asked, merged: runs[0]!, runs, onDisk };
+    } finally {
+      await engine.stop();
+    }
+  }
+  const paths = (merged: { path: string }[]) => merged.map(({ path }) => path);
+
+  it("writes the rules in the engine's order before the files they cover, each with the rules still to come", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      orders: [{ writes: [PRIVATE, OTHER, TEAM], deletes: [] }],
+    });
+    expect(failure).toBeNull();
+    expect(asked).toEqual([{ writes: [TEAM, OTHER, PRIVATE], deletes: [] }]);
+    expect(merged).toEqual([
+      { path: PRIVATE, ruleOrder: [PRIVATE, OTHER, TEAM] },
+      { path: OTHER, ruleOrder: [OTHER, TEAM] },
+      { path: TEAM, ruleOrder: [TEAM] },
+      { path: "team/private/a.md" },
+    ]);
+  });
+
+  it("refuses a merge whose rules the engine can't order, and writes nothing", async () => {
+    const { failure, merged, onDisk } = await mergeWithRuleOrder({
+      orders: [{ refused: "too-many", rules: [TEAM, PRIVATE] }],
+    });
+    expect(failure).toBeInstanceOf(MergeWidensAccessError);
+    expect(failure).toMatchObject({ reason: "too-many", rules: [TEAM, PRIVATE] });
+    expect(readError(failure)).toMatchObject({
+      words:
+        "Nothing was merged. Change this version's access rules in Main one folder at a time, then merge again.",
+      canRetry: false,
+    });
+    expect(String(readError(failure).cause)).toContain(`\n${TEAM}\n${PRIVATE}`);
+    expect(merged).toEqual([]);
+    expect(onDisk).toBe(VIEW_RULE);
+  });
+
+  it("orders the rules after a conflicting one again, from Main as it is", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      conflict: true,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { writes: [PRIVATE, OTHER], deletes: [] },
+      ],
+    });
+    expect(failure).toBeNull();
+    expect(asked[1]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
+    expect(paths(merged)).toEqual([TEAM, PRIVATE, OTHER, "team/private/a.md"]);
+  });
+
+  it("stops at a rule's conflict when the rules after it can't be ordered, and says to resolve it", async () => {
+    const { failure, merged } = await mergeWithRuleOrder({
+      conflict: true,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { refused: "widens", rules: [OTHER, PRIVATE] },
+      ],
+    });
+    expect(failure).toBeInstanceOf(MergeRuleConflictError);
+    expect(readError(failure)).toMatchObject({
+      words: `dohc stopped the merge at a conflict in ${TEAM}. Resolve that conflict, then merge again.`,
+      canRetry: false,
+    });
+    expect(paths(merged)).toEqual([TEAM]);
+  });
+
+  it("leaves a rule whose conflict is open out of the order", async () => {
+    const { failures, asked, runs } = await mergeWithRuleOrder({
+      conflict: true,
+      runs: 2,
+      orders: [
+        { writes: [TEAM, OTHER, PRIVATE], deletes: [] },
+        { refused: "widens", rules: [OTHER, PRIVATE] },
+        { writes: [PRIVATE, OTHER], deletes: [] },
+      ],
+    });
+    expect(failures[1]).toBeNull();
+    expect(asked[2]).toEqual({ writes: [OTHER, PRIVATE], deletes: [] });
+    expect(runs[1]).toEqual([
+      { path: PRIVATE, ruleOrder: [PRIVATE, OTHER] },
+      { path: OTHER, ruleOrder: [OTHER] },
+      { path: "team/private/a.md" },
+    ]);
+  });
+
+  it("orders the rules again when Main changed under the order", async () => {
+    const { failure, asked, merged } = await mergeWithRuleOrder({
+      staleAt: PRIVATE,
+      orders: [
+        { writes: [PRIVATE, OTHER, TEAM], deletes: [] },
+        { writes: [OTHER, PRIVATE, TEAM], deletes: [] },
+      ],
+    });
+    expect(failure).toBeNull();
+    expect(asked[1]).toEqual({ writes: [TEAM, PRIVATE, OTHER], deletes: [] });
+    expect(merged).toEqual([
+      { path: OTHER, ruleOrder: [OTHER, PRIVATE, TEAM] },
+      { path: PRIVATE, ruleOrder: [PRIVATE, TEAM] },
+      { path: TEAM, ruleOrder: [TEAM] },
+      { path: "team/private/a.md" },
+    ]);
+  });
+
+  // The engine refuses an order when Main changed under it, when its check
+  // runs out of work, and when the order leaves out a rule whose conflict is
+  // open. Only the last has a known way out.
+  it.each([
+    [
+      "says only that dohc could not confirm the order",
+      false,
+      MergeRuleOrderUnconfirmedError,
+      "dohc could not confirm the order of this version's access rule changes against Main, so it stopped the merge. Merge again.",
+    ],
+    [
+      "says to resolve a rule's open conflict",
+      true,
+      MergeRuleConflictError,
+      `dohc stopped the merge. ${TEAM} has an open conflict. Resolve that conflict, then merge again.`,
+    ],
+  ])(
+    "stops, writing nothing, when the engine refuses every order it planned, and %s",
+    async (_name, openConflict, stop, words) => {
+      // A rule whose conflict is open is not in the order.
+      const order = {
+        writes: openConflict ? [PRIVATE, OTHER] : [PRIVATE, OTHER, TEAM],
+        deletes: [],
+      };
+      const { failure, asked, merged, onDisk } = await mergeWithRuleOrder({
+        openConflict,
+        staleAt: PRIVATE,
+        staleTimes: 3,
+        orders: [order, order, order],
+      });
+      expect(failure).toBeInstanceOf(stop);
+      expect(readError(failure)).toMatchObject({ words, canRetry: false });
+      expect(asked).toHaveLength(3);
+      expect(merged).toEqual([]);
+      expect(onDisk).toBe(VIEW_RULE);
+    },
+  );
+
+  it("leaves it to the merge's result to say a refused order stopped it partway", async () => {
+    const { failure, merged } = await mergeWithRuleOrder({
+      staleAt: PRIVATE,
+      staleTimes: 3,
+      orders: [
+        { writes: [OTHER, PRIVATE, TEAM], deletes: [] },
+        { writes: [PRIVATE, TEAM], deletes: [] },
+        { writes: [PRIVATE, TEAM], deletes: [] },
+      ],
+    });
+    expect(paths(merged)).toEqual([OTHER]);
+    expect(failure).toBeInstanceOf(MergeStoppedPartwayError);
+    const { words, cause } = readError(failure);
+    expect(words).toBeNull();
+    expect(cause).toContain("MergeRuleOrderUnconfirmedError");
+    expect(cause).not.toMatch(/Nothing was merged/);
   });
 });
 
@@ -1909,6 +2243,7 @@ describe("workspaceEngineCapture batch capture", () => {
               recoveryUnavailable: true,
               secretKeyUnavailable: "key-missing",
               heldFiles: [],
+              heldAccessRules: [REMOVED_TEAM],
             });
           if (property === "listKeptCopies") return async () => native;
           if (property === "listPendingCollectionAdoptions") return adoptions;
@@ -1922,7 +2257,8 @@ describe("workspaceEngineCapture batch capture", () => {
         recovery = vi.fn(),
         secretKey = vi.fn(),
         held = vi.fn(),
-        outside = vi.fn();
+        outside = vi.fn(),
+        heldRules = vi.fn();
       const outcomes = vi.fn(),
         errors = vi.fn();
       const engine = capture(root, {
@@ -1933,6 +2269,7 @@ describe("workspaceEngineCapture batch capture", () => {
         onRecoveryUnavailable: recovery,
         onSecretKeyUnavailable: secretKey,
         onHeldFiles: held,
+        onHeldAccessRules: heldRules,
         onOutsideWriteCopies: outside,
         onCaptureOutcome: outcomes,
         onError: errors,
@@ -1945,6 +2282,7 @@ describe("workspaceEngineCapture batch capture", () => {
         expect(recovery).toHaveBeenCalledWith(true);
         expect(secretKey).toHaveBeenCalledWith("key-missing");
         expect(held).toHaveBeenCalledWith([]);
+        expect(heldRules).toHaveBeenCalledWith([REMOVED_TEAM]);
         expect(adoptions).toHaveBeenCalled();
         expect(outcomes).toHaveBeenLastCalledWith(null, null);
         expect(errors).not.toHaveBeenCalled();
@@ -4654,6 +4992,93 @@ it("drops an undone pending-placement receipt through the real guard before a fr
     expect(commits).toEqual([pending.operationId, fresh.operationId]);
     expect(await readdir(directory)).toEqual([]);
     expect(await readFile(join(root, fresh.path), "utf8")).toBe("Original");
+  } finally {
+    await engine.stop();
+  }
+});
+
+// Saving the latest edits records the disk as a deliberate write. An access
+// rule changed outside dohc reaches History only through capture, which holds
+// a widening for the owner's decision.
+const OUTSIDE_RULE = "History has not recorded the change to team/access.yaml made outside dohc.";
+
+it.each([
+  ["widened", "members: edit\n"],
+  ["removed", null],
+] as const)(
+  "records no access rule %s outside dohc before changing its folder",
+  async (_name, onDisk) => {
+    const root = await createTestScratch("dohc-outside-rule-");
+    const loopback = new VersionedLoopbackEngine();
+    for (const [path, text] of [
+      ["team/access.yaml", "members: view\n"],
+      ["team/a.md", "alpha\n"],
+    ] as const) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text });
+      await write(root, path, text);
+    }
+    if (onDisk === null) await rm(join(root, "team/access.yaml"));
+    else await write(root, "team/access.yaml", onDisk);
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    ).store;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      const files = onDisk === null ? ["team/a.md"] : ["team/access.yaml", "team/a.md"];
+      await expect(
+        engine.changePathsAs(
+          ["team"],
+          {
+            operation: "delete",
+            operationId: "dohc-operation:33333333-3333-4333-8333-333333333333",
+            author: RESTORER,
+            folder: true,
+          },
+          (held) => held.recordDisk("team", files),
+          () => [],
+        ),
+      ).rejects.toThrow(OUTSIDE_RULE);
+      expect(
+        (
+          await store.readTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path: "team/access.yaml",
+          })
+        )?.text,
+      ).toBe("members: view\n");
+    } finally {
+      await engine.stop();
+    }
+  },
+);
+
+it("restores no access rule changed outside dohc before capture records it", async () => {
+  const root = await createTestScratch("dohc-outside-rule-restore-");
+  const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+  const store = createCaptureLiveStores(
+    { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+    sessions,
+  ).store;
+  const target = {
+    workspaceId: WORKSPACE_ID,
+    versionId: "main",
+    path: "team/access.yaml",
+    metadata: { origin: "api" as const },
+  };
+  await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+  await store.writeTextFile({ ...target, text: "members: comment\n" });
+  const changed = await store.writeTextFile({ ...target, text: "members: view\n" });
+  await write(root, target.path, "members: edit\n");
+  const engine = capture(root, { store, rustEngineSessions: sessions });
+  try {
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toThrow(
+      OUTSIDE_RULE,
+    );
+    expect((await store.readTextFile(target))?.text).toBe("members: view\n");
+    expect(await readFile(join(root, target.path), "utf8")).toBe("members: edit\n");
   } finally {
     await engine.stop();
   }

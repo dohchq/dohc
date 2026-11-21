@@ -115,6 +115,7 @@
 //! completes. Its single rename keeps the check-to-replace race; the
 //! ancestor-redirection race is closed.
 
+use crate::access_rules::is_access_rule_related_path;
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::{is_excluded_file, path_collision_key};
 use crate::media::{is_text_media_type, media_type_for_path};
@@ -1186,10 +1187,13 @@ fn materialize_one_inner(
     // Generation staleness gate: if a newer generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    // Version switches and access-rule placements number their jobs by time,
+    // not moment order, so they neither fence nor are fenced.
     // A keyed write's request records the supersession first, so a complete
     // job with no recorded outcome always reached disk.
     if !conflict_only
         && !job.job_id.starts_with("version-switch-")
+        && !job.job_id.starts_with("access-rule-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
@@ -1917,6 +1921,13 @@ fn materialize_delete(
                 target,
                 &std::io::Error::from(ErrorKind::CrossesDevices),
             ));
+        }
+        // Across volumes a delete checks the bytes, then unlinks, so an edit
+        // between the two would go with no kept copy. A rule's removal waits,
+        // as it does for a rule that changed.
+        Stage::CrossVolume if job.job_id.starts_with("access-rule-remove_") => {
+            store.mark_materialization_conflict(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::Conflict);
         }
         Stage::CrossVolume => return materialize_cross_volume(store, target, None, job, options),
         Stage::Conflict => {
@@ -3790,6 +3801,54 @@ pub enum KeptCopySave {
     NoValidName,
 }
 
+/// Keep a copy of `bytes`, the file at `path` that a deliberate change is
+/// about to replace or remove, as a kept copy of that path. The copy is
+/// durable before this returns, and stays listed with the workspace's kept
+/// copies until someone saves it beside `path` or discards it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the copy is named by its job, path and bytes"
+)]
+pub fn keep_copy_before_change(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    job_id: &str,
+    path: &str,
+    bytes: &[u8],
+    now_ms: i64,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
+    let staging = checked_staging_dir(store.database_path(), root, true)?;
+    let taken: Vec<String> = store.displacement_names()?.into_iter().collect();
+    let name = unused_staged_name(&staging, job_id, &taken)?;
+    let file = staging.join(&name);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map_err(|err| MaterializeError::io(&file, &err))?;
+    std::io::Write::write_all(&mut out, bytes)
+        .and_then(|()| out.sync_all())
+        .map_err(|err| MaterializeError::io(&file, &err))?;
+    drop(out);
+    sync_staged(store, &staging, policy)?;
+    let sha256 = dohc_engine_storage::hex_sha256(bytes);
+    store.keep_displacement(
+        &DisplacementSpec {
+            job_id: job_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            target_path: path.to_owned(),
+            displaced_name: name,
+            expected_sha256: sha256.clone(),
+            content_sha256: None,
+            now_ms,
+        },
+        Some(&sha256),
+    )?;
+    Ok(())
+}
+
 /// Move a kept file from staging to a visible copy beside
 /// its path, `name (kept copy).ext`, and end its row. Capture then records
 /// the copy like any new file, and the person or an agent can open, compare
@@ -4008,6 +4067,10 @@ fn has_multiple_links(path: &Path) -> std::io::Result<bool> {
 /// bytes. A name with no extension, or only a leading dot, takes the suffix
 /// at its end. The stem gives up bytes, never splitting a character; the
 /// suffix and the extension stay whole. `None` when not one stem byte fits.
+///
+/// A copy of an access rule keeps the rule's whole name as its stem,
+/// `access.yaml (kept copy).yaml`, so the relay hides it from members as it
+/// hides the rule. `None` when the budget would cut that name.
 fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
     let suffix = match n {
         1 => " (kept copy)".to_owned(),
@@ -4019,13 +4082,16 @@ fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
         }
         _ => (file_name, ""),
     };
+    let rule_related = is_access_rule_related_path(file_name);
+    let stem = if rule_related { file_name } else { stem };
     let mut keep = budget
         .checked_sub(suffix.len() + extension.len())?
         .min(stem.len());
     while !stem.is_char_boundary(keep) {
         keep -= 1;
     }
-    (keep > 0).then(|| format!("{}{suffix}{extension}", &stem[..keep]))
+    let name = format!("{}{suffix}{extension}", &stem[..keep]);
+    (keep > 0 && (!rule_related || is_access_rule_related_path(&name))).then_some(name)
 }
 
 /// The longest file name, in UTF-8 bytes, a kept copy takes. Most file
@@ -6387,6 +6453,31 @@ mod tests {
         let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(13));
         assert_eq!(attempts, MAX_REPLACE_ATTEMPTS as usize);
         assert_eq!(result.expect_err("EACCES").code(), "materialize-io");
+    }
+
+    /// A kept copy of an access rule carries the rule's emails, so its name
+    /// still names the rule and members never receive it.
+    #[test]
+    fn kept_copies_of_an_access_rule_stay_rule_related() {
+        let name = |file: &str, n| kept_copy_name(file, n, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(name("access.yaml", 1), "access.yaml (kept copy).yaml");
+        assert_eq!(name("ACCESS.yaml", 2), "ACCESS.yaml (kept copy 2).yaml");
+        assert_eq!(name("#access.yaml#", 1), "#access.yaml# (kept copy).yaml#");
+        for file in [
+            "access.yaml",
+            "Access.YAML",
+            "access.yaml~",
+            "#access.yaml#",
+        ] {
+            let copy = name(file, 1);
+            assert!(is_access_rule_related_path(&copy), "{copy}");
+            assert!(
+                is_access_rule_related_path(&format!("team/{copy}")),
+                "{copy}"
+            );
+        }
+        // A budget that would cut the rule's name leaves no name at all.
+        assert_eq!(kept_copy_name("access.yaml", 1, 25), None);
     }
 
     #[cfg(windows)]

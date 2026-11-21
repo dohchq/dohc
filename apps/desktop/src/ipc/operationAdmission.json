@@ -43,6 +43,7 @@
   "desktop:read-explorer-menu": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:reveal-explorer-path": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:retry-held-capture": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
+  "desktop:decide-access-rule": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-file-chats": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-chat-bookmarks": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:save-chat-bookmark": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

@@ -874,6 +874,9 @@ fn replay_materializations(
             hard_errors: Vec::new(),
         });
     }
+    // Once the workspace folder no longer holds the store, every job stays
+    // pending for a replay made once it does again.
+    super::access_order::check_root()?;
     let loaded_holds;
     let holds = match scope.holds {
         Some(holds) => holds,
@@ -1014,6 +1017,26 @@ fn replay_materializations(
             if holds.blocks(&job.target_path) {
                 summary.parked += 1;
                 continue;
+            }
+            // A merged rule spelling waits for the old spelling's merged
+            // delete, which places it, as it did before the restart.
+            if job.job_id.starts_with("merge-mat_")
+                && job.operation == MaterializationOperation::Write
+                && job.preimage == dohc_engine_storage::Preimage::Absent
+                && dohc_engine_files::access_rules::is_access_rule_path(&job.target_path)
+            {
+                let version = VersionedTextStore::new(store)
+                    .get_active_version(scope.workspace_id)?
+                    .version_id;
+                if super::access_order::respelled_rule_waits(
+                    store,
+                    scope.workspace_id,
+                    &version,
+                    &job.target_path,
+                )? {
+                    summary.parked += 1;
+                    continue;
+                }
             }
             let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
             let ordinary_secret = job.job_id.starts_with("secret-mat_");

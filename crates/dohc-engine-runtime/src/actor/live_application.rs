@@ -1502,6 +1502,10 @@ impl Request {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
                     let resolver = cache.reader_resolver.clone();
                     if cancel.is_cancelled() {return Err(RuntimeError::Cancelled);}
+                    // The restore commits before it settles, so admit its path first.
+                    let binding = &input.preparation.fence.operation.old_binding;
+                    super::access_order::order_writer(store, &binding.workspace_id, &binding.main_version_id,
+                        &[super::access_order::Touch::write(&binding.current_path)])?;
                     owner.with_restore_settlement(store, resolver.as_ref(),*input,coordinate,max_bytes,max_events,|store,audit| {
                         let mut result = settle_audited(store,cache,&root,audit,now_ms,faults.as_ref(),&cancel,None)?;
                         result.materialized &= matches!(

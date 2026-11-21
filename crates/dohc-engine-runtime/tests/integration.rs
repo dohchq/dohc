@@ -1,5 +1,7 @@
 mod support;
 
+#[path = "access_rule_order.rs"]
+mod access_rule_order;
 #[path = "author_coverage_regressions.rs"]
 mod author_coverage_regressions;
 #[path = "authored_publication.rs"]

@@ -1,3 +1,4 @@
+import { isAccessRulePath } from "@dohc/security-contract/access-rule-files";
 import { useCallback, useEffect, useRef } from "react";
 import type { KeptCopy } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -5,6 +6,10 @@ import { useRequestSequence } from "../useRequestSequence";
 import type { KeptCopyNotice } from "./useShellError";
 
 export function keptCopyMessage(path: string): string {
+  // The path leads, so a clamped row still tells one copy from another.
+  if (isAccessRulePath(path)) {
+    return `${path}: dohc kept the file from outside dohc when you chose Restore rule.`;
+  }
   return `Another program changed ${path} while dohc was saving it. dohc kept both copies.`;
 }
 
@@ -46,6 +51,7 @@ export function useKeptCopyNotices(input: {
         keptCopies.map((copy) => ({
           id: copy.id,
           message: keptCopyMessage(copy.path),
+          accessRule: isAccessRulePath(copy.path),
           save: () => save(copy),
         })),
         more,

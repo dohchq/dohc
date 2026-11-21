@@ -55,6 +55,39 @@ function harness(initial: KeptCopy[]) {
 }
 
 describe("useKeptCopyNotices", () => {
+  // Restore rule's own toast names the copies it kept, so their rows are
+  // quiet results, not failures, and file no summary of colliding saves.
+  it("shows copies Restore rule kept as quiet results, path first, with no summary", async () => {
+    const h = harness([
+      { id: 4, path: "new/access.yaml", keptAtMs: 1 },
+      { id: 5, path: "team/ACCESS.yaml", keptAtMs: 2 },
+      { id: 6, path: "notes/a.md", keptAtMs: 3 },
+    ]);
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
+    expect(h.result.current.shellErrors).toMatchObject([
+      {
+        message:
+          "new/access.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
+        action: { label: "Save copy" },
+        tone: "success",
+        seen: true,
+        read: true,
+      },
+      {
+        message:
+          "team/ACCESS.yaml: dohc kept the file from outside dohc when you chose Restore rule.",
+        action: { label: "Save copy" },
+        tone: "success",
+        seen: true,
+        read: true,
+      },
+      { message: keptCopyMessage("notes/a.md"), seen: false },
+    ]);
+    // A collided save is a failure the person hasn't read yet.
+    expect(h.result.current.shellErrors[2]!.tone).toBeUndefined();
+    expect(h.result.current.shellErrors[2]!.read).toBeUndefined();
+  });
+
   it("shows each kept copy as a row whose Save copy saves it, clears the row, and opens the copy", async () => {
     const h = harness([{ id: 3, path: "notes/a.md", keptAtMs: 1 }]);
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));

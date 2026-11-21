@@ -19,6 +19,199 @@ function liveDeliveryIcon(surface: HTMLElement): string | undefined {
     ?.slice("lucide-".length);
 }
 
+it("shows the running step as working, with every step waiting, on the toast and the row", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "Access to team was widened outside dohc",
+    message: "Until you choose…",
+    atMs: 0,
+    canRetry: false,
+    seen: false,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Allowing…"],
+    actionBusy: 1,
+    noDismiss: true,
+  };
+  const action = vi.fn();
+  render(<WorkspaceErrorToast error={held} onAction={action} onHide={vi.fn()} />);
+  const restore = screen.getByRole("button", { name: "Restore rule" });
+  const allowing = screen.getByRole("button", { name: "Allowing…" });
+  expect([restore.hasAttribute("disabled"), allowing.hasAttribute("disabled")]).toEqual([
+    true,
+    true,
+  ]);
+  expect([restore.getAttribute("aria-busy"), allowing.getAttribute("aria-busy")]).toEqual([
+    null,
+    "true",
+  ]);
+  cleanup();
+
+  renderNotices({ workspaceErrors: [{ ...held, seen: true }], onWorkspaceErrorAction: action });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  const row = screen.getByTestId("notice-held");
+  expect(within(row).getByRole("button", { name: "Restore rule" }).hasAttribute("disabled")).toBe(
+    true,
+  );
+  expect(within(row).getByRole("button", { name: "Allowing…" }).getAttribute("aria-busy")).toBe(
+    "true",
+  );
+  expect(action).not.toHaveBeenCalled();
+});
+
+it("keeps Notices open on a step that runs in place, with focus on its row and then on its outcome", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "Access to team was widened outside dohc",
+    message: "Until you choose…",
+    atMs: 1,
+    canRetry: false,
+    seen: true,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Allow new access"],
+    actionStays: true,
+    noDismiss: true,
+    target: { to: "folder", path: "team" },
+  };
+  const action = vi.fn();
+  const props = { onWorkspaceErrorAction: action, onOpenTarget: async () => null };
+  const view = renderNotices({ ...props, workspaceErrors: [held] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  await userEvent.click(
+    within(screen.getByTestId("notice-held")).getByRole("button", { name: "Allow new access" }),
+  );
+  expect(action).toHaveBeenCalledExactlyOnceWith("held", 1);
+  const opens = (id: string) =>
+    screen.getByTestId(`notice-${id}`).querySelector("[data-notice-open]");
+  expect(document.activeElement).toBe(opens("held"));
+  expect(within(screen.getByTestId("notice-held")).getByRole("status").textContent).toBe("");
+
+  // Working: the row stays in Notices, its steps wait, and focus stays on it.
+  const busy = { ...held, additionalActionLabels: ["Allowing…"], actionBusy: 1 };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [busy] }));
+  expect(
+    within(screen.getByTestId("notice-held"))
+      .getByRole("button", { name: "Allowing…" })
+      .getAttribute("aria-busy"),
+  ).toBe("true");
+  expect(
+    within(screen.getByTestId("notice-held"))
+      .getByRole("button", { name: "Restore rule" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(document.activeElement).toBe(opens("held"));
+  // A screen reader hears the step start, from a region that was there before it.
+  expect(within(screen.getByTestId("notice-held")).getByRole("status").textContent).toBe(
+    "Allowing…",
+  );
+
+  // Done: the outcome files while the row still waits, then the row goes.
+  const done: WorkspaceErrorNotice = {
+    id: "done",
+    tone: "success",
+    message: "Members can now edit team.",
+    atMs: 2,
+    canRetry: false,
+    seen: true,
+  };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [busy, done] }));
+  expect(document.activeElement).toBe(opens("held"));
+  view.rerender(noticeElement({ ...props, workspaceErrors: [done] }));
+  expect(screen.getByTestId("notice-done").contains(document.activeElement)).toBe(true);
+
+  // A failure puts the row back; focus stays on it beside the failure's row.
+  view.rerender(noticeElement({ ...props, workspaceErrors: [held] }));
+  await userEvent.click(
+    within(screen.getByTestId("notice-held")).getByRole("button", { name: "Restore rule" }),
+  );
+  view.rerender(
+    noticeElement({
+      ...props,
+      workspaceErrors: [{ ...held, actionLabel: "Restoring…", actionBusy: 0 }],
+    }),
+  );
+  const failed: WorkspaceErrorNotice = {
+    id: "failed",
+    message: "dohc could not restore the access rule for team",
+    atMs: 3,
+    canRetry: true,
+    seen: true,
+  };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [held, failed] }));
+  expect(screen.getByTestId("notice-failed")).toBeTruthy();
+  expect(document.activeElement).toBe(opens("held"));
+});
+
+it("shows a row's lead above its rows and reads it out while Notices is open", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "The workspace's access rule was removed outside dohc",
+    message: "Until you choose…",
+    rows: ["Members: View → Edit"],
+    atMs: 1,
+    canRetry: false,
+    seen: true,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Remove rule"],
+    actionStays: true,
+    noDismiss: true,
+  };
+  const lead =
+    "dohc didn't apply your choice because the members' level changed in Members settings.";
+  const view = renderNotices({ workspaceErrors: [{ ...held, lead: "An earlier lead." }] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  const said = () => screen.getByTestId("notice-center-said");
+  // A lead already there when Notices opens is not read out again.
+  expect(said().getAttribute("role")).toBe("status");
+  expect(said().textContent).toBe("");
+  view.rerender(
+    noticeElement({
+      workspaceErrors: [{ ...held, additionalActionLabels: ["Removing…"], actionBusy: 1 }],
+    }),
+  );
+  expect(said().textContent).toBe("");
+  // The choice didn't run: the row comes back, filed again, with its reason.
+  view.rerender(
+    noticeElement({
+      workspaceErrors: [{ ...held, id: "held-2", rows: ["Members: View, no change"], lead }],
+    }),
+  );
+  const row = screen.getByTestId("notice-held-2");
+  const shown = within(row).getByText(lead);
+  expect(
+    shown.compareDocumentPosition(within(row).getByText("Members: View, no change")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(said().textContent).toBe(lead);
+});
+
+it("opens Notices at the row a request names and moves focus into it", async () => {
+  const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
+    id,
+    tone: "warning",
+    title: `${id} rule changed`,
+    message: "Until you choose…",
+    atMs: 0,
+    canRetry: false,
+    seen: true,
+    target: { to: "folder", path: id },
+  }));
+  const view = renderNotices({ workspaceErrors: errors, onOpenTarget: async () => null });
+  expect(screen.queryByTestId("notice-outer")).toBeNull();
+  view.rerender(
+    noticeElement({
+      workspaceErrors: errors,
+      onOpenTarget: async () => null,
+      showRequest: { id: "outer", seq: 1 },
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("notice-outer").contains(document.activeElement)).toBe(true),
+  );
+});
+
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {});
 });
@@ -102,6 +295,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
       {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
       {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
+      {...(props.showRequest ? { showRequest: props.showRequest } : {})}
     />
   );
 }
@@ -368,6 +562,43 @@ describe("notice center", () => {
       }),
     );
     expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
+  });
+
+  it("leads a notice with its rows, right under the title, on the toast and the row", async () => {
+    const user = userEvent.setup();
+    const rows = ["Members: View → Edit", "sam@example.com: No access → Edit"];
+    renderNotices({
+      workspaceErrors: [
+        {
+          id: "shell-error-4",
+          tone: "warning",
+          title: "Access to team was widened outside dohc",
+          message: "Until you choose, dohc does not record or share changes in team.",
+          rows,
+          atMs: 1_000,
+          canRetry: false,
+          seen: false,
+        },
+      ],
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    // Title, then each row, then the message.
+    const order = (testId: string) => {
+      const listed = screen.getByTestId(`${testId}-rows`);
+      expect([...listed.querySelectorAll("li")].map((item) => item.textContent)).toEqual(rows);
+      const title = within(listed.parentElement!.parentElement!).getByText(
+        "Access to team was widened outside dohc",
+      );
+      const message = within(listed.parentElement!).getByText(/^Until you choose/);
+      expect(title.compareDocumentPosition(listed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(
+        listed.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    };
+    order("workspace-shell-toast");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    order("notice-shell-error-4");
   });
 
   // A retry with no reason raises its toast and row only once it has lasted 15 s.

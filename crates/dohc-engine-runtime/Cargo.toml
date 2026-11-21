@@ -67,6 +67,7 @@ dohc-linux-files = { path = "../dohc-linux-files" }
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+dohc-engine-files = { path = "../dohc-engine-files", features = ["test-support"] }
 dohc-engine-reader = { path = "../dohc-engine-reader", features = ["test-support"] }
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }
 dohc-engine-runtime = { path = ".", features = ["test-support"] }
@@ -85,6 +86,7 @@ tokio = { version = "1", features = [
 # arming the crash-injection at the index-commit boundary.
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 rusqlite = { version = "0.41", features = ["bundled", "hooks", "trace"] }
+filetime = "0.2"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Stands in for /proc/self/fd where the engine's folder can't be held.

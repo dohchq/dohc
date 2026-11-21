@@ -286,6 +286,38 @@ struct VersionedTextMergeParams {
     author: Option<Value>,
     #[serde(default)]
     now_ms: Option<i64>,
+    /// For a rule file: the rule changes still to merge, this one first, in
+    /// the order `versions.ruleMergeOrder` planned. Required for a rule and
+    /// refused for any other file.
+    #[serde(default)]
+    rule_order: Option<Vec<String>>,
+}
+
+/// A rule's merge must carry the order its rule changes were planned in,
+/// itself first, so the engine can check it against the store it writes;
+/// any other file's merge carries none.
+fn validated_rule_order(
+    path: &str,
+    rule_order: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, WireError> {
+    let is_rule = dohc_engine_files::access_rules::is_access_rule_path;
+    let invalid = |message: &str| Err(WireError::new(ErrorCode::InvalidParams, message));
+    match rule_order {
+        None if is_rule(path) => invalid("a rule merge takes ruleOrder"),
+        None => Ok(None),
+        Some(_) if !is_rule(path) => invalid("ruleOrder is for rule files only"),
+        Some(order) => {
+            let unique: std::collections::BTreeSet<&str> =
+                order.iter().map(String::as_str).collect();
+            if order.first().map(String::as_str) != Some(path)
+                || unique.len() != order.len()
+                || !order.iter().all(|rule| is_rule(rule))
+            {
+                return invalid("ruleOrder lists rule paths once each, this one first");
+            }
+            Ok(Some(order))
+        }
+    }
 }
 
 /// One comparison side as a versioned read value. A binary side reports the
@@ -1027,6 +1059,7 @@ impl EngineService {
         let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let author_json = validated_author(params.author.as_ref())?;
+        let rule_order = validated_rule_order(&path, params.rule_order)?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
@@ -1040,7 +1073,7 @@ impl EngineService {
             self.generated_rpc_id("conflict", request.id, request_id.as_deref(), &path);
         let result = open
             .actor
-            .versioned_text_merge(
+            .versioned_text_merge_in_rule_order(
                 MergeTextFileFromVersion {
                     workspace_id: open.workspace_id.clone(),
                     target_version_id: params.target_version_id,
@@ -1056,6 +1089,7 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
+                rule_order,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),

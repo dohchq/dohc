@@ -40,6 +40,8 @@ import { SAVED_TABS_TITLE, type SavedTabsNotice } from "./useSavedTabsReread";
 export interface KeptCopyNotice {
   id: number;
   message: string;
+  /** Kept by the owner's Restore rule, whose outcome already names it. */
+  accessRule: boolean;
   save: () => void;
 }
 
@@ -141,6 +143,12 @@ export interface ShellError {
   lastLine?: string;
   // Paths the message lists, one per line under it.
   paths?: readonly string[];
+  // Short facts the message lists, one per line under it, such as who
+  // reaches a folder at which level. Copy details names each a row.
+  rows?: readonly string[];
+  // What just happened to the row, such as a choice that didn't run, on its
+  // own line under the title. Notices reads it out when it appears.
+  lead?: string;
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -157,6 +165,9 @@ export interface ShellError {
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
+  // `busy` names the step that is running, 0 for the action and 1 on for
+  // each additional one: it reads as working and every step waits.
+  // `stays`: its steps run where the row is, so Notices stays open on it.
   action?: {
     label: string;
     run: () => void;
@@ -164,6 +175,8 @@ export interface ShellError {
     reads?: boolean;
     afterRetry?: true;
     additional?: { label: string; run: () => void }[];
+    busy?: number;
+    stays?: true;
   };
   // Where a press on the row goes: what it is about. Opening never runs
   // the row's action, so it never retries or ends the row.
@@ -662,6 +675,8 @@ export function useShellError(
       command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
       paths?: readonly string[];
+      rows?: readonly string[];
+      lead?: string;
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
@@ -711,6 +726,8 @@ export function useShellError(
               : (failure.retry ?? null),
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
+          ...(failure.rows?.length ? { rows: failure.rows } : {}),
+          ...(failure.lead ? { lead: failure.lead } : {}),
           ...(details.length ? { details } : {}),
           ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
           ...(action ? { action } : {}),
@@ -1175,6 +1192,7 @@ export function useShellError(
   // saves it. An Undo's row goes, so it runs once.
   const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (target?.action?.busy !== undefined) return;
     if (index > 0) {
       target?.action?.additional?.[index - 1]?.run();
       return;
@@ -1195,12 +1213,14 @@ export function useShellError(
       kind?: ShellErrorKind,
       action?: ShellError["action"],
       target?: NoticeTarget,
+      identity?: string,
     ) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
+        ...(identity ? { identity } : {}),
         ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
@@ -1279,20 +1299,24 @@ export function useShellError(
     };
     const arrived = copies.filter((copy) => !shownKeptCopies.current.has(copy.id));
     for (const copy of arrived) shownKeptCopies.current.add(copy.id);
-    const summarized = arrived.length > 1;
+    // A copy the owner's Restore rule kept is the result they chose, and the
+    // Restore's own toast names it, so its row is quiet, read, and not a failure.
+    const collided = arrived.filter((copy) => !copy.accessRule);
+    const summarized = collided.length > 1;
     const fresh: ShellError[] = arrived.map((copy) =>
       row({
         message: copy.message,
         retry: null,
         action: { label: "Save copy", run: copy.save },
         keptCopyId: copy.id,
-        seen: summarized,
+        seen: copy.accessRule || summarized,
+        ...(copy.accessRule ? { tone: "success" as const, read: true } : {}),
       }),
     );
     if (summarized) {
       fresh.push(
         row({
-          message: `dohc kept ${arrived.length} copies of files other programs changed.`,
+          message: `dohc kept ${collided.length} copies of files other programs changed.`,
           retry: null,
           kind: "kept-copies-summary",
           seen: false,
@@ -1313,7 +1337,8 @@ export function useShellError(
         (error) =>
           (error.keptCopyId === undefined || listed.has(error.keptCopyId)) &&
           (error.kind !== "kept-copies-more" || more) &&
-          (error.kind !== "kept-copies-summary" || (copies.length > 0 && !summarized)),
+          (error.kind !== "kept-copies-summary" ||
+            (copies.some((copy) => !copy.accessRule) && !summarized)),
       );
       return added.length === 0 && stays.length === current.length ? current : [...stays, ...added];
     });

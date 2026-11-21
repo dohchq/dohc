@@ -3118,6 +3118,19 @@ fn settled_collection_record_reconcile_required(
     }
 }
 
+/// Settlement writes the document's Markdown through dohc, so it is admitted
+/// like any deliberate write: refused once the workspace folder no longer
+/// holds the store, or under a folder held for its owner. Every settlement,
+/// from a session or from inside another command, runs it first.
+fn settle_order(store: &mut EngineStore, key: &DocKey, path: &str) -> Result<(), RuntimeError> {
+    super::access_order::order_writer(
+        store,
+        &key.workspace_id,
+        &key.version_id,
+        &[super::access_order::Touch::write(path)],
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SettlementKind {
     Document,
@@ -3148,6 +3161,7 @@ pub(super) fn ydoc_settle_on_store(
     use_reader: bool,
     conversion_consent: Option<&MarkdownConversionConsent>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    settle_order(store, key, path)?;
     let result = ydoc_settle_attempt_on_store(
         store,
         doc_cache,

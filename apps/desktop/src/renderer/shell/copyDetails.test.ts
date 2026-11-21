@@ -1,5 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { ERROR_DETAIL_MAX_CHARS, errorDetails } from "./copyDetails";
+import { ERROR_DETAIL_MAX_CHARS, errorDetails, shellNoticeFields } from "./copyDetails";
+
+describe("shellNoticeFields", () => {
+  it("names the message and title, then paths and details", () => {
+    expect(
+      errorDetails(
+        shellNoticeFields({
+          message: "dohc could not save notes/plan.md.",
+          title: "Save failed",
+          paths: ["notes/plan.md"],
+          details: [["Cause", "EACCES"]],
+        }),
+      ),
+    ).toBe(
+      "Error: dohc could not save notes/plan.md.\nTitle: Save failed\nPath: notes/plan.md\nCause: EACCES",
+    );
+  });
+
+  it("leads a notice with change rows with its facts, and leaves out the words its row shows", () => {
+    expect(
+      errorDetails(
+        shellNoticeFields({
+          tone: "warning",
+          title: "Access to team was widened outside dohc",
+          message: "Until you choose, dohc doesn't record or share changes in team.",
+          rows: ["Members: View → Edit"],
+          details: [
+            ["Recorded rule", "members: view"],
+            ["Until you choose", "Members keep their earlier access."],
+          ],
+        }),
+      ),
+    ).toBe(
+      "Recorded rule: members: view\nUntil you choose: Members keep their earlier access.\nChange: Members: View → Edit",
+    );
+  });
+});
 
 describe("errorDetails", () => {
   it("writes one line per fact and leaves out facts without a value", () => {

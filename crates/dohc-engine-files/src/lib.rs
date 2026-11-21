@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access_rules;
 pub mod actor;
 pub mod bounds;
 pub mod capture;

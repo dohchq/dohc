@@ -32,6 +32,7 @@ use dohc_engine_protocol::wire::Request;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::CancellationToken;
 use dohc_engine_runtime::NoFaults;
+use dohc_engine_runtime::RuleMergeOrder;
 use dohc_engine_runtime::RuntimeError;
 use serde::Deserialize;
 use serde_json::Value;
@@ -301,6 +302,17 @@ struct VersionsCompareFilesParams {
     after_path: Option<String>,
     #[serde(default)]
     byte_budget: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsRuleMergeOrderParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    source_version_id: String,
+    target_version_id: String,
+    writes: Vec<String>,
+    deletes: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1254,6 +1266,53 @@ impl EngineService {
             "entries": entries[..included].to_vec(),
             "nextCursor": next_cursor,
         }))
+    }
+
+    /// The order a merge writes, then deletes, its rule files in, judged by
+    /// what each rule's merge would write. A rule the merge would leave as
+    /// the target has it, or that conflicts, is in neither list. When the
+    /// engine can't order them, `refused` says why and `rules` which.
+    pub(super) async fn versions_rule_merge_order(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsRuleMergeOrderParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        if params
+            .writes
+            .iter()
+            .chain(&params.deletes)
+            .any(|path| !dohc_engine_files::access_rules::is_access_rule_path(path))
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "versions.ruleMergeOrder takes only access rule paths",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let order = Self::read_under_ctx(
+            &cancellation,
+            "versions.ruleMergeOrder",
+            open.actor.access_rule_merge_order(
+                open.workspace_id.clone(),
+                params.source_version_id,
+                params.target_version_id,
+                params.writes,
+                params.deletes,
+            ),
+        )
+        .await?;
+        Ok(match order {
+            RuleMergeOrder::Ordered { writes, deletes } => {
+                json!({ "writes": writes, "deletes": deletes })
+            }
+            RuleMergeOrder::Refused { reason, rules } => {
+                json!({ "refused": reason.as_str(), "rules": rules })
+            }
+        })
     }
 
     pub(super) async fn versions_active(

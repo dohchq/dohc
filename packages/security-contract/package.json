@@ -30,6 +30,7 @@
     "./workspace-members": "./src/workspaceMembers.ts",
     "./access-rules": "./src/accessRules.ts",
     "./listed-reach": "./src/listedReach.ts",
+    "./access-rule-files": "./src/accessRuleFiles.ts",
     "./direct-messages": "./src/directMessages.ts",
     "./app-collection-checks": "./src/appCollectionChecks.ts"
   },

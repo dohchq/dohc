@@ -124,7 +124,8 @@ pub struct ReconcilePlan {
 
 impl ReconcilePlan {
     /// Build a plan from a classified diff. Ops are sorted by path so the plan
-    /// is deterministic and inspectable, except that a retire whose path an
+    /// is deterministic and inspectable, except that access rule writes come
+    /// first and their deletes last, and a retire whose path an
     /// ingested path respells comes before every ingest. `stored_spelling`
     /// gives the spelling a retired path's file is stored under, when that is
     /// another one; the retire is respelled only when the plan ingests that
@@ -164,7 +165,12 @@ impl ReconcilePlan {
         for path in diff.removed {
             ops.push(CaptureOp::Retire { path });
         }
+        // Rule writes come first and rule deletes last, so the engine never
+        // holds a folder's files without its rule.
         ops.sort_by(|a, b| a.path().cmp(b.path()));
+        crate::access_rules::sort_rule_changes(&mut ops, |op| {
+            (op.path(), matches!(op, CaptureOp::Retire { .. }))
+        });
         // A rename that changes only case or Unicode normalization retires the
         // old spelling first. A peer on a disk that ignores case then deletes
         // the old file before it writes the new one, never the new one after.

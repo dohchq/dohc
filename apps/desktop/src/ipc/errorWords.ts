@@ -28,12 +28,14 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
-const HELD_CHANGE_REFUSALS = new Set([
+// Refusals that trying again only repeats.
+const NO_RETRY_REFUSALS = new Set([
   "held-change-shared-owner",
   "held-change-stale",
   "held-change-missing",
   "held-change-conflict",
   "held-change-undo-stale",
+  "workspace-folder-moved",
 ]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
@@ -206,6 +208,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
     "workspace-owned":
       "Another copy of dohc has this workspace open. Close it there, then try again.",
+    "workspace-folder-moved":
+      "This workspace's folder moved while dohc had it open. Open the workspace again from where it is now.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "relay-server-busy": "The server is busy. Try again in a moment.",
@@ -525,6 +529,16 @@ export function readError(error: unknown): ReadError {
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
+  // Trying again at once gives the same answer, so the words say what to do
+  // first. The first line is the words; the rest, with the rules dohc could
+  // not order, is for Details.
+  if (
+    name === "MergeWidensAccessError" ||
+    name === "MergeRuleConflictError" ||
+    name === "MergeRuleOrderUnconfirmedError"
+  ) {
+    return { words: message.split("\n")[0]!, mapped: false, cause: text, canRetry: false };
+  }
   if (
     name === "DaemonRefusalError" &&
     code === "INVALID_PARAMS" &&
@@ -548,7 +562,7 @@ export function readError(error: unknown): ReadError {
       words,
       mapped: words !== null,
       cause: text,
-      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key)
+      ...(name === "DaemonRefusalError" && NO_RETRY_REFUSALS.has(key)
         ? { canRetry: false as const }
         : {}),
     };
@@ -1015,6 +1029,44 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
     name === "DaemonRefusalError" &&
     code === "CONFLICT" &&
     message.startsWith("capture-file-held: ")
+  );
+}
+
+/**
+ * The folder whose access rule also changed outside dohc, above the one the
+ * owner decided on, which they decide first; empty for the workspace's own
+ * rule. Null for any other error.
+ */
+export function heldOuterAccessRuleFolder(error: unknown): string | null {
+  const { name, code, message } = parse(error);
+  if (
+    name !== "DaemonRefusalError" ||
+    code !== "CONFLICT" ||
+    !message.startsWith("access-rule-held:")
+  )
+    return null;
+  // `access-rule-held: <reason> <folder>`; the workspace's own folder is empty.
+  const rest = message.slice("access-rule-held:".length).trim();
+  const space = rest.indexOf(" ");
+  return space < 0 ? "" : rest.slice(space + 1);
+}
+
+/** The access rule changed again since the owner saw its Notice. The Notice already shows it as it is now. */
+export function isAccessRuleChangedRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  // The workspace's own rule names no folder, and `parse` trims the trailing space.
+  return (
+    name === "DaemonRefusalError" &&
+    code === "CONFLICT" &&
+    (message === "access-rule-changed:" || message.startsWith("access-rule-changed: "))
+  );
+}
+
+/** The hold was decided already, or its Version is no longer active. The list that follows drops its Notice. */
+export function isAccessRuleNotHeldRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return (
+    name === "DaemonRefusalError" && code === "INVALID_PARAMS" && message === "access-rule-not-held"
   );
 }
 

@@ -43,6 +43,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "documents.heldChange"
                 | "capture.reconcile"
                 | "capture.retryHeld"
+                | "capture.acceptAccessRule"
+                | "capture.restoreAccessRule"
                 | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
@@ -642,6 +644,10 @@ impl EngineService {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
+            "versions.ruleMergeOrder" => {
+                self.versions_rule_merge_order(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versions.createNamed" => self.versions_create_named(&ctx, request).await?,
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
@@ -763,6 +769,24 @@ impl EngineService {
             "capture.retryHeld" => {
                 self.capture_retry_held(&ctx, request.workspace, request.params)
                     .await?
+            }
+            "capture.acceptAccessRule" => {
+                self.capture_decide_access_rule(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    dohc_engine_runtime::AccessRuleDecision::Accept,
+                )
+                .await?
+            }
+            "capture.restoreAccessRule" => {
+                self.capture_decide_access_rule(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    dohc_engine_runtime::AccessRuleDecision::Restore,
+                )
+                .await?
             }
             "capture.setAuthor" => {
                 self.capture_set_author(&ctx, request.workspace, request.params)
@@ -1754,6 +1778,8 @@ mod tests {
             "capture.reconcile",
             "capture.retry",
             "capture.retryHeld",
+            "capture.acceptAccessRule",
+            "capture.restoreAccessRule",
             "capture.release",
             "capture.renew",
             "capture.setAuthor",
@@ -1921,6 +1947,7 @@ mod tests {
             "versions.createNamed",
             "versions.ensureMain",
             "versions.list",
+            "versions.ruleMergeOrder",
             "versions.setActive",
             "watcher.status",
             "workReferences.make",

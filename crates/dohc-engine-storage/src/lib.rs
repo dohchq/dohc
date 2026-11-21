@@ -30,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access_rule_holds;
 pub mod backup;
 pub mod blob;
 pub mod capture_file_holds;

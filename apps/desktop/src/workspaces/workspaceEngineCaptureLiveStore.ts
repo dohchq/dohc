@@ -1297,11 +1297,22 @@ export function createCaptureLiveStores(
       return await runRead(async (adapter) => await adapter.compareVersionFilesPage(input));
     },
 
+    async accessRuleMergeOrder(input: {
+      workspaceId: string;
+      sourceVersionId: string;
+      targetVersionId: string;
+      writes: string[];
+      deletes: string[];
+    }) {
+      return await runRead(async (adapter) => await adapter.accessRuleMergeOrder(input));
+    },
+
     async mergeTextFileFromVersion(input: {
       workspaceId: string;
       targetVersionId: string;
       sourceVersionId: string;
       path: string;
+      ruleOrder?: string[];
       metadata: ActorNeutralWriteMetadata;
     }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({

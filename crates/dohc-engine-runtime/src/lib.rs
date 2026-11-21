@@ -33,15 +33,17 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
-    ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
-    CAPTURE_NEW_FILE_LIVE, CaptureBatchReads, CheckpointCycle, CollectionReconciliation,
-    HistoryPageRead, LifecycleState, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
-    MergeExecutionResult, PostCommitMaterializeOutcome, REBUILD_JOB_PREFIX, RebuildCarried,
-    RebuildHead, RebuildJob, RebuildRemoval, RebuildUnsent, RelayConfiguration, RelayOperation,
-    RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord,
-    SharingDeclined, TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions,
-    YdocAppend, YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState,
-    YdocSettleOutcome, YdocSettlement, YdocWriteState,
+    ACCESS_RULE_HELD, ACCESS_RULE_SETTLE, ACCESS_RULE_WAITS, AccessRuleDecided, AccessRuleDecision,
+    AccessRuleHoldView, AccessRuleLevelChange, AccessRuleSignals, ActiveVersionSwitch, ActorHandle,
+    AutomationClaimListener, BinaryWriteExecutionResult, CAPTURE_NEW_FILE_LIVE, CaptureBatchReads,
+    CheckpointCycle, CollectionReconciliation, HistoryPageRead, LifecycleState,
+    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
+    PostCommitMaterializeOutcome, REBUILD_JOB_PREFIX, RebuildCarried, RebuildHead, RebuildJob,
+    RebuildRemoval, RebuildUnsent, RelayConfiguration, RelayOperation, RelayOperationOutcome,
+    RollbackExecutionResult, RuleMergeOrder, RuleMergeRefusal, SelfWriteRecorder,
+    ShareViewIdentityRecord, SharingDeclined, TextWriteExecutionResult, WORKSPACE_FOLDER_MOVED,
+    WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend, YdocCloseMaterialization,
+    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement, YdocWriteState,
 };
 #[cfg(unix)]
 pub use actor::{

@@ -848,6 +848,7 @@ impl StoreCaptureSink {
             Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(error) if waits_for_switch(&error) => Ok(DomainIngest::WaitsForSwitch),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
+            Err(error) if waits_for_access_rule(&error) => Ok(DomainIngest::AccessRuleWaits),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -914,6 +915,7 @@ impl StoreCaptureSink {
             Err(error) if write_waits_for_session(&error) => Ok(DomainIngest::WriteDeferred),
             Err(error) if waits_for_switch(&error) => Ok(DomainIngest::WaitsForSwitch),
             Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
+            Err(error) if waits_for_access_rule(&error) => Ok(DomainIngest::AccessRuleWaits),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -1211,6 +1213,10 @@ impl StoreCaptureSink {
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(error) if waits_for_access_rule(&error) && respelled_to.is_none() => {
+                Err(RETIRE_HELD)
+            }
+            Err(error) if waits_for_access_rule(&error) => Err(RESPELLED_RETIRE_WAITS),
             Err(RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { .. }))
                 if respelled_to.is_some() =>
             {
@@ -1245,6 +1251,21 @@ enum DomainIngest {
     /// bytes, so the switch's landed write or a later edit arrives as `Changed`.
     WaitsForSwitch,
     Held,
+    /// An access rule over the path is settling or waits for its owner, so
+    /// nothing under its folder was written. Capture offers the path again
+    /// once the rule settles or the owner decides.
+    AccessRuleWaits,
+}
+
+fn waits_for_access_rule(error: &RuntimeError) -> bool {
+    match error {
+        RuntimeError::AccessRuleHeld { .. } => true,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState { reason }) => {
+            *reason == dohc_engine_runtime::ACCESS_RULE_WAITS
+                || *reason == dohc_engine_runtime::ACCESS_RULE_HELD
+        }
+        _ => false,
+    }
 }
 
 /// Empty new files wait for the editor's first settle. Nonempty bytes wait
@@ -1587,6 +1608,7 @@ impl StoreCaptureSink {
                         Err(RuntimeError::CaptureFileHeld { .. }) => {
                             Ok(IngestOutcome::Held { size, sha256 })
                         }
+                        Err(error) if waits_for_access_rule(&error) => Ok(IngestOutcome::Deferred),
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1821,6 +1843,7 @@ impl CaptureSink for StoreCaptureSink {
                         self.self_writes.clear_path(&self.workspace_id, path);
                         Ok(IngestOutcome::Held { size, sha256 })
                     }
+                    DomainIngest::AccessRuleWaits => Ok(IngestOutcome::Deferred),
                 }
             }
             CurrentContent::Absent => {
@@ -1901,6 +1924,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::WriteDeferred => Ok(IngestOutcome::WriteDeferred),
                     DomainIngest::WaitsForSwitch => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
+                    DomainIngest::AccessRuleWaits => Ok(IngestOutcome::Deferred),
                 }
             }
         }

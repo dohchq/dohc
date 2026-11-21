@@ -2,6 +2,7 @@ import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
 import { useOutsideChangeNotices } from "./shell/useOutsideChangeNotices";
+import { useAccessRuleHoldNotices } from "./shell/useAccessRuleHoldNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -168,7 +169,7 @@ import {
   namedPaths,
 } from "./shell/importStop";
 import { importSkipLines } from "./shell/importSkips";
-import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
+import { errorDetails, shellNoticeFields, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { workspaceCreateOffers, type ShareViewWriter } from "../workspaces/shareWriteGate";
 import { CopyButton } from "./ui/CopyButton";
@@ -7594,6 +7595,8 @@ export function DesktopWorkspaceShell(props: {
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.paths ? { paths: error.paths } : {}),
+        ...(error.rows ? { rows: error.rows } : {}),
+        ...(error.lead ? { lead: error.lead } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.change
           ? {}
@@ -7601,13 +7604,7 @@ export function DesktopWorkspaceShell(props: {
             ? shareCaptureCopy(error.details?.map((detail) => String(detail[1])) ?? [])
             : {
                 copy: {
-                  report: errorDetails([
-                    [error.tone ? "Notice" : "Error", error.message],
-                    ...(error.title ? [["Title", error.title] as const] : []),
-                    ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-                    ...(error.details ?? []),
-                    ...reportFacts(error.atMs),
-                  ]),
+                  report: errorDetails([...shellNoticeFields(error), ...reportFacts(error.atMs)]),
                 },
               }),
         atMs: error.atMs,
@@ -7621,6 +7618,8 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action?.additional
           ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
           : {}),
+        ...(error.action?.busy !== undefined ? { actionBusy: error.action.busy } : {}),
+        ...(error.action?.stays ? { actionStays: true } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
@@ -7978,6 +7977,29 @@ export function DesktopWorkspaceShell(props: {
     reportShellFailure,
     clearIdentity,
   });
+  // Opens Notices at the row of one identity, such as a held folder that an
+  // inner folder's decision waits for.
+  const [noticeShown, setNoticeShown] = useState<{ id: string; seq: number } | null>(null);
+  const showNoticeRow = useCallback((identity: string) => {
+    const id = shellErrorsRef.current.find((error) => error.identity === identity)?.id;
+    if (id !== undefined) setNoticeShown((current) => ({ id, seq: (current?.seq ?? 0) + 1 }));
+  }, []);
+  const { readMemberLevel } = useAccessRuleHoldNotices({
+    workspaceId,
+    holds: shareView ? undefined : syncStatus?.heldAccessRules,
+    reportShellFailure,
+    clearIdentity,
+    showSuccessNotice,
+    showNotice: showNoticeRow,
+    openHistory: openHistoryView,
+    openMembers: () => openSettings("members"),
+  });
+  // A held rule's words name the members' level, which Settings can change.
+  const settingsWereOpen = useRef(settingsOpen);
+  useEffect(() => {
+    if (settingsWereOpen.current && !settingsOpen) readMemberLevel();
+    settingsWereOpen.current = settingsOpen;
+  }, [settingsOpen, readMemberLevel]);
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
     paths: syncStatus?.keptFiles?.filter(([path]) => !path),
@@ -8403,6 +8425,7 @@ export function DesktopWorkspaceShell(props: {
                             notices={
                               <NoticeCenter
                                 workspaceId={workspaceId}
+                                onOpen={readMemberLevel}
                                 syncStatus={syncStatus}
                                 failedSaves={failedSaves}
                                 agentActive={agentActive}
@@ -8436,6 +8459,7 @@ export function DesktopWorkspaceShell(props: {
                                 onRetryLiveDelivery={retryLiveDelivery}
                                 onOpenSharingDeclined={openSharingDeclined}
                                 onOpenTarget={openNoticeRowTarget}
+                                showRequest={noticeShown}
                                 {...(shareView
                                   ? {}
                                   : {
@@ -9976,6 +10000,7 @@ export function DesktopWorkspaceShell(props: {
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}
                               onClearError={clearIdentity}
+                              onMemberLevelSaved={readMemberLevel}
                               onNotice={showSettingsNotice}
                               onWorkspaceSettingsRead={onWorkspaceSettingsRead}
                               workspaceId={workspaceId}

@@ -937,7 +937,8 @@ pub(crate) fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> 
 /// coordinate predates the column, or `None` if nothing has been materialized
 /// there yet. An empty caller coordinate is itself a legacy global job, so its
 /// fence spans every workspace. Active version projections (`version-switch-`
-/// jobs) use snapshot timestamps, which are a different namespace and
+/// jobs) use snapshot timestamps, and access-rule placements (`access-rule-`
+/// jobs) use the time of the owner's decision. Both are other namespaces and
 /// therefore cannot participate in this ordering fence. The
 /// materialization pipeline uses this to skip a pending ordinary job whose
 /// generation is superseded by an already-materialized newer generation for
@@ -952,7 +953,8 @@ pub(crate) fn max_completed_generation_for_path(
         "SELECT MAX(target_generation) FROM materialization_jobs \
          WHERE (?1 = '' OR workspace_id = ?1 OR workspace_id = '') \
            AND target_path = ?2 AND status = 'complete' \
-           AND job_id NOT LIKE 'version-switch-%'",
+           AND job_id NOT LIKE 'version-switch-%' \
+           AND job_id NOT LIKE 'access-rule-%'",
     )
     .map_err(StorageError::corrupt)?
     .query_row([workspace_id, path], |r| r.get::<_, Option<i64>>(0))
