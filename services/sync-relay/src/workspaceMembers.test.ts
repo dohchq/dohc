@@ -2432,4 +2432,37 @@ describe("account deletion", () => {
     expect((await join(h, "ana", token)).status).toBe(200);
     expect(await levels("ana")).toEqual(["view", "edit"]);
   });
+
+  it("leaves the address's rules for its real holder when a deleted account never verified it", async () => {
+    const SAM = "sam@elsewhere.example";
+    const { h, storage } = await seed({
+      overrides: {
+        lookupVerifiedUserEmail: async (userId) =>
+          userId === "squatter" ? null : userId === "sam" ? SAM : `${userId}@dohc.test`,
+      },
+    });
+    await ownerWrite(
+      h,
+      "docs/access.yaml",
+      `members: view
+people:
+  ${SAM}: edit
+`,
+    );
+    const token = (await inviteLink(h, OWNER, "turn-on"))!;
+    const level = async (userId: string) => {
+      await pulledText(h, userId, await shareIdOf(h, userId));
+      return storage.memberReach(WORKSPACE, userId, "member", "comment").folderLevel("docs");
+    };
+    expect((await join(h, "squatter", token)).status).toBe(200);
+    expect(await level("squatter")).toBe("view");
+
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, KEY);
+    const { manifest } = fenceAccount(context, KEY, "squatter", SAM);
+    purgeAccountRows(context, "squatter", SAM, manifest!);
+
+    expect((await join(h, "sam", token)).status).toBe(200);
+    expect(await level("sam")).toBe("edit");
+  });
 });
