@@ -80,11 +80,17 @@ final class ServerRoundTests: XCTestCase {
     field.typeText(origin)
     app.buttons["Connect server"].tap()
     // The approval page opens in the browser's sheet, over the code. Closing it leaves the sign-in waiting.
-    let close = app.buttons.matching(NSPredicate(format: "label IN %@", ["Done", "Close"])).firstMatch
-    if close.waitForExistence(timeout: 30) { close.tap() }
+    let names = ["Done", "Close", "Cancel", "Dismiss"]
+    let close = app.buttons.matching(NSPredicate(format: "label IN %@ OR identifier IN %@", names, names)).firstMatch
     // Connect labels the code one character at a time, so VoiceOver spells it.
     let code = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", "([A-Za-z0-9-] )+[A-Za-z0-9-]")).firstMatch
-    XCTAssertTrue(code.waitForExistence(timeout: 10), "Connect should show the device code")
+    let end = Date().addingTimeInterval(40)
+    while Date() < end && !code.exists {
+      if close.exists { close.tap() }
+      _ = code.waitForExistence(timeout: 1)
+    }
+    if !code.exists { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(code.exists, "Connect should show the device code")
     say("SERVER ROUND CODE \(code.label.replacingOccurrences(of: " ", with: ""))")
     XCTAssertTrue(app.tabBars.firstMatch.waitForExistence(timeout: 120), "Once the code is approved, the phone should show its tabs")
   }
