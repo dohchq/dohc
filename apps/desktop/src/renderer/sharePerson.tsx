@@ -12,7 +12,7 @@ import {
 import type { ResendRelayShareInvitationResult, ShareAccess } from "../ipc/bridgeContract";
 import { AutomationShareNote, useAutomationShareCheck } from "./automationShareCheck";
 import { bridge } from "./bridge";
-import { accessOptions, invitationEmailNote } from "./EmailShareForm";
+import { accessOptions } from "./EmailShareForm";
 import { ipcErrorMessage } from "./ipcError";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import {
@@ -281,8 +281,10 @@ function invitationResendWords(answer: ResendRelayShareInvitationResult): string
       return "Email invite sent.";
     case "unavailable":
       return "This server sends no email.";
-    case "limit":
-      return invitationEmailNote(answer);
+    case "limit": {
+      const { sent, limit, windowHours } = answer.invitationEmailLimit;
+      return `No email sent: ${sent} of ${limit} invitation emails used in the last ${windowHours} hours.`;
+    }
     case "recent":
       return "Tried a moment ago. Try again in a minute.";
     case "failed":

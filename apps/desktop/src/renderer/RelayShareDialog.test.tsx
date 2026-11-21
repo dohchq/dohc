@@ -11,7 +11,6 @@ import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
-import { invitationEmailNote } from "./EmailShareForm";
 import {
   RelayShareDialog as ProductionRelayShareDialog,
   type RelayShareTarget,
@@ -6467,10 +6466,9 @@ describe("people and links on one surface", () => {
     expect(within(ana).getByRole("status").textContent).toBe("Email invite sent.");
 
     const limited = { invitationEmail: "limit" as const, invitationEmailLimit: EMAIL_LIMIT };
-    expect(invitationEmailNote(limited)).toContain("50 of 50 invitation emails");
     for (const [answer, words] of [
       [{ invitationEmail: "unavailable" }, "This server sends no email."],
-      [limited, invitationEmailNote(limited)],
+      [limited, "No email sent: 50 of 50 invitation emails used in the last 24 hours."],
       [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(answer);

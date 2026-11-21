@@ -8,7 +8,6 @@ import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ResendRelayShareInvitationResult, ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { automationShareWarning } from "../automationShareCheck";
-import { invitationEmailNote } from "../EmailShareForm";
 import { ShellErrorReporter, ShellNoticeClear } from "../shell/useShellError";
 import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import type { AccessFacts } from "./accessReason";
@@ -1072,10 +1071,9 @@ describe("copying a share's code or invitation", () => {
       invitationEmail: "limit" as const,
       invitationEmailLimit: { limit: 50, windowHours: 24, sent: 50 },
     };
-    expect(invitationEmailNote(limited)).toContain("50 of 50 invitation emails");
     for (const [next, words] of [
       [{ invitationEmail: "unavailable" }, "This server sends no email."],
-      [limited, invitationEmailNote(limited)],
+      [limited, "No email sent: 50 of 50 invitation emails used in the last 24 hours."],
       [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
     ] as const) {
       bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(next);
