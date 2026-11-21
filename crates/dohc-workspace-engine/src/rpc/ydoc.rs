@@ -758,7 +758,6 @@ impl EngineService {
         }
         let params: Params = parse(params)?;
         // A release names its relay cut, a Try again only its kept edits.
-        // Either names the person it credits.
         if (action == "release") != params.binding.is_some()
             || (action == "release") != params.person_id.is_some()
             || params

@@ -18,7 +18,6 @@ const withDocument = <
   retirementOwed: true,
 });
 
-// The engine's own release, as the desktop calls it.
 const engineRelease =
   (client: EngineClient) =>
   (

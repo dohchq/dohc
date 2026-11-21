@@ -2909,7 +2909,6 @@ pub(crate) type EntryCredit = (
 /// outranks an agent, and either a person's edit. An adoption seed, and a
 /// draft that declared nothing, credit nobody; a caller treats that as
 /// unattributed, never as whoever reads the entry.
-/// A draft keeps only that a person made it; the caller names the person.
 pub(crate) fn entry_credit(
     native: Option<&OwnerOutboxNativeSource>,
     agent: Option<String>,

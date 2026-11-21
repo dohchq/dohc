@@ -2182,7 +2182,6 @@ fn release_snapshot(f: &Fixture) -> Vec<Vec<String>> {
         .unwrap()
 }
 
-/// The person this computer names; signed in, it is the account.
 const OWNER_PERSON: &str = "owner-account";
 
 async fn stop_action(
@@ -3580,7 +3579,6 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
         assert_eq!(payload["updateBlobSha256"], hex_sha256(update));
         assert_eq!(payload["actorOriginId"], serde_json::json!(actor));
         assert_eq!(payload["isBaseState"], false);
-        // A person's run names the account the relay checks it against.
         assert_eq!(
             payload.get("authorContext"),
             (kind.as_deref() == Some("human"))
