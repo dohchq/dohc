@@ -5,10 +5,12 @@ import type {
   ChatDispatchFailedRun,
   GetRelayReceivedShareResult,
   NoticeRow,
+  RelayShareReceivedRow,
+  ShareAccess,
   WorkspaceSummary,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { opensForLiveEditing } from "../OpenSharedView";
+import { shareLevel } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
 import { useRequestSequence } from "../useRequestSequence";
 import { workspaceName } from "../Titlebar";
@@ -69,8 +71,8 @@ function agentRunOfNotice(
 // file, to open once the share is added. `controls` opens an automation's
 // switch instead when the share opens as its own workspace.
 export interface NoticeShare {
-  resolvedShare: { shareId: string; shareCode: string };
-  liveEditing: boolean;
+  resolvedShare: { shareId: string; shareCode: string; share?: RelayShareReceivedRow };
+  level: ShareAccess | null;
   path: string | null;
   controls?: Extract<NoticeTarget, { to: "automation-controls" }>;
 }
@@ -418,8 +420,12 @@ export function useSentNoticeProps(input: {
                 ? notice.target?.automation
                 : undefined;
             onOpenShare({
-              resolvedShare: { shareId: found.share.shareId, shareCode: found.share.shareCode },
-              liveEditing: opensForLiveEditing(found.share),
+              resolvedShare: {
+                shareId: found.share.shareId,
+                shareCode: found.share.shareCode,
+                share: found.share,
+              },
+              level: shareLevel(found.share),
               path: place.path,
               ...(automation === undefined || place.path === null
                 ? {}

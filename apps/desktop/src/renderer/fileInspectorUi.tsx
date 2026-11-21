@@ -181,8 +181,10 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  details?: string;
   children?: ReactNode;
 }) {
+  const { details } = props;
   return (
     <div
       data-testid="engine-may-hold-document-notice"
@@ -203,6 +205,9 @@ export function EngineMayHoldDocumentNotice(props: {
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
+        {details ? (
+          <CopyButton label="Copy details" pinName iconOnly getText={() => details} />
+        ) : null}
         <button
           type="button"
           onClick={props.onRetry}
@@ -211,6 +216,20 @@ export function EngineMayHoldDocumentNotice(props: {
           Try again
         </button>
       </span>
+    </div>
+  );
+}
+
+export function EditCopyNotice(props: { onOpenToEdit: () => void }) {
+  return (
+    <div
+      data-testid="edit-copy-notice"
+      className="flex items-center gap-3 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-muted"
+    >
+      <span>This copy is read-only.</span>
+      <SecondaryButton size="row" onClick={props.onOpenToEdit}>
+        Open to edit
+      </SecondaryButton>
     </div>
   );
 }

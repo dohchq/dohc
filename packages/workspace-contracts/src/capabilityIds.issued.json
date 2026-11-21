@@ -233,6 +233,7 @@
   "share.discussion.read",
   "share.discussion.resume",
   "share.grant.access.set",
+  "share.grant.invitation.resend",
   "share.grant.promote",
   "share.grant.revoke",
   "share.handoff.accept",

@@ -16,6 +16,7 @@ export {
   isDocumentTooDenseRefusal,
   isIdempotencyKeyReuseRefusal,
   isOwnerOutboxFrozenRefusal,
+  isRestoreFencedRefusal,
   isYdocUpdateAdmissionRefusal,
   isTransientEngineRefusal,
   isYdocAuthorCapacityRefusal,

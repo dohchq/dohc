@@ -22,12 +22,12 @@ import {
 } from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
-const RELAY_READS = "The sync relay serves the link, so it can read this content.";
+const RELAY_READS = "The sync relay can read this content.";
 const VERSION_WARNING = `The link shows this version as it is now. ${RELAY_READS}`;
-const PATHS_WARNING = `If files are added to this selection later, the link includes them. ${RELAY_READS}`;
+const PATHS_WARNING = `The link includes files added later. ${RELAY_READS}`;
 
 // The line under the invite field once a person is invited.
-const INVITED = /^Invited .*send it to them.$/;
+const INVITED = /^Invited .*send it to them\.$/;
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -357,6 +357,7 @@ const bridgeMock = {
   listSharingAccess: vi.fn(),
   getShareCopyDetails: vi.fn(),
   retuneRelayShareGrant: vi.fn(),
+  resendRelayShareInvitation: vi.fn(),
   listRelayShareDiscussion: vi.fn(),
   pollRelayShareDiscussionActivity: vi.fn(),
   cancelRelayShareDiscussionActivity: vi.fn(),
@@ -888,8 +889,8 @@ describe("RelayShareDialog", () => {
     expect(row.textContent).toBe("No linkCan viewCreate link");
     expect(screen.queryByText(PATHS_WARNING)).toBeNull();
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
     await user.click(screen.getByTestId("share-link-create-access"));
     expect(screen.getByText(PATHS_WARNING).tagName).toBe("P");
@@ -2858,8 +2859,8 @@ codex mcp login dohc-share`);
       "Separate linkIts own commentsCan viewCreate link",
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
     await chooseNewLinkAccess(user, "Can comment");
     await user.click(create);
@@ -6375,6 +6376,208 @@ codex mcp login dohc-share`);
 
 describe("people and links on one surface", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
+  const EMAIL_LIMIT = { limit: 50, windowHours: 24, sent: 50 };
+
+  it("offers Resend invitation to a person invited by email, and to no one who joined through a link", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("parent-link", {
+          shareId: "share-1",
+          generation: 7,
+          dependents: [dependent("dependent-1", "friend@example.test", "friend-user", "comment")],
+        }),
+      ],
+      supportedLinkAccess: ["view", "comment"],
+      independentGrants: [],
+    });
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([
+        invitedRow("ana", "ana@dohc.test"),
+        invitedRow("new", "new@example.test", { recipientUserId: null }),
+      ]),
+    );
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+    const itemsOf = async (row: HTMLElement) => {
+      const trigger = within(row).getByRole("button", {
+        name: /(: Can (view|comment|edit)$|^Options for )/,
+      });
+      await user.click(trigger);
+      const names = screen
+        .getAllByRole("menuitem", { hidden: true })
+        .map((item) => item.textContent);
+      await user.click(trigger);
+      return names;
+    };
+
+    const ana = await screen.findByTestId("share-invited-ana");
+    expect(ana.textContent).toContain("Invited by email");
+    expect(await itemsOf(ana)).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
+    const pending = screen.getByTestId("share-invited-new");
+    expect(pending.textContent).toContain("Invited, not signed in yet");
+    expect(await itemsOf(pending)).toEqual([
+      "Copy invitation",
+      "Resend invitation",
+      "Remove access",
+    ]);
+
+    await openOwnerComments(user, "share-1");
+    const joined = await screen.findByTestId("share-dependent-dependent-1");
+    expect(joined.textContent).toContain("Joined through a link");
+    const offered = await itemsOf(joined);
+    expect(offered).toEqual(["Make independent"]);
+    expect(bridgeMock.resendRelayShareInvitation).not.toHaveBeenCalled();
+  });
+
+  it("resends an invitation once, cannot be picked again while it is sent, and says each answer on the person's line", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    const sending = controllable<unknown>();
+    bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(sending.promise);
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
+    const ana = await screen.findByTestId("share-invited-ana");
+    const line = () => screen.getByTestId("share-invited-ana").textContent;
+
+    await choosePersonOption(user, ana, "Resend invitation");
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      shareId: "share-ana",
+      grantId: "ana",
+    });
+    expect(line()).toContain("ana@dohc.testSending the email…");
+
+    await user.click(screen.getByTestId("share-person-access-ana"));
+    const item = await screen.findByTestId("share-resend-invitation-ana");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.textContent).toBe("Resend invitationdohc is sending the email.");
+    await user.click(item);
+    await user.keyboard("{Escape}");
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledOnce();
+
+    await act(async () => sending.resolve({ invitationEmail: "sent" }));
+    expect(line()).toContain("ana@dohc.testEmail invite sent.");
+    expect(within(ana).getByRole("status").textContent).toBe("Email invite sent.");
+
+    const limited = { invitationEmail: "limit" as const, invitationEmailLimit: EMAIL_LIMIT };
+    for (const [answer, words] of [
+      [{ invitationEmail: "unavailable" }, "This server sends no email."],
+      [limited, "No email sent: 50 of 50 invitation emails used in the last 24 hours."],
+      [{ invitationEmail: "recent" }, "Tried a moment ago. Try again in a minute."],
+    ] as const) {
+      bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce(answer);
+      await choosePersonOption(user, ana, "Resend invitation");
+      await waitFor(() => expect(line()).toContain(`ana@dohc.test${words}`));
+    }
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(4);
+    expect(report).not.toHaveBeenCalled();
+
+    bridgeMock.getShareCopyDetails.mockResolvedValue({
+      status: "active",
+      shareCode: "dohc-share:share-ana:http://r.test",
+    });
+    await copyInvitation(user, "ana");
+    await waitFor(() => expect(line()).toContain("ana@dohc.testInvitation copied"));
+    await waitFor(() => expect(line()).toContain("ana@dohc.testInvited by email"), {
+      timeout: 5000,
+    });
+  });
+
+  it("keeps a resend that failed on the person's line while Share shows them, and files no notice", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("ana", "ana@dohc.test")]),
+    );
+    const report = vi.fn<ReportShellFailure>();
+    const clear = vi.fn<(identity: string) => void>();
+    const user = userEvent.setup();
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <ShellNoticeClear.Provider value={clear}>
+          <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        </ShellNoticeClear.Provider>
+      </ShellErrorReporter.Provider>,
+    );
+    const ana = await screen.findByTestId("share-invited-ana");
+
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "failed" });
+    await choosePersonOption(user, ana, "Resend invitation");
+    await waitFor(() =>
+      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
+    );
+    expect(ana.querySelector(".text-danger")?.textContent).toBe("The email could not be sent.");
+
+    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(new Error("relay down"));
+    await choosePersonOption(user, ana, "Resend invitation");
+    await waitFor(() => expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(ana.textContent).toContain("ana@dohc.testThe email could not be sent."),
+    );
+    expect(report).not.toHaveBeenCalled();
+
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
+    await choosePersonOption(user, ana, "Resend invitation");
+    await waitFor(() => expect(ana.textContent).toContain("ana@dohc.testEmail invite sent."));
+    expect(clear).toHaveBeenCalledExactlyOnceWith("share-invitation-email:ana");
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it("hands the shell an answer that comes after Share closed, with a Try again that sends again", async () => {
+    bridgeMock.listSharingAccess.mockResolvedValue(
+      sharingAccess([invitedRow("late", "late@dohc.test")]),
+    );
+    const sending = controllable<unknown>();
+    bridgeMock.resendRelayShareInvitation.mockReturnValueOnce(sending.promise);
+    const report = vi.fn<ReportShellFailure>();
+    const clear = vi.fn<(identity: string) => void>();
+    const user = userEvent.setup();
+    const view = render(
+      <ShellErrorReporter.Provider value={report}>
+        <ShellNoticeClear.Provider value={clear}>
+          <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />
+        </ShellNoticeClear.Provider>
+      </ShellErrorReporter.Provider>,
+    );
+    await choosePersonOption(
+      user,
+      await screen.findByTestId("share-invited-late"),
+      "Resend invitation",
+    );
+    view.unmount();
+
+    await act(async () => sending.resolve({ invitationEmail: "recent" }));
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      message: "dohc could not email late@dohc.test their invitation.",
+      cause: new Error("Tried a moment ago. Try again in a minute."),
+      identity: "share-invitation-email:late",
+      retry: expect.any(Function),
+    });
+
+    const down = new Error("relay down");
+    bridgeMock.resendRelayShareInvitation.mockRejectedValueOnce(down);
+    await act(async () => report.mock.calls[0]![0].retry!());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-late",
+      grantId: "late",
+    });
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(report.mock.calls[1]![0]).toMatchObject({
+      cause: down,
+      identity: "share-invitation-email:late",
+    });
+
+    bridgeMock.resendRelayShareInvitation.mockResolvedValueOnce({ invitationEmail: "sent" });
+    await act(async () => report.mock.calls[1]![0].retry!());
+    expect(bridgeMock.resendRelayShareInvitation).toHaveBeenCalledTimes(3);
+    expect(clear).toHaveBeenCalledExactlyOnceWith("share-invitation-email:late");
+    expect(report).toHaveBeenCalledTimes(2);
+  });
 
   it("reports an invitation the clipboard refused, the way a copy button does", async () => {
     bridgeMock.listSharingAccess.mockResolvedValue(
@@ -6809,9 +7012,9 @@ describe("people and links on one surface", () => {
     expect(
       screen.getAllByRole("menuitemradio", { hidden: true }).map((level) => level.textContent),
     ).toEqual([
-      expect.stringMatching(/^Can view/),
-      "Can comment",
-      expect.stringMatching(/^Can edit/),
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
+      "Can editCan make changes and see History.",
     ]);
     expect(
       screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
@@ -7282,7 +7485,7 @@ describe("people and links on one surface", () => {
     ).toEqual(["share-person-access-ben-view", "share-person-access-ben-edit"]);
     expect(
       screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
-    ).toEqual(["Copy invitation", "Remove access"]);
+    ).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
     expect(screen.getAllByRole("separator", { hidden: true })).toHaveLength(1);
   });
 
@@ -8074,8 +8277,13 @@ describe("people and links on one surface", () => {
       await user.click(access);
       return names;
     };
-    expect(await actions("ana")).toEqual(["Copy invitation", "Remove access"]);
-    expect(await actions("ben")).toEqual(["Copy invitation", "Copy share code", "Remove access"]);
+    expect(await actions("ana")).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
+    expect(await actions("ben")).toEqual([
+      "Copy invitation",
+      "Resend invitation",
+      "Copy share code",
+      "Remove access",
+    ]);
 
     await user.click(screen.getByTestId("share-person-access-ben"));
     await user.click(await screen.findByTestId("share-copy-code-ben"));
@@ -8117,7 +8325,7 @@ describe("people and links on one surface", () => {
     await user.click(await screen.findByTestId("share-person-access-ben"));
     expect(
       screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent),
-    ).toEqual(["Copy invitation", "Remove access"]);
+    ).toEqual(["Copy invitation", "Resend invitation", "Remove access"]);
   });
 
   it("lets only the copy asked for last reach the clipboard, from a person's menu or the invite line", async () => {
@@ -8237,12 +8445,12 @@ describe("people and links on one surface", () => {
     {
       name: "no Copy share code when the relay answered without a browser invitation",
       browserInvitationUrl: undefined,
-      offers: ["Copy invitation", "Remove access"],
+      offers: ["Copy invitation", "Resend invitation", "Remove access"],
     },
     {
       name: "Copy share code when the relay answered with a browser invitation",
       browserInvitationUrl: "https://share.test/invite#grant-1",
-      offers: ["Copy invitation", "Copy share code", "Remove access"],
+      offers: ["Copy invitation", "Resend invitation", "Copy share code", "Remove access"],
     },
   ])(
     "offers $name, in the menu of a person invited here to edit",
@@ -8270,9 +8478,7 @@ describe("people and links on one surface", () => {
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test{Enter}");
       expect(await screen.findByTestId("share-invited-ana")).toBeTruthy();
       await act(async () => {});
-      expect(Boolean(screen.queryByTestId("share-code-copy"))).toBe(
-        browserInvitationUrl !== undefined,
-      );
+      expect(screen.queryByRole("button", { name: "Copy share code" })).toBeNull();
 
       await user.click(screen.getByTestId("share-person-access-grant-1"));
       expect(
@@ -8478,9 +8684,7 @@ describe("advertised public Edit release", () => {
           onClose={() => {}}
         />,
       );
-      expect(await newLinkLevels(user)).toContain(
-        "Can editAnyone with the link can edit this and see the full History.",
-      );
+      expect(await newLinkLevels(user)).toContain("Can editCan make changes and see History.");
       await chooseNewLinkAccess(user, "Can edit");
       await user.click(await screen.findByTestId("share-link-create"));
       expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
@@ -8505,8 +8709,8 @@ describe("advertised public Edit release", () => {
       />,
     );
     expect(await newLinkLevels(user)).toEqual([
-      "Can viewAnyone with the link can read this without an account.",
-      "Can commentAnyone with the link can read this and comment.",
+      "Can viewCan read, but not change.",
+      "Can commentCan read and comment.",
     ]);
   });
 });

@@ -221,6 +221,7 @@
   "desktop:resume-relay-share-discussion": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:promote-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:retune-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:resend-relay-share-invitation": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:revoke-relay-share-grant": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:stop-owner-live-document": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:resume-owner-live-document": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

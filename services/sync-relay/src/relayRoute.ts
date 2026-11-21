@@ -315,6 +315,13 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
         grantId: parseShareId(parts[4]),
       };
     }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "invitation-email") {
+      return {
+        route: "share-grant-invitation-email",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
     if (parts.length === 4 && parts[3] === "discussion") {
       return { route: "share-discussion", shareId };

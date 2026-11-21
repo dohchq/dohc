@@ -87,9 +87,9 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   );
   const user = userEvent.setup();
   expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
-  expect(screen.getByTestId("open-share-summary").textContent).toContain(
-    "Trip plans · Ana (granter@dohc.test) · Edit access",
-  );
+  expect(
+    [...screen.getByTestId("open-share-summary").children].map((line) => line.textContent),
+  ).toEqual(["Trip plans", "Can edit · From Ana (granter@dohc.test)"]);
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));
@@ -101,6 +101,33 @@ it("opens an Edit handoff as a standalone live view while mounts remain read-onl
   );
   expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   expect(onWorkspaceReady).toHaveBeenCalled();
+});
+
+it("defaults an Edit handoff of a pinned version, which cannot be edited live, to Open separately", async () => {
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({
+    found: true,
+    share: {
+      ...receivedShare("share-edit", "edit-code"),
+      access: "edit",
+      selector: { paths: ["notes"], versionId: "version-7" },
+    },
+  });
+  render(
+    <ShareHandoffSurface
+      status={{ status: "done", statusId: "edit-status", shareId: "share-edit" }}
+      onWorkspaceReady={() => {}}
+      onBack={() => {}}
+      onOpened={() => {}}
+      mountInto={{ workspaceId: "host", onMounted: vi.fn() }}
+    />,
+  );
+
+  expect((await screen.findByTestId("open-share-mode-separate")).getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  expect(screen.getByTestId("open-share-mode-help").textContent).toBe(
+    "Opens as its own workspace, where you can edit.",
+  );
 });
 
 type ExactReceivedShareResult =
@@ -483,7 +510,10 @@ describe("ShareHandoffSurface", () => {
     );
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onMounted).toHaveBeenCalledWith({
+      shareId: "share-exact",
       label: "granter",
+      name: "Trip plans",
+      files: 3,
       access: null,
       alreadyAdded: false,
       left: false,

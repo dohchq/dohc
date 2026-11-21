@@ -37,6 +37,7 @@ import {
   useLinkAgentDisconnects,
 } from "./shareLinkAgents";
 import {
+  SHARE_ACCESS_DESCRIPTIONS,
   SHARE_ACCESS_WORDS,
   SHARE_ROW_INSET,
   ShareAccessLevel,
@@ -191,18 +192,12 @@ type OwnerConfirmation =
       name: string;
     };
 
-const NEW_LINK_WORDS: Record<LinkAccess, string> = {
-  view: "Anyone with the link can read this without an account.",
-  comment: "Anyone with the link can read this and comment.",
-  edit: "Anyone with the link can edit this and see the full History.",
-};
-
 function newLinkReach(target: RelayShareTarget): string {
   const reach =
     target.kind === "version"
       ? "The link shows this version as it is now."
-      : "If files are added to this selection later, the link includes them.";
-  return `${reach} The sync relay serves the link, so it can read this content.`;
+      : "The link includes files added later.";
+  return `${reach} The sync relay can read this content.`;
 }
 
 const LINKS_BUSY = "Finish the change under way first.";
@@ -1995,7 +1990,7 @@ export function useRelayShareLinkPane(props: {
             access={draft.access}
             options={draft.supported.map((value) => ({
               value,
-              description: NEW_LINK_WORDS[value],
+              description: SHARE_ACCESS_DESCRIPTIONS[value],
             }))}
             note={newLinkReach(props.target)}
             disabled={linkControlsBusy}

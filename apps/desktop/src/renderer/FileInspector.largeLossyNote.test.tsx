@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
@@ -10,6 +10,7 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, utf8ByteLength } from "../workspaces/workspaceTextLimits";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
+import { findEnabledMarkdownEditToggle, findSourceEditor } from "./FileInspector.editor-fixture";
 
 // These tests need a note past the WYSIWYG limit, not the limit itself. A
 // small limit keeps their notes small, so opening one stays fast on a busy host.
@@ -162,6 +163,40 @@ describe("a note past read mode's size", () => {
       "This file is too large to edit in dohc.",
     );
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("with no engine record edits as source and saves to its file", async () => {
+    const clear = `# Notes
+
+${FILLER}
+`;
+    const bridge = bridgeFor(clear, "no-record");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
+    await answerChecks();
+    fireEvent.click(await findEnabledMarkdownEditToggle());
+    const editor = await findSourceEditor();
+    expect(editor.readOnly).toBe(false);
+    expect(screen.queryByTestId("engine-may-hold-document-notice")).toBeNull();
+
+    editor.value = `${clear}
+Typed in source.
+`;
+    await waitFor(
+      () =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workspaceId: "ws-1",
+            relativePath: "a.md",
+            text: `${clear}
+Typed in source.
+`,
+          }),
+        ),
+      { timeout: 10_000 },
+    );
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
   }, 30_000);
 
   it("with an engine record turns editable once a clear check answers", async () => {

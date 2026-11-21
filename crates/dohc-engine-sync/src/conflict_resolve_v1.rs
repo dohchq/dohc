@@ -3076,6 +3076,44 @@ fn open_divergent_result_review(
     payload: &ConflictResolveV1,
     live: &HeadV1,
 ) -> Result<(String, bool), SyncError> {
+    if let (Some(reviewed), Some(result), Some(head)) = (
+        payload.current.present(),
+        payload.result.present(),
+        live.present(),
+    ) && result.object_id == head.object_id
+    {
+        let open: Option<String> = tx
+            .query_row(
+                "UPDATE conflicts SET incoming_latest_moment_id=?7,incoming_updated_at_ms=?8,updated_at_ms=?9 \
+                 WHERE conflict_id=(SELECT conflict_id FROM conflicts WHERE workspace_id=?1 AND status='open' \
+                   AND metadata_origin='sync' AND target_version_id=?2 AND current_object_id=?3 \
+                   AND current_latest_moment_id=?4 AND incoming_object_id=?3 \
+                   AND incoming_latest_moment_id=?5 AND incoming_blob_sha256=?6 \
+                   AND source_version_id=?10 AND path=?11 AND current_path=?11 AND incoming_path=?12 \
+                   ORDER BY created_at_ms,conflict_id LIMIT 1) AND workspace_id=?1 \
+                 RETURNING conflict_id",
+                params![
+                    payload.workspace_id,
+                    payload.target_version_id,
+                    head.object_id,
+                    head.latest_moment_id,
+                    reviewed.latest_moment_id,
+                    result.blob_sha256,
+                    result.latest_moment_id,
+                    result.updated_at_ms,
+                    payload.effect_context.recorded_at_ms,
+                    payload.source_version_id,
+                    payload.paths[live.path_ref()],
+                    payload.paths[payload.result.path_ref()],
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::persist)?;
+        if let Some(conflict_id) = open {
+            return Ok((conflict_id, false));
+        }
+    }
     let seed = format!(
         "{}\0{}\0{}\0{}",
         payload.workspace_id,

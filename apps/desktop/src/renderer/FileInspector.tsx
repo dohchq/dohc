@@ -16,6 +16,7 @@ import { DrawingView } from "./DrawingView";
 import { lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
 import {
   DocumentControls,
+  EditCopyNotice,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewActions,
@@ -314,6 +315,7 @@ type FileInspectorProps = {
   onOpenLiveDocuments?: (path: string) => void;
   // The file is a received share's: a shared view, or a mount in shared-with-me.
   receivedShare?: boolean;
+  onOpenToEdit?: () => void;
   accessEnded?: boolean;
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
@@ -742,14 +744,18 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     if (noDocument) onEditorReady?.(null);
   }, [noDocument, onEditorReady]);
   const url = assetUrl(props.workspaceId, props.path, props.refreshKey ?? 0);
-  const truncatedNotice =
-    isText && truncated ? (
-      <TruncatedNotice
-        workspaceId={props.workspaceId}
-        path={props.path}
-        onError={props.onButtonError}
-      />
-    ) : null;
+  const truncatedNotice = (
+    <>
+      {props.onOpenToEdit ? <EditCopyNotice onOpenToEdit={props.onOpenToEdit} /> : null}
+      {isText && truncated ? (
+        <TruncatedNotice
+          workspaceId={props.workspaceId}
+          path={props.path}
+          onError={props.onButtonError}
+        />
+      ) : null}
+    </>
+  );
   const onShareCurrentPath = props.onSharePath ? () => props.onSharePath?.(props.path) : undefined;
   const { appFolder, onRunApp } = props;
   const runApp = appFolder && onRunApp ? () => onRunApp(appFolder) : undefined;
@@ -869,6 +875,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             onRetry={retryEngineOpen}
             contentShown={false}
             message={engine.openRefusal ?? engine.sharedWaiting?.message}
+            details={engine.openRefusalDetail}
           />
         ) : null}
         {engine.artifactAssetsInvalid ? (

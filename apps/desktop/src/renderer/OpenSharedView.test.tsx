@@ -130,7 +130,10 @@ describe("OpenSharedView", () => {
     expect(onOpened).not.toHaveBeenCalled();
     expect(onWorkspaceReady).not.toHaveBeenCalled();
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 3,
       access: null,
       alreadyAdded: false,
       left: true,
@@ -158,7 +161,10 @@ describe("OpenSharedView", () => {
 
     await waitFor(() =>
       expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+        shareId: "share-1",
         label: "granter",
+        name: "granter",
+        files: 0,
         access: null,
         alreadyAdded: true,
         left: false,
@@ -210,7 +216,10 @@ describe("OpenSharedView", () => {
       shareCode: "dohc-share:share-1:http://localhost:1788",
     });
     expect(onMounted).toHaveBeenCalledExactlyOnceWith({
+      shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 1,
       access: null,
       alreadyAdded: false,
       left: true,
@@ -300,11 +309,41 @@ describe("OpenSharedView", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(onOpened).toHaveBeenCalledOnce();
     expect(onMounted).toHaveBeenCalledWith({
+      shareId: "share-1",
       label: "granter",
+      name: "granter",
+      files: 3,
       access: "edit",
       alreadyAdded: false,
       left: false,
     });
+  });
+
+  it("defaults a pre-resolved Edit share to Open separately", async () => {
+    render(
+      <OpenSharedView
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        level="edit"
+        resolvedShare={{ shareId: "share-1", shareCode: "ordinary-received-share-code" }}
+        mountInto={{ workspaceId: "ws-host", onMounted: () => {} }}
+      />,
+    );
+
+    expect(
+      (await screen.findByTestId("open-share-mode-separate")).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.getByTestId("open-share-mode-help").textContent).toBe(
+      "Opens as its own workspace, where you can edit.",
+    );
+  });
+
+  it("shows no choice to describe on first run, where a share only opens separately", async () => {
+    render(<OpenSharedView onWorkspaceReady={() => {}} onBack={() => {}} />);
+
+    await screen.findByTestId("open-share-code");
+    expect(screen.queryByTestId("open-share-mode-separate")).toBeNull();
+    expect(screen.queryByTestId("open-share-mode-help")).toBeNull();
   });
 
   it("surfaces a mount failure in the dialog error slot", async () => {
@@ -387,7 +426,11 @@ describe("OpenSharedView defaults for a pasted code", () => {
   const CODE = "dohc-share:share-1:http://localhost:1788";
   const OTHER_CODE = "dohc-share:share-2:http://localhost:1788";
 
-  function received(access: ShareAccess, shareId = "share-1"): GetRelayReceivedShareResult {
+  function received(
+    access: ShareAccess,
+    shareId = "share-1",
+    versionId: string | null = null,
+  ): GetRelayReceivedShareResult {
     return {
       found: true,
       share: {
@@ -398,7 +441,7 @@ describe("OpenSharedView defaults for a pasted code", () => {
         generation: 1,
         createdAtMs: 1,
         shareCode: `dohc-share:${shareId}:http://localhost:1788`,
-        selector: { paths: ["docs"], versionId: null },
+        selector: { paths: ["docs"], versionId },
         access,
       },
     };
@@ -418,6 +461,101 @@ describe("OpenSharedView defaults for a pasted code", () => {
     return screen.getByTestId(`open-share-mode-${mode}`).getAttribute("aria-checked");
   }
 
+  function modeHelp(): string | null {
+    return screen.queryByTestId("open-share-mode-help")?.textContent ?? null;
+  }
+
+  async function paste(answer: GetRelayReceivedShareResult) {
+    bridgeMock.getRelayReceivedShare.mockResolvedValue(answer);
+    renderInWorkspace();
+    fireEvent.change(await screen.findByTestId("open-share-code"), { target: { value: CODE } });
+    await waitFor(() => expect(modeHelp()).not.toBeNull());
+  }
+
+  it("defaults an Edit code to Open separately when the share cannot be edited live", async () => {
+    await paste(received("edit", "share-1", "version-7"));
+
+    expect(modeChecked("separate")).toBe("true");
+    expect(modeChecked("mount")).toBe("false");
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Open share");
+  });
+
+  it.each(["view", "comment"] as const)(
+    "defaults a %s code to Add to this workspace, and describes only the selected choice",
+    async (access) => {
+      const user = userEvent.setup();
+      await paste(received(access));
+
+      expect(modeChecked("mount")).toBe("true");
+      expect(modeHelp()).toBe("Adds a read-only copy to this workspace.");
+      await user.click(screen.getByTestId("open-share-mode-separate"));
+      expect(modeHelp()).toBe("Opens as its own workspace, read-only.");
+    },
+  );
+
+  it("describes only the selected choice for an Edit code", async () => {
+    const user = userEvent.setup();
+    await paste(received("edit"));
+
+    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
+    await user.click(screen.getByTestId("open-share-mode-mount"));
+    expect(modeHelp()).toBe("Adds a read-only copy to this workspace.");
+    await user.click(screen.getByTestId("open-share-mode-separate"));
+    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
+  });
+
+  it("asks again for a code entered again after its lookup failed, and then defaults Edit to Open separately", async () => {
+    bridgeMock.getRelayReceivedShare
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(received("edit"));
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(start.textContent).toBe("Add share"));
+    expect(modeChecked("mount")).toBe("true");
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: CODE } });
+
+    await waitFor(() => expect(modeChecked("separate")).toBe("true"));
+    expect(start.textContent).toBe("Open share");
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the choice the person made when a failed lookup is asked again", async () => {
+    bridgeMock.getRelayReceivedShare
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(received("edit"));
+    const user = userEvent.setup();
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(start.textContent).toBe("Add share"));
+    await user.click(screen.getByTestId("open-share-mode-mount"));
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: CODE } });
+
+    await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("open-share-summary").textContent).toContain("Can edit"),
+    );
+    expect(modeChecked("mount")).toBe("true");
+    expect(start.textContent).toBe("Add share");
+    expect(start.disabled).toBe(false);
+  });
+
+  it("promises no level for a code the relay does not know", async () => {
+    const user = userEvent.setup();
+    await paste({ found: false });
+
+    expect(modeChecked("mount")).toBe("true");
+    await user.click(screen.getByTestId("open-share-mode-separate"));
+    expect(modeHelp()).toBe("Opens as its own workspace.");
+  });
+
   it("holds Open while the relay answers, then defaults an Edit code to Open separately", async () => {
     const lookup = deferred<GetRelayReceivedShareResult>();
     bridgeMock.getRelayReceivedShare.mockReturnValue(lookup.promise);
@@ -432,13 +570,14 @@ describe("OpenSharedView defaults for a pasted code", () => {
     // Neither half looks chosen, so nobody confirms a default that may move.
     expect(modeChecked("mount")).toBe("false");
     expect(modeChecked("separate")).toBe("false");
+    expect(modeHelp()).toBeNull();
     // Enter reaches open() without the button.
     fireEvent.keyDown(screen.getByTestId("open-share-code"), { key: "Enter" });
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
 
     await act(async () => lookup.resolve(received("edit")));
     await waitFor(() => expect(modeChecked("separate")).toBe("true"));
-    expect(screen.getByText(/Open separately to edit shared Markdown/)).toBeTruthy();
+    expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
     await waitFor(() => expect(start.disabled).toBe(false));
     expect(start.textContent).toBe("Open share");
     expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({

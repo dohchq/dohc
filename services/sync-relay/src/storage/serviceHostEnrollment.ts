@@ -14,7 +14,7 @@ import {
   parseStoredAnyShareSelectorJson,
 } from "../shareFilter";
 import { parseWorkspaceId } from "../requestInputs";
-import { SERVICE_HOST_ORIGIN_PREFIX } from "../relayLogInputs";
+import { SERVICE_HOST_ORIGIN_PREFIX, isOwnerLogOrigin } from "../relayLogInputs";
 import { canonicalLiveSelector, currentLiveDocumentMoment } from "./liveDocumentAuthority";
 import { LIVE_RESTORE_OPERATIONS, UNFINISHED_RESTORE } from "./liveRestoreOperationSchema";
 import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
@@ -663,6 +663,53 @@ export function bindStoppedNoteClient(
       `INSERT INTO ${LIVE_AUTHOR_CLIENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,author_snapshot_json,storage_bytes) VALUES (?,?,?,?,?,?,?)`,
     )
     .run(...params, unbound[0]!, snapshot, storageBytes);
+}
+export function isOwnerSaveOfUnhostedNote(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; payloadJson: string; recordedAtMs: number },
+): boolean {
+  const { workspaceId, userId, recordedAtMs } = input;
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(input.payloadJson));
+  } catch {
+    return false;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256;
+  if (
+    typeof objectId !== "string" ||
+    typeof path !== "string" ||
+    typeof before !== "string" ||
+    liveDocumentKindForPath(path) !== "richdoc"
+  )
+    return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT f.blob_sha256,l.origin_id,l.recorded_at_ms,json_extract(l.payload_json,'$.objectId') AS object_id
+        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(workspaceId, path);
+  if (
+    typeof stored?.recorded_at_ms !== "number" ||
+    stored.object_id !== objectId ||
+    typeof stored.origin_id !== "string" ||
+    !isOwnerLogOrigin(stored.origin_id) ||
+    stored.blob_sha256 === before ||
+    recordedAtMs <= stored.recorded_at_ms
+  )
+    return false;
+  return (
+    storage.workspaceIsOwnedBy(workspaceId, userId) &&
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS}
+          WHERE workspace_id=? AND object_id=? AND (retired=0 OR owner_stop IS NOT NULL)`,
+      )
+      .get(workspaceId, objectId) === undefined
+  );
 }
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
 const reclaimable = (enrollment: ServiceHostEnrollment) =>

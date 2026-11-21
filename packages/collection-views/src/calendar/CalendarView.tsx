@@ -3,7 +3,7 @@ import type { ComponentType } from "react";
 import { Plus } from "lucide-react";
 import { Calendar, dateFnsLocalizer } from "react-big-calendar";
 import type { CalendarProps, DateHeaderProps } from "react-big-calendar";
-import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
+import dragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
 import type { EventInteractionArgs } from "react-big-calendar/lib/addons/dragAndDrop";
 import { addMonths } from "date-fns/addMonths";
 import { differenceInCalendarDays } from "date-fns/differenceInCalendarDays";
@@ -130,6 +130,11 @@ function nearestDay(month: Date, days: readonly Date[]): Date | null {
   }
   return nearest;
 }
+
+// The add-on is CommonJS. Vite 7 hands over its default export; Vite 8, which
+// builds the website's demo, follows Node and hands over the whole module.
+const withDragAndDrop: typeof dragAndDrop =
+  "default" in dragAndDrop ? (dragAndDrop as { default: typeof dragAndDrop }).default : dragAndDrop;
 
 const DnDCalendar = withDragAndDrop<CalendarRecordEvent, object>(
   Calendar as ComponentType<CalendarProps<CalendarRecordEvent, object>>,

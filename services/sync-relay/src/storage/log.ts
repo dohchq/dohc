@@ -40,6 +40,7 @@ import { recordPushDeliveries } from "./pushDeliveries";
 import {
   bindStoppedNoteClient,
   isOwnerSaveOfStoppedNote,
+  isOwnerSaveOfUnhostedNote,
   isResumedHostSave,
 } from "./serviceHostEnrollment";
 
@@ -366,19 +367,25 @@ export function appendLogBatchInTransaction(
         op.payloadJson,
         Number(result.lastInsertRowid),
       );
-    const replacesStoredFile = () =>
-      op.opKind === "moment.append" &&
-      (owner !== undefined
-        ? isOwnerSaveOfStoppedNote(storage, {
-            workspaceId: input.workspaceId,
-            userId: owner,
-            payloadJson: op.payloadJson,
-          })
-        : isResumedHostSave(storage, {
-            workspaceId: input.workspaceId,
-            originId: input.originId,
-            payloadJson: op.payloadJson,
-          }));
+    const replacesStoredFile = () => {
+      if (op.opKind !== "moment.append") return false;
+      if (owner === undefined)
+        return isResumedHostSave(storage, {
+          workspaceId: input.workspaceId,
+          originId: input.originId,
+          payloadJson: op.payloadJson,
+        });
+      const ownerSave = {
+        workspaceId: input.workspaceId,
+        userId: owner,
+        payloadJson: op.payloadJson,
+        recordedAtMs: op.recordedAtMs,
+      };
+      return (
+        isOwnerSaveOfStoppedNote(storage, ownerSave) ||
+        isOwnerSaveOfUnhostedNote(storage, ownerSave)
+      );
+    };
     if (op.opKind === "moment.append") {
       const resolved = objectPathFromMomentPayload(op.payloadJson);
       if (resolved) {

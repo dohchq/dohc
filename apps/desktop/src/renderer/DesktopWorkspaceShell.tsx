@@ -264,6 +264,7 @@ import {
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
 import { OpenSharedView, type MountedShare } from "./OpenSharedView";
+import { addedShareNotice, editCopyAt, useOpenShareToEdit } from "./shell/shareCopyEdit";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -6613,7 +6614,7 @@ export function DesktopWorkspaceShell(props: {
           ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
           : "dohc can't read what this share grants. Open the share again to restore it."
         : shareViewWritable
-          ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
+          ? `Shared view from ${shareGranterName}. Pages save as you type. Other files need Send changes.`
           : shareViewHasIndependentChat
             ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
             : shareAccess === "comment"
@@ -7504,27 +7505,33 @@ export function DesktopWorkspaceShell(props: {
     agentSetup.runnerEnabled;
 
   // `openPath` is the file a notice named, inside the share.
+  const openShareToEdit = useOpenShareToEdit({
+    workspaceId,
+    onOpenShare: setOpenShare,
+    reportError: reportButtonError,
+  });
+  function openToEditOffer(path: string, tabPath: string | null): { onOpenToEdit?: () => void } {
+    const copy = editCopyAt(path, shareMounts, cloudStatus?.connected === true);
+    const tabOpen = () => allTabs(wbRef.current).some((tab) => tab.path === tabPath);
+    return copy ? { onOpenToEdit: () => void openShareToEdit(copy, tabOpen) } : {};
+  }
   function handleMountedShare(mounted: MountedShare, openPath?: string) {
-    const { label, access, alreadyAdded } = mounted;
+    const { label } = mounted;
     if (!mounted.left) setOpenShare(null);
     void reloadShareMounts();
     void refreshFiles()
       .catch(() => undefined)
       .then(() => {
-        if (openPath && !mounted.left) openFile(`shared-with-me/${label}/${openPath}`);
+        if (openPath && !mounted.left && (mounted.alreadyAdded || mounted.files > 0))
+          openFile(`shared-with-me/${label}/${openPath}`);
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-    // A mount is read-only whatever the grant allows. Open a share defaults
-    // an Edit grant to Open separately; a person who chose Add is told how
-    // to reach the access they have.
-    showSuccessNotice(
-      alreadyAdded
-        ? `${label} is already in shared-with-me.`
-        : access === "edit"
-          ? `Added ${label} to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.`
-          : `Added ${label} to shared-with-me. Its files are read-only and stay up to date.`,
+    const notice = addedShareNotice(
+      mounted,
+      () => void openShareToEdit({ shareId: mounted.shareId, path: openPath ?? null }),
     );
+    showSuccessNotice(notice.message, undefined, undefined, notice.action);
   }
 
   const storeUpdateState = desktopUpdate.state;
@@ -8183,11 +8190,6 @@ export function DesktopWorkspaceShell(props: {
                                 {shareView.subjectName}
                               </span>
                             )}
-                            {shareView.granterEmail && (
-                              <span className="shrink-0 font-mono text-[11px]">
-                                {shareView.granterEmail}
-                              </span>
-                            )}{" "}
                             <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
                               {shareBannerText}
                             </span>
@@ -8485,10 +8487,10 @@ export function DesktopWorkspaceShell(props: {
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                   onShare: setShareTarget,
-                                  onOpenShare: ({ shareId, shareCode, liveEditing }) =>
+                                  onOpenShare: ({ shareId, shareCode, liveEditing, share }) =>
                                     setOpenShare({
-                                      resolvedShare: { shareId, shareCode },
-                                      liveEditing,
+                                      resolvedShare: { shareId, shareCode, share },
+                                      level: liveEditing ? "edit" : null,
                                       path: null,
                                     }),
                                 }}
@@ -8612,6 +8614,7 @@ export function DesktopWorkspaceShell(props: {
                                       }
                                       onOpenLiveDocuments={openLiveDocumentsAt}
                                       receivedShare={!!shareView || isMountedSharePath(path)}
+                                      {...openToEditOffer(path, tabPath)}
                                       {...(shareView || isMountedSharePath(path)
                                         ? {}
                                         : { onSharePath })}
@@ -10083,7 +10086,7 @@ export function DesktopWorkspaceShell(props: {
                                 ? {}
                                 : {
                                     resolvedShare: openShare.resolvedShare,
-                                    liveEditing: openShare.liveEditing,
+                                    level: openShare.level,
                                   })}
                               onWorkspaceReady={(workspace) => {
                                 setOpenShare(null);

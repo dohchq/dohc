@@ -192,6 +192,7 @@
   "reloadRenderer",
   "reloadUserSettings",
   "requestDmAgain",
+  "resendRelayShareInvitation",
   "resetAutomationHolds",
   "resetUserSettings",
   "resetWorkspaceSettings",

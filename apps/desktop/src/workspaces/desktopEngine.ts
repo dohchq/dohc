@@ -237,7 +237,8 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   noteWriteDeferred(workspaceId: string, path: string): void;
   backgroundLiveStart?: Pick<BackgroundLiveStart, "note" | "pause" | "resume">;
   notifyOwnerDeliveryChanged?(workspaceId: string): void;
-  // The server accepted or refused a document's edits, so the notes waiting for it changed.
+  // The notes waiting for the server may differ from the last read: the server accepted or
+  // refused a document's edits, or a workspace this computer owns opened.
   notifyOwnerDraftsChanged?(workspaceId: string): void;
   // The shared notes whose edits wait on this computer for the server, as last read.
   ownerPendingPaths?(workspaceId: string): readonly string[];
@@ -1910,6 +1911,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         onOpened: (workspace) => {
           startupSmoke.resolve("skip");
           dependencies.onWorkspaceOpened?.(workspace.workspaceId);
+          if (workspace.shareMount === true) return;
+          dependencies.notifyOwnerDraftsChanged?.(workspace.workspaceId);
           // Refused edits wait in the engine's queues across restarts, so each open reads them again.
           void Promise.resolve()
             .then(() => refreshOwnerLiveQuarantines(workspace))

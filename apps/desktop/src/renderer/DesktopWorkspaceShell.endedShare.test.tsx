@@ -1309,7 +1309,7 @@ describe("ended Edit Collection shares", () => {
     await act(async () => registry.resolve({ workspaces: [ENDED_SHARE] }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     expect(screen.getByTestId("shared-view-banner").textContent).toContain(
-      "Markdown edits save to the live host",
+      "Pages save as you type",
     );
     expect(screen.getByTestId("share-changes-send")).toBeTruthy();
   });

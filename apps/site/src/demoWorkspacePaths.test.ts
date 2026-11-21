@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { findFileAncestor, planDemoPathMove } from "./demoWorkspacePaths";
+import { findFileAncestor, planDemoPathMove, resolveDemoWikilink } from "./demoWorkspacePaths";
+
+describe("resolveDemoWikilink", () => {
+  const pages = ["Trip plan.md", "Days/Day 1 - Lisbon.md", "a/Notes.md", "b/Notes.md"];
+
+  it("finds a page by its path, or by a file name only one page has", () => {
+    expect(resolveDemoWikilink(pages, "Trip plan")).toBe("Trip plan.md");
+    expect(resolveDemoWikilink(pages, "Day 1 - Lisbon")).toBe("Days/Day 1 - Lisbon.md");
+    expect(resolveDemoWikilink(pages, "a/Notes")).toBe("a/Notes.md");
+  });
+
+  it("finds nothing for a name two pages share, or no page has", () => {
+    expect(resolveDemoWikilink(pages, "Notes")).toBeNull();
+    expect(resolveDemoWikilink(pages, "Day 4")).toBeNull();
+  });
+});
 
 describe("findFileAncestor", () => {
   it("finds a file that would become a candidate path's parent", () => {

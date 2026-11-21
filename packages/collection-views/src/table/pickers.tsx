@@ -88,7 +88,9 @@ function PickerFrame({
   useEffect(() => {
     const press = (event: PointerEvent) => {
       const element = frame.current;
-      if (!element || element.contains(event.target as Node) || paused(element)) return;
+      // The path, not the target: inside a shadow root, as on the website's
+      // demo, the document sees the root's host as the target.
+      if (!element || event.composedPath().includes(element) || paused(element)) return;
       leave.current("away");
     };
     document.addEventListener("pointerdown", press, true);

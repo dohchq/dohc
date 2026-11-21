@@ -2463,6 +2463,50 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it.each(["owner-outbox-frozen", "restore-fenced"])(
+    "holds editing when the engine refuses an owner's open with %s, and opens the note once the engine accepts",
+    async (message) => {
+      const h = harness();
+      const sender = new FakeSender(7);
+      vi.mocked(h.capture.openYDocSession).mockRejectedValueOnce(
+        new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, undefined),
+      );
+      await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+        available: false,
+        engineRefusedOpen: { detail: `INVALID_PARAMS ${message}` },
+      });
+      await expect(
+        h.ipc.open(sender, { ...openPayload, sessionId: "try-again" }),
+      ).resolves.toMatchObject({ available: true });
+      expect(h.capture.openYDocSession).toHaveBeenCalledTimes(2);
+      await h.ipc.shutdown();
+    },
+  );
+
+  // Each of these notes edits its file directly: a note too large to seed, a
+  // path the engine keeps out of live sessions, and answers no retry clears.
+  it.each([
+    ["INVALID_PARAMS", "ydoc-seed-too-large"],
+    ["INVALID_PARAMS", "invalid Y.Doc path"],
+    ["INTERNAL", "document-too-dense"],
+    ["CONFLICT", "markdown-write-held"],
+    ["INTERNAL", "state-corrupt"],
+    ["INTERNAL", "corrupt-lineage"],
+    ["INVALID_PARAMS", "a-refusal-added-later"],
+  ] as const)(
+    "leaves the plain editor to a note whose open the engine refuses with %s %s",
+    async (code, message) => {
+      const h = harness();
+      vi.mocked(h.capture.openYDocSession).mockRejectedValueOnce(
+        new DaemonRefusalError({ code, message, retry: "no" }, undefined),
+      );
+      await expect(h.ipc.open(new FakeSender(7), openPayload)).resolves.toEqual({
+        available: false,
+      });
+      await h.ipc.shutdown();
+    },
+  );
+
   it("refuses shared, unclassified, and invalid paths before opening a session", async () => {
     const sender = new FakeSender(7);
     const shared = harness();

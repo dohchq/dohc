@@ -19,7 +19,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { ShareAccess, ShareProposalRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareAccess,
+  ShareProposalRow,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { useAutomationShareCheck } from "../automationShareCheck";
 import { accessOptions } from "../EmailShareForm";
@@ -33,7 +38,12 @@ import {
   ShareAccessMenu,
   ShareOptionsMenu,
 } from "../shareAccess";
-import { accessNoticeIdentity, nextAccessChange } from "../sharePerson";
+import {
+  accessNoticeIdentity,
+  nextAccessChange,
+  resendInvitationEntry,
+  useInvitationResend,
+} from "../sharePerson";
 import { shareSenderParts } from "../ShareSender";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
 import { hasUnacknowledgedShareSkips, shareSkipNoticeLines } from "../shareSkipNotice";
@@ -93,7 +103,12 @@ export type CopyWhat = "code" | "invitation";
 export type ChangedAccess = { access: ShareAccess; generation: number };
 export type AccessChange = { asked: ShareAccess | null; answered: ChangedAccess | null };
 export type AccessChanges = Readonly<Record<string, AccessChange>>;
-export type OpenedShare = { shareId: string; shareCode: string; liveEditing: boolean };
+export type OpenedShare = {
+  shareId: string;
+  shareCode: string;
+  liveEditing: boolean;
+  share: RelayShareReceivedRow;
+};
 export type SharingLaneView =
   | AccessView
   | { status: "ready"; answer: AccessAnswer; moreFailed: true };
@@ -869,6 +884,11 @@ function PersonRow(props: {
     sensitive: SHARE_CODE_SECRET,
   });
   const copied = copiedLast === "code" ? codeCopy : invitationCopy;
+  const resend = useInvitationResend(
+    props.workspaceId,
+    { shareId: grant.shareId, grantId: grant.grantId, name },
+    "on-row-and-reported",
+  );
 
   const automations = useAutomationShareCheck(props.workspaceId, props.target ?? NEVER_CHECKED);
   const checks = useRequestSequence([grant.grantId]);
@@ -917,9 +937,15 @@ function PersonRow(props: {
             id: "copy-invitation",
             label: invited ? "Copy invitation" : "Copy code",
             testId: `sharing-person-copy-${grant.grantId}`,
-            onSelect: () => invitationCopy.copy(),
+            onSelect: () => {
+              resend.forget();
+              invitationCopy.copy();
+            },
           },
         ]
+      : []),
+    ...(copyable(grant) && invited
+      ? [resendInvitationEntry(resend, `sharing-person-resend-${grant.grantId}`)]
       : []),
     ...(copyable(grant) && invitation
       ? [
@@ -927,7 +953,10 @@ function PersonRow(props: {
             id: "copy-code",
             label: "Copy share code",
             testId: `sharing-person-copy-code-${grant.grantId}`,
-            onSelect: () => codeCopy.copy(),
+            onSelect: () => {
+              resend.forget();
+              codeCopy.copy();
+            },
           },
         ]
       : []),
@@ -993,16 +1022,18 @@ function PersonRow(props: {
             )}
           </span>
           <span data-testid="sharing-person-detail" className={`${SECOND_LINE} text-muted`}>
-            {copied.feedback === null ? (
-              detail
-            ) : (
+            {copied.feedback !== null ? (
               <span className={copied.feedback === "failed" ? "text-danger" : undefined}>
                 {copied.words[copied.feedback]}
               </span>
+            ) : resend.words !== null ? (
+              <span className={resend.failed ? "text-danger" : undefined}>{resend.words}</span>
+            ) : (
+              detail
             )}
           </span>
           <span role="status" aria-live="polite" className="sr-only">
-            {copied.announcement}
+            {copied.feedback === null && resend.words !== null ? resend.words : copied.announcement}
           </span>
         </span>
       </div>
@@ -2461,7 +2492,7 @@ export function SharingView(props: {
         void loadReceived({ refreshed: refresh() });
         return;
       }
-      open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true });
+      open({ shareId: share.shareId, shareCode: share.shareCode, liveEditing: true, share });
     } catch (cause) {
       if (openLookups.isCurrent(lookup))
         receivedFailed(token, "dohc could not open this share.", cause, retry);

@@ -11,6 +11,7 @@ import { ArrowLeft, Check, FolderInput, FolderOpen, AppWindow } from "lucide-rea
 import { useContext, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
+import { SHARE_ACCESS_WORDS } from "./shareAccess";
 import type { MountShareResult, RelayShareReceivedRow, ShareAccess } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { parseShareCode } from "../workspaces/syncCode";
@@ -27,7 +28,10 @@ import { FolderChip } from "./ui/Step";
 // nobody has to pick a folder to see the files.
 
 export type MountedShare = {
+  shareId: string;
   label: string;
+  name: string;
+  files: number;
   access: ShareAccess | null;
   alreadyAdded: boolean;
   left: boolean;
@@ -35,12 +39,15 @@ export type MountedShare = {
 
 type MountInto = { workspaceId: string; onMounted: (mounted: MountedShare) => void };
 
-function mountedShare(result: MountShareResult, left: boolean): MountedShare {
+function mountedShare(result: MountShareResult, left: boolean, name: string | null): MountedShare {
   const pinned = result.workspace.shareMounts?.find(
     (mount) => mount.shareId === result.mount.shareId,
   );
   return {
+    shareId: result.mount.shareId,
     label: result.mount.label,
+    name: name ?? result.mount.label,
+    files: result.mount.changedPaths,
     access: pinned?.access ?? null,
     alreadyAdded: result.alreadyAdded === true,
     left,
@@ -51,6 +58,7 @@ function reportAddAfterLeaving(
   report: ReportShellFailure | null,
   into: MountInto,
   shareCode: string,
+  name: string | null,
   cause: unknown,
 ) {
   const shareId = parseShareCode(shareCode)?.shareId;
@@ -62,8 +70,8 @@ function reportAddAfterLeaving(
       void bridge()
         .mountShare({ workspaceId: into.workspaceId, shareCode })
         .then(
-          (result) => into.onMounted(mountedShare(result, true)),
-          (again: unknown) => reportAddAfterLeaving(report, into, shareCode, again),
+          (result) => into.onMounted(mountedShare(result, true, name)),
+          (again: unknown) => reportAddAfterLeaving(report, into, shareCode, name, again),
         ),
   });
 }
@@ -82,6 +90,16 @@ export function opensForLiveEditing(share: RelayShareReceivedRow): boolean {
     share.selector !== null &&
     (share.selector.versionId === null || share.selector.versionId === "main")
   );
+}
+
+export function shareLevel(share: RelayShareReceivedRow | null): ShareAccess | null {
+  return share === null || share.damaged ? null : share.access;
+}
+
+function openingWords(mode: "mount" | "separate", level: ShareAccess | null): string {
+  if (mode === "mount") return "Adds a read-only copy to this workspace.";
+  if (level === "edit") return "Opens as its own workspace, where you can edit.";
+  return level === null ? "Opens as its own workspace." : "Opens as its own workspace, read-only.";
 }
 
 function displayPath(path: string): string {
@@ -121,7 +139,7 @@ export function OpenSharedView(
     onWorkspaceReady: (workspace: Workspace) => void;
     onBack: () => void;
     onOpened?: () => void;
-    liveEditing?: boolean;
+    level?: ShareAccess | null;
     resolvedShare?: {
       shareId: string;
       shareCode: string;
@@ -145,9 +163,7 @@ export function OpenSharedView(
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
   const [settledSuggestionShareId, setSettledSuggestionShareId] = useState<string | null>(null);
   const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
-  // Whether each pasted share opens for live editing, asked once per share
-  // id while this dialog is open. A failed lookup counts as no.
-  const [pastedLiveEditing, setPastedLiveEditing] = useState<ReadonlyMap<string, boolean>>(
+  const [pastedLevels, setPastedLevels] = useState<ReadonlyMap<string, ShareAccess | null>>(
     () => new Map(),
   );
   const accessLookups = useRef(new Map<string, Promise<RelayShareReceivedRow | null>>());
@@ -197,19 +213,19 @@ export function OpenSharedView(
 
   const shareCode = props.resolvedShare?.shareCode ?? code.trim();
   const shareId = props.resolvedShare?.shareId ?? parseShareCode(shareCode)?.shareId ?? null;
-  const liveEditing = props.resolvedShare
-    ? !!props.liveEditing
-    : shareId !== null && pastedLiveEditing.get(shareId) === true;
-  // Edit defaults to Open separately, as the browser handoff does, because
-  // a folder added to this workspace cannot be edited.
-  const mode = pickedMode ?? (props.mountInto && !liveEditing ? "mount" : "separate");
+  const level = props.resolvedShare
+    ? (props.level ?? null)
+    : shareId === null
+      ? null
+      : (pastedLevels.get(shareId) ?? null);
+  const mode = pickedMode ?? (props.mountInto && level !== "edit" ? "mount" : "separate");
   const mounting = mode === "mount" && !!props.mountInto;
 
   // Only a pasted code has an unknown grant, and only a signed-in session
   // can ask the relay about it. A mode the person picked needs no answer.
   const accessShareId = !props.resolvedShare && gate.kind === "signed-in" ? shareId : null;
   const checkingAccess =
-    pickedMode === null && accessShareId !== null && !pastedLiveEditing.has(accessShareId);
+    pickedMode === null && accessShareId !== null && !pastedLevels.has(accessShareId);
   useEffect(() => {
     const request = accessRequests.next();
     setPreview(null);
@@ -220,15 +236,22 @@ export function OpenSharedView(
       lookup = bridge()
         .getRelayReceivedShare({ shareId: accessShareId })
         .then((result) => ("share" in result ? result.share : null))
-        .catch(() => null);
+        .catch(() => {
+          accessLookups.current.delete(accessShareId);
+          return null;
+        });
       accessLookups.current.set(accessShareId, lookup);
+      setPastedLevels((current) => {
+        if (!current.has(accessShareId)) return current;
+        const asking = new Map(current);
+        asking.delete(accessShareId);
+        return asking;
+      });
     }
     void lookup.then((share) => {
       if (!accessRequests.isCurrent(request)) return;
       setPreview(share);
-      setPastedLiveEditing((current) =>
-        new Map(current).set(accessShareId, share !== null && opensForLiveEditing(share)),
-      );
+      setPastedLevels((current) => new Map(current).set(accessShareId, shareLevel(share)));
     });
   }, [accessShareId, accessRequests]);
 
@@ -275,6 +298,7 @@ export function OpenSharedView(
     setOpening(true);
     setError(null);
     const adding = mounting && props.mountInto ? props.mountInto : null;
+    const name = (preview?.shareId === shareId ? preview.subjectName : null) ?? null;
     try {
       if (adding) {
         const result = await bridge().mountShare({
@@ -284,7 +308,7 @@ export function OpenSharedView(
         const left = actionRequests.isCutOff(actionRequest);
         if (!left && !actionRequests.isCurrent(actionRequest)) return;
         if (!left) props.onOpened?.();
-        adding.onMounted(mountedShare(result, left));
+        adding.onMounted(mountedShare(result, left, name));
       } else {
         const result = await bridge().openSharedView({
           shareCode,
@@ -296,7 +320,7 @@ export function OpenSharedView(
       }
     } catch (cause) {
       if (adding && actionRequests.isCutOff(actionRequest)) {
-        reportAddAfterLeaving(reportShellError, adding, shareCode, cause);
+        reportAddAfterLeaving(reportShellError, adding, shareCode, name, cause);
         return;
       }
       if (!actionRequests.isCurrent(actionRequest)) return;
@@ -377,11 +401,17 @@ export function OpenSharedView(
       </div>
 
       {preview?.shareId === shareId && (
-        <p data-testid="open-share-summary" className="m-0 text-[13px] text-ink">
-          {preview.subjectName ?? shareSubjectFallback(preview.selector)} ·{" "}
-          {shareSenderLabel(preview.sharerName, preview.granterEmail)} ·{" "}
-          {shareAccessLabel(preview.access)} access
-        </p>
+        <div data-testid="open-share-summary" className="flex flex-col gap-0.5">
+          <p className="m-0 truncate text-[13px] font-medium text-ink">
+            {preview.subjectName ?? shareSubjectFallback(preview.selector)}
+          </p>
+          <p className="m-0 text-[12px] leading-4 text-muted [overflow-wrap:anywhere]">
+            {preview.damaged
+              ? `${shareAccessLabel(preview.access)} access`
+              : SHARE_ACCESS_WORDS[preview.access]}{" "}
+            · From {shareSenderLabel(preview.sharerName, preview.granterEmail)}
+          </p>
+        </div>
       )}
       {props.mountInto ? (
         <div className="flex flex-col gap-1.5">
@@ -408,15 +438,14 @@ export function OpenSharedView(
               onClick={() => setPickedMode("separate")}
             />
           </div>
+          {checkingAccess ? null : (
+            <p data-testid="open-share-mode-help" className="m-0 text-[12px] leading-4 text-muted">
+              {openingWords(mode, level)}
+            </p>
+          )}
         </div>
       ) : null}
 
-      {liveEditing && props.mountInto ? (
-        <p className="m-0 text-xs leading-relaxed text-muted">
-          Open separately to edit shared Markdown. Adding it to this workspace creates a read-only
-          folder.
-        </p>
-      ) : null}
       <div className="flex flex-col gap-1.5">
         <SectionLabel>{mounting ? "Goes under" : "Folder"}</SectionLabel>
         {mounting ? (
