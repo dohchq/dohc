@@ -1104,6 +1104,10 @@ export class EngineWorkspaceSessions {
     this.shareMounts.add(this.sessionKey(workspace));
   }
 
+  private opensAsShareMount(workspace: EngineWorkspace): boolean {
+    return workspace.shareMount === true || this.shareMounts.has(this.sessionKey(workspace));
+  }
+
   beginRebuild(workspace: AttachedEngineWorkspace): void {
     const key = this.sessionKey(workspace),
       entry = this.entries.get(key);
@@ -1444,7 +1448,9 @@ export class EngineWorkspaceSessions {
       entry.binding = binding;
       entry.opened = true;
       try {
-        this.onOpened?.(workspace);
+        this.onOpened?.(
+          this.opensAsShareMount(workspace) ? { ...workspace, shareMount: true } : workspace,
+        );
       } catch (error) {
         console.warn("[engine] workspace-open observer failed", error);
       }
@@ -1490,7 +1496,7 @@ export class EngineWorkspaceSessions {
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
     const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
-    const shareMount = workspace.shareMount === true || this.shareMounts.has(sessionKey);
+    const shareMount = this.opensAsShareMount(workspace);
     const captureDisabled = shareMount || workspace.captureMode === "none";
     const raw = await requester.request(
       WORKSPACE_METHOD.open,

@@ -10,9 +10,11 @@ import { useEngineDoc } from "./useEngineDoc";
 // that pass told the caller — the settled DOM cannot.
 type RenderedState = { opening: boolean; available: boolean; hasDoc: boolean };
 let rendered: RenderedState[] = [];
+let renderedHolds: boolean[] = [];
 
 beforeEach(() => {
   rendered = [];
+  renderedHolds = [];
 });
 
 afterEach(async () => {
@@ -38,12 +40,14 @@ function Harness(props: {
     available: engine.available,
     hasDoc: engine.doc !== null,
   });
+  renderedHolds.push(engine.engineMayHoldDocument || engine.openRefusalDetail !== undefined);
   return (
     <div>
       <span data-testid="opening">{String(engine.opening)}</span>
       <span data-testid="live-host-unavailable">{String(engine.liveHostUnavailable)}</span>
       <span data-testid="available">{String(engine.available)}</span>
       <span data-testid="engine-may-hold-document">{String(engine.engineMayHoldDocument)}</span>
+      <span data-testid="open-refusal-detail">{engine.openRefusalDetail ?? ""}</span>
     </div>
   );
 }
@@ -189,6 +193,60 @@ it.each(["engineMayHoldDocument", "liveHostUnavailable"] as const)(
     expect(screen.getByTestId("available").textContent).toBe("false");
   },
 );
+
+const FROZEN = "INVALID_PARAMS owner-outbox-frozen";
+
+it("keeps a note the engine refused to open out of the writable fallback, with the engine's answer", async () => {
+  const bridge = deferredBridge();
+  vi.stubGlobal("dohcDesktop", {
+    ...bridge.api,
+    openEngineYDocSession: vi.fn(async () => ({
+      available: false,
+      engineRefusedOpen: { detail: FROZEN },
+    })),
+  });
+
+  render(<Harness path="notes/a.md" />);
+
+  await waitFor(() => expect(screen.getByTestId("open-refusal-detail").textContent).toBe(FROZEN));
+  expect(screen.getByTestId("engine-may-hold-document").textContent).toBe("true");
+  expect(screen.getByTestId("opening").textContent).toBe("false");
+  expect(screen.getByTestId("available").textContent).toBe("false");
+});
+
+it("never shows one workspace's refused open on the same note in another workspace", async () => {
+  const refused = { available: false, engineRefusedOpen: { detail: FROZEN } };
+  const answersForFirst: Array<(result: typeof refused) => void> = [];
+  const second = deferredBridge();
+  vi.stubGlobal("dohcDesktop", {
+    ...second.api,
+    openEngineYDocSession: ({ workspaceId }: { workspaceId: string }) =>
+      workspaceId === "ws-1"
+        ? new Promise<typeof refused>((resolve) => answersForFirst.push(resolve))
+        : second.api.openEngineYDocSession(),
+  });
+  const view = render(<Harness path="note.md" workspaceId="ws-1" />);
+  await waitFor(() => expect(answersForFirst).toHaveLength(1));
+  view.rerender(<Harness path="note.md" workspaceId="ws-2" />);
+  await waitFor(() => expect(second.api.openEngineYDocSession).toHaveBeenCalledOnce());
+
+  renderedHolds = [];
+  await act(async () => answersForFirst[0]!(refused));
+  second.bind();
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  expect(renderedHolds).not.toContain(true);
+
+  view.rerender(<Harness path="note.md" workspaceId="ws-1" />);
+  await waitFor(() => expect(answersForFirst).toHaveLength(2));
+  await act(async () => answersForFirst[1]!(refused));
+  await waitFor(() => expect(screen.getByTestId("open-refusal-detail").textContent).toBe(FROZEN));
+
+  renderedHolds = [];
+  view.rerender(<Harness path="note.md" workspaceId="ws-2" />);
+  await act(async () => {});
+  expect(renderedHolds.length).toBeGreaterThan(0);
+  expect(renderedHolds).not.toContain(true);
+});
 
 it("clears opening when the open throws, instead of wedging the surface read-only", async () => {
   const bridge = deferredBridge();

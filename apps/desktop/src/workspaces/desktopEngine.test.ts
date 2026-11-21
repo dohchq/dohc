@@ -1132,6 +1132,49 @@ describe("desktop engine composed sessions and events", () => {
       await f.close();
     }
   });
+
+  it("reads waiting notes and refused edits when a workspace this computer owns opens, and neither for a received share", async () => {
+    const f = fixture();
+    Object.setPrototypeOf(
+      f.client,
+      Object.defineProperties(
+        Object.create(EngineClient.prototype),
+        Object.getOwnPropertyDescriptors(Client.prototype),
+      ),
+    );
+    f.client.respond = async (request) => ({
+      id: request.id,
+      result:
+        request.method === "workspace.open"
+          ? { workspace: `${String(workspaceIdOf(request))}-handle`, localStateReady: true }
+          : request.method === "workspace.close"
+            ? { closed: true }
+            : { ok: true },
+    });
+    const opened = vi.fn(),
+      waitingNotesMayDiffer = vi.fn();
+    f.dependencies.onWorkspaceOpened = opened;
+    f.dependencies.notifyOwnerDraftsChanged = waitingNotesMayDiffer;
+    const received = {
+      workspaceId: "received",
+      rootPath: await createTestScratch("dohc-open-received-"),
+    };
+    const owner = { workspaceId: "owner", rootPath: await createTestScratch("dohc-open-owner-") };
+    try {
+      await f.engine.start();
+      f.engine.sessions!.rememberShareMount({ ...received, shareMount: true });
+      await f.engine.sessions!.run(received, async () => undefined);
+      await f.engine.sessions!.run(owner, async () => undefined);
+      await vi.waitFor(() => expect(quarantineMock.read).toHaveBeenCalled());
+      expect(opened.mock.calls).toEqual([["received"], ["owner"]]);
+      expect(waitingNotesMayDiffer.mock.calls).toEqual([["owner"]]);
+      expect(quarantineMock.read.mock.calls.map(([, workspace]) => workspace)).toEqual([
+        "owner-handle",
+      ]);
+    } finally {
+      await f.close();
+    }
+  });
 });
 
 describe("private owner peer lifecycle", () => {

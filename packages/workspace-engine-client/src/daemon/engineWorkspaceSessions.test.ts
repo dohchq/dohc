@@ -2025,6 +2025,29 @@ describe("EngineWorkspaceSessions", () => {
     ]);
   });
 
+  it("tells the open observer which workspaces opened as share mounts", async () => {
+    const mount = await tempWorkspace("workspace-share-observed");
+    const flagged = await tempWorkspace("workspace-share-flagged");
+    const ordinary = await tempWorkspace("workspace-ordinary-observed");
+    const client = new MockClient("share-observed-handle");
+    const opened: Array<[string, true | undefined]> = [];
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { onOpened: (workspace) => opened.push([workspace.workspaceId, workspace.shareMount]) },
+    );
+    sessions.rememberShareMount({ ...mount, shareMount: true });
+
+    await sessions.run(mount, async () => undefined);
+    await sessions.run({ ...flagged, shareMount: true }, async () => undefined);
+    await sessions.run(ordinary, async () => undefined);
+
+    expect(opened).toEqual([
+      [mount.workspaceId, true],
+      [flagged.workspaceId, true],
+      [ordinary.workspaceId, undefined],
+    ]);
+  });
+
   it("preserves a remembered share mount across rebind but not physical close", async () => {
     const workspace = {
       ...(await tempWorkspace("workspace-share-rebind")),

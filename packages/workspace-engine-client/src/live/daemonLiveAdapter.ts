@@ -253,6 +253,13 @@ export function isOwnerOutboxFrozenRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "owner-outbox-frozen";
 }
 
+// The note is stopped while its content is restored (`CollabError::RestoreFenced`).
+// Until the restore resumes or is cancelled, the engine refuses every ordinary
+// write to it and folds no change to its file into it.
+export function isRestoreFencedRefusal(error: unknown): boolean {
+  return refusalMessageOf(error) === "restore-fenced";
+}
+
 function isYdocSettlementPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
 }

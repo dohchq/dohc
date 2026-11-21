@@ -875,6 +875,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             onRetry={retryEngineOpen}
             contentShown={false}
             message={engine.openRefusal ?? engine.sharedWaiting?.message}
+            details={engine.openRefusalDetail}
           />
         ) : null}
         {engine.artifactAssetsInvalid ? (

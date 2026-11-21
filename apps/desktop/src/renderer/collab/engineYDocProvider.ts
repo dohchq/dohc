@@ -88,6 +88,7 @@ export interface EngineYDocTransport {
     // A session for this document may still be the engine's —
     // This available:false must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
+    engineRefusedOpen?: { detail: string };
     // The canonical drawing has image records that conflict with storage.
     // This terminal state stays read-only and must not offer a retry.
     artifactAssetsInvalid?: boolean;
@@ -271,6 +272,7 @@ export interface EngineYDocBinding {
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
   readonly engineMayHoldDocument: boolean;
+  readonly engineRefusedOpen: { detail: string } | null;
   readonly artifactAssetsInvalid: boolean;
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
@@ -339,6 +341,7 @@ export async function bindEngineYDoc(
       liveHostUnavailable: opened.liveHostUnavailable === true,
       sharedWaiting: opened.sharedWaiting ?? null,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
+      engineRefusedOpen: opened.engineRefusedOpen ?? null,
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
@@ -780,6 +783,7 @@ export async function bindEngineYDoc(
     liveHostUnavailable: false,
     sharedWaiting: null,
     engineMayHoldDocument: false,
+    engineRefusedOpen: null,
     artifactAssetsInvalid: false,
     removalInProgress: null,
     get artifactAssets() {

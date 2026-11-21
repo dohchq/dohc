@@ -9,6 +9,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   isOwnerOutboxFrozenRefusal,
+  isRestoreFencedRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
@@ -1839,9 +1840,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (isEngineWorkspaceOpenRefusedError(error) || isYDocSessionUnreleasedError(error)) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
-    return unavailableOpen();
+    const held = OPEN_REFUSALS_THAT_HOLD_EDITING.find(({ refused }) => refused(error));
+    return held
+      ? unavailableOpen({ engineRefusedOpen: { detail: held.detail } })
+      : unavailableOpen();
   }
 }
+
+const OPEN_REFUSALS_THAT_HOLD_EDITING = [
+  { refused: isOwnerOutboxFrozenRefusal, detail: "INVALID_PARAMS owner-outbox-frozen" },
+  { refused: isRestoreFencedRefusal, detail: "INVALID_PARAMS restore-fenced" },
+] as const;
 
 export const DOCUMENT_EDIT_PENDING_WARNING =
   "Saved locally. The shared file update is pending. Do not repeat this edit.";
