@@ -80,6 +80,7 @@ pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
     target_arch = "aarch64"
 ))]
 pub use flush::refuse_folder_flushes;
+pub use flush::{FileFlusher, Flushed};
 #[cfg(feature = "fault-injection")]
 pub use flush::{FlushEvent, FlushKind};
 pub use limits::{

@@ -9,7 +9,7 @@ mod private_dir;
 #[cfg(windows)]
 mod staged;
 #[cfg(windows)]
-pub use dacl::{Dacl, create_new_with_dacl};
+pub use dacl::{Dacl, change_time_at, create_new_with_dacl};
 #[cfg(windows)]
 pub use private_dir::{
     NotPrivate, NotPrivateReason, ensure_private_dir, ensure_private_dir_leaving,

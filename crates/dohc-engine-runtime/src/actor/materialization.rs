@@ -6,6 +6,7 @@ use dohc_engine_domain::{
     DomainError, SecretFileStore, VersionedTextStore, binary_rename_write_job_id,
     decode_binary_rollback_job_identity,
 };
+use dohc_engine_files::materialize::PreparedTemps;
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, StdBackoff, StdReplacer,
     complete_secret_job_unrun, materialize_one, materialize_secret_delete_one,
@@ -981,6 +982,41 @@ pub(super) fn replay_publication_materializations(
     Ok(summary)
 }
 
+const PREPARED_CHUNK: usize = 128;
+
+/// The switch's ordinary writes whose temps can be written ahead, by index.
+/// A write shares its path, at any spelling, or a folder of it with no other
+/// job, so no earlier job changes what its temp is written beside.
+fn switch_writes_to_prepare(
+    jobs: &[MaterializationJob],
+    holds: &dohc_engine_files::PlacementHolds,
+) -> Vec<usize> {
+    let mut paths: std::collections::HashMap<String, usize> = Default::default();
+    for job in jobs {
+        *paths
+            .entry(dohc_engine_files::floor::path_collision_key(
+                &job.target_path,
+            ))
+            .or_default() += 1;
+    }
+    jobs.iter()
+        .enumerate()
+        .filter(|(_, job)| {
+            job.job_id.starts_with("version-switch-mat_")
+                && job.operation == MaterializationOperation::Write
+                && !holds.blocks(&job.target_path)
+                && paths[&dohc_engine_files::floor::path_collision_key(&job.target_path)] == 1
+                && !std::iter::successors(job.target_path.rsplit_once('/'), |(parent, _)| {
+                    parent.rsplit_once('/')
+                })
+                .any(|(parent, _)| {
+                    paths.contains_key(&dohc_engine_files::floor::path_collision_key(parent))
+                })
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn replay_materializations(
     store: &mut EngineStore,
@@ -1132,7 +1168,22 @@ fn replay_materializations(
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             Ok(true)
         };
-        for job in jobs {
+        let switch_writes = switch_writes_to_prepare(&jobs, holds);
+        let mut prepared = PreparedTemps::default();
+        let mut next_prepared = 0;
+        for (index, job) in jobs.iter().enumerate() {
+            if switch_writes.get(next_prepared) == Some(&index) {
+                let chunk = &switch_writes
+                    [next_prepared..switch_writes.len().min(next_prepared + PREPARED_CHUNK)];
+                let chunk_jobs: Vec<_> = chunk.iter().map(|&index| &jobs[index]).collect();
+                prepared = PreparedTemps::prepare(
+                    store,
+                    root_dir,
+                    &chunk_jobs,
+                    DurabilityPolicy::per_os(),
+                );
+                next_prepared += chunk.len();
+            }
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
                 progress.fetch_add(1, Ordering::Relaxed);
@@ -1145,7 +1196,7 @@ fn replay_materializations(
             let ordinary_secret = job.job_id.starts_with("secret-mat_");
             if switch_secret || ordinary_secret {
                 let coordinates = if switch_secret {
-                    match switch_projection_matches_active(store, &job, true)? {
+                    match switch_projection_matches_active(store, job, true)? {
                         Some(coordinates) => coordinates,
                         None => {
                             store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -1158,8 +1209,8 @@ fn replay_materializations(
                         }
                     }
                 } else {
-                    let Some(coordinates) = secret_job_coordinates(store, &job)? else {
-                        if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                    let Some(coordinates) = secret_job_coordinates(store, job)? else {
+                        if complete_secret_job_unrun(store, root_dir, job, now_ms).is_err() {
                             summary.failed += 1;
                         }
                         continue;
@@ -1173,7 +1224,7 @@ fn replay_materializations(
                     let tip_present = secret_tip_exists(store, &coordinates)?;
                     match (job.operation, tip_present) {
                         (MaterializationOperation::Write, false) => {
-                            if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                            if complete_secret_job_unrun(store, root_dir, job, now_ms).is_err() {
                                 summary.failed += 1;
                             }
                             continue;
@@ -1186,7 +1237,7 @@ fn replay_materializations(
                         | (MaterializationOperation::Write, true) => {}
                     }
                     if later_secret_job_pending(store, &coordinates, job.target_generation)? {
-                        if complete_secret_job_unrun(store, root_dir, &job, now_ms).is_err() {
+                        if complete_secret_job_unrun(store, root_dir, job, now_ms).is_err() {
                             summary.failed += 1;
                         }
                         continue;
@@ -1200,14 +1251,14 @@ fn replay_materializations(
                     coordinates
                 };
                 if job.operation == MaterializationOperation::Delete {
-                    if retire_delete(store, &job)? {
+                    if retire_delete(store, job)? {
                         summary.completed += 1;
                         continue;
                     }
                     match materialize_secret_delete_one(
                         store,
                         root_dir,
-                        &job,
+                        job,
                         &MaterializeOptions {
                             holds: Some(holds),
                             policy: DurabilityPolicy::per_os(),
@@ -1240,7 +1291,7 @@ fn replay_materializations(
                 // A secret write never waits for a folder. One that stays
                 // keeps what came into it, as a file edited since planning
                 // keeps its edit.
-                if switch_secret && switch_folder_stays(store, root_dir, None, &job) {
+                if switch_secret && switch_folder_stays(store, root_dir, None, job) {
                     store.mark_materialization_conflict(&job.job_id, now_ms)?;
                     if scope.file_outcomes_settled {
                         summary.completed += 1;
@@ -1279,7 +1330,7 @@ fn replay_materializations(
                 let outcome = materialize_secret_one(
                     store,
                     root_dir,
-                    &job,
+                    job,
                     plaintext.as_bytes(),
                     &MaterializeOptions {
                         holds: Some(holds),
@@ -1319,7 +1370,7 @@ fn replay_materializations(
                             );
                         }
                         if ordinary_secret && matches!(outcome, Ok(JobOutcome::Conflict)) {
-                            keep_secret_edit(store, &coordinates.workspace_id, &job, faults)?;
+                            keep_secret_edit(store, &coordinates.workspace_id, job, faults)?;
                             summary.completed += 1;
                         } else if scope.file_outcomes_settled
                             && matches!(outcome, Ok(JobOutcome::Conflict | JobOutcome::Superseded))
@@ -1333,8 +1384,9 @@ fn replay_materializations(
                 continue;
             }
             if job.job_id.starts_with("version-switch-mat_")
-                && switch_projection_matches_active(store, &job, false)?.is_none()
+                && switch_projection_matches_active(store, job, false)?.is_none()
             {
+                prepared.discard(&job.job_id);
                 if scope.released_hold_paths.is_some_and(|paths| {
                     paths.contains(&dohc_engine_files::floor::path_collision_key(
                         &job.target_path,
@@ -1344,7 +1396,7 @@ fn replay_materializations(
                     match dohc_engine_files::materialize_write_conflict(
                         store,
                         root_dir,
-                        &job,
+                        job,
                         &MaterializeOptions {
                             holds: Some(holds),
                             policy: DurabilityPolicy::per_os(),
@@ -1369,13 +1421,13 @@ fn replay_materializations(
                 continue;
             }
             if job.job_id.starts_with("version-switch-mat_")
-                && switch_folder_stays(store, root_dir, Some(holds), &job)
+                && switch_folder_stays(store, root_dir, Some(holds), job)
             {
                 summary.parked += 1;
                 continue;
             }
             if matches!(
-                rollback_job_matches_active(store, scope.workspace_id, &job)?,
+                rollback_job_matches_active(store, scope.workspace_id, job)?,
                 Some(false)
             ) {
                 continue;
@@ -1410,7 +1462,7 @@ fn replay_materializations(
                     }
                 }
             }
-            if job.operation == MaterializationOperation::Delete && retire_delete(store, &job)? {
+            if job.operation == MaterializationOperation::Delete && retire_delete(store, job)? {
                 summary.completed += 1;
                 continue;
             }
@@ -1452,15 +1504,15 @@ fn replay_materializations(
             }
             #[cfg(test)]
             let injected =
-                super::history_operations::turns::tests::materialization_error(root_dir, &job);
+                super::history_operations::turns::tests::materialization_error(root_dir, job);
             #[cfg(not(test))]
             let injected: Option<dohc_engine_files::MaterializeError> = None;
             let outcome = injected.map_or_else(
                 || {
-                    dohc_engine_files::materialize::materialize_one_ordinary(
+                    dohc_engine_files::materialize::materialize_one_ordinary_prepared(
                         store,
                         root_dir,
-                        &job,
+                        job,
                         &MaterializeOptions {
                             holds: Some(holds),
                             policy: DurabilityPolicy::per_os(),
@@ -1469,6 +1521,7 @@ fn replay_materializations(
                             now_ms,
                             faults,
                         },
+                        &prepared,
                     )
                 },
                 Err,

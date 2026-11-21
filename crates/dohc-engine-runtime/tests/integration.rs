@@ -54,8 +54,12 @@ mod search_performance;
 mod secret_queued_jobs;
 #[path = "soak.rs"]
 mod soak;
+#[path = "switch_bench.rs"]
+mod switch_bench;
 #[path = "switch_file_holds.rs"]
 mod switch_file_holds;
+#[path = "switch_prepared_temps.rs"]
+mod switch_prepared_temps;
 #[path = "sync_refusal_notices.rs"]
 mod sync_refusal_notices;
 #[path = "unsettled_local_recovery.rs"]
