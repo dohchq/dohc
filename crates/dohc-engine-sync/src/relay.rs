@@ -1162,6 +1162,11 @@ impl PullContinuation {
 mod prepared_tests;
 
 pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
+/// The most pages of a share's log one pull reads while they hold nothing
+/// for the share. A page scans up to 10,000 of the owner's rows, about 170 ms
+/// on the relay plus a round trip, so 16 pages on a 400 ms round trip stay
+/// under 10 seconds of the desktop's 30-second RPC deadline.
+const MAX_SHARE_LOG_PAGES_PER_PULL: usize = 16;
 const MAX_BLOB_UPLOAD_BATCH_BYTES: usize = 1024 * 1024;
 
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
@@ -5147,7 +5152,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(())
     }
 
-    /// Pull one page of a received share.
+    /// Pull the next page of a received share that holds something for it.
+    /// Pages that hold nothing are read past in the same call, up to
+    /// `MAX_SHARE_LOG_PAGES_PER_PULL` of them.
     ///
     /// `granted` is the selector the relay stated for this share, pinned by
     /// the recipient on first read, and it is enforced against every inbound
@@ -5170,14 +5177,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scope_id = format!("view:{share_id}");
         let reference_after =
             work_reference_page_after(store, workspace_id, &scope_id).map_err(reference_error)?;
-        let page = self.transport.share_view_pull(ShareViewRequest {
-            include_work_references: true,
-            reference_after,
-            share_id: share_id.to_owned(),
-            cursor,
-            limit: crate::model::MAX_PULL_OPS_PER_PASS,
-        })?;
-        validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+        let mut pages_read = 0;
+        let page = loop {
+            let page = self.transport.share_view_pull(ShareViewRequest {
+                include_work_references: true,
+                reference_after: reference_after.clone(),
+                share_id: share_id.to_owned(),
+                cursor,
+                limit: crate::model::MAX_PULL_OPS_PER_PASS,
+            })?;
+            validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+            pages_read += 1;
+            if !page.ops.is_empty() || !page.has_more || pages_read == MAX_SHARE_LOG_PAGES_PER_PULL
+            {
+                break page;
+            }
+            cursor = page.next_cursor;
+        };
         let fetched = page.ops.len();
         let ops = page.ops;
         // The cursor this page was fetched at, kept for the ops that carry no
