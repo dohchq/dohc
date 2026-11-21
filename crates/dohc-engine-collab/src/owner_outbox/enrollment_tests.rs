@@ -1052,7 +1052,9 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
                 21,
             )?;
             release::request_in_tx(tx, &key, true, 22)?;
-            release::release_in_tx(tx, &next, Some(0), None, 23, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(tx, &next, Some(0), None, "person", 23, |_, _, _, _, _| {
+                Ok(())
+            })
         })
         .unwrap();
     store

@@ -109,6 +109,7 @@ async fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
                 &observed.binding,
                 Some(observed.accepted_cursor),
                 None,
+                "person",
                 21,
                 |_, _, _, _, _| Ok(()),
             )
@@ -1207,6 +1208,7 @@ fn a_released_owned_page_moves() {
                 &observed.binding,
                 Some(observed.accepted_cursor),
                 None,
+                "person",
                 21,
                 |_, _, _, _, _| Ok(()),
             )

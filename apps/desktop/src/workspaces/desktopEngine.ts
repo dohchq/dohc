@@ -194,6 +194,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   serverOwnerDelivery?: ServerOwnerDelivery;
   /** Stops that took refused edits out of their queue but did not write the file. */
   ownerLiveReleases: UnwrittenReleases;
+  localPersonId(): string;
   /** Builds a recovery copy's Markdown off main. */
   documentProjection: DocumentProjection;
   ownerDeliveryCredentials?(): {
@@ -619,6 +620,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     const released = await client.ownerYDocRelease(
       { id: 0, workspace: workspaceHandle, deadlineMs: 30_000 },
       binding,
+      dependencies.localPersonId(),
       { acceptedCursor, ...(keptSnapshot === undefined ? {} : { keptSnapshot }) },
       signal,
     );
@@ -2240,6 +2242,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
           const released = await client.ownerYDocRelease(
             { id: 0, workspace: handle, deadlineMs: 30_000 },
             binding,
+            dependencies.localPersonId(),
             { keptSnapshot: snapshot },
           );
           if (released.materialized === true)

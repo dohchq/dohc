@@ -691,6 +691,16 @@ async function runRenameRepro(
           signal: AbortSignal.timeout(60_000),
           assertCurrent() {},
           retire,
+          release: (binding, acceptedCursor, signal) =>
+            o.opened
+              .nativeClient()
+              .ownerYDocRelease(
+                { id: 0, workspace, deadlineMs: 30_000 },
+                binding,
+                "local-person",
+                { acceptedCursor },
+                signal,
+              ),
         }),
       )
       .then(() => "ok", reproErrorText);
@@ -1010,6 +1020,7 @@ async function runRenameRepro(
             : client.ownerYDocRelease(
                 request,
                 binding as import("@dohc/live-session-contract").LiveObjectBinding,
+                "local-person",
                 { acceptedCursor: acceptedCursor! },
               );
         }),
@@ -1827,6 +1838,16 @@ async function runDeleteRepro(
           signal: AbortSignal.timeout(60_000),
           assertCurrent() {},
           retire,
+          release: (binding, acceptedCursor, signal) =>
+            opened
+              .nativeClient()
+              .ownerYDocRelease(
+                { id: 0, workspace, deadlineMs: 30_000 },
+                binding,
+                "local-person",
+                { acceptedCursor },
+                signal,
+              ),
         }),
       )
       .then(() => "ok", reproErrorText);
@@ -2123,6 +2144,7 @@ async function runDeleteRepro(
             : client.ownerYDocRelease(
                 request,
                 binding as import("@dohc/live-session-contract").LiveObjectBinding,
+                "local-person",
                 { acceptedCursor: acceptedCursor! },
               );
         }),

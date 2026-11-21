@@ -395,9 +395,15 @@ fn retiring_a_page_whose_stop_was_deferred_closes_its_generation() {
         .store
         .write_with(&NoFaults, |tx| {
             request_in_tx(tx, &key(), true, 21)?;
-            release_in_tx(tx, &binding, Some(cursor + 1), None, 22, |_, _, _, _, _| {
-                Ok(())
-            })
+            release_in_tx(
+                tx,
+                &binding,
+                Some(cursor + 1),
+                None,
+                "person",
+                22,
+                |_, _, _, _, _| Ok(()),
+            )
         })
         .unwrap()
     else {
