@@ -7522,7 +7522,7 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles()
       .catch(() => undefined)
       .then(() => {
-        if (openPath && !mounted.left && mounted.files > 0)
+        if (openPath && !mounted.left && (mounted.alreadyAdded || mounted.files > 0))
           openFile(`shared-with-me/${label}/${openPath}`);
       });
     setExplorerFolderExpanded("shared-with-me", true);
