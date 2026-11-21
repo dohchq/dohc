@@ -2395,4 +2395,41 @@ describe("account deletion", () => {
     expect(await workspaceShare(h, "dee-new")).toBeUndefined();
     expect((await membersView(h, OWNER)).people).toHaveLength(1);
   });
+
+  it("gives a new account at a deleted account's address no level a rule gave that address, above or below the member level", async () => {
+    const SAM = "sam@elsewhere.example";
+    const { h, storage } = await seed({
+      overrides: {
+        lookupVerifiedUserEmail: async (userId) =>
+          userId.startsWith("sam-") ? SAM : `${userId}@dohc.test`,
+      },
+    });
+    await ownerWrite(h, "docs/access.yaml", `members: view\npeople:\n  ${SAM}: edit\n`);
+    await ownerWrite(h, "notes/access.yaml", `members: edit\npeople:\n  ${SAM}: view\n`);
+    await ownerWrite(h, "notes/todo.md", "the todo");
+    const token = (await inviteLink(h, OWNER, "turn-on"))!;
+    const levels = async (userId: string) => {
+      // A pull stores the account's verified email.
+      await pulledText(h, userId, await shareIdOf(h, userId));
+      const reach = storage.memberReach(WORKSPACE, userId, "member", "comment");
+      return [reach.folderLevel("docs"), reach.folderLevel("notes")];
+    };
+    expect((await join(h, "sam-old", token)).status).toBe(200);
+    expect(await levels("sam-old")).toEqual(["edit", "view"]);
+
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, KEY);
+    const { manifest } = fenceAccount(context, KEY, "sam-old", SAM);
+    purgeAccountRows(context, "sam-old", SAM, manifest!);
+
+    expect((await join(h, "sam-new", token)).status).toBe(200);
+    // Not matching would leave the member level, Edit in notes, so each rule hides.
+    expect(await levels("sam-new")).toEqual([null, null]);
+    const pulled = await pulledText(h, "sam-new", await shareIdOf(h, "sam-new"));
+    expect(pulled).not.toContain("docs/plan.md");
+    expect(pulled).not.toContain("notes/todo.md");
+    // Another account keeps the level the rules give everyone they don't name.
+    expect((await join(h, "ana", token)).status).toBe(200);
+    expect(await levels("ana")).toEqual(["view", "edit"]);
+  });
 });

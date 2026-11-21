@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { accessRuleSet, parseAccessRule } from "@dohc/security-contract/access-rules";
+import { refreshAccountEmail, retireRuleEmail } from "./accountEmails";
 import { groupRuleText, insertCreatedGroupRule } from "./groupRules";
 import { memberReach } from "./memberReach";
 import { initializeSyncRelaySchema } from "./schema";
@@ -122,6 +123,46 @@ describe("a Group's rule in a member's reach", () => {
       expect(JSON.stringify(r.reach().listed("key"))).not.toContain(TEAM);
       // An admin reaches every Group whatever the rules.
       expect(r.reach("admin", "edit").visibilitySignature()).toBe(admin);
+    } finally {
+      r.db.close();
+    }
+  });
+});
+
+describe("a person entry naming a deleted account's address", () => {
+  it("hides each folder and Group whose rule names it from a later account there, and leaves other rules", () => {
+    const r = relay();
+    try {
+      const SAM = "sam@example.com";
+      const rule = (channelWireId: string, text: string) =>
+        r.db
+          .prepare(
+            `INSERT INTO sync_relay_group_rules (workspace_id, channel_wire_id, rule_text, created_rule_text,
+               changed_by_user_id, changed_at_ms) VALUES ('ws', ?, ?, NULL, 'owner', 1)`,
+          )
+          .run(channelWireId, text);
+      rule(TEAM, `members: view\npeople:\n  ${SAM}: edit\n`);
+      rule(NEWS, `members: edit\npeople:\n  ${SAM}: view\n`);
+      rule("channel_other", "members: view\npeople:\n  ben@example.com: edit\n");
+      const rules = accessRuleSet([
+        ["up", parseAccessRule(`members: view\npeople:\n  ${SAM}: edit\n`)],
+        ["down", parseAccessRule(`members: edit\npeople:\n  ${SAM}: view\n`)],
+        ["other", parseAccessRule("members: view\npeople:\n  ben@example.com: edit\n")],
+      ]);
+      refreshAccountEmail(r.storageDb, "ana", { verifiedEmail: "Sam@Example.com" }, 1);
+      const levels = () => {
+        const reach = memberReach(r.storageDb, "ws", "ana", "member", "comment", rules);
+        return [
+          ...["up", "down", "other"].map((folder) => reach.folderLevel(folder)),
+          ...[TEAM, NEWS, "channel_other"].map((id) => reach.groupLevel(id)),
+        ];
+      };
+      expect(levels()).toEqual(["edit", "view", "view", "edit", "view", "view"]);
+      retireRuleEmail(r.storageDb, SAM);
+      expect(levels()).toEqual([null, null, "view", null, null, "view"]);
+      expect(
+        memberReach(r.storageDb, "ws", "ana", "admin", "edit", rules).folderLevel("down"),
+      ).toBe("edit");
     } finally {
       r.db.close();
     }

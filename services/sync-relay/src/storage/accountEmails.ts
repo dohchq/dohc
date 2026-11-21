@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { normalizeRuleEmail } from "@dohc/security-contract/access-rules";
 import type { SqliteDb } from "./types";
 
@@ -13,7 +14,27 @@ export interface AccountEmail {
 export function initializeAccountEmails(db: SqliteDb): void {
   db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_account_emails (
     user_id TEXT PRIMARY KEY, verified_email TEXT, refreshed_at_ms INTEGER NOT NULL
-  ) STRICT`);
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS sync_relay_retired_rule_emails (email_sha256 TEXT PRIMARY KEY) STRICT`);
+}
+
+const emailDigest = (email: string) =>
+  createHash("sha256").update(normalizeRuleEmail(email)).digest("hex");
+
+/**
+ * Records a deleted account's address. A person entry naming it named that
+ * account, so no later account at the address matches it. Kept as a digest.
+ */
+export function retireRuleEmail(db: SqliteDb, email: string): void {
+  db.prepare("INSERT OR IGNORE INTO sync_relay_retired_rule_emails VALUES (?)").run(
+    emailDigest(email),
+  );
+}
+
+export function ruleEmailRetired(db: SqliteDb, email: string): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM sync_relay_retired_rule_emails WHERE email_sha256 = ?")
+    .get(emailDigest(email));
 }
 
 export function accountEmail(db: SqliteDb, userId: string): AccountEmail | null {

@@ -5,6 +5,7 @@ import {
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { noticeIdFrom } from "./notices";
+import { retireRuleEmail } from "./accountEmails";
 import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
@@ -211,6 +212,7 @@ export function fenceAccount(
       )
       .run(Date.now(), userId, normalizeEmail(email));
     dropEndedWorkspaceInvitesInTransaction(storage, normalizeEmail(email));
+    retireRuleEmail(storage.db, email);
     retireUncoveredServiceActivations(storage, covered, Date.now());
     storage.db
       .prepare(`UPDATE sync_relay_share_removals SET voided = 1

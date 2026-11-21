@@ -11,7 +11,7 @@ import {
 } from "@dohc/security-contract/access-rules";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { accountEmail } from "./accountEmails";
+import { accountEmail, ruleEmailRetired } from "./accountEmails";
 import { accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
 import { readGroupRules, type GroupRuleRow } from "./groupRules";
 import type { SqliteDb } from "./types";
@@ -104,20 +104,22 @@ export function memberReach(
   current?: AccessRuleSet,
 ): MemberReach {
   const email = accountEmail(db, userId);
-  const viewer: ReachViewer =
-    role === "admin"
-      ? { role }
-      : {
-          role,
-          level,
-          verifiedEmail: email?.verifiedEmail ?? null,
-        };
+  const verifiedEmail = email?.verifiedEmail ?? null;
+  const viewer: ReachViewer = role === "admin" ? { role } : { role, level, verifiedEmail };
+  // An entry naming a deleted account's address named that account. Not
+  // matching it could widen a level the entry narrows, so its rule hides.
+  const retired = role !== "admin" && verifiedEmail !== null && ruleEmailRetired(db, verifiedEmail);
+  const namesRetired = (rule: AccessRule) => retired && rule.people.has(verifiedEmail!);
   const knownRules = (rules: AccessRuleSet) =>
-    email || role === "admin"
+    role === "admin" || (email && !retired)
       ? rules
       : accessRuleSet(
           [...rules.exact].map(
-            ([folder, rule]) => [folder, rule && rule.people.size === 0 ? rule : null] as const,
+            ([folder, rule]) =>
+              [
+                folder,
+                rule && (email ? namesRetired(rule) : rule.people.size > 0) ? null : rule,
+              ] as const,
           ),
         );
   const rules = knownRules(current ?? currentAccessRuleSet(db, workspaceId));
@@ -127,7 +129,7 @@ export function memberReach(
   const groupRuleLevel = (rule: GroupRuleRow["rule"]): ShareAccess | null | undefined => {
     if (rule === undefined) return undefined;
     if (viewer.role !== "member") return "edit";
-    if (rule && rule.people.size > 0 && viewer.verifiedEmail === null) return null;
+    if (rule && rule.people.size > 0 && (verifiedEmail === null || namesRetired(rule))) return null;
     return ruleLevel(rule, viewer);
   };
   const ruledGroups = [...groupRows.values()].flatMap((row) => {
