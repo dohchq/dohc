@@ -275,9 +275,10 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
     // In a field of the record's own screen, not the row it was opened from.
-    let field = app.otherElements.matching(identifier: "record-field")
-      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
-    XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
+    let field = app.descendants(matching: .any).matching(identifier: "record-field")
+      .containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)).firstMatch
+    if !field.waitForExistence(timeout: 10) { say("SERVER ROUND SCREEN \(app.debugDescription)") }
+    XCTAssertTrue(field.exists, "The record's fields should show \(value)")
   }
 
   // Needs a build with EXPO_PUBLIC_DOHC_PHONE_WRITES=1. Planning can mention the author of the seeded post Kickoff, whose
@@ -345,8 +346,8 @@ final class ServerRoundTests: XCTestCase {
     let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
     XCTAssertTrue(row.waitForExistence(timeout: 30), "\(name) should show a record with \(value)")
     row.tap()
-    let field = app.otherElements.matching(identifier: "record-field")
-      .containing(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+    let field = app.descendants(matching: .any).matching(identifier: "record-field")
+      .containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)).firstMatch
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The record's fields should show \(value)")
     return field
   }
@@ -403,7 +404,7 @@ final class ServerRoundTests: XCTestCase {
     app.launch()
     let undo = app.buttons["Undo last edit"]
     let showing = { (text: String) in
-      app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+      app.descendants(matching: .any).matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch
     }
     // `value` is a prefix of `changed`, so a field showing `value` must not also show `changed`.
     let only = { (text: String, what: String) in
@@ -462,10 +463,10 @@ final class ServerRoundTests: XCTestCase {
     new.tap()
 
     // The new record opens on its own screen; its first field names it.
-    let first = app.otherElements.matching(identifier: "record-field").firstMatch
+    let first = app.descendants(matching: .any).matching(identifier: "record-field").firstMatch
     XCTAssertTrue(first.waitForExistence(timeout: 60), "The new record should open within 60 s")
     edit(app, first, typing: added)
-    let named = app.otherElements.matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@", added)).firstMatch
+    let named = app.descendants(matching: .any).matching(identifier: "record-field").containing(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", added, added)).firstMatch
     XCTAssertTrue(named.waitForExistence(timeout: 10), "The field should show \(added) as it saves")
     settled(app, named, "Naming the new record")
     reread(app, added)
