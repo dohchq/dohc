@@ -4,6 +4,7 @@ import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 import {
   clearStoredDrafts,
   draftFileWritesSettled,
+  forgetStoredDraft,
   isStoredDraftCurrent,
   isStoredDraftPending,
   loadDraftFiles,
@@ -151,6 +152,43 @@ it("settles a draft once its own writes are answered, whatever other drafts wait
   answers.get(draft.text)!();
   await expect.poll(() => settled).toBe(true);
   answers.get("other")!();
+});
+
+describe("after a replacement fails during a rename", () => {
+  let release!: () => void;
+  beforeEach(async () => {
+    expect(await storeDraft(draft)).toBe(true);
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      ...disk.calls,
+      writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
+        gate.then(() => {
+          if (input.raw.includes("newer typing")) throw new Error("No space left on device");
+          return disk.calls.writeSetAsideDraft(input);
+        }),
+      removeSetAsideDraft: (input: Parameters<typeof disk.calls.removeSetAsideDraft>[0]) =>
+        gate.then(() => disk.calls.removeSetAsideDraft(input)),
+    });
+    void replaceStoredDraft({ ...draft, text: "newer typing" });
+    remapStoredDraftPaths("ws", (path) => (path === "a.md" ? "b.md" : null));
+  });
+  afterEach(() => release());
+
+  it("dismissing the draft removes the moved file", async () => {
+    release();
+    await draftFileWritesSettled();
+    forgetStoredDraft(draft.id);
+    await draftFileWritesSettled();
+    expect(disk.files.size).toBe(0);
+  });
+
+  it("a second rename to a secret path removes the moved file", async () => {
+    remapStoredDraftPaths("ws", (path) => (path === "b.md" ? ".env" : null));
+    release();
+    await draftFileWritesSettled();
+    expect(disk.files.size).toBe(0);
+  });
 });
 
 it("reports a draft whose write failed as not kept", async () => {

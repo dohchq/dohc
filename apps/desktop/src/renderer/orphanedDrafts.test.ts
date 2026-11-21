@@ -777,10 +777,11 @@ describe("orphanedDrafts persistence", () => {
     ]);
   });
 
-  it("drops the stored copy when a rename lands on a secret path", () => {
+  it("drops the stored copy when a rename lands on a secret path", async () => {
     captureOrphanedDraft("ws-1", "a.md", "SECRET_BODY");
     expect(storedText()).toContain("SECRET_BODY");
     remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? ".env" : path));
+    await draftFileWritesSettled();
     expect(storedText()).not.toContain("SECRET_BODY");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
   });
