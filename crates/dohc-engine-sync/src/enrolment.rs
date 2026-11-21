@@ -585,6 +585,17 @@ pub(crate) fn file_version_is_publishable_in_tx(
     ).map_err(SyncError::corrupt)
 }
 
+pub fn journal_owner_save_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    moment_id: &str,
+) -> Result<(), SyncError> {
+    if file_version_is_publishable_in_tx(tx, key, moment_id)? {
+        journal_file_version_in_tx(tx, key, moment_id, &mut FileExportBudget::default())?;
+    }
+    Ok(())
+}
+
 /// The cut and all candidate admissions share the actor's writer transaction.
 pub(crate) fn backfill_file_versions_in_tx(
     tx: &Transaction<'_>,

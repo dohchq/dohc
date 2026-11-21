@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ import {
   openEditor,
   typeAtEnd,
   shown,
+  writeAndCapture,
 } from "./twoDaemonSync.fixture";
 
 it.skipIf(engine.missing)(
@@ -178,6 +180,77 @@ it.skipIf(engine.missing)(
 
       expect(fileRecords()).toEqual({ count: 1 });
       expect(shown(editorA)).toBe(text);
+    } finally {
+      await Promise.allSettled(editors.map((editor) => editor.session.close()));
+      await daemonA?.close();
+      await relay.stop();
+    }
+  },
+  180_000,
+);
+
+it.skipIf(engine.missing)(
+  "keeps the server's copy of a note that is not live on its owner's latest save",
+  async () => {
+    const workspaceId = "two-daemon-follows-owner";
+    const token = `test:${workspaceId}`;
+    const path = "notes/followed.txt";
+    const rootA = await createTestScratch("dohc-follows-owner-a-");
+    const relayRoot = await createTestScratch("dohc-follows-owner-relay-");
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
+    let daemonA: LiveDaemonCapture | null = null;
+    const editors: OpenEditor[] = [];
+    const serverCopy = () => {
+      const relayDb = new DatabaseSync(relay.dbPath, { readOnly: true });
+      try {
+        return (
+          relayDb
+            .prepare(
+              "SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND path=?",
+            )
+            .get(workspaceId, path) as { blob_sha256: string } | undefined
+        )?.blob_sha256;
+      } finally {
+        relayDb.close();
+      }
+    };
+    const onDisk = async () =>
+      createHash("sha256")
+        .update(await readFile(join(rootA, path)))
+        .digest("hex");
+    const sync = async (daemon: LiveDaemonCapture) => {
+      await pushUntilDrained(daemon.relay);
+      await pullCaptured(daemon.relay, daemon.capture);
+      await pushUntilDrained(daemon.relay);
+    };
+    try {
+      daemonA = await openLiveDaemonCapture({
+        workspaceId,
+        rootPath: rootA,
+        relay: { baseUrl: relay.baseUrl, token },
+      });
+      await daemonA.relay.claim();
+      await mkdir(join(rootA, "notes"), { recursive: true });
+      await writeFile(join(rootA, path), "");
+      const editorA = await openEditor(daemonA, path);
+      editors.push(editorA);
+      await typeAtEnd(editorA, "First save.\n");
+      await sync(daemonA);
+      expect(serverCopy()).toBe(await onDisk());
+
+      await typeAtEnd(editorA, "Second save.\n");
+      expect(await readFile(join(rootA, path), "utf8")).toBe("First save.\nSecond save.\n");
+      await sync(daemonA);
+      expect(serverCopy(), "after a second save in the open tab").toBe(await onDisk());
+
+      await editorA.session.close();
+      editors.length = 0;
+      await writeAndCapture(daemonA, rootA, path, "First save.\nSecond save.\nOutside.\n");
+      await sync(daemonA);
+      expect(serverCopy(), "after a change outside the app").toBe(await onDisk());
     } finally {
       await Promise.allSettled(editors.map((editor) => editor.session.close()));
       await daemonA?.close();

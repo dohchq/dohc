@@ -903,6 +903,7 @@ fn apply_moment_append(
                 }) && holds_earlier_lineage_artifact(tx, envelope, payload, live_claim)?
             } else {
                 holds_earlier_lineage_artifact(tx, envelope, payload, None)?
+                    || origin_settled_on_held_claim(tx, envelope, payload)?
             })
     {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
@@ -1913,6 +1914,33 @@ fn holds_earlier_lineage_artifact(
         }
     }
     Ok(false)
+}
+
+fn origin_settled_on_held_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    if !is_ydoc_settlement_moment_id(&payload.moment_id)
+        || payload.path != payload.payload_after_path
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(false);
+    }
+    let claim: Option<String> = tx
+        .query_row(
+            "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_status='exact'",
+            params![envelope.workspace_id, payload.version_id, payload.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    match claim {
+        Some(claim) => origin_update_is_on_live_claim(tx, envelope, payload, &claim),
+        None => Ok(false),
+    }
 }
 
 fn freeze_incoming_scene_delete_authority(

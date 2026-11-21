@@ -1474,3 +1474,26 @@ fn merge_removal_text_stays_on_the_engine_that_kept_it() {
         "a dismissed removal stays local"
     );
 }
+
+#[test]
+fn an_owner_save_names_the_last_file_sent_and_skips_an_unchanged_save() {
+    let (_scratch, _, mut store) = owner();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    let journal = |store: &mut EngineStore, id: &str| {
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::enrolment::journal_owner_save_in_tx(tx, &key, id)
+            })
+            .unwrap();
+    };
+    write(&mut store, "doc", "v1", "doc.md", "one", "ydoc", 10);
+    journal(&mut store, "v1");
+    write(&mut store, "doc", "v2", "doc.md", "one\ntwo", "ydoc", 20);
+    journal(&mut store, "v2");
+    journal(&mut store, "v2");
+    let sent = exports(&store);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].payload["momentId"], "v1");
+    assert_eq!(sent[1].payload["momentId"], "v2");
+    assert_eq!(sent[1].payload["beforeLatestMomentId"], "v1");
+}
