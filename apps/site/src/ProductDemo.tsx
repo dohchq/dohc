@@ -675,9 +675,10 @@ export function ProductDemo() {
                       : null;
       if (!run) return;
       event.preventDefault();
-      run();
+      // An open confirmation keeps the demo where it is until it is answered.
+      if (!deletion) run();
     },
-    [activeTab, closeTab, createDocument, showNeighbourTab, toggleSidebar],
+    [activeTab, closeTab, createDocument, deletion, showNeighbourTab, toggleSidebar],
   );
 
   const createFolder = useCallback((path: string) => {
@@ -854,20 +855,6 @@ export function ProductDemo() {
             new Promise((answer) => setDeletion({ recordId: row.id, answer }))
           }
         />
-        {deletion && (
-          <DeleteCollectionRecordDialog
-            collectionName={GUESTS_DATASET.name}
-            recordId={deletion.recordId}
-            onCancel={() => {
-              deletion.answer(false);
-              setDeletion(null);
-            }}
-            onConfirm={() => {
-              deletion.answer(true);
-              setDeletion(null);
-            }}
-          />
-        )}
       </div>
     );
   } else {
@@ -987,6 +974,22 @@ export function ProductDemo() {
           </EditorGroupFrame>
         </main>
       </div>
+      {deletion ? (
+        <div className="demo-overlay">
+          <DeleteCollectionRecordDialog
+            collectionName={GUESTS_DATASET.name}
+            recordId={deletion.recordId}
+            onCancel={() => {
+              deletion.answer(false);
+              setDeletion(null);
+            }}
+            onConfirm={() => {
+              deletion.answer(true);
+              setDeletion(null);
+            }}
+          />
+        </div>
+      ) : null}
       {palette ? (
         <div className="demo-overlay">
           {palette === "quick-open" ? (
