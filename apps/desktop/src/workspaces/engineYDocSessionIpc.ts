@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
-  DaemonRefusalError,
   isOwnerOutboxFrozenRefusal,
+  isRestoreFencedRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
   YdocOwnerDraftPendingError,
@@ -1840,20 +1840,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (isEngineWorkspaceOpenRefusedError(error) || isYDocSessionUnreleasedError(error)) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
-    const detail = engineRefusalDetail(error);
-    return detail === null ? unavailableOpen() : unavailableOpen({ engineRefusedOpen: { detail } });
+    const held = OPEN_REFUSALS_THAT_HOLD_EDITING.find(({ refused }) => refused(error));
+    return held
+      ? unavailableOpen({ engineRefusedOpen: { detail: held.detail } })
+      : unavailableOpen();
   }
 }
 
-function engineRefusalDetail(error: unknown): string | null {
-  let candidate = error;
-  for (let depth = 0; depth < 4 && typeof candidate === "object" && candidate !== null; depth++) {
-    if (candidate instanceof DaemonRefusalError)
-      return `${candidate.wireCode} ${candidate.message}`.slice(0, 500);
-    candidate = (candidate as { cause?: unknown }).cause;
-  }
-  return null;
-}
+const OPEN_REFUSALS_THAT_HOLD_EDITING = [
+  { refused: isOwnerOutboxFrozenRefusal, detail: "INVALID_PARAMS owner-outbox-frozen" },
+  { refused: isRestoreFencedRefusal, detail: "INVALID_PARAMS restore-fenced" },
+] as const;
 
 export const DOCUMENT_EDIT_PENDING_WARNING =
   "Saved locally. The shared file update is pending. Do not repeat this edit.";
