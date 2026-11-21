@@ -18,6 +18,12 @@ final class ServerRoundTests: XCTestCase {
   }
 
   /// One line for the round's script, sent at once.
+  // The iOS 27.2 simulator's keyboard drops a doubled letter typed in one call ("https" became "hps"), so text goes
+  // in one character at a time.
+  private func typeSlowly(_ element: XCUIElement, _ text: String) {
+    for character in text { element.typeText(String(character)) }
+  }
+
   private func say(_ line: String) {
     print(line)
     fflush(stdout)
@@ -77,7 +83,8 @@ final class ServerRoundTests: XCTestCase {
     let field = app.textFields["Server address"]
     XCTAssertTrue(field.waitForExistence(timeout: 30), "A fresh install should open on Connect")
     field.tap()
-    field.typeText(origin)
+    typeSlowly(field, origin)
+    XCTAssertEqual(field.value as? String, origin, "The address field should hold the typed address")
     app.buttons["Connect server"].tap()
     // The approval page opens in the browser's sheet, over the code. Closing it leaves the sign-in waiting.
     let names = ["Done", "Close", "Cancel", "Dismiss"]
@@ -239,7 +246,7 @@ final class ServerRoundTests: XCTestCase {
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
     text.tap()
-    app.typeText(sentence)
+    typeSlowly(app, sentence)
     let start = Date()
     XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
     XCTAssertTrue(saved.waitForExistence(timeout: 60), "The server should apply the edit within 60 s")
@@ -308,7 +315,7 @@ final class ServerRoundTests: XCTestCase {
                    "The row should make the text \"Can @\(handle) \", not \(String(describing: field.value))")
     XCTAssertTrue(app.keyboards.firstMatch.exists, "The keyboard should stay up after the tap")
     let tail = "join us? \(UUID().uuidString.prefix(8))"
-    field.typeText(tail)
+    typeSlowly(field, tail)
     let body = "Can @\(handle) \(tail)"
     XCTAssertEqual(field.value as? String, body, "Typing should go on after the mention")
     app.buttons.matching(NSPredicate(format: "label IN %@", ["Send message", "Post"])).firstMatch.tap()
@@ -352,7 +359,8 @@ final class ServerRoundTests: XCTestCase {
     XCTAssertTrue(input.waitForExistence(timeout: 10), "The field should open its editor")
     XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "The editor should raise the keyboard")
     // The editor opens with the cursor after the field's text.
-    app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting) + typed)
+    app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: deleting))
+    typeSlowly(app, typed)
     app.navigationBars.buttons["Save"].tap()
   }
 
