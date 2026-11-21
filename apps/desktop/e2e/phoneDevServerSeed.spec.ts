@@ -269,8 +269,34 @@ test("@phone-dev-server seeds a synced workspace for the phone and holds it unti
         })
         .toContain(sentence);
       await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
-    } else if (!plan.includes(sentence)) {
-      throw new Error("The fixture's Plan.md does not hold the sentence.");
+    } else {
+      // The editor shows the live copy the server holds, which can differ from the file a round left.
+      await page.getByTestId("titlebar-quick-open").click();
+      const quickOpen = page.getByTestId("quick-open");
+      await quickOpen.getByLabel("File").fill("Plan.md");
+      await quickOpen.getByRole("option", { name: "Plan.md", exact: true }).click();
+      const editor = page.getByTestId("markdown-editor");
+      await expect(editor).toBeVisible();
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
+        timeout: 60_000,
+      });
+      if (!((await editor.textContent()) ?? "").includes(sentence)) {
+        await editor.click();
+        await page.keyboard.press("ControlOrMeta+a");
+        await page.keyboard.type(sentence);
+        await expect(editor).toContainText(sentence);
+        await expect
+          .poll(() => readFile(join(rootPath, "Plan.md"), "utf8").catch(() => ""), {
+            message: "Plan.md should hold the sentence again.",
+            timeout: 30_000,
+          })
+          .toContain(sentence);
+        await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+          "data-state",
+          "saved",
+        );
+      }
+      await page.keyboard.press("Escape");
     }
 
     // A transactional Collection with the generator's operations: Name, its primary text field, and a date.

@@ -245,7 +245,8 @@ final class ServerRoundTests: XCTestCase {
     let page = app.webViews.firstMatch
     let text = containing(page, try need("DOHC_SERVER_SENTENCE"))
     XCTAssertTrue(text.waitForExistence(timeout: 10), "Plan should show its sentence")
-    text.tap()
+    // At the sentence's end, so the next round still finds the sentence whole.
+    text.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
     typeSlowly(app, sentence)
     let start = Date()
     XCTAssertTrue(mark("Saving").waitForExistence(timeout: 10) || saved.exists, "Typing should show Saving")
