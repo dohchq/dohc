@@ -71,8 +71,8 @@ pub use cursor::{
 };
 pub use deferred::{WAITING_VERSION_CODE, waiting_versions};
 pub use enrolment::{
-    first_exports_held_open_in, journal_owner_save_in_tx, originate_closing_ydoc_base_in_tx,
-    originate_live_ydoc_base_in_tx,
+    first_exports_held_open_in, journal_owner_head_in_tx, journal_owner_save_in_tx,
+    originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx,
 };
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};

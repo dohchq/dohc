@@ -2319,6 +2319,12 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
             stop_action(&actor, &f, "release").await.unwrap()[0].state,
             "released"
         );
+        let head_sent: i64 = f.store.read_with(|conn| conn.query_row(
+            "SELECT COUNT(*) FROM replication_log r JOIN snapshots s ON s.latest_moment_id=json_extract(r.payload_json,'$.momentId') \
+             WHERE r.op_kind='moment.append' AND r.imported=0 AND s.object_id='object'",
+            [], |r| r.get(0),
+        )).unwrap();
+        assert_eq!(head_sent, 1, "the Stop sends the owner's file once");
         let doc = dohc_engine_collab::load_persisted(&f.store, &key)
             .unwrap()
             .unwrap()
@@ -2659,6 +2665,24 @@ async fn a_release_ends_a_stop_the_relay_retired_on_its_own_and_keeps_an_asked_o
     let (f, supervisor, actor) = pending_release_fixture(2).await;
     stop_action(&actor, &f, "release").await.unwrap();
     assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 1);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn a_stop_of_a_note_open_nowhere_sends_the_owners_file() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    assert_eq!(
+        stop_action(&actor, &f, "request").await.unwrap()[0].state,
+        "released"
+    );
+    let head_sent: i64 = f.store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM replication_log r JOIN snapshots s ON s.latest_moment_id=json_extract(r.payload_json,'$.momentId') \
+         WHERE r.op_kind='moment.append' AND r.imported=0 AND s.object_id='object'",
+        [], |r| r.get(0),
+    )).unwrap();
+    assert_eq!(head_sent, 1);
     supervisor.close_all().unwrap();
 }
 

@@ -229,7 +229,7 @@ impl ActorHandle {
             };
             let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
-                "request"|"requestRetired"=>release::request_in_tx(tx,&key,action=="request",now_ms).map(|row|vec![row]),
+                "request"|"requestRetired"=>{let row=release::request_in_tx(tx,&key,action=="request",now_ms)?;send_stopped_head_in_tx(tx,&key)?;Ok(vec![row])},
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{
@@ -241,6 +241,7 @@ impl ActorHandle {
                     let row=dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),person_id,now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
                     }))?;
+                    send_stopped_head_in_tx(tx,&key)?;
                     // A release that waits keeps its Stop and notice.
                     if ends && row.deferred.is_none() {release::clear_in_tx(tx,&key)?;}
                     Ok(vec![row])
@@ -1876,6 +1877,16 @@ fn decide_owner_holds_after_commit(
     {
         eprintln!("engine: held service host updates kept: {error}");
     }
+}
+
+fn send_stopped_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<(), OwnerOutboxError> {
+    if dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, key)? {
+        dohc_engine_sync::journal_owner_head_in_tx(tx, key).map_err(owner_hold_error)?;
+    }
+    Ok(())
 }
 
 /// Ending an owner's binding decides the service host's updates it held; a

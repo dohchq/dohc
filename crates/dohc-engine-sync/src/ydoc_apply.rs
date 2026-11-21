@@ -1789,6 +1789,13 @@ fn complete_drain_cleanup(
         if removed {
             crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx, &cleanup.key)?;
         }
+        if removed
+            && cleanup.projected.is_some()
+            && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, &cleanup.key)
+                .map_err(map_owner_retirement_error)?
+        {
+            crate::enrolment::journal_owner_head_in_tx(tx, &cleanup.key)?;
+        }
         // Recovery a released hold stopped did not fail.
         if let Some((key, _)) = recovery {
             let (waiting, path): (bool, Option<String>) = tx.query_row("SELECT settle_prior_update_seq IS NOT NULL,path FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(SyncError::corrupt)?;
@@ -1898,6 +1905,11 @@ pub(crate) fn complete_ended_session_cleanup(
     complete_drain_cleanup(store, cleanup, faults, Some((key, leases)))
 }
 
+fn owner_edits_unsettled_in(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row("SELECT last_local_update_seq>COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)
+}
+
 fn require_recovery_closed(
     conn: &Connection,
     key: &DocKey,
@@ -1906,9 +1918,7 @@ fn require_recovery_closed(
     if leases.is_live(key) {
         return Err(SyncError::LiveDocumentBindingActive);
     }
-    let draft: bool=conn.query_row("SELECT last_local_update_seq>COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        params![key.workspace_id,key.version_id,key.object_id],|row|row.get(0)).map_err(SyncError::corrupt)?;
-    if draft {
+    if owner_edits_unsettled_in(conn, key)? {
         return Err(SyncError::RetryableState {
             reason: "local-document-unsettled",
         });
@@ -7993,10 +8003,17 @@ pub fn project_and_write_in_tx(
         now_ms,
     )
     .map_err(map_collab_hard_error)?;
+    let settles_owner_edits = !result.deduped
+        && owner_edits_unsettled_in(tx, key)?
+        && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, key)
+            .map_err(map_owner_retirement_error)?;
     // Later envelopes may supersede this disk projection; the history moment already covers its interval.
     if !(replayed && result.deduped) {
         dohc_engine_collab::author_coverage::advance_in(tx, key, false)
             .map_err(map_collab_hard_error)?;
+    }
+    if settles_owner_edits && crate::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
+        crate::enrolment::journal_owner_save_in_tx(tx, key, &result.moment.moment_id)?;
     }
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the

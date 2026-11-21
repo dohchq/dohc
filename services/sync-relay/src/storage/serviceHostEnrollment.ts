@@ -548,20 +548,9 @@ export function isOwnerSaveOfStoppedNote(
 ): boolean {
   const { workspaceId, userId } = input;
   const save = savedFile(input.payloadJson);
-  if (!save) return false;
-  const { objectId, path, before } = save;
-  if (!stoppedBy(storage, { workspaceId, userId, objectId, path })) return false;
-  const stored = storage.db
-    .prepare(
-      `SELECT l.origin_id,json_extract(l.payload_json,'$.payloadBeforeBlobSha256') AS before
-        FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
-        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
-    )
-    .get(workspaceId, path);
   return (
-    typeof stored?.origin_id === "string" &&
-    stored.origin_id.startsWith(SERVICE_HOST_ORIGIN_PREFIX) &&
-    stored.before === before
+    save !== null &&
+    stoppedBy(storage, { workspaceId, userId, objectId: save.objectId, path: save.path })
   );
 }
 export function isResumedHostSave(
