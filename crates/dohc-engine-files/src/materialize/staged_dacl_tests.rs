@@ -283,17 +283,19 @@ fn startup_makes_files_an_earlier_version_staged_private() {
     );
 }
 
-/// The DACL of any regular file, its own or not.
+/// The DACL of any regular file, its own or not, as `icacls` saves it: the
+/// file's name, then its DACL, in UTF-16.
 fn sddl_of(path: &Path) -> String {
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command"])
-        .arg(format!(
-            "(Get-Acl -LiteralPath '{}').GetSecurityDescriptorSddlForm('Access')",
-            path.display()
-        ))
-        .output()
-        .unwrap();
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    let scratch = ScratchDir::new_named("staged-dacl-saved").unwrap();
+    let saved = scratch.join("saved");
+    icacls(path, &["/save", saved.to_str().unwrap()]);
+    let units: Vec<u16> = std::fs::read(&saved)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let text = String::from_utf16(&units).unwrap();
+    text.lines().nth(1).unwrap().trim().to_owned()
 }
 
 /// Each state a crash can leave between saving a DACL and forgetting it

@@ -459,6 +459,21 @@ mod tests {
         local_string(Local(text))
     }
 
+    /// A file a test may leave with an empty DACL, which not even its owner
+    /// can delete. When the test ends, pass or fail, the file takes the DACL
+    /// its folder passes down, so its scratch folder can be removed.
+    struct Removable<'a>(&'a Path);
+
+    impl Drop for Removable<'_> {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("icacls")
+                .arg(self.0)
+                .arg("/reset")
+                .stdout(std::process::Stdio::null())
+                .status();
+        }
+    }
+
     /// No one can open a file with an empty DACL to read it, dohc included,
     /// so dohc leaves it as it is. One that comes back with dohc's DACL gets
     /// its empty DACL back.
@@ -467,6 +482,7 @@ mod tests {
         for empty in ["D:P", "D:"] {
             let scratch = ScratchDir::new().expect("scratch");
             let file = shared_file(&scratch);
+            let removable = Removable(&file);
             let identity = staged(&file).identity;
             assert_eq!(
                 make_staged_private(&file, &identity).expect("private"),
@@ -477,6 +493,8 @@ mod tests {
             let refused = read_staged(&file).expect_err("empty");
             assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(stored_sddl(&file), empty);
+            drop(removable);
+            std::fs::remove_file(&file).expect("the file can be removed again");
         }
     }
 
