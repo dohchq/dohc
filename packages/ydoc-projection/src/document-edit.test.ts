@@ -53,6 +53,33 @@ describe("documentMarkdown", () => {
     expect(settledDocumentMarkdown("# Kyoto\n\n* Day one\n")).toBe("# Kyoto\n\n- Day one\n");
     expect(markdownOf(new Y.Doc())).toBe("");
   });
+
+  test.each([
+    ["an empty paragraph", editorDoc([paragraph("A"), paragraph()]), "A\n"],
+    ["spaces", editorDoc([paragraph("Hello ")]), "Hello\n"],
+    ["only an empty paragraph", editorDoc([paragraph()]), ""],
+  ])("reads a document that ends in %s as its file does", (_, doc, file) => {
+    expect(yDocToMarkdown(doc)).toBe(file);
+    expect(markdownOf(doc)).toBe(file);
+  });
+
+  test("reads a note with only frontmatter as before", () => {
+    const doc = markdownToYDoc("---\ntitle: Trip\n---\n");
+    expect(markdownOf(doc)).toBe("---\ntitle: Trip\n---\n\n");
+  });
+
+  test("leaves the read as the file after an edit that ends in a blank line", () => {
+    const doc = markdownToYDoc("Budget 400");
+    edited(doc, { find: "400\n", replacement: "450\n\n" });
+    expect(markdownOf(doc)).toBe("Budget 450\n");
+    expect(markdownOf(doc)).toBe(yDocToMarkdown(doc));
+    edited(doc, { find: "450\n", replacement: "500\n" });
+    expect(markdownOf(doc)).toBe("Budget 500\n");
+    const spaced = editorDoc([paragraph("Intro"), paragraph("Hello  ")]);
+    edited(spaced, { find: "Hello\n", replacement: "Hello there.\n" });
+    expect(markdownOf(spaced)).toBe("Intro\n\nHello there.\n");
+    expect(yDocToMarkdown(spaced)).toBe("Intro\n\nHello there.\n");
+  });
 });
 
 describe("documentEditUpdate", () => {
@@ -117,7 +144,7 @@ describe("documentEditUpdate", () => {
     const doc = editorDoc([paragraph("Notes"), paragraph()]);
     const cursorBlock = getDohcYDocBodyFragment(doc).get(1);
     edited(doc, { replacement: "## Next\n\nCall the hotel." });
-    expect(markdownOf(doc)).toBe("Notes\n\n## Next\n\nCall the hotel.\n\n");
+    expect(markdownOf(doc)).toBe("Notes\n\n## Next\n\nCall the hotel.\n");
     const body = getDohcYDocBodyFragment(doc);
     expect(body.get(body.length - 1)).toBe(cursorBlock);
   });
@@ -125,7 +152,7 @@ describe("documentEditUpdate", () => {
   test("adds text to a document with no blocks and to one with only an empty paragraph", () => {
     expect(markdownOf(edited(new Y.Doc(), { replacement: "First line." }))).toBe("First line.\n");
     expect(markdownOf(edited(editorDoc([paragraph()]), { replacement: "First line." }))).toBe(
-      "First line.\n\n",
+      "First line.\n",
     );
   });
 
