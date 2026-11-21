@@ -6,6 +6,7 @@
 mod unix_socket;
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dohc_engine_sync::{
@@ -14,13 +15,13 @@ use dohc_engine_sync::{
     HostedPullRequest, HostedPullResponse, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
-    MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
-    ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, RelayError,
-    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
-    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
-    ShareProposalChange, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
-    SharedChannelResponse,
+    MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_SHARE_BLOB_BATCH,
+    ObservedBytes, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RelayError, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -49,6 +50,14 @@ const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
 /// `ureq` refuses a body once a read reaches its limit, so the limit sits one
 /// byte past the largest body this transport accepts.
 const BLOB_BODY_READ_LIMIT_BYTES: usize = MAX_BLOB_BODY_BYTES + 1;
+/// `ureq` keeps 3 idle connections to a host unless told otherwise, so a wider
+/// batch would open a connection, and pay its TLS handshake, on every batch.
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = MAX_SHARE_BLOB_BATCH;
+/// A `share_blobs` call downloads together as many blobs as fit in this many
+/// bytes, judged by the largest blob the call before it read. Downloads that
+/// overlap share the link, so a wide call of large blobs can miss a deadline
+/// that each blob alone would meet.
+const MAX_SHARE_BLOB_BATCH_BYTES: usize = 1024 * 1024;
 
 /// A blob body that overruns the read limit broke the ingest ceiling, so the
 /// caller gets the ceiling by name. The transport stops reading at its bound
@@ -142,6 +151,7 @@ pub struct HttpRelayTransport {
     agent: Agent,
     /// Serves a hosted replica through the session host's scoped feed.
     hosted: bool,
+    next_share_blobs_width: AtomicUsize,
 }
 
 impl std::fmt::Debug for HttpRelayTransport {
@@ -179,6 +189,7 @@ impl HttpRelayTransport {
                 base_url: "http://127.0.0.1".into(),
                 token,
                 hosted: false,
+                next_share_blobs_width: AtomicUsize::new(1),
                 agent: Agent::with_parts(
                     config,
                     unix_socket::UnixConnector(socket_path.into()),
@@ -266,6 +277,7 @@ impl HttpRelayTransport {
             token,
             agent: configured_agent(Duration::from_secs(30), allow_insecure_loopback, None),
             hosted: false,
+            next_share_blobs_width: AtomicUsize::new(1),
         })
     }
 
@@ -761,6 +773,7 @@ fn configured_agent(
         .http_status_as_error(false)
         .https_only(!allow_insecure_loopback)
         .max_redirects(0)
+        .max_idle_connections_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .middleware(name_relay_api_version);
     let builder = if let Some(tls_config) = tls_config {
         builder.tls_config(tls_config)
@@ -1172,6 +1185,42 @@ impl RelayTransport for HttpRelayTransport {
             blob_body_overflow(),
         )?;
         Ok(BlobDownloadResponse { bytes })
+    }
+
+    fn share_blobs(
+        &self,
+        mut requests: Vec<ShareBlobRequest>,
+    ) -> Result<Vec<Result<BlobDownloadResponse, RelayError>>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_SHARE_BLOB_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests.truncate(self.next_share_blobs_width.swap(1, Ordering::Relaxed));
+        let blobs = if requests.len() == 1 {
+            vec![self.share_blob(requests.remove(0))]
+        } else {
+            std::thread::scope(|scope| {
+                let downloads = requests
+                    .into_iter()
+                    .map(|request| scope.spawn(move || self.share_blob(request)))
+                    .collect::<Vec<_>>();
+                downloads
+                    .into_iter()
+                    .map(|download| download.join().unwrap_or(Err(RelayError::InvalidResponse)))
+                    .collect()
+            })
+        };
+        if let Some(largest) = blobs
+            .iter()
+            .filter_map(|blob| blob.as_ref().ok())
+            .map(|blob| blob.bytes.len())
+            .max()
+        {
+            self.next_share_blobs_width.store(
+                (MAX_SHARE_BLOB_BATCH_BYTES / largest.max(1)).clamp(1, MAX_SHARE_BLOB_BATCH),
+                Ordering::Relaxed,
+            );
+        }
+        Ok(blobs)
     }
 
     fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
@@ -2384,6 +2433,7 @@ mod tests {
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
             hosted: false,
+            next_share_blobs_width: AtomicUsize::new(1),
         };
 
         let error = transport
@@ -2449,6 +2499,7 @@ mod tests {
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
             hosted: false,
+            next_share_blobs_width: AtomicUsize::new(1),
         };
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2549,6 +2600,7 @@ mod tests {
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
             hosted: false,
+            next_share_blobs_width: AtomicUsize::new(1),
         };
         let (mid_body_tx, mid_body_rx) = mpsc::channel();
         let (outcome_tx, outcome_rx) = mpsc::channel();
