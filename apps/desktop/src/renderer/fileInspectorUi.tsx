@@ -181,8 +181,10 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  details?: string;
   children?: ReactNode;
 }) {
+  const { details } = props;
   return (
     <div
       data-testid="engine-may-hold-document-notice"
@@ -203,6 +205,9 @@ export function EngineMayHoldDocumentNotice(props: {
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
+        {details ? (
+          <CopyButton label="Copy details" pinName iconOnly getText={() => details} />
+        ) : null}
         <button
           type="button"
           onClick={props.onRetry}

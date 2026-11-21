@@ -156,6 +156,7 @@ type EngineDocOpenOutcome =
   | { kind: "live-host-unavailable" }
   | { kind: "shared-waiting"; waiting: SharedDocumentOpenState }
   | { kind: "engine-may-hold-document" }
+  | { kind: "engine-refused-open"; detail: string }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
@@ -212,6 +213,7 @@ function makeTransport(
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.captureHeld ? { captureHeld: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.engineRefusedOpen ? { engineRefusedOpen: result.engineRefusedOpen } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress ? { removalInProgress: result.removalInProgress } : {}),
       };
@@ -1386,6 +1388,8 @@ function createEngineDocSession(input: EngineDocInput, requestKey: string): Engi
               setOutcome({ kind: "artifact-assets-invalid" });
             } else if (bound.engineMayHoldDocument) {
               setOutcome({ kind: "engine-may-hold-document" });
+            } else if (bound.engineRefusedOpen) {
+              setOutcome({ kind: "engine-refused-open", detail: bound.engineRefusedOpen.detail });
             } else if (bound.removalInProgress) {
               writesRefused.current = true;
               setOutcome({

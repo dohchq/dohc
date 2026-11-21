@@ -2463,6 +2463,27 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
+  it("names an engine refusal of an owner's open, and opens the note once the engine accepts", async () => {
+    const frozen = new DaemonRefusalError(
+      { code: "INVALID_PARAMS", message: "owner-outbox-frozen", retry: "no" },
+      undefined,
+    );
+    for (const refusal of [frozen, new Error("open failed", { cause: frozen })]) {
+      const h = harness();
+      const sender = new FakeSender(7);
+      vi.mocked(h.capture.openYDocSession).mockRejectedValueOnce(refusal);
+      await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+        available: false,
+        engineRefusedOpen: { detail: "INVALID_PARAMS owner-outbox-frozen" },
+      });
+      await expect(
+        h.ipc.open(sender, { ...openPayload, sessionId: "try-again" }),
+      ).resolves.toMatchObject({ available: true });
+      expect(h.capture.openYDocSession).toHaveBeenCalledTimes(2);
+      await h.ipc.shutdown();
+    }
+  });
+
   it("refuses shared, unclassified, and invalid paths before opening a session", async () => {
     const sender = new FakeSender(7);
     const shared = harness();

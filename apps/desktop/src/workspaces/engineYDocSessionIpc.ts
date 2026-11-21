@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
+  DaemonRefusalError,
   isOwnerOutboxFrozenRefusal,
   isYdocArtifactAssetsInvalidRefusal,
   isYdocAuthorCapacityRefusal,
@@ -1839,8 +1840,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (isEngineWorkspaceOpenRefusedError(error) || isYDocSessionUnreleasedError(error)) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
-    return unavailableOpen();
+    const detail = engineRefusalDetail(error);
+    return detail === null ? unavailableOpen() : unavailableOpen({ engineRefusedOpen: { detail } });
   }
+}
+
+function engineRefusalDetail(error: unknown): string | null {
+  let candidate = error;
+  for (let depth = 0; depth < 4 && typeof candidate === "object" && candidate !== null; depth++) {
+    if (candidate instanceof DaemonRefusalError)
+      return `${candidate.wireCode} ${candidate.message}`.slice(0, 500);
+    candidate = (candidate as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 export const DOCUMENT_EDIT_PENDING_WARNING =

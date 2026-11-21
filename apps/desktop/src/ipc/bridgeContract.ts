@@ -8972,6 +8972,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // the file. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
+  engineRefusedOpen: z.object({ detail: z.string().min(1).max(500) }).optional(),
   // The engine committed the drawing, but its image records conflict with
   // authoritative storage. The drawing stays read-only. Retrying cannot
   // repair this terminal state.

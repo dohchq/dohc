@@ -297,6 +297,7 @@ export function DrawingView({
         <EngineMayHoldDocumentNotice
           onRetry={onRetryEngineOpen}
           contentShown={document.value !== null}
+          details={engine.openRefusalDetail}
         />
       ) : null}
       {engine.artifactAssetsInvalid ? (
