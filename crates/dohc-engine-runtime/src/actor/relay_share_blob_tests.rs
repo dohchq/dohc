@@ -214,16 +214,23 @@ struct Photo {
     bytes: Vec<u8>,
 }
 
-fn photo_versions() -> Vec<Photo> {
-    (0..PHOTO_VERSIONS)
-        .map(|index| {
-            let bytes = vec![u8::try_from(index).unwrap(); PHOTO_BYTES];
+fn photos_of(sizes: impl IntoIterator<Item = usize>) -> Vec<Photo> {
+    sizes
+        .into_iter()
+        .enumerate()
+        .map(|(index, size)| {
+            let bytes = vec![u8::try_from(index).unwrap(); size];
             Photo {
                 sha256: hex_sha256(&bytes),
                 bytes,
             }
         })
         .collect()
+}
+
+fn a_photo_over_the_ceiling_then_a_small_one_then_large_ones() -> Vec<Photo> {
+    let (_, ceiling) = dohc_engine_sync::blob_ceiling(dohc_engine_sync::BlobKind::Binary);
+    photos_of([ceiling + 1, 1024].into_iter().chain([PHOTO_BYTES; 6]))
 }
 
 fn photo_log_page(photos: &[Photo]) -> String {
@@ -248,7 +255,7 @@ fn photo_log_page(photos: &[Photo]) -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({ "ops": ops, "nextCursor": PHOTO_VERSIONS, "hasMore": false }).to_string()
+    serde_json::json!({ "ops": ops, "nextCursor": photos.len(), "hasMore": false }).to_string()
 }
 
 #[derive(Default)]
@@ -258,6 +265,7 @@ struct SlowLink {
     spent: bool,
     writers: u64,
     writers_waiting: VecDeque<u64>,
+    photos_asked_for: Vec<usize>,
 }
 
 struct SlowLinkRelay {
@@ -316,15 +324,17 @@ fn serve_over_slow_link(
 ) {
     while let Some(path) = read_request_path(&mut stream) {
         let photo = path.split_once("/blobs/").map(|(_, sha256)| {
-            photos
+            let asked = photos
                 .iter()
-                .find(|photo| photo.sha256 == sha256)
-                .expect("a version of the shared photo")
+                .position(|photo| photo.sha256 == sha256)
+                .expect("a version of the shared photo");
+            link.0.lock().unwrap().photos_asked_for.push(asked);
+            &photos[asked]
         });
         let page = if path.contains("since=0&") {
             photo_log_page(photos)
         } else {
-            serde_json::json!({ "ops": [], "nextCursor": PHOTO_VERSIONS, "hasMore": false })
+            serde_json::json!({ "ops": [], "nextCursor": photos.len(), "hasMore": false })
                 .to_string()
         };
         let length = photo.map_or(page.len(), |photo| photo.bytes.len());
@@ -343,12 +353,12 @@ fn serve_over_slow_link(
 }
 
 impl SlowLinkRelay {
-    fn start() -> (Self, tokio::sync::mpsc::UnboundedReceiver<()>) {
+    fn start(photos: Vec<Photo>) -> (Self, tokio::sync::mpsc::UnboundedReceiver<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let link = Arc::new((Mutex::new(SlowLink::default()), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let photos = Arc::new(photo_versions());
+        let photos = Arc::new(photos);
         let (spent, link_spent) = tokio::sync::mpsc::unbounded_channel();
         let (accept_link, accept_stop) = (Arc::clone(&link), Arc::clone(&stop));
         let accept_photos = Arc::clone(&photos);
@@ -389,6 +399,52 @@ impl SlowLinkRelay {
         state.spent = false;
         state.writers_waiting.clear();
         wake.notify_all();
+    }
+
+    fn times_asked_for(&self, photo: usize) -> usize {
+        let asked = &self.link.0.lock().unwrap().photos_asked_for;
+        asked.iter().filter(|asked| **asked == photo).count()
+    }
+
+    async fn pull_until_the_link_is_spent(
+        &self,
+        actor: &ActorHandle,
+        link_spent: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+        bytes: usize,
+    ) -> Vec<bool> {
+        self.start_attempt(bytes);
+        while link_spent.try_recv().is_ok() {}
+        let deadline = CancellationToken::new();
+        let pull = actor.relay(
+            RelayConfiguration {
+                base_url: format!("http://{}", self.address),
+                socket_path: None,
+                bearer_token: "token".to_owned(),
+                allow_insecure_loopback_for_tests: true,
+            },
+            pull_the_share(),
+            LeaseRegistry::default(),
+            deadline.clone(),
+            None,
+        );
+        tokio::pin!(pull);
+        let _ = tokio::select! {
+            pulled = &mut pull => pulled,
+            _ = link_spent.recv() => {
+                deadline.cancel();
+                pull.await
+            }
+        };
+        let photos = Arc::clone(&self.photos);
+        actor
+            .run(move |store, _| {
+                Ok(photos
+                    .iter()
+                    .map(|photo| store.has_binary_blob(&photo.sha256).unwrap())
+                    .collect())
+            })
+            .await
+            .unwrap()
     }
 
     fn finish(mut self) {
@@ -496,51 +552,19 @@ async fn a_share_pull_downloads_each_batch_of_a_notes_saved_versions_together() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_share_pull_over_a_slow_link_applies_large_files_on_every_attempt() {
-    let (relay, mut link_spent) = SlowLinkRelay::start();
+    let (relay, mut link_spent) = SlowLinkRelay::start(photos_of([PHOTO_BYTES; PHOTO_VERSIONS]));
     let (_scratch, path) = receiving_workspace();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1_100).unwrap().actor;
-    let photos = relay
-        .photos
-        .iter()
-        .map(|photo| photo.sha256.clone())
-        .collect::<Vec<_>>();
     let mut applied_after_each_attempt = Vec::new();
 
     while applied_after_each_attempt.last() != Some(&PHOTO_VERSIONS) {
-        relay.start_attempt(SLOW_LINK_BYTES_PER_ATTEMPT);
-        while link_spent.try_recv().is_ok() {}
-        let deadline = CancellationToken::new();
-        let pull = actor.relay(
-            RelayConfiguration {
-                base_url: format!("http://{}", relay.address),
-                socket_path: None,
-                bearer_token: "token".to_owned(),
-                allow_insecure_loopback_for_tests: true,
-            },
-            pull_the_share(),
-            LeaseRegistry::default(),
-            deadline.clone(),
-            None,
-        );
-        tokio::pin!(pull);
-        let _ = tokio::select! {
-            pulled = &mut pull => pulled,
-            _ = link_spent.recv() => {
-                deadline.cancel();
-                pull.await
-            }
-        };
-        let stored = photos.clone();
-        let applied = actor
-            .run(move |store, _| {
-                Ok(stored
-                    .iter()
-                    .filter(|photo| store.has_binary_blob(photo).unwrap())
-                    .count())
-            })
+        let applied = relay
+            .pull_until_the_link_is_spent(&actor, &mut link_spent, SLOW_LINK_BYTES_PER_ATTEMPT)
             .await
-            .unwrap();
+            .into_iter()
+            .filter(|stored| *stored)
+            .count();
         assert!(
             applied > applied_after_each_attempt.last().copied().unwrap_or(0),
             "an attempt applied nothing: {applied} applied after {applied_after_each_attempt:?}"
@@ -555,6 +579,72 @@ async fn a_share_pull_over_a_slow_link_applies_large_files_on_every_attempt() {
             "applied_after_each_attempt": applied_after_each_attempt,
         })
     );
+    drop(actor);
+    supervisor.close(&path).unwrap();
+    relay.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_blob_does_not_keep_a_slow_pull_from_the_file_after_it() {
+    let (relay, mut link_spent) =
+        SlowLinkRelay::start(a_photo_over_the_ceiling_then_a_small_one_then_large_ones());
+    let (_scratch, path) = receiving_workspace();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1_100).unwrap().actor;
+
+    let stored = relay
+        .pull_until_the_link_is_spent(&actor, &mut link_spent, 11 * 1024 * 1024)
+        .await;
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "refused_blob": "slow link, 11 MiB in the attempt",
+            "times_the_refused_blob_was_asked_for": relay.times_asked_for(0),
+            "files_applied": stored.iter().filter(|stored| **stored).count(),
+        })
+    );
+    assert!(!stored[0], "a blob over its ceiling was stored");
+    assert!(
+        stored[1],
+        "the small file after the refused blob was not applied"
+    );
+    assert_eq!(
+        relay.times_asked_for(0),
+        1,
+        "the refused blob was downloaded again in the same pull"
+    );
+    drop(actor);
+    supervisor.close(&path).unwrap();
+    relay.finish();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_downloads_a_refused_blob_once() {
+    let (relay, mut link_spent) =
+        SlowLinkRelay::start(a_photo_over_the_ceiling_then_a_small_one_then_large_ones());
+    let (_scratch, path) = receiving_workspace();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1_100).unwrap().actor;
+
+    let stored = relay
+        .pull_until_the_link_is_spent(&actor, &mut link_spent, usize::MAX)
+        .await;
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "refused_blob": "whole pull, link never spent",
+            "times_the_refused_blob_was_asked_for": relay.times_asked_for(0),
+            "files_applied": stored.iter().filter(|stored| **stored).count(),
+        })
+    );
+    assert_eq!(
+        stored,
+        [false, true, true, true, true, true, true, true],
+        "every file but the refused one is applied"
+    );
+    assert_eq!(relay.times_asked_for(0), 1);
     drop(actor);
     supervisor.close(&path).unwrap();
     relay.finish();

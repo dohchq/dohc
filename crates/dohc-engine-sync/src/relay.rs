@@ -839,7 +839,14 @@ pub struct RelaySyncClient<T> {
 pub struct PullContinuation(
     std::sync::Arc<std::sync::Mutex<Option<SuspendedPull>>>,
     std::sync::Arc<std::sync::Mutex<Option<FetchPullToken>>>,
+    std::sync::Arc<std::sync::Mutex<SharePageBlobRefusals>>,
 );
+
+#[derive(Default)]
+struct SharePageBlobRefusals {
+    page: Option<(String, i64)>,
+    refused: BTreeMap<(String, &'static str), RelayError>,
+}
 
 struct FetchPullToken {
     identity: crate::SyncIdentity,
@@ -1128,6 +1135,25 @@ impl PullContinuation {
             fetched,
             progress,
         });
+    }
+
+    fn share_page_blob_refusals(
+        &self,
+        share_id: &str,
+        page_cursor: i64,
+    ) -> std::sync::MutexGuard<'_, SharePageBlobRefusals> {
+        let mut refusals = self
+            .2
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let page = (share_id.to_owned(), page_cursor);
+        if refusals.page.as_ref() != Some(&page) {
+            *refusals = SharePageBlobRefusals {
+                page: Some(page),
+                refused: BTreeMap::new(),
+            };
+        }
+        refusals
     }
 }
 
@@ -5168,7 +5194,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut refusals = Vec::new();
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
-        let mut blob_refusals = BTreeMap::<(String, &'static str), RelayError>::new();
+        let mut page_blob_refusals = self
+            .continuation
+            .share_page_blob_refusals(share_id, page_cursor);
         // The coordinate before the envelope is built: a malformed op the
         // engine will not apply still commits the cursor past itself, and
         // when its origin coordinate is usable there is an identity to
@@ -5275,7 +5303,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped: &mut skipped,
                 refusals: &mut refusals,
                 changed: &mut changed,
-                blob_refusals: &mut blob_refusals,
+                blob_refusals: &mut page_blob_refusals.refused,
                 blobs: &mut blobs,
             };
             // Replay refusals are recorded inside, one per refused blob, by
