@@ -632,7 +632,7 @@ export function bindStoppedNoteClient(
   const blob = storage.db
     .prepare("SELECT content FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
     .get(workspaceId, update);
-  if (seed === null || !blob) return;
+  if (!blob) return;
   let clients: number[];
   try {
     clients = [...Y.parseUpdateMeta(new Uint8Array(blob.content as Uint8Array)).from.keys()];

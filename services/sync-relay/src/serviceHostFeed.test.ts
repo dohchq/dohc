@@ -950,6 +950,7 @@ const ownerAuthor = [{ kind: "human", humanId: "owner-1", humanName: "Owner" }] 
 const agentAuthor = { kind: "agent", agentId: "agent-1", agentName: "Agent" } as const;
 const ownerEdit = {
   retire: true,
+  ydocStart: false,
   account: true,
   clients: [42],
   base: false,
@@ -964,6 +965,12 @@ it.each([
   { name: "the owner's whole note rather than an edit", ...ownerEdit, base: true, takes: false },
   { name: "an agent working for the owner", ...ownerEdit, agent: true, takes: false },
   { name: "a push that fills the workspace", ...ownerEdit, full: true, takes: false },
+  {
+    name: "a note whose history starts at a Y.Doc row",
+    ...ownerEdit,
+    ydocStart: true,
+    takes: true,
+  },
 ] as const)(
   "lets the owner's room edit build on the owner's own edit from a Stop: $name",
   async (input) => {
@@ -978,6 +985,8 @@ it.each([
       nowMs: 20,
       guard() {},
     });
+    if (input.ydocStart)
+      f.raw.prepare("UPDATE sync_relay_live_documents SET baseline_moment_relay_seq=999999").run();
     const doc = new Yjs.Doc();
     const authors = [...ownerAuthor, ...(input.agent ? [agentAuthor] : [])];
     const edit = (originSeq: number, change: () => void) => {
