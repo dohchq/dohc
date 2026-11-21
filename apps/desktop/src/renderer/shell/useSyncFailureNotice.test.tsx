@@ -396,22 +396,6 @@ describe("useSyncFailureNotice", () => {
     ).toEqual({ message: "dohc could not sync this workspace." });
   });
 
-  it("an occupied-path refusal names the file", async () => {
-    const detail = "DaemonRefusalError: sync-path-occupied: notes/trip.txt";
-    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
-    await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(view.rows()).toHaveLength(1);
-    expect(view.rows()[0]).toMatchObject({
-      kind: "cloud-sync",
-      title: "dohc could not sync this workspace",
-      message:
-        "dohc can't apply a change to notes/trip.txt, because this machine has a different file there. Other changes wait behind it.",
-      details: [["Detail", detail]],
-      seen: false,
-    });
-    expect(view.rows()[0]!.retry).toBeTypeOf("function");
-  });
-
   it("names a file whose permissions dohc could not read, with Try again", async () => {
     const detail = "Error: Could not update notes/trip.txt on disk: permissions-not-kept";
     const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });

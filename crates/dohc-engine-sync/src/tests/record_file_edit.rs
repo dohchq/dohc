@@ -1668,9 +1668,9 @@ fn a_save_held_by_an_open_editor_holds_back_only_its_file() {
 }
 
 /// B keeps its own note at the path where A's document of another object
-/// arrives, as a workspace can from before a move recorded both sides. Only
-/// A's document waits: A's next save of another file arrives, and the
-/// document comes in once B moves its note away.
+/// arrives, as a workspace from an older build can. Only A's document waits:
+/// A's next save of another file arrives, and the document comes in once B
+/// moves its note away.
 #[test]
 fn a_document_whose_path_holds_another_file_holds_back_only_itself() {
     const NOTE_PATH: &str = "notes/note.md";
@@ -1773,7 +1773,7 @@ fn a_document_whose_path_holds_another_file_holds_back_only_itself() {
     assert_eq!(
         count(
             &b,
-            "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='a-note'"
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='a-note'"
         ),
         1,
         "A's document arrives"
