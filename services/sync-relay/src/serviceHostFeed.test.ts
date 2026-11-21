@@ -894,6 +894,53 @@ it.each([
   ).toBe(input.stored.sha256);
 });
 
+const resumed = blob("save after resume");
+it.each([
+  { name: "the host that resumed from it", source: owner, host: true, stored: resumed },
+  { name: "a host that resumed from another file", source: last, host: true, stored: owner },
+  { name: "a push that is not the host's", source: owner, host: false, stored: owner },
+] as const)(
+  "lets a save from its host's last one replace the owner's save: $name",
+  async (input) => {
+    const f = await fixture();
+    retainServiceActivation(f.raw, namespace, true);
+    f.raw
+      .prepare(
+        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?)",
+      )
+      .run(input.source.sha256);
+    for (const content of [last, owner, resumed])
+      f.storage.putBlob({ workspaceId: ws, ...content, createdAtMs: 1 });
+    const save = (originId: string, originSeq: number, before: Blob, after: Blob) =>
+      f.storage.appendLogBatch({
+        workspaceId: ws,
+        originId,
+        ops: [
+          parseLogOp({
+            originSeq,
+            opKind: "moment.append",
+            recordedAtMs: 4,
+            payload: write(binding.objectId, "docs/a.md", after, {
+              momentId: `moment-${originId}-${originSeq}`,
+              beforePresent: true,
+              payloadBeforePath: "docs/a.md",
+              payloadBeforeBlobSha256: before.sha256,
+            }),
+          }),
+        ],
+      });
+    save(HOST_ORIGIN, 0, A, last);
+    save("owner-laptop", 0, last, owner);
+    if (input.host) save(HOST_ORIGIN, 1, last, resumed);
+    else save("other-laptop", 0, last, resumed);
+    expect(
+      f.raw
+        .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+        .get(ws, "docs/a.md")!.blob_sha256,
+    ).toBe(input.stored.sha256);
+  },
+);
+
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
   const replacement = blob("replacement");

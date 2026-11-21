@@ -507,22 +507,28 @@ export function readServiceHostEnrollmentByObjectId(
     .get(parseWorkspaceId(workspaceId), parseLiveUpdateIdentifier(objectId, "object ID"));
   return value ? row(value) : null;
 }
+function savedFile(payloadJson: string) {
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256;
+  return typeof objectId === "string" && typeof path === "string" && typeof before === "string"
+    ? { objectId, path, before }
+    : null;
+}
 export function isOwnerSaveOfStoppedNote(
   storage: StorageContext,
   input: { workspaceId: string; userId: string; payloadJson: string },
 ): boolean {
   const { workspaceId, userId } = input;
-  let save: Record<string, unknown> | null;
-  try {
-    save = asRecord(JSON.parse(input.payloadJson));
-  } catch {
-    return false;
-  }
-  const objectId = save?.objectId,
-    path = save?.path,
-    before = save?.payloadBeforeBlobSha256;
-  if (typeof objectId !== "string" || typeof path !== "string" || typeof before !== "string")
-    return false;
+  const save = savedFile(input.payloadJson);
+  if (!save) return false;
+  const { objectId, path, before } = save;
   const enrollment = storage.db
     .prepare(
       `SELECT path FROM ${SERVICE_HOST_ENROLLMENTS}
@@ -545,6 +551,40 @@ export function isOwnerSaveOfStoppedNote(
     typeof stored?.origin_id === "string" &&
     stored.origin_id.startsWith(SERVICE_HOST_ORIGIN_PREFIX) &&
     stored.before === before
+  );
+}
+export function isResumedHostSave(
+  storage: StorageContext,
+  input: { workspaceId: string; originId: string; payloadJson: string },
+): boolean {
+  const { workspaceId } = input;
+  const save = input.originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX)
+    ? savedFile(input.payloadJson)
+    : null;
+  if (
+    !save ||
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path: save.path }) !==
+      save.objectId
+  )
+    return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT f.blob_sha256,l.origin_id FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(workspaceId, save.path);
+  const source = storage.db
+    .prepare(
+      `SELECT json_extract(source_json,'$.currentPath') AS path,json_extract(source_json,'$.sourceDigest') AS digest
+        FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
+        AND retire_requested_at_ms IS NULL AND retired_at_ms IS NULL`,
+    )
+    .get(workspaceId, save.objectId);
+  return (
+    typeof stored?.origin_id === "string" &&
+    !stored.origin_id.startsWith(SERVICE_HOST_ORIGIN_PREFIX) &&
+    source?.path === save.path &&
+    source.digest === stored.blob_sha256
   );
 }
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
