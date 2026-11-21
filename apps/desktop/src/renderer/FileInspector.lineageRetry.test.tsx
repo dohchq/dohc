@@ -68,20 +68,14 @@ const surface = (activeWorkspace: string) => (
   </Shell>
 );
 
-function refuseDraftStorage() {
-  return vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-  });
-}
-
 async function failReplacement() {
   await screen.findByTestId("markdown-source-toggle");
   harness.emit("settling", 0);
-  const setItem = refuseDraftStorage();
+  harness.drafts.fail(new Error("No space left on device"));
   harness.emitLineageReplacement("winner");
   const retry = await screen.findByTestId("markdown-save-state-action");
   expect(harness.acknowledgedGenerations).toEqual([]);
-  return { setItem, retry };
+  return { retry };
 }
 
 beforeEach(() => {
@@ -118,7 +112,7 @@ afterEach(async () => {
 it("keeps Try again on the frozen editor after its row is dismissed", async () => {
   const user = userEvent.setup();
   render(surface("ws-1"));
-  const { setItem } = await failReplacement();
+  await failReplacement();
   expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
     REPLACED_DOCUMENT_UNSAVED,
   );
@@ -136,7 +130,7 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   );
   expect(screen.queryByTestId("connection-notices")).toBeNull();
 
-  setItem.mockRestore();
+  harness.drafts.fail(null);
   await user.click(screen.getByTestId("markdown-save-state-action"));
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());

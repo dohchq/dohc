@@ -29,6 +29,7 @@ import { CsvView } from "../CsvView";
 import { documentVersionKey } from "../documentVersionKey";
 import { resetOrphanedDrafts } from "../orphanedDrafts";
 import { loadStoredDrafts } from "../orphanedDraftStorage";
+import { draftFilesForTests } from "../orphanedDraftFiles.testHarness";
 import {
   acquireSharedLocalDocument,
   resetSharedLocalDocumentsForTests,
@@ -218,6 +219,7 @@ describe("document save notices", () => {
     retryEngineYDocSave.mockResolvedValue("settled");
     vi.stubGlobal("dohcDesktop", {
       platform: "win32",
+      ...draftFilesForTests().calls,
       onEngineYDocSaveState: (listener: (event: EngineYDocSaveStateEvent) => void) => {
         listeners.add(listener);
         return () => listeners.delete(listener);

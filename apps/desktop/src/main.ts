@@ -41,6 +41,7 @@ import {
   appViewOperations,
   engineStoreRefusalRecovery,
   liveDraftRecoveryOperations,
+  setAsideDraftOperations,
   workLinkOperations,
   type WorkspaceActivatedMessage,
 } from "./ipc/bridgeContract";
@@ -77,6 +78,7 @@ import {
   removeWorkspaceLiveDrafts,
   workspaceDraftStore,
 } from "./workspaces/liveDraftRecovery";
+import { setAsideDraftFiles } from "./workspaces/setAsideDraftFiles";
 import {
   createPhysicalWorkspaceRemoval,
   createWorkspaceForget,
@@ -10385,6 +10387,17 @@ function registerIpcHandlers(): void {
   pressNamedForCli = buttonsIpc.pressNamed;
   clearButtonInspections = buttonsIpc.clearInspections;
   inspectNamedForCli = buttonsIpc.inspectNamed;
+
+  const setAsideDrafts = setAsideDraftFiles(join(stateDir(), "set-aside-drafts"), (change) => {
+    for (const window of BrowserWindow.getAllWindows())
+      if (desktopWindows.showsNotices(window))
+        sendIfOpen(window, CHANNELS.setAsideDraftChanged, change);
+  });
+  registerOperations(operationBoundary, setAsideDraftOperations, {
+    listSetAsideDrafts: () => setAsideDrafts.list(),
+    writeSetAsideDraft: ({ key, raw, ifCurrent }) => setAsideDrafts.write(key, raw, ifCurrent),
+    removeSetAsideDraft: ({ key, ifCurrent }) => setAsideDrafts.remove(key, ifCurrent),
+  });
 
   registerOperations(operationBoundary, liveDraftRecoveryOperations, {
     typingRecovery: async (input, { operation }) => {

@@ -7,6 +7,7 @@ import { deferred } from "../testing/deferred";
 import { documentVersionKey } from "./documentVersionKey";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "./orphanedDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 import {
   acquireSharedLocalDocument,
   resetSharedLocalDocumentsForTests,
@@ -45,7 +46,10 @@ function documentProps(workspaceId: string, path: string, body: string) {
   };
 }
 
+let disk = draftFilesForTests();
+
 beforeEach(() => {
+  disk = draftFilesForTests();
   resetOrphanedDrafts();
   resetSharedLocalDocumentsForTests();
 });
@@ -71,17 +75,13 @@ describe("useAutosavedTextDraft", () => {
         .mockReturnValueOnce(held.promise)
         .mockReturnValueOnce(later.promise);
       vi.stubGlobal("dohcDesktop", {
+        ...disk.calls,
         platform: "linux",
         writeWorkspaceText,
         onExitRound: () => () => {},
         holdQuit: async () => {},
       });
-      const refusal =
-        path === "storage-refused.txt"
-          ? vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-              throw Error("quota");
-            })
-          : null;
+      if (path === "storage-refused.txt") disk.fail(Error("quota"));
       const close = vi.spyOn(window, "close").mockImplementation(() => {
         window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
       });
@@ -127,7 +127,6 @@ describe("useAutosavedTextDraft", () => {
           held.resolve({ status: "written", contentHash: "first-saved" });
           later.resolve({ status: "written", contentHash: "newer-saved" });
         });
-        refusal?.mockRestore();
         close.mockRestore();
         vi.useRealTimers();
       }
@@ -141,7 +140,11 @@ describe("useAutosavedTextDraft", () => {
       .fn()
       .mockReturnValueOnce(held.promise)
       .mockResolvedValue({ status: "written", contentHash: "latest-saved" });
-    vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText });
+    vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
+      platform: "linux",
+      writeWorkspaceText,
+    });
     const editor = renderHook(useAutosavedTextDraft, {
       initialProps: {
         ...documentProps("workspace", "retired.txt", "before"),
@@ -188,6 +191,7 @@ describe("useAutosavedTextDraft", () => {
     const held = deferred<WriteResult>();
     const writeWorkspaceText = vi.fn(() => held.promise);
     vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
       platform: "linux",
       writeWorkspaceText,
       onExitRound: () => () => {},
@@ -216,6 +220,7 @@ describe("useAutosavedTextDraft", () => {
   it.each(["notes.txt", ".env"])("preserves a failed exit flush for %s", async (path) => {
     const writeWorkspaceText = vi.fn().mockRejectedValue(Error("write refused"));
     vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
       platform: "linux",
       writeWorkspaceText,
       onExitRound: () => () => {},
@@ -250,6 +255,7 @@ describe("useAutosavedTextDraft", () => {
     const held = deferred<WriteResult>();
     const writeWorkspaceText = vi.fn(() => held.promise);
     vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
       platform: "linux",
       writeWorkspaceText,
       onExitRound: () => () => {},
@@ -281,6 +287,7 @@ describe("useAutosavedTextDraft", () => {
       .mockImplementationOnce(() => heldWrite.promise)
       .mockResolvedValue({ status: "written", contentHash: "new-saved-hash" });
     vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
       platform: "linux",
       writeWorkspaceText,
     } satisfies Pick<DohcDesktopBridge, "platform" | "writeWorkspaceText">);
@@ -361,6 +368,7 @@ describe("useAutosavedTextDraft", () => {
       .fn<DohcDesktopBridge["writeWorkspaceText"]>()
       .mockImplementation(() => heldWrite.promise);
     vi.stubGlobal("dohcDesktop", {
+      ...disk.calls,
       platform: "linux",
       writeWorkspaceText,
     } satisfies Pick<DohcDesktopBridge, "platform" | "writeWorkspaceText">);
@@ -411,6 +419,7 @@ it("publishes saving once across repeated dirty edits and saved once after the w
   vi.useFakeTimers();
   const onSaveStateChange = vi.fn();
   vi.stubGlobal("dohcDesktop", {
+    ...disk.calls,
     writeWorkspaceText: vi.fn(async () => ({ status: "written", contentHash: "saved" })),
   });
   const editor = renderHook(useAutosavedTextDraft, {

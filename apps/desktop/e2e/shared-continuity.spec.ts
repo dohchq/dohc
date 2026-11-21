@@ -67,6 +67,7 @@ test.skip(
 );
 
 type Api = DohcDesktopBridge;
+type SetAsideDraftWindow = { dohcDesktop: Pick<Api, "listSetAsideDrafts"> };
 
 const PATH = "notes/plan.md";
 const HIDDEN = "private/hidden.md";
@@ -449,12 +450,12 @@ async function storedDrafts(
   workspaceId: string,
 ): Promise<{ id: number; text: string; refined: boolean }[]> {
   return page.evaluate(
-    ({ workspaceId, path }) => {
+    async ({ workspaceId, path }) => {
       const drafts: { id: number; text: string; refined: boolean }[] = [];
-      for (let index = 0; index < localStorage.length; index += 1) {
-        const key = localStorage.key(index);
-        if (!key?.startsWith("dohc-set-aside-drafts:")) continue;
-        const row = JSON.parse(localStorage.getItem(key) ?? "null") as {
+      for (const file of await (
+        window as unknown as SetAsideDraftWindow
+      ).dohcDesktop.listSetAsideDrafts({})) {
+        const row = JSON.parse(file.raw) as {
           id: number;
           workspaceId: string;
           path: string;
