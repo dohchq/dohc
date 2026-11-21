@@ -933,7 +933,7 @@ export function createNoticeStore(deps: {
           const target =
             NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = markdownHeld
-            ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
+            ? "Saving it would also change parts dohc can't show."
             : attributionRefused
               ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
               : bindingChanged

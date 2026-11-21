@@ -14,6 +14,7 @@ import {
 import {
   getDohcProseMirrorSchema,
   markdownToYDoc,
+  parseRichdocMarkdown,
   startsWithFrontmatter,
   yDocToMarkdown,
 } from "./import-export.js";
@@ -64,6 +65,41 @@ describe("documentEditUpdate", () => {
 
     expect(markdownOf(doc)).toBe("# Kyoto\n\nDay one: temples and tea.\n\nDay two: markets.\n");
     expect(body.toArray()).toEqual([heading, dayOne, dayTwo]);
+  });
+
+  test("keeps raw HTML, references and picture links as the file spells them", () => {
+    const sealed = [
+      "<details>\n<summary>Setup</summary>\n\nRun it.\n\n</details>",
+      "[![build](https://img.example/b.svg)](https://ci.example/run) see [the docs][docs].",
+      "[docs]: https://example.com/docs",
+    ];
+    const doc = markdownToYDoc(["Status: draft.", ...sealed].join("\n\n"));
+    edited(doc, { find: "draft", replacement: "ready" });
+    expect(markdownOf(doc)).toBe(`${["Status: ready.", ...sealed].join("\n\n")}\n`);
+    edited(doc, { find: "the docs", replacement: "the guide" });
+    expect(markdownOf(doc)).toBe(
+      `${["Status: ready.", ...sealed].join("\n\n").replace("the docs", "the guide")}\n`,
+    );
+  });
+
+  test("edits text beside a link through a definition in another block", () => {
+    const doc = markdownToYDoc("See [docs][x] for details.\n\n[x]: https://example.com");
+    edited(doc, { find: "for details", replacement: "for more" });
+    expect(markdownOf(doc)).toBe("See [docs][x] for more.\n\n[x]: https://example.com\n");
+    const emphasis = markdownToYDoc("Read *[foo*] here*.\n\n[foo*]: /guide");
+    edited(emphasis, { find: "Read", replacement: "See" });
+    expect(markdownOf(emphasis)).toBe("See *[foo*] here*.\n\n[foo*]: /guide\n");
+    const appended = markdownToYDoc("Intro.\n\n[x]: /old");
+    edited(appended, { replacement: "Read [a &copy; b][x]." });
+    expect(markdownOf(appended)).toBe("Intro.\n\n[x]: /old\n\nRead [a &copy; b][x].\n");
+    const named = "[constructor] and [__proto__] here.";
+    expect(JSON.stringify(parseRichdocMarkdown(named, "source", named))).not.toContain("rawInline");
+  });
+
+  test("reads a link as text once the same edit removes its definition", () => {
+    const doc = markdownToYDoc("[x]: /x\n\nText.");
+    edited(doc, { find: "[x]: /x\n\nText.", replacement: "Text [x]." }, closed);
+    expect(String(doc.toJSON().body)).toBe("<paragraph>Text [x].</paragraph>");
   });
 
   test("adds a section written as Markdown", () => {

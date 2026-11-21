@@ -65,7 +65,7 @@ export const documentWords = {
   lossyHeld: "dohc held a change to this note. Saving it would also change parts dohc can't show.",
   editAnyway: "Edit anyway",
   editAnywayTitle: "Edit this note anyway?",
-  editAnywayBody: "Saving rewrites the parts dohc can't show, such as raw HTML or reference links.",
+  editAnywayBody: "Saving rewrites the parts dohc can't show.",
   historyKeeps: "History keeps the original.",
   historyDoesNotTrack: "History does not track this file, so dohc can't restore the original.",
   historyUnconfirmed: "dohc could not confirm that History can restore the original.",

@@ -26,7 +26,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// The four forms the editor can't hold.
+// Two forms the editor keeps as written, and two it can't hold.
 const LOSSY = [
   "# Readme",
   "",
@@ -286,7 +286,7 @@ describe("a lossy note", () => {
     const dialog = screen.getByRole("dialog", { name: "Edit this note anyway?" });
     await waitFor(() =>
       expect(dialog.textContent).toContain(
-        "Saving rewrites the parts dohc can't show, such as raw HTML or reference links. History keeps the original.",
+        "Saving rewrites the parts dohc can't show. History keeps the original.",
       ),
     );
     expect(bridge.listEngineMoments).toHaveBeenCalledWith({

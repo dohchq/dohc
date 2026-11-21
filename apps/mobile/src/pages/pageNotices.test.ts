@@ -35,7 +35,7 @@ describe("a page's actions", () => {
 });
 
 describe("Edit anyway's message", () => {
-  const cost = "Saving rewrites the parts dohc can't show, such as raw HTML or reference links.";
+  const cost = "Saving rewrites the parts dohc can't show.";
   it("gives each History answer its own line", () => {
     expect(editAnywayMessage("kept")).toBe(`${cost} History keeps the original.`);
     expect(editAnywayMessage("untracked")).toBe(

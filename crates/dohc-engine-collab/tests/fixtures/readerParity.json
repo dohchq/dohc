@@ -950,68 +950,9 @@
         }
        },
        {
-        "x": "word_\"]?a~`code`",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "c",
-        "m": {
-         "link": {
-          "href": "x.md",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": "日本 a",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "italic": {}
-        }
-       },
-       {
-        "x": "b",
-        "m": {
-         "link": {
-          "href": "u",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": "t"
-         },
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "em",
-        "m": {
-         "italic": {}
+         "source": "*word_\"]?a~`code`[**c**](x.md)日本 a[a](https://e.example)[b](u \"t\")![alt](x.png)*em**"
         }
        },
        {
@@ -2984,35 +2925,9 @@
         }
        },
        {
-        "x": "(",
-        "m": {
-         "link": {
-          "href": "**strong**.a[![alt](x.png",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         }
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "s",
-        "m": {
-         "link": {
-          "href": "**strong**.a[![alt](x.png",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
+         "source": "[(![alt](x.png)__s__](**strong**.a[![alt](x.png)"
         }
        },
        {
@@ -4513,77 +4428,9 @@
         "x": " "
        },
        {
-        "x": "日本",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "b",
-        "m": {
-         "link": {
-          "href": "u",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": "t"
-         },
-         "italic": {}
-        }
-       },
-       {
-        "x": "c",
-        "m": {
-         "link": {
-          "href": "u",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "code": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": ".",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "code",
-        "m": {
-         "code": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": "strong",
-        "m": {
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": " \n",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "del",
-        "m": {
-         "italic": {},
-         "strike": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
+         "source": "*日本[b](u \"t\")[`c`](u).`code`**strong** \n~~del~~![p](https://e.example/p.png \"t\")*"
         }
        },
        {
@@ -8998,22 +8845,9 @@
         "x": "'()"
        },
        {
-        "x": ".](",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "日本*strong",
-        "m": {
-         "italic": {}
+         "source": "*.](![alt](x.png)日本**strong**"
         }
        }
       ]
@@ -9637,43 +9471,9 @@
         }
        },
        {
-        "x": "x_y_z.",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "x": ".**strong***a*b__s__![p](https://e.example/p.png \"t\")]é[**c**](x.md)![alt](x.png)~[",
-        "m": {
-         "bold": {},
-         "code": {}
-        }
-       },
-       {
-        "x": "c",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "x": "](u)(é日本*😀![",
-        "m": {
-         "bold": {},
-         "code": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": ",é``**!x_y_z__s",
-        "m": {
-         "bold": {}
+         "source": "__x_y_z.`.**strong***a*b__s__![p](https://e.example/p.png \"t\")]é[**c**](x.md)![alt](x.png)~[`c`](u)(é日本*😀![`![p](https://e.example/p.png \"t\"),é``**!x_y_z__s__"
         }
        },
        {
@@ -10932,30 +10732,9 @@
       "t": "paragraph",
       "c": [
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "italic": {}
-        }
-       },
-       {
-        "x": "ab**b(",
-        "m": {
-         "italic": {}
+         "source": "*![p](https://e.example/p.png \"t\")[a](https://e.example)*a*b**b(*"
         }
        },
        {
@@ -17635,11 +17414,9 @@
         "x": "~"
        },
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
+         "source": "_![p](https://e.example/p.png \"t\")_"
         }
        },
        {
@@ -29953,76 +29730,9 @@
         }
        },
        {
-        "x": "\")word",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "x": "a ",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
-        }
-       },
-       {
-        "x": "b",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {},
-         "code": {}
-        }
-       },
-       {
-        "x": " c",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
-        }
-       },
-       {
-        "x": "-b__s",
-        "m": {
-         "bold": {}
+         "source": "__\")word[a `b` c](https://e.example)![p](https://e.example/p.png \"t\")[a](https://e.example)-b__s__"
         }
        },
        {
@@ -31810,36 +31520,15 @@
         "x": "word**1."
        },
        {
-        "x": "s'",
+        "x": "s",
         "m": {
          "bold": {}
         }
        },
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
-        }
-       },
-       {
-        "x": "b *",
-        "m": {
-         "bold": {}
+         "source": "__'![p](https://e.example/p.png \"t\")[a](https://e.example)b *__"
         }
        },
        {
@@ -32876,23 +32565,9 @@
         "x": "~~"
        },
        {
-        "x": "em",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": "__s__é",
-        "m": {
-         "italic": {}
+         "source": "**em*![p](https://e.example/p.png \"t\")__s__é*"
         }
        },
        {
@@ -33854,31 +33529,9 @@
         }
        },
        {
-        "x": ".",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "x": "em",
-        "m": {
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
-        }
-       },
-       {
-        "x": "code",
-        "m": {
-         "bold": {},
-         "code": {}
+         "source": "__.*em*![p](https://e.example/p.png \"t\")`code`__"
         }
        },
        {
@@ -36641,16 +36294,9 @@
         }
        },
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "_x_y_z](](strong",
-        "m": {
-         "bold": {}
+         "source": "**![alt](x.png)_x_y_z](](**strong****"
         }
        }
       ]
@@ -41263,36 +40909,9 @@
         "x": "*"
        },
        {
-        "x": "é",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "c",
-        "m": {
-         "link": {
-          "href": "x.md",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": "``",
-        "m": {
-         "italic": {}
+         "source": "*é![alt](x.png)[**c**](x.md)``*"
         }
        }
       ]
@@ -45855,16 +45474,9 @@
         "x": "\""
        },
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "1.![",
-        "m": {
-         "italic": {}
+         "source": "*![alt](x.png)1.![*"
         }
        }
       ]
@@ -48430,35 +48042,9 @@
         "x": "a"
        },
        {
-        "x": "bé'",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "?é",
-        "m": {
-         "italic": {}
+         "source": "*bé'[a](https://e.example)![alt](x.png)?é*"
         }
        },
        {
@@ -49603,22 +49189,9 @@
         "x": "*"
        },
        {
-        "x": "日本",
-        "m": {
-         "italic": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "#",
-        "m": {
-         "italic": {}
+         "source": "*日本![alt](x.png)#*"
         }
        },
        {
@@ -56216,62 +55789,9 @@
       "t": "paragraph",
       "c": [
        {
-        "x": "b",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "x.png",
-         "alt": "alt"
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": "b",
-        "m": {
-         "bold": {}
-        }
-       },
-       {
-        "x": "del",
-        "m": {
-         "bold": {},
-         "strike": {}
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "link": {
-          "href": "https://e.example",
-          "target": "_blank",
-          "rel": "noopener noreferrer nofollow",
-          "class": null,
-          "title": null
-         },
-         "bold": {}
-        }
-       },
-       {
-        "x": "a",
-        "m": {
-         "bold": {},
-         "italic": {}
-        }
-       },
-       {
-        "x": "b**strong",
-        "m": {
-         "bold": {}
+         "source": "**b![alt](x.png)*a*b~~del~~[a](https://e.example)*a*b**strong**"
         }
        },
        {
@@ -56735,11 +56255,9 @@
         "x": " ("
        },
        {
-        "t": "image",
+        "t": "rawInline",
         "a": {
-         "src": "https://e.example/p.png",
-         "alt": "p",
-         "title": "t"
+         "source": "~~![p](https://e.example/p.png \"t\")~~"
         }
        },
        {

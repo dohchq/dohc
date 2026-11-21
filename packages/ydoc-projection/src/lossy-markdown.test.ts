@@ -21,8 +21,8 @@ vi.mock("./import-export.js", async (importOriginal) => {
 });
 
 // The 646 CommonMark 0.31.2 examples the desktop can open, each with the
-// Markdown the engine wrote for it after an edit, on main at `writtenAt`.
-// Regenerate it when the import learns a form.
+// Markdown dohc writes for it after an edit. Regenerate it when the reader or
+// the writer learns a form.
 it("flags every CommonMark example whose meaning an edit would change", () => {
   const changed = commonmark.examples.filter(
     (example) => !sameMarkdownMeaning(example.markdown, example.written),
@@ -34,25 +34,37 @@ it("flags every CommonMark example whose meaning an edit would change", () => {
     .filter((example) => !changed.includes(example) && isLossyMarkdown(example.markdown))
     .map((example) => example.example);
   expect(commonmark.examples).toHaveLength(646);
-  // 273 by marked's raw HTML. Examples 226, 241 and 645 differ only by spaces
-  // after a paragraph's last word, which CommonMark's own HTML strips.
-  expect(changed).toHaveLength(270);
+  expect(changed).toHaveLength(125);
   expect(misses).toEqual([]);
   // Example 353, `` `foo`bar` ``, differs only in a code span marked reads
   // two ways. Flagging more would open ordinary notes read-only.
   expect(extra.length).toBeLessThanOrEqual(1);
 });
 
+const lossySource = "1. Run this:\n\n       pnpm install\n\n2. Done\n";
+
 it.each([
-  ["a raw HTML block", "# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n"],
-  [
-    "a link reference definition",
-    'See [the docs][docs].\n\n[docs]: https://example.com/docs "Docs"\n',
-  ],
   ["an image with a root-relative path", "![logo](/docs/logo.png)\n"],
-  ["code indented under a list item", "1. Run this:\n\n       pnpm install\n\n2. Done\n"],
+  ["code indented under a list item", lossySource],
+  ["a comment that never closes", "<!-- draft\n\nNotes\n"],
+  ["preformatted text that never closes", "<pre>\nfoo\n"],
+  ["preformatted text closed by another tag", "<pre>\n</script>\n"],
+  ["CDATA in lower case that never closes", "<![cdata[ x\n"],
 ])("flags %s", (_, markdown) => {
   expect(isLossyMarkdown(markdown)).toBe(true);
+});
+
+it.each([
+  ["a raw HTML block", "# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n\n</details>\n"],
+  ["inline raw HTML", "Press <kbd>Ctrl</kbd>+<kbd>K</kbd>.\n"],
+  [
+    "a link through a reference and its definition",
+    'See [the docs][docs].\n\n[docs]: https://example.com/docs "Docs"\n',
+  ],
+  ["a link on a picture", "[![build](https://img.example/b.svg)](https://ci.example/run)\n"],
+])("does not flag %s, which dohc writes as the file spells it", (_, markdown) => {
+  expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown);
+  expect(isLossyMarkdown(markdown)).toBe(false);
 });
 
 it("does not flag a note dohc wrote, with or without its final newline", () => {
@@ -78,14 +90,14 @@ it("flags a note the editor cannot import", () => {
 });
 
 it("remembers a verdict by the digest it was given", () => {
-  expect(isLossyMarkdownCached("digest-a", "<details>\n\nHidden.\n</details>\n")).toBe(true);
+  expect(isLossyMarkdownCached("digest-a", lossySource)).toBe(true);
   expect(isLossyMarkdownCached("digest-a", "Plain text.\n")).toBe(true);
   expect(isLossyMarkdownCached("digest-b", "Plain text.\n")).toBe(false);
 });
 
 it("names the note and the way forward when it refuses", () => {
   expect(lossyNoteRefusal("notes/readme.md")).toBe(
-    "dohc can't change notes/readme.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
+    "dohc can't change notes/readme.md without also changing parts it can't show. Edit the file directly instead.",
   );
 });
 
@@ -104,15 +116,13 @@ function seeded(source: string): Y.Doc {
 }
 
 it("judges a live note by the file its witness records", () => {
-  expect(
-    isLossyDocument(seeded("See [the docs][docs].\n\n[docs]: https://example.com/docs\n"), null),
-  ).toBe(true);
+  expect(isLossyDocument(seeded(lossySource), null)).toBe(true);
   expect(isLossyDocument(seeded("Title\n=====\n\n* one\n"), null)).toBe(false);
   expect(isLossyDocument(seeded("# Plan\n\nText."), null)).toBe(false);
 });
 
 it("still needs consent after an edit while the head holds the unsafe source", () => {
-  const doc = seeded("<details>\n\nHidden.\n</details>\n");
+  const doc = seeded(lossySource);
   const source = doc.getMap("meta").get("dohcMarkdownSourceSha256") as string;
   expect(isLossyDocument(doc, source)).toBe(true);
   doc.getMap("frontmatter").set("status", "done");
@@ -122,7 +132,7 @@ it("still needs consent after an edit while the head holds the unsafe source", (
 });
 
 it("judges a session state as its live note", () => {
-  const lossy = seeded("<details>\n\nHidden.\n</details>\n");
+  const lossy = seeded(lossySource);
   const plain = seeded("# Plan\n\nText.");
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true);
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(plain), null)).toBe(false);
@@ -152,13 +162,25 @@ it("keeps a note editable after an update changes how dohc writes it, while its 
   expect(witnessKeepsMeaning(doc)).toBe(true);
   expect(isLossyDocument(doc, meta.get("dohcMarkdownSourceSha256") as string)).toBe(false);
   // The meaning check still holds a source today's writer would change.
-  const lossy = seeded("<details>\n\nHidden.\n</details>\n");
+  const lossy = seeded(lossySource);
   lossy.getMap("meta").set("dohcMarkdownSourceProjectionSha256", "0".repeat(64));
   expect(witnessKeepsMeaning(lossy)).toBe(false);
 });
 
+it("holds a note an older build read before dohc kept its raw HTML as the file spells it", () => {
+  const source = "* one\n\n<details>\n<summary>More</summary>\n\nHidden.\n\n</details>\n";
+  const doc = seeded(source);
+  const meta = doc.getMap("meta");
+  expect(witnessKeepsMeaning(doc)).toBe(true);
+  const older =
+    "- one\n\n&lt;details&gt;\n&lt;summary&gt;More&lt;/summary&gt;\n\nHidden.\n\n&lt;/details&gt;\n";
+  meta.set("dohcMarkdownSourceProjectionSha256", createHash("sha256").update(older).digest("hex"));
+  expect(witnessKeepsMeaning(doc)).toBe(false);
+  expect(isLossyDocument(doc, meta.get("dohcMarkdownSourceSha256") as string)).toBe(true);
+});
+
 it("checks the whole session when its witness records a lossy source", () => {
-  const lossy = seeded("<details>\n\nHidden.\n</details>\n");
+  const lossy = seeded(lossySource);
   expect(witnessKeepsMeaning(lossy)).toBe(false);
   expect(isLossyDocumentState(Y.encodeStateAsUpdate(lossy), null)).toBe(true);
   lossy.getMap("frontmatter").set("status", "done");
