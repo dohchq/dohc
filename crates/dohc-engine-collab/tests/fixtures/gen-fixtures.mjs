@@ -1377,6 +1377,10 @@ function makeReaderParity() {
     "Run `make` and see [`npm install`](https://docs.example/install).",
     "Some **bold** and a [link](https://a.example).", "[a`]`](u)", "[``a`](u)",
     "[`a](u)", "[``](u) `x](v)", "*see [`x`](u)*", "~~`gone`~~",
+    "Use `a<b> & {c}` and *em*", "`&amp;` and `&#42;` and **strong**",
+    "`{{atom:x}}` and `$x$` and `a==b++c[[d` *em*", "[`a<b`](https://e.example) *em*",
+    "*a* `x>` and `<y` *b*", "`<a` *x* `b>`", "``<a`b`` *x* ``c`>``",
+    "``a`<`` _x_ ``>`b``", "`a&b` *em* <b>tag</b>", "[a](https://e.example/?a=1&b=2) *em*",
   ];
   const texts = [
     ...curated,
