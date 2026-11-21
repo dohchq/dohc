@@ -134,7 +134,7 @@ impl PreparedTemps {
     }
 
     /// Remove the temp prepared for `job_id`, for a job that ends without it.
-    pub(super) fn discard(&self, job_id: &str) {
+    pub fn discard(&self, job_id: &str) {
         if let Some(temp) = self.temps.borrow_mut().remove(job_id) {
             remove_if_unchanged(&temp.path, temp.stamp);
         }

@@ -1386,6 +1386,7 @@ fn replay_materializations(
             if job.job_id.starts_with("version-switch-mat_")
                 && switch_projection_matches_active(store, job, false)?.is_none()
             {
+                prepared.discard(&job.job_id);
                 if scope.released_hold_paths.is_some_and(|paths| {
                     paths.contains(&dohc_engine_files::floor::path_collision_key(
                         &job.target_path,

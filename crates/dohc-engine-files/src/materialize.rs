@@ -1249,6 +1249,7 @@ fn materialize_one_inner(
     // conflict, so the person is told.
     let (staging, kept) = recover_job_displacements(store, &canonical_root, &target, job, options)?;
     if kept {
+        prepared.discard(&job.job_id);
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
