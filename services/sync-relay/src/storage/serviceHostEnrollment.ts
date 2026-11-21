@@ -547,6 +547,51 @@ export function isOwnerSaveOfStoppedNote(
     stored.before === before
   );
 }
+export function isOwnerSaveOfUnhostedNote(
+  storage: StorageContext,
+  input: { workspaceId: string; userId: string; payloadJson: string },
+): boolean {
+  const { workspaceId, userId } = input;
+  let save: Record<string, unknown> | null;
+  try {
+    save = asRecord(JSON.parse(input.payloadJson));
+  } catch {
+    return false;
+  }
+  const objectId = save?.objectId,
+    path = save?.path,
+    before = save?.payloadBeforeBlobSha256,
+    recordedAtMs = save?.recordedAtMs;
+  if (
+    typeof objectId !== "string" ||
+    typeof path !== "string" ||
+    typeof before !== "string" ||
+    typeof recordedAtMs !== "number"
+  )
+    return false;
+  const stored = storage.db
+    .prepare(
+      `SELECT f.blob_sha256,l.recorded_at_ms FROM sync_relay_current_files f JOIN sync_relay_log l ON l.relay_seq=f.state_relay_seq
+        WHERE f.workspace_id=? AND f.version_id='main' AND f.path=?`,
+    )
+    .get(workspaceId, path);
+  if (
+    typeof stored?.recorded_at_ms !== "number" ||
+    stored.blob_sha256 === before ||
+    recordedAtMs <= stored.recorded_at_ms
+  )
+    return false;
+  return (
+    storage.workspaceIsOwnedBy(workspaceId, userId) &&
+    storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId &&
+    storage.db
+      .prepare(
+        `SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS}
+          WHERE workspace_id=? AND object_id=? AND (retired=0 OR owner_stop IS NOT NULL)`,
+      )
+      .get(workspaceId, objectId) === undefined
+  );
+}
 /** A document retired because no Edit grant covered it is hosted again by the next Edit share that covers it. */
 const reclaimable = (enrollment: ServiceHostEnrollment) =>
   enrollment.retired && enrollment.ownerStop === null;

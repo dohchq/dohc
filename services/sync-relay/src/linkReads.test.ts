@@ -140,6 +140,36 @@ it.each(["view"] as const)(
     }
   },
 );
+it("shows the owner's latest save of a note that is not live, even when two computers saved from the same file", async () => {
+  const storage = await newStorage();
+  const h = handler(storage);
+  const link = await seed(h, "view");
+  const shown = async () => {
+    const current = await json(await h(linkRequest(link.capability, "/sync/link/current")));
+    return (current.files as { blobSha256: string }[]).map((file) => file.blobSha256);
+  };
+  const save = async (originId: string, text: string, recordedAtMs: number) => {
+    const sha = await putBlob(h, text);
+    await appendMoments(
+      h,
+      [
+        moment(originId === "origin-a" ? 3 : 0, "docs/shared.md", text, recordedAtMs, {
+          objectId: "object-shared",
+          beforePath: "docs/shared.md",
+          beforeContent: "# shared\n",
+        }),
+      ],
+      { originId },
+    );
+    return sha;
+  };
+  const first = await save("origin-a", "first computer\n", 2_000);
+  expect(await shown()).toEqual([first]);
+  const second = await save("origin-b", "second computer\n", 2_001);
+  expect(await shown()).toEqual([second]);
+  await save("origin-c", "saved offline earlier\n", 1_500);
+  expect(await shown()).toEqual([second]);
+});
 it("serves one link-grant identity to browser and agent holders, separated from other grants and named users", async () => {
   const storage = await newStorage(),
     h = handler(storage);
@@ -554,7 +584,7 @@ describe("relay capability reads", () => {
         beforePath: "docs/shared.md",
         beforeContent: "# shared\n",
       }),
-      moment(4, "docs/shared.md", staleContent, 1_400, {
+      moment(4, "docs/shared.md", staleContent, 1_250, {
         objectId: "object-shared",
         beforePath: "docs/shared.md",
         beforeContent: "# shared\n",

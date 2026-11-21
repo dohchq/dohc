@@ -37,7 +37,7 @@ import {
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
 import { recordPushDeliveries } from "./pushDeliveries";
-import { isOwnerSaveOfStoppedNote } from "./serviceHostEnrollment";
+import { isOwnerSaveOfStoppedNote, isOwnerSaveOfUnhostedNote } from "./serviceHostEnrollment";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -354,14 +354,14 @@ export function appendLogBatchInTransaction(
         op.payloadJson,
         Number(result.lastInsertRowid),
       );
-    const ownerSaveOfStoppedNote =
-      owner !== undefined &&
-      op.opKind === "moment.append" &&
-      isOwnerSaveOfStoppedNote(storage, {
-        workspaceId: input.workspaceId,
-        userId: owner,
-        payloadJson: op.payloadJson,
-      });
+    const ownerSave =
+      owner === undefined || op.opKind !== "moment.append"
+        ? undefined
+        : { workspaceId: input.workspaceId, userId: owner, payloadJson: op.payloadJson };
+    const ownerSaveReplacesStoredFile =
+      ownerSave !== undefined &&
+      (isOwnerSaveOfStoppedNote(storage, ownerSave) ||
+        isOwnerSaveOfUnhostedNote(storage, ownerSave));
     if (op.opKind === "moment.append") {
       const resolved = objectPathFromMomentPayload(op.payloadJson);
       if (resolved) {
@@ -427,7 +427,7 @@ export function appendLogBatchInTransaction(
       op.opKind,
       op.payloadJson,
       Number(result.lastInsertRowid),
-      ownerSaveOfStoppedNote,
+      ownerSaveReplacesStoredFile,
     );
   }
   for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
