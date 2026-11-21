@@ -1004,8 +1004,6 @@ fn publish_pushed_ops(relay: &FakeRelay, workspace_id: &str, source: &ScratchDir
     }
 }
 
-// Ordinary editor settlements do not export a companion moment through this
-// uncaptured harness. Use the production exporter to exercise that wire pair.
 async fn pull_materialize_and_commit(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,

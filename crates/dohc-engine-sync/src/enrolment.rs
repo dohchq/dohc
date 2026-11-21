@@ -651,7 +651,7 @@ pub(crate) const LAST_FILE_EXPORT_SQL: &str = concat!("SELECT r.payload_json,m.m
          WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
            AND json_extract(r.payload_json,'$.versionId')=+?2
            AND json_extract(r.payload_json,'$.objectId')=+?3
-           AND (r.imported=0 OR (COALESCE(m.sync_record_only,0)=0 AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+           AND (r.imported=0 OR ((COALESCE(m.sync_record_only,0)=0 OR m.moment_id GLOB 'moment-ydoc-*') AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
              WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
          AND ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1");
 

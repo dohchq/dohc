@@ -3089,6 +3089,7 @@ fn open_divergent_result_review(
                    AND metadata_origin='sync' AND target_version_id=?2 AND current_object_id=?3 \
                    AND current_latest_moment_id=?4 AND incoming_object_id=?3 \
                    AND incoming_latest_moment_id=?5 AND incoming_blob_sha256=?6 \
+                   AND source_version_id=?10 AND path=?11 AND current_path=?11 AND incoming_path=?12 \
                    ORDER BY created_at_ms,conflict_id LIMIT 1) AND workspace_id=?1 \
                  RETURNING conflict_id",
                 params![
@@ -3101,6 +3102,9 @@ fn open_divergent_result_review(
                     result.latest_moment_id,
                     result.updated_at_ms,
                     payload.effect_context.recorded_at_ms,
+                    payload.source_version_id,
+                    payload.paths[live.path_ref()],
+                    payload.paths[payload.result.path_ref()],
                 ],
                 |row| row.get(0),
             )
