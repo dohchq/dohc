@@ -285,6 +285,7 @@
     "desktop:report-renderer-error",
     "desktop:request-access-refresh",
     "desktop:request-dm-again",
+    "desktop:resend-relay-share-invitation",
     "desktop:reset-automation-holds",
     "desktop:reset-user-settings",
     "desktop:reset-workspace-settings",

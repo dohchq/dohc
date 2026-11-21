@@ -1196,9 +1196,10 @@ describe("registered relay share handlers", () => {
       relayShareOperations.resumeRelayShareDiscussion.channel,
       relayShareOperations.promoteRelayShareGrant.channel,
       relayShareOperations.retuneRelayShareGrant.channel,
+      relayShareOperations.resendRelayShareInvitation.channel,
       relayShareOperations.revokeRelayShareGrant.channel,
     ]);
-    expect(h.handlers.size).toBe(35);
+    expect(h.handlers.size).toBe(36);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
     }
@@ -1297,6 +1298,61 @@ describe("registered relay share handlers", () => {
     await expect(
       h.invoke(relayShareOperations.retuneRelayShareGrant.channel, { ...input, access: "owner" }),
     ).rejects.toThrow();
+  });
+
+  it("has the server email a person their invitation again, and reads the answer strictly", async () => {
+    const h = harness();
+    const input = { workspaceId, shareId: "share", grantId: "grant" };
+    const resend = () => h.invoke(relayShareOperations.resendRelayShareInvitation.channel, input);
+    const limit = { limit: 50, windowHours: 24, sent: 50 };
+
+    h.request.mockResolvedValueOnce({ ok: true, invitationEmail: "sent" });
+    await expect(resend()).resolves.toEqual({ invitationEmail: "sent" });
+    expect(h.request).toHaveBeenCalledExactlyOnceWith(
+      h.credentials,
+      "/sync/shares/share/grants/grant/invitation-email",
+      { method: "POST", body: JSON.stringify({ workspaceId: "workspace" }) },
+    );
+
+    for (const invitationEmail of ["unavailable", "recent", "failed"]) {
+      h.request.mockResolvedValueOnce({ ok: true, invitationEmail });
+      await expect(resend()).resolves.toEqual({ invitationEmail });
+    }
+    h.request.mockResolvedValueOnce({
+      ok: true,
+      invitationEmail: "limit",
+      invitationEmailLimit: limit,
+    });
+    await expect(resend()).resolves.toEqual({
+      invitationEmail: "limit",
+      invitationEmailLimit: limit,
+    });
+
+    for (const unread of [
+      { ok: true, invitationEmail: "queued" },
+      { ok: true },
+      { ok: true, invitationEmail: "limit" },
+      { ok: true, invitationEmail: "limit", invitationEmailLimit: { ...limit, sent: "many" } },
+      { ok: true, invitationEmail: "sent", invitationEmailLimit: limit },
+      { ok: true, invitationEmail: "sent", recipientUserId: "user" },
+      { invitationEmail: "sent" },
+      null,
+    ]) {
+      h.request.mockResolvedValueOnce(unread);
+      await expect(resend(), JSON.stringify(unread)).resolves.toEqual({
+        invitationEmail: "failed",
+      });
+    }
+
+    for (const refused of [
+      { ...input, recipientEmail: "person@example.test" },
+      { workspaceId, shareId: "share" },
+    ]) {
+      await expect(
+        h.invoke(relayShareOperations.resendRelayShareInvitation.channel, refused),
+      ).rejects.toThrow();
+    }
+    expect(h.request).toHaveBeenCalledTimes(13);
   });
 
   it.each([
@@ -1537,6 +1593,7 @@ const ownerInputs = {
     expectedParentGeneration: 2,
   },
   retuneRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant", access: "edit" },
+  resendRelayShareInvitation: { workspaceId, shareId: "share", grantId: "grant" },
   revokeRelayShareGrant: { workspaceId, shareId: "share", grantId: "grant" },
   saveOwnerLiveRecoveryCopy: { workspaceId, path: "notes/a.md" },
   listOwnerLiveRecoveryPackages: { workspaceId },

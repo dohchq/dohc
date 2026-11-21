@@ -57,6 +57,7 @@ export const RELAY_ROUTE_PATTERNS = {
   "share-grant-promote": "/sync/shares/:shareId/grants/:grantId/promote",
   "share-grant-retune": "/sync/shares/:shareId/grants/:grantId/retune",
   "share-grant-revoke": "/sync/shares/:shareId/grants/:grantId/revoke",
+  "share-grant-invitation-email": "/sync/shares/:shareId/grants/:grantId/invitation-email",
   "share-log": "/sync/shares/:shareId/log",
   "share-discussion": "/sync/shares/:shareId/discussion",
   "share-discussion-activity": "/sync/shares/:shareId/discussion/activity",

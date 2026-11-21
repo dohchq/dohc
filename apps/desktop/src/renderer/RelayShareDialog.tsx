@@ -13,6 +13,8 @@ import {
   PersonAccessRow,
   PersonRemovalError,
   removePersonAccess,
+  resendInvitationEntry,
+  useInvitationResend,
   useLocalPeople,
   type ChangedAccess,
   type ListedPerson,
@@ -455,6 +457,7 @@ function InvitedPersonRow(props: {
   });
   const [copiedLast, setCopiedLast] = useState<InvitationPart>("invitation");
   const copied = copiedLast === "code" ? codeCopy : invitationCopy;
+  const resend = useInvitationResend(workspaceId, person, "on-row");
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const shown = useRef(false);
@@ -495,15 +498,17 @@ function InvitedPersonRow(props: {
       person={person}
       detail={
         <>
-          {copied.feedback === null ? (
-            invitedByEmailWords(person.signedIn)
-          ) : (
+          {copied.feedback !== null ? (
             <span className={copied.feedback === "failed" ? "text-danger" : undefined}>
               {copied.words[copied.feedback]}
             </span>
+          ) : resend.words !== null ? (
+            <span className={resend.failed ? "text-danger" : undefined}>{resend.words}</span>
+          ) : (
+            invitedByEmailWords(person.signedIn)
           )}
           <span role="status" aria-live="polite" className="sr-only">
-            {copied.announcement}
+            {copied.feedback === null && resend.words !== null ? resend.words : copied.announcement}
           </span>
         </>
       }
@@ -515,9 +520,11 @@ function InvitedPersonRow(props: {
           testId: `share-copy-invitation-${person.grantId}`,
           onSelect: () => {
             setCopiedLast("invitation");
+            resend.forget();
             invitationCopy.copy();
           },
         },
+        resendInvitationEntry(resend, `share-resend-invitation-${person.grantId}`),
         ...(props.shareCodeToo
           ? [
               {
@@ -526,6 +533,7 @@ function InvitedPersonRow(props: {
                 testId: `share-copy-code-${person.grantId}`,
                 onSelect: () => {
                   setCopiedLast("code");
+                  resend.forget();
                   codeCopy.copy();
                 },
               },
