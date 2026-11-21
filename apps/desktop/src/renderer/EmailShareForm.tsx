@@ -12,44 +12,28 @@ import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton } from "./ui/controls";
 import { CopyButton } from "./ui/CopyButton";
 import { nextInvitationCopy } from "./invitationCopy";
-import { ShareAccessMenu } from "./shareAccess";
-import { INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
+import { SHARE_ACCESS_DESCRIPTIONS, ShareAccessMenu } from "./shareAccess";
+import { INVITATION_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
-const READS = "They can read only what you selected";
-const HISTORY = "They can see the full History.";
-
-// What each level gives, said where a person chooses it. Only a share of
-// files can be edited live in a browser.
 export function accessOptions(
-  target: RelayShareTarget,
+  _target: RelayShareTarget,
 ): ReadonlyArray<{ value: ShareAccess; description: string; testId: string }> {
-  const live =
-    target.kind === "paths"
-      ? " In a browser, they can change shared Markdown files live when available."
-      : "";
-  return [
-    { value: "view", description: `${READS}.`, testId: "share-access-view" },
-    {
-      value: "edit",
-      description: `${READS}, and send you changes to accept.${live} ${HISTORY}`,
-      testId: "share-access-edit",
-    },
-  ];
+  return (["view", "edit"] as const).map((value) => ({
+    value,
+    description: SHARE_ACCESS_DESCRIPTIONS[value],
+    testId: `share-access-${value}`,
+  }));
 }
 
-const SEND_IT_YOURSELF = "Copy the invitation and send it to them.";
-
-export function invitationEmailNote(
+function whyNoEmail(
   result: Pick<CreateRelayShareResult, "invitationEmail" | "invitationEmailLimit">,
 ): string {
   const limit = result.invitationEmailLimit;
-  if (result.invitationEmail === "sent") return "dohc emailed them the invitation.";
-  if (result.invitationEmail === "failed")
-    return `The email could not be sent. ${SEND_IT_YOURSELF}`;
   if (result.invitationEmail === "limit" && limit)
-    return `No email was sent: this account sent ${limit.sent} of ${limit.limit} invitation emails in the last ${limit.windowHours} hours. ${SEND_IT_YOURSELF}`;
-  return SEND_IT_YOURSELF;
+    return `No email sent: ${limit.sent} of ${limit.limit} invitation emails used in the last ${limit.windowHours} hours.`;
+  if (result.invitationEmail === "failed") return "dohc could not send the email.";
+  return "Copy the invitation and send it to them.";
 }
 
 export function EmailShareForm(props: {
@@ -99,7 +83,7 @@ export function EmailShareForm(props: {
   const share = { recipientEmail: email.trim(), access };
   const note = automations.noteFor(share);
   const invitedNote = invited ? automations.noteFor(invited.share) : null;
-  const options = useMemo(() => accessOptions(props.target), [props.target.kind]);
+  const options = accessOptions(props.target);
 
   // An edit during the automation check drops it, so Invite always acts on
   // the share on screen. Once the share is being made, the fields wait.
@@ -224,39 +208,32 @@ export function EmailShareForm(props: {
       >
         <p role="status" className="m-0 min-w-48 flex-1 text-[12px] leading-4 text-muted">
           {invited ? (
-            <>
-              Invited <span className="break-all text-ink">{invited.result.recipientEmail}</span>.{" "}
-              {invitationEmailNote(invited.result)}
-            </>
+            invited.result.invitationEmail === "sent" ? (
+              <>
+                Email invite sent to{" "}
+                <span className="break-words text-ink">{invited.result.recipientEmail}</span>.
+              </>
+            ) : (
+              <>
+                Invited{" "}
+                <span className="break-words text-ink">{invited.result.recipientEmail}</span>.{" "}
+                {whyNoEmail(invited.result)}
+              </>
+            )
           ) : null}
         </p>
         {invited ? (
-          <span className="flex shrink-0 items-center gap-2">
-            <CopyButton
-              key={invited.result.grantId}
-              label="Copy invitation"
-              copiedLabel="Invitation copied"
-              sensitive={INVITATION_SECRET}
-              testId="share-invitation-copy"
-              getText={() => {
-                nextInvitationCopy();
-                return invited.result.browserInvitationUrl ?? invited.result.shareCode;
-              }}
-            />
-            {invited.result.browserInvitationUrl !== undefined ? (
-              <CopyButton
-                key={`code:${invited.result.grantId}`}
-                label="Copy share code"
-                copiedLabel="Share code copied"
-                sensitive={SHARE_CODE_SECRET}
-                testId="share-code-copy"
-                getText={() => {
-                  nextInvitationCopy();
-                  return invited.result.shareCode;
-                }}
-              />
-            ) : null}
-          </span>
+          <CopyButton
+            key={invited.result.grantId}
+            label="Copy invitation"
+            copiedLabel="Invitation copied"
+            sensitive={INVITATION_SECRET}
+            testId="share-invitation-copy"
+            getText={() => {
+              nextInvitationCopy();
+              return invited.result.browserInvitationUrl ?? invited.result.shareCode;
+            }}
+          />
         ) : null}
       </div>
       {invitedNote?.failed ? (

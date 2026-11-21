@@ -62,4 +62,32 @@ describe("read-only reason on the text and CSV chips", () => {
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     },
   );
+
+  it("offers Open to edit above a note in a read-only copy of an Edit share, and nothing otherwise", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Plan\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    const onOpenToEdit = vi.fn();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="shared-with-me/ana/plan.md"
+        readOnly
+        onOpenToEdit={onOpenToEdit}
+      />,
+    );
+
+    const notice = await screen.findByTestId("edit-copy-notice");
+    expect(notice.textContent).toBe("This copy is read-only.Open to edit");
+    await user.click(screen.getByRole("button", { name: "Open to edit" }));
+    expect(onOpenToEdit).toHaveBeenCalledOnce();
+
+    view.rerender(<FileInspector workspaceId="ws-1" path="shared-with-me/ben/plan.md" readOnly />);
+    await screen.findByRole("button", { name: "Edit", description: PAGE_SHARE });
+    expect(screen.queryByTestId("edit-copy-notice")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open to edit" })).toBeNull();
+  });
 });

@@ -12,6 +12,12 @@ export const SHARE_ACCESS_WORDS: Record<ShareAccess, string> = {
   edit: "Can edit",
 };
 
+export const SHARE_ACCESS_DESCRIPTIONS: Record<ShareAccess, string> = {
+  view: "Can read, but not change.",
+  comment: "Can read and comment.",
+  edit: "Can make changes and see History.",
+};
+
 const ACCESS_LEVEL =
   "flex h-7 shrink-0 items-center rounded-md px-2 text-[12px] font-medium text-muted";
 const ACCESS_TRIGGER =
@@ -33,11 +39,14 @@ export function ShareAccessMenu(props: {
 }) {
   const [open, setOpen] = useState(false);
   const actions = props.actions ?? [];
+  const described = props.options.some((option) => option.description);
   const levels: MenuEntry[] = props.options.map((option) => ({
     id: option.value,
     label: SHARE_ACCESS_WORDS[option.value],
     checked: option.value === props.access,
-    ...(option.description ? { description: option.description } : {}),
+    ...(described
+      ? { description: option.description ?? SHARE_ACCESS_DESCRIPTIONS[option.value] }
+      : {}),
     ...(option.testId ? { testId: option.testId } : {}),
     onSelect: () => props.onPick(option.value),
   }));
