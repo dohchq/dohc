@@ -144,7 +144,11 @@ describe("Open to edit", () => {
       shareId: "share-1",
     });
     expect(onOpenShare).toHaveBeenCalledExactlyOnceWith({
-      resolvedShare: { shareId: "share-1", shareCode: "dohc-share:share-1:http://localhost:1788" },
+      resolvedShare: {
+        shareId: "share-1",
+        shareCode: "dohc-share:share-1:http://localhost:1788",
+        share: expect.objectContaining({ shareId: "share-1", access: "edit" }),
+      },
       level: "edit",
       path: "docs/plan.md",
     });

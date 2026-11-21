@@ -81,7 +81,11 @@ export function useOpenShareToEdit(input: {
         return;
       }
       latest.current.onOpenShare({
-        resolvedShare: { shareId: copy.shareId, shareCode: found.share.shareCode },
+        resolvedShare: {
+          shareId: copy.shareId,
+          shareCode: found.share.shareCode,
+          share: found.share,
+        },
         level: "edit",
         path: copy.path,
       });

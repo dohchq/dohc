@@ -7522,7 +7522,8 @@ export function DesktopWorkspaceShell(props: {
     void refreshFiles()
       .catch(() => undefined)
       .then(() => {
-        if (openPath && !mounted.left) openFile(`shared-with-me/${label}/${openPath}`);
+        if (openPath && !mounted.left && mounted.files > 0)
+          openFile(`shared-with-me/${label}/${openPath}`);
       });
     setExplorerFolderExpanded("shared-with-me", true);
     setExplorerFolderExpanded(`shared-with-me/${label}`, true);
@@ -8486,9 +8487,9 @@ export function DesktopWorkspaceShell(props: {
                                   onFocused: clearSharingFocus,
                                   notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                   onShare: setShareTarget,
-                                  onOpenShare: ({ shareId, shareCode, liveEditing }) =>
+                                  onOpenShare: ({ shareId, shareCode, liveEditing, share }) =>
                                     setOpenShare({
-                                      resolvedShare: { shareId, shareCode },
+                                      resolvedShare: { shareId, shareCode, share },
                                       level: liveEditing ? "edit" : null,
                                       path: null,
                                     }),
