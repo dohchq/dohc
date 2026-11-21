@@ -289,7 +289,14 @@ fn actorless_projection_audit_requests_are_bounded_and_expire() {
 
 #[test]
 fn a_pulled_edit_over_the_owners_unsaved_edit_of_a_stopped_note_sends_the_owners_save() {
-    for (stopped, deferred) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (stopped, deferred, owner) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+        (true, false, false),
+        (true, true, false),
+    ] {
         let mut f = fixture_joined(true);
         if stopped {
             f.store
@@ -302,21 +309,23 @@ fn a_pulled_edit_over_the_owners_unsaved_edit_of_a_stopped_note_sends_the_owners
                 })
                 .unwrap();
         }
-        let doc = dohc_engine_collab::load_persisted(&f.store, &f.key)
-            .unwrap()
-            .unwrap()
-            .doc;
-        dohc_engine_collab::record_local_update(
-            &mut f.store,
-            &mut f.cache,
-            &f.key,
-            &doc.plaintext_insert(0, "owner"),
-            LocalAppend::default(),
-            &NoFaults,
-            2000,
-            |_, _, _| Ok(()),
-        )
-        .unwrap();
+        if owner {
+            let doc = dohc_engine_collab::load_persisted(&f.store, &f.key)
+                .unwrap()
+                .unwrap()
+                .doc;
+            dohc_engine_collab::record_local_update(
+                &mut f.store,
+                &mut f.cache,
+                &f.key,
+                &doc.plaintext_insert(0, "owner"),
+                LocalAppend::default(),
+                &NoFaults,
+                2000,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        }
         let update = f.doc.plaintext_insert(0, "link");
         remote(&mut f, 1, &update, deferred, false);
         if deferred {
@@ -341,8 +350,8 @@ fn a_pulled_edit_over_the_owners_unsaved_edit_of_a_stopped_note_sends_the_owners
             .unwrap();
         assert_eq!(
             sent,
-            i64::from(stopped),
-            "stopped: {stopped}, deferred: {deferred}"
+            i64::from(stopped && owner),
+            "stopped: {stopped}, deferred: {deferred}, owner: {owner}"
         );
     }
 }

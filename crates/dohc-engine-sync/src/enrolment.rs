@@ -602,27 +602,6 @@ pub fn journal_owner_save_in_tx(
     Ok(())
 }
 
-pub(crate) fn journal_owner_head_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-) -> Result<(), SyncError> {
-    if !crate::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
-        return Ok(());
-    }
-    let head: Option<String> = tx
-        .query_row(
-            "SELECT latest_moment_id FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id, key.version_id, key.object_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    match head {
-        Some(moment_id) => journal_owner_save_in_tx(tx, key, &moment_id),
-        None => Ok(()),
-    }
-}
-
 /// The cut and all candidate admissions share the actor's writer transaction.
 pub(crate) fn backfill_file_versions_in_tx(
     tx: &Transaction<'_>,

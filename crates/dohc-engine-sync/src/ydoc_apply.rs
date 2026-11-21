@@ -1790,11 +1790,12 @@ fn complete_drain_cleanup(
             crate::moment_apply::open_artifacts::clear_settled_mark_in_tx(tx, &cleanup.key)?;
         }
         if removed
-            && cleanup.projected.is_some()
+            && let Some(moment) = &cleanup.owner_save
             && dohc_engine_collab::owner_outbox::release::owner_saves_publish_in(tx, &cleanup.key)
                 .map_err(map_owner_retirement_error)?
+            && crate::workspace_journals_file_moments_in_tx(tx, &cleanup.key.workspace_id)?
         {
-            crate::enrolment::journal_owner_head_in_tx(tx, &cleanup.key)?;
+            crate::enrolment::journal_owner_save_in_tx(tx, &cleanup.key, moment)?;
         }
         // Recovery a released hold stopped did not fail.
         if let Some((key, _)) = recovery {
@@ -2015,6 +2016,7 @@ pub struct YdocDrainCleanup {
     projected: Option<(DocKey, String)>,
     /// The drain kept a row queued for released retained work.
     released_hold: bool,
+    owner_save: Option<String>,
 }
 
 impl YdocDrainCleanup {
@@ -2185,6 +2187,7 @@ fn drain_deferred_ydoc(
                 report: None,
                 projected: None,
                 released_hold: false,
+                owner_save: None,
             },
         )
     };
@@ -2312,6 +2315,7 @@ fn drain_deferred_ydoc(
     let mut unadmitted = false;
     let mut projected_lineage = None;
     let mut projected_moment = None;
+    let mut owner_save = None;
     // Rows held for released retained work while the head waits for
     // dependencies, earliest first. Each stays queued, and each row applied
     // past them brings them back to be decided against the new head.
@@ -2808,6 +2812,7 @@ fn drain_deferred_ydoc(
         Some((origin, seq)) => (origin.as_str(), *seq),
         None => ("deferred-drain", payload_recorded_at),
     };
+    let owner_edits_unsettled = store.read_with(|conn| owner_edits_unsettled_in(conn, key))?;
     if waiting.is_none()
         && let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
@@ -2830,6 +2835,9 @@ fn drain_deferred_ydoc(
                 .and_then(|marker| marker.lineage_claim_id)
                 .map(|lineage| (key.clone(), lineage));
             let moment = ydoc_apply_moment_id(key, &payload.path, drain_origin, drain_seq);
+            if owner_edits_unsettled {
+                owner_save = Some(moment.clone());
+            }
             projected_moment = Some(moment);
         }
         match projected {
@@ -2938,6 +2946,7 @@ fn drain_deferred_ydoc(
             report: None,
             projected: projected_lineage,
             released_hold: !held_rows.is_empty() || archived_held,
+            owner_save,
         },
     ))
 }
