@@ -1858,3 +1858,56 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
     }
     assert!(requests.lock().unwrap().is_empty(), "{requests:?}");
 }
+
+#[test]
+fn share_blobs_downloads_small_blobs_together_and_a_large_blob_alone() {
+    const SMALL_BLOBS: usize = 8;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let served = Arc::clone(&asked);
+    let server = FakeServer::concurrent(move |request| {
+        let blob = usize::from_str_radix(request.path().rsplit('/').next().unwrap(), 16).unwrap();
+        served.lock().unwrap().push(blob);
+        TestResponse::bytes(vec![0; if blob < SMALL_BLOBS { 1024 } else { 600 * 1024 }])
+    });
+    let transport = transport(&server);
+    let blobs = |range: std::ops::Range<usize>| {
+        range
+            .map(|blob| ShareBlobRequest {
+                share_id: "share-1".to_owned(),
+                sha256: format!("{blob:064x}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let lengths = |answered: Vec<Result<dohc_engine_sync::BlobDownloadResponse, RelayError>>| {
+        answered
+            .into_iter()
+            .map(|blob| blob.expect("share blob").bytes.len())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        lengths(transport.share_blobs(blobs(0..8)).expect("small blobs")),
+        [1024; 8]
+    );
+    assert_eq!(
+        lengths(transport.share_blobs(blobs(8..16)).expect("large blobs")),
+        [600 * 1024],
+        "two 600 KiB blobs are more than a batch downloads together"
+    );
+    assert_eq!(
+        lengths(
+            transport
+                .share_blobs(blobs(9..16))
+                .expect("the rest of the large blobs")
+        ),
+        [600 * 1024]
+    );
+
+    let mut asked = asked.lock().unwrap().clone();
+    asked.sort_unstable();
+    assert_eq!(
+        asked,
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 15],
+        "after a large blob the transport asks for one blob at a time"
+    );
+}

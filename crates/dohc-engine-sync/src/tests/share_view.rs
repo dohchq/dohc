@@ -4131,3 +4131,46 @@ fn share_view_pull_asks_once_for_a_blob_two_writes_of_one_batch_name() {
     );
     assert_eq!(note_text(&mut engine), Some(first));
 }
+
+#[test]
+fn share_view_pull_applies_what_a_batch_answered_and_asks_again_for_the_rest() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let versions = saved_note_versions()[..5].to_vec();
+    let mut relay = note_share_relay(&versions);
+    relay.view_blobs_answered_per_batch = 2;
+    let client = RelaySyncClient::new(relay);
+
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .expect("a transport that answers part of each batch still serves the whole page");
+
+    assert_eq!((outcome.fetched, outcome.applied), (5, 5));
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_batches
+            .lock()
+            .expect("share blob batches"),
+        [5, 3, 1],
+    );
+    assert_eq!(
+        *client
+            .transport()
+            .share_blob_calls
+            .lock()
+            .expect("share blob calls"),
+        versions
+            .iter()
+            .map(|version| dohc_engine_storage::hex_sha256(version))
+            .collect::<Vec<_>>(),
+        "a blob the transport answered was asked for again"
+    );
+    assert_eq!(note_text(&mut engine).as_ref(), versions.last());
+}

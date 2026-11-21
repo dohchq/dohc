@@ -3,6 +3,7 @@ use crate::WorkspaceSupervisor;
 use dohc_engine_storage::hex_sha256;
 use dohc_engine_sync::MAX_SHARE_BLOB_BATCH;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Condvar;
@@ -13,6 +14,12 @@ const NOTE_PATH: &str = "notes/note.md";
 const SAVED_VERSIONS: usize = 25;
 const ROUND_TRIP: Duration = Duration::from_millis(270);
 const TCP_AND_TLS_HANDSHAKE: Duration = Duration::from_millis(540);
+const PHOTO_PATH: &str = "notes/photo.bin";
+const PHOTO_VERSIONS: usize = 8;
+const PHOTO_BYTES: usize = 3 * 512 * 1024;
+const SLOW_LINK_BYTES_PER_ATTEMPT: usize = 9 * 1024 * 1024;
+const SLOW_LINK_CHUNK_BYTES: usize = 64 * 1024;
+const SLOW_LINK_CHUNK_TIME: Duration = Duration::from_millis(8);
 
 #[derive(Clone, Copy)]
 enum Pace {
@@ -199,35 +206,233 @@ impl ShareRelay {
     }
 }
 
+struct Photo {
+    sha256: String,
+    bytes: Vec<u8>,
+}
+
+fn photo_versions() -> Vec<Photo> {
+    (0..PHOTO_VERSIONS)
+        .map(|index| {
+            let bytes = vec![u8::try_from(index).unwrap(); PHOTO_BYTES];
+            Photo {
+                sha256: hex_sha256(&bytes),
+                bytes,
+            }
+        })
+        .collect()
+}
+
+fn photo_log_page(photos: &[Photo]) -> String {
+    let ops = photos
+        .iter()
+        .enumerate()
+        .map(|(index, photo)| {
+            serde_json::json!({
+                "relaySeq": index + 1,
+                "originId": "granter",
+                "originSeq": index,
+                "opKind": "moment.append",
+                "recordedAtMs": 1_000 + index,
+                "payload": {
+                    "versionId": "main",
+                    "operation": "write",
+                    "path": PHOTO_PATH,
+                    "payloadAfterPath": PHOTO_PATH,
+                    "payloadAfterBlobSha256": photo.sha256,
+                    "payloadAfterContentKind": "binary",
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "ops": ops, "nextCursor": PHOTO_VERSIONS, "hasMore": false }).to_string()
+}
+
+#[derive(Default)]
+struct SlowLink {
+    attempt: u64,
+    bytes_left: usize,
+    spent: bool,
+    writers: u64,
+    writers_waiting: VecDeque<u64>,
+}
+
+struct SlowLinkRelay {
+    address: SocketAddr,
+    photos: Arc<Vec<Photo>>,
+    link: Arc<(Mutex<SlowLink>, Condvar)>,
+    stop: Arc<AtomicBool>,
+    accept: Option<std::thread::JoinHandle<()>>,
+}
+
+fn send_over_slow_link(
+    stream: &mut TcpStream,
+    body: &[u8],
+    link: &(Mutex<SlowLink>, Condvar),
+    spent: &tokio::sync::mpsc::UnboundedSender<()>,
+) -> bool {
+    let (lock, wake) = link;
+    let attempt = lock.lock().unwrap().attempt;
+    for chunk in body.chunks(SLOW_LINK_CHUNK_BYTES) {
+        let mut state = lock.lock().unwrap();
+        let writer = state.writers;
+        state.writers += 1;
+        state.writers_waiting.push_back(writer);
+        loop {
+            if state.attempt != attempt {
+                return false;
+            }
+            if state.writers_waiting.front() == Some(&writer) {
+                if state.bytes_left >= chunk.len() {
+                    break;
+                }
+                if !state.spent {
+                    state.spent = true;
+                    let _ = spent.send(());
+                }
+            }
+            state = wake.wait(state).unwrap();
+        }
+        state.writers_waiting.pop_front();
+        state.bytes_left -= chunk.len();
+        std::thread::sleep(SLOW_LINK_CHUNK_TIME);
+        wake.notify_all();
+        drop(state);
+        if stream.write_all(chunk).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn serve_over_slow_link(
+    mut stream: TcpStream,
+    photos: &[Photo],
+    link: &(Mutex<SlowLink>, Condvar),
+    spent: &tokio::sync::mpsc::UnboundedSender<()>,
+) {
+    while let Some(path) = read_request_path(&mut stream) {
+        let photo = path.split_once("/blobs/").map(|(_, sha256)| {
+            photos
+                .iter()
+                .find(|photo| photo.sha256 == sha256)
+                .expect("a version of the shared photo")
+        });
+        let page = if path.contains("since=0&") {
+            photo_log_page(photos)
+        } else {
+            serde_json::json!({ "ops": [], "nextCursor": PHOTO_VERSIONS, "hasMore": false })
+                .to_string()
+        };
+        let length = photo.map_or(page.len(), |photo| photo.bytes.len());
+        let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {length}\r\n\r\n");
+        if stream.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        let sent = match photo {
+            Some(photo) => send_over_slow_link(&mut stream, &photo.bytes, link, spent),
+            None => stream.write_all(page.as_bytes()).is_ok(),
+        };
+        if !sent {
+            return;
+        }
+    }
+}
+
+impl SlowLinkRelay {
+    fn start() -> (Self, tokio::sync::mpsc::UnboundedReceiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let link = Arc::new((Mutex::new(SlowLink::default()), Condvar::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let photos = Arc::new(photo_versions());
+        let (spent, link_spent) = tokio::sync::mpsc::unbounded_channel();
+        let (accept_link, accept_stop) = (Arc::clone(&link), Arc::clone(&stop));
+        let accept_photos = Arc::clone(&photos);
+        let accept = std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().unwrap();
+                if accept_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let (link, spent) = (Arc::clone(&accept_link), spent.clone());
+                let photos = Arc::clone(&accept_photos);
+                connections.push(std::thread::spawn(move || {
+                    serve_over_slow_link(stream, &photos, &link, &spent);
+                }));
+            }
+            for connection in connections {
+                connection.join().unwrap();
+            }
+        });
+        (
+            Self {
+                address,
+                photos,
+                link,
+                stop,
+                accept: Some(accept),
+            },
+            link_spent,
+        )
+    }
+
+    fn start_attempt(&self, bytes: usize) {
+        let (lock, wake) = &*self.link;
+        let mut state = lock.lock().unwrap();
+        state.attempt += 1;
+        state.bytes_left = bytes;
+        state.spent = false;
+        state.writers_waiting.clear();
+        wake.notify_all();
+    }
+
+    fn finish(mut self) {
+        self.start_attempt(0);
+        self.stop.store(true, Ordering::SeqCst);
+        drop(TcpStream::connect(self.address).unwrap());
+        self.accept.take().unwrap().join().unwrap();
+    }
+}
+
 struct AddedNote {
     outcome: ShareViewPullOutcome,
     text: Option<String>,
     pull: Duration,
 }
 
-async fn add_the_shared_note(relay: &ShareRelay) -> AddedNote {
+fn receiving_workspace() -> (ScratchDir, std::path::PathBuf) {
     let scratch = ScratchDir::new().unwrap();
     let path = engine_db_path(&scratch).unwrap();
     let mut store = EngineStore::open(&path, 1_000).unwrap();
     dohc_engine_domain::VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .unwrap();
-    drop(store);
+    (scratch, path)
+}
+
+fn pull_the_share() -> RelayOperation {
+    RelayOperation::PullShareView {
+        workspace_id: "ws".to_owned(),
+        share_id: "share".to_owned(),
+        granted: dohc_engine_sync::ShareGrant {
+            paths: vec!["notes".to_owned()],
+            version_id: None,
+            access: dohc_engine_sync::ShareAccess::View,
+        },
+    }
+}
+
+async fn add_the_shared_note(relay: &ShareRelay) -> AddedNote {
+    let (_scratch, path) = receiving_workspace();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1_100).unwrap().actor;
     let started = Instant::now();
     let pulled = actor
         .relay(
             relay.configuration(),
-            RelayOperation::PullShareView {
-                workspace_id: "ws".to_owned(),
-                share_id: "share".to_owned(),
-                granted: dohc_engine_sync::ShareGrant {
-                    paths: vec!["notes".to_owned()],
-                    version_id: None,
-                    access: dohc_engine_sync::ShareAccess::View,
-                },
-            },
+            pull_the_share(),
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
@@ -284,6 +489,72 @@ async fn a_share_pull_downloads_each_batch_of_a_notes_saved_versions_together() 
         served.connections, MAX_SHARE_BLOB_BATCH,
         "a later batch opened new connections instead of reusing the first batch's"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_pull_over_a_slow_link_applies_large_files_on_every_attempt() {
+    let (relay, mut link_spent) = SlowLinkRelay::start();
+    let (_scratch, path) = receiving_workspace();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1_100).unwrap().actor;
+    let photos = relay
+        .photos
+        .iter()
+        .map(|photo| photo.sha256.clone())
+        .collect::<Vec<_>>();
+    let mut applied_after_each_attempt = Vec::new();
+
+    while applied_after_each_attempt.last() != Some(&PHOTO_VERSIONS) {
+        relay.start_attempt(SLOW_LINK_BYTES_PER_ATTEMPT);
+        while link_spent.try_recv().is_ok() {}
+        let deadline = CancellationToken::new();
+        let pull = actor.relay(
+            RelayConfiguration {
+                base_url: format!("http://{}", relay.address),
+                socket_path: None,
+                bearer_token: "token".to_owned(),
+                allow_insecure_loopback_for_tests: true,
+            },
+            pull_the_share(),
+            LeaseRegistry::default(),
+            deadline.clone(),
+            None,
+        );
+        tokio::pin!(pull);
+        let _ = tokio::select! {
+            pulled = &mut pull => pulled,
+            _ = link_spent.recv() => {
+                deadline.cancel();
+                pull.await
+            }
+        };
+        let stored = photos.clone();
+        let applied = actor
+            .run(move |store, _| {
+                Ok(stored
+                    .iter()
+                    .filter(|photo| store.has_binary_blob(photo).unwrap())
+                    .count())
+            })
+            .await
+            .unwrap();
+        assert!(
+            applied > applied_after_each_attempt.last().copied().unwrap_or(0),
+            "an attempt applied nothing: {applied} applied after {applied_after_each_attempt:?}"
+        );
+        applied_after_each_attempt.push(applied);
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "slow_link": "8 files of 1.5 MiB, 9 MiB per attempt",
+            "applied_after_each_attempt": applied_after_each_attempt,
+        })
+    );
+    drop(actor);
+    supervisor.close(&path).unwrap();
+    relay.finish();
 }
 
 #[test]

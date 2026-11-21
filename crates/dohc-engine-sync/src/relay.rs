@@ -752,7 +752,8 @@ pub trait RelayTransport {
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError>;
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError>;
     fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError>;
-    /// Up to `MAX_SHARE_BLOB_BATCH` of a share's blobs, answered in request
+    /// Up to `MAX_SHARE_BLOB_BATCH` of a share's blobs. Answers the first
+    /// request and as many of the next as it downloaded with it, in request
     /// order. One blob's failure is that blob's answer and fails no other.
     fn share_blobs(
         &self,
@@ -7665,9 +7666,14 @@ struct PlannedShareBlob {
     content_kind: &'static str,
 }
 
+struct FetchedShareBlob {
+    bytes: Result<Vec<u8>, RelayError>,
+    writes_still_to_read_it: usize,
+}
+
 struct ShareBlobBatches {
     planned: Vec<PlannedShareBlob>,
-    fetched: BTreeMap<String, Result<Vec<u8>, RelayError>>,
+    fetched: BTreeMap<String, FetchedShareBlob>,
 }
 
 impl ShareBlobBatches {
@@ -7714,7 +7720,8 @@ impl ShareBlobBatches {
         refused: &BTreeMap<(String, &'static str), RelayError>,
     ) -> Result<Vec<u8>, RelayError> {
         if !self.fetched.contains_key(sha256) {
-            let mut wanted = vec![sha256.to_owned()];
+            self.fetched.clear();
+            let mut wanted = vec![(sha256.to_owned(), 0_usize)];
             if let Some(index) = self
                 .planned
                 .iter()
@@ -7725,39 +7732,58 @@ impl ShareBlobBatches {
                     .iter()
                     .take(MAX_SHARE_BLOB_BATCH)
                 {
-                    if wanted.len() == MAX_SHARE_BLOB_BATCH {
-                        break;
-                    }
-                    if !wanted.contains(&blob.sha256)
-                        && !refused.contains_key(&blob_refusal_key(&blob.sha256, blob.content_kind))
-                        && !share_write_applied(store, &blob.request_id)?
+                    if refused.contains_key(&blob_refusal_key(&blob.sha256, blob.content_kind))
+                        || share_write_applied(store, &blob.request_id)?
                     {
-                        wanted.push(blob.sha256.clone());
+                        continue;
+                    }
+                    if let Some((_, writes)) =
+                        wanted.iter_mut().find(|(wanted, _)| *wanted == blob.sha256)
+                    {
+                        *writes += 1;
+                    } else if wanted.len() < MAX_SHARE_BLOB_BATCH {
+                        wanted.push((blob.sha256.clone(), 1));
                     }
                 }
             }
             let results = transport.share_blobs(
                 wanted
                     .iter()
-                    .map(|sha256| ShareBlobRequest {
+                    .map(|(sha256, _)| ShareBlobRequest {
                         share_id: share_id.to_owned(),
                         sha256: sha256.clone(),
                     })
                     .collect(),
             )?;
-            if results.len() != wanted.len() {
+            if results.is_empty() || results.len() > wanted.len() {
                 return Err(RelayError::InvalidResponse);
             }
             self.fetched = wanted
                 .into_iter()
                 .zip(results)
-                .map(|(sha256, result)| (sha256, result.map(|blob| blob.bytes)))
+                .map(|((sha256, writes_still_to_read_it), result)| {
+                    (
+                        sha256,
+                        FetchedShareBlob {
+                            bytes: result.map(|blob| blob.bytes),
+                            writes_still_to_read_it,
+                        },
+                    )
+                })
                 .collect();
         }
+        let fetched = self
+            .fetched
+            .get_mut(sha256)
+            .ok_or(RelayError::InvalidResponse)?;
+        if fetched.writes_still_to_read_it > 1 {
+            fetched.writes_still_to_read_it -= 1;
+            return fetched.bytes.clone();
+        }
         self.fetched
-            .get(sha256)
-            .cloned()
+            .remove(sha256)
             .ok_or(RelayError::InvalidResponse)?
+            .bytes
     }
 }
 
