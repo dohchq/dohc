@@ -496,6 +496,49 @@ describe("OpenSharedView defaults for a pasted code", () => {
     expect(modeHelp()).toBe("Opens as its own workspace, where you can edit.");
   });
 
+  it("asks again for a code entered again after its lookup failed, and then defaults Edit to Open separately", async () => {
+    bridgeMock.getRelayReceivedShare
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(received("edit"));
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(start.textContent).toBe("Add share"));
+    expect(modeChecked("mount")).toBe("true");
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: CODE } });
+
+    await waitFor(() => expect(modeChecked("separate")).toBe("true"));
+    expect(start.textContent).toBe("Open share");
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the choice the person made when a failed lookup is asked again", async () => {
+    bridgeMock.getRelayReceivedShare
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(received("edit"));
+    const user = userEvent.setup();
+    renderInWorkspace();
+    const input = await screen.findByTestId("open-share-code");
+    const start = screen.getByTestId<HTMLButtonElement>("open-share-start");
+    fireEvent.change(input, { target: { value: CODE } });
+    await waitFor(() => expect(start.textContent).toBe("Add share"));
+    await user.click(screen.getByTestId("open-share-mode-mount"));
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: CODE } });
+
+    await waitFor(() => expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("open-share-summary").textContent).toContain("Edit access"),
+    );
+    expect(modeChecked("mount")).toBe("true");
+    expect(start.textContent).toBe("Add share");
+    expect(start.disabled).toBe(false);
+  });
+
   it("promises no level for a code the relay does not know", async () => {
     const user = userEvent.setup();
     await paste({ found: false });

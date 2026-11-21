@@ -230,8 +230,17 @@ export function OpenSharedView(
       lookup = bridge()
         .getRelayReceivedShare({ shareId: accessShareId })
         .then((result) => ("share" in result ? result.share : null))
-        .catch(() => null);
+        .catch(() => {
+          accessLookups.current.delete(accessShareId);
+          return null;
+        });
       accessLookups.current.set(accessShareId, lookup);
+      setPastedLevels((current) => {
+        if (!current.has(accessShareId)) return current;
+        const asking = new Map(current);
+        asking.delete(accessShareId);
+        return asking;
+      });
     }
     void lookup.then((share) => {
       if (!accessRequests.isCurrent(request)) return;
