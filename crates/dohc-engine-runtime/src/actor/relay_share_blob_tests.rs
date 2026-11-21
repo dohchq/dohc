@@ -99,8 +99,11 @@ fn answer_blob(served: &(Mutex<Served>, Condvar), pace: Pace, sha256: &str) -> V
     wake.notify_all();
     match pace {
         Pace::HoldEachBlobUntilItsWholeBatchIsAsked => {
-            let batch_end =
-                ((index / MAX_SHARE_BLOB_BATCH + 1) * MAX_SHARE_BLOB_BATCH).min(SAVED_VERSIONS);
+            let batch_end = if index == 0 {
+                1
+            } else {
+                ((index / MAX_SHARE_BLOB_BATCH + 1) * MAX_SHARE_BLOB_BATCH).min(SAVED_VERSIONS)
+            };
             let (waited, timeout) = wake
                 .wait_timeout_while(state, Duration::from_secs(10), |state| {
                     !state.batch_never_overlapped && state.blob_requests < batch_end
@@ -584,39 +587,6 @@ fn share_pull_of_a_note_saved_25_times_benchmark() {
                 "most_blobs_in_flight": served.most_blobs_in_flight,
                 "connections": served.connections,
                 "pull_ms": added.pull.as_millis(),
-            })
-        );
-    }
-    for at_a_time in [1, 2, 4, 8] {
-        let relay = ShareRelay::start(pace);
-        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(
-            format!("http://{}", relay.address),
-            "token",
-        )
-        .unwrap();
-        let blob = |index: usize| ShareBlobRequest {
-            share_id: "share".to_owned(),
-            sha256: hex_sha256(&saved_version(index)),
-        };
-        transport.share_blob(blob(0)).unwrap();
-        let started = Instant::now();
-        for together in (0..SAVED_VERSIONS).collect::<Vec<_>>().chunks(at_a_time) {
-            let results = transport
-                .share_blobs(together.iter().copied().map(blob).collect())
-                .unwrap();
-            assert!(results.iter().all(Result::is_ok));
-        }
-        let elapsed_ms = started.elapsed().as_millis();
-        drop(transport);
-        let served = relay.finish();
-        println!(
-            "{}",
-            serde_json::json!({
-                "benchmark": "share_blob_downloads_at_a_time",
-                "at_a_time": at_a_time,
-                "blob_requests": served.blob_requests - 1,
-                "connections": served.connections,
-                "elapsed_ms": elapsed_ms,
             })
         );
     }

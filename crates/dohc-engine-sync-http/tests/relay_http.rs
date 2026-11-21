@@ -1860,54 +1860,65 @@ fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
 }
 
 #[test]
-fn share_blobs_downloads_small_blobs_together_and_a_large_blob_alone() {
-    const SMALL_BLOBS: usize = 8;
-    let asked = Arc::new(Mutex::new(Vec::new()));
+fn share_blobs_widens_after_small_blobs_and_narrows_after_a_large_blob_or_a_failed_call() {
+    const LARGE: std::ops::Range<usize> = 100..200;
+    const MISSING: usize = 200;
+    let asked = Arc::new(Mutex::new(0_usize));
     let served = Arc::clone(&asked);
     let server = FakeServer::concurrent(move |request| {
         let blob = usize::from_str_radix(request.path().rsplit('/').next().unwrap(), 16).unwrap();
-        served.lock().unwrap().push(blob);
-        TestResponse::bytes(vec![0; if blob < SMALL_BLOBS { 1024 } else { 600 * 1024 }])
+        *served.lock().unwrap() += 1;
+        if blob >= MISSING {
+            return TestResponse::json(404, json!({"code": "not_found"}));
+        }
+        TestResponse::bytes(vec![
+            0;
+            if LARGE.contains(&blob) {
+                1024 * 1024 + 1
+            } else {
+                1024
+            }
+        ])
     });
     let transport = transport(&server);
-    let blobs = |range: std::ops::Range<usize>| {
-        range
-            .map(|blob| ShareBlobRequest {
-                share_id: "share-1".to_owned(),
-                sha256: format!("{blob:064x}"),
-            })
-            .collect::<Vec<_>>()
-    };
-    let lengths = |answered: Vec<Result<dohc_engine_sync::BlobDownloadResponse, RelayError>>| {
-        answered
+    let answers = |blobs: std::ops::Range<usize>| {
+        transport
+            .share_blobs(
+                blobs
+                    .map(|blob| ShareBlobRequest {
+                        share_id: "share-1".to_owned(),
+                        sha256: format!("{blob:064x}"),
+                    })
+                    .collect(),
+            )
+            .expect("share blobs")
             .into_iter()
-            .map(|blob| blob.expect("share blob").bytes.len())
+            .map(|blob| blob.map(|blob| blob.bytes.len()).ok())
             .collect::<Vec<_>>()
     };
 
+    assert_eq!(answers(0..8), [Some(1024)], "a transport's first call");
+    assert_eq!(answers(1..9), [Some(1024); 8], "after a small blob");
     assert_eq!(
-        lengths(transport.share_blobs(blobs(0..8)).expect("small blobs")),
-        [1024; 8]
+        answers(100..102),
+        [Some(1024 * 1024 + 1); 2],
+        "after small blobs"
     );
     assert_eq!(
-        lengths(transport.share_blobs(blobs(8..16)).expect("large blobs")),
-        [600 * 1024],
-        "two 600 KiB blobs are more than a batch downloads together"
+        answers(102..110),
+        [Some(1024 * 1024 + 1)],
+        "after a blob over 1 MiB"
+    );
+    assert_eq!(answers(9..17), [Some(1024)], "after a blob over 1 MiB");
+    assert_eq!(answers(200..208), [None; 8], "after a small blob");
+    assert_eq!(
+        answers(10..18),
+        [Some(1024)],
+        "after a call that read no blob"
     );
     assert_eq!(
-        lengths(
-            transport
-                .share_blobs(blobs(9..16))
-                .expect("the rest of the large blobs")
-        ),
-        [600 * 1024]
-    );
-
-    let mut asked = asked.lock().unwrap().clone();
-    asked.sort_unstable();
-    assert_eq!(
-        asked,
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 15],
-        "after a large blob the transport asks for one blob at a time"
+        *asked.lock().unwrap(),
+        22,
+        "the transport asked the relay for a blob it did not answer"
     );
 }
