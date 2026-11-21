@@ -109,6 +109,7 @@ import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
 import { useAccountDeletion } from "./shell/useAccountDeletion";
+import { draftFilesForTests } from "./orphanedDraftFiles.testHarness";
 
 // The shell under the session's reaction owner and account deletion, as
 // DesktopRoot mounts it. A key on this element remounts both owners too.
@@ -346,6 +347,7 @@ function makeBaseBridge(
   const activatedCallbacks = new Set<(workspace: Workspace, file?: string) => void>();
   return {
     platform,
+    ...draftFilesForTests().calls,
     typingRecovery: vi.fn(async () => ({ failures: [] })),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);

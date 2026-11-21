@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftStorage";
+import { loadStoredDrafts } from "../orphanedDraftStorage";
 import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
@@ -306,9 +306,7 @@ function observeReplacementNotices() {
 }
 
 function refuseDraftStorage() {
-  return vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-  });
+  harness.drafts.fail(new Error("No space left on device"));
 }
 
 const storedDraftTexts = () =>
@@ -320,7 +318,7 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   const losingDoc = retained.boundDoc();
   act(() => editDocument());
   await flushLocalBatch();
-  const setItem = refuseDraftStorage();
+  refuseDraftStorage();
   harness.emitLineageReplacement("winner");
   await waitFor(() => expect(retained.snapshot.readOnlyTransition?.cause).toBe("lineage-failure"));
 
@@ -334,7 +332,7 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]));
   expect(storedDraftTexts()).toEqual([]);
 
-  setItem.mockRestore();
+  harness.drafts.fail(null);
   act(() => failure.retry!());
   await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
   expect(harness.acknowledgedGenerations).toEqual([2]);
@@ -364,13 +362,13 @@ it.each(["newest text first"])(
     act(() => editDocument());
     await flushLocalBatch();
     projectionGate.held = [];
-    const setItem = refuseDraftStorage();
+    refuseDraftStorage();
     harness.emitLineageReplacement("winner");
     await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).toBeTypeOf("function"));
     const retry = retained.snapshot.readOnlyTransition!.retry!;
     act(() => editDocument());
 
-    setItem.mockRestore();
+    harness.drafts.fail(null);
     act(() => retry());
     await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
     act(() => {
@@ -451,14 +449,9 @@ it.each([
     // The typing the replacement retired stays recoverable in this window
     // either way. Only a tracked path may reach plaintext storage.
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
-    expect(
-      Object.keys(localStorage)
-        .filter(
-          (key) =>
-            key === ORPHANED_DRAFT_STORAGE_KEY || key.startsWith(`${ORPHANED_DRAFT_STORAGE_KEY}:`),
-        )
-        .some((key) => localStorage.getItem(key)?.includes("seed!")),
-    ).toBe(stored);
+    await waitFor(() =>
+      expect(harness.drafts.rows().some((row) => row.text === "seed!")).toBe(stored),
+    );
   },
 );
 

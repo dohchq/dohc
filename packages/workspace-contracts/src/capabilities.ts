@@ -1435,6 +1435,15 @@ const LISTED_CAPABILITIES = {
   "document.typing.recovery": capability("Keep and recover typing during an outage.", {
     ipc: ["typingRecovery"],
   }),
+  "document.aside.list": capability("Read the edits this computer set aside.", {
+    ipc: ["listSetAsideDrafts"],
+  }),
+  "document.aside.write": capability("Write an edit this computer set aside to disk.", {
+    ipc: ["writeSetAsideDraft"],
+  }),
+  "document.aside.remove": capability("Remove an edit this computer set aside.", {
+    ipc: ["removeSetAsideDraft"],
+  }),
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {
     ipc: ["discardLiveDraftRecovery"],
   }),
