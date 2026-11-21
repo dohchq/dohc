@@ -403,11 +403,6 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
             return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
         }
-        // The desktop matches the code prefix and names the file. The engine
-        // still logs it as an internal refusal, and that line names no path.
-        RuntimeError::Relay(RelayError::PathOccupied { path, .. }) => {
-            return WireError::new(ErrorCode::Internal, format!("sync-path-occupied: {path}"));
-        }
         // Changes waiting on an open conflict reached their limit. The desktop
         // shows its sentences and keeps the counts after them for a report.
         RuntimeError::Relay(RelayError::Local(detail))
@@ -549,7 +544,6 @@ fn relay_refusal_word(error: &RelayError) -> std::borrow::Cow<'static, str> {
         RelayError::HttpStatus(status) => format!("relay-http-status-{status}").into(),
         RelayError::ValidationPending(_) => "relay-validation-pending".into(),
         RelayError::RepairPending => "relay-repair-pending".into(),
-        RelayError::PathOccupied { .. } => "sync-path-occupied".into(),
         RelayError::ClaimRefused(reason) => relay_refusal_word(reason),
         RelayError::Local(detail) => {
             let head = detail.split(": ").next().unwrap_or_default();
@@ -669,8 +663,7 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         | RelayError::HttpStatus(_)
         | RelayError::ValidationPending(_)
         | RelayError::Local(_)
-        | RelayError::RepairPending
-        | RelayError::PathOccupied { .. } => ErrorCode::Internal,
+        | RelayError::RepairPending => ErrorCode::Internal,
         RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }

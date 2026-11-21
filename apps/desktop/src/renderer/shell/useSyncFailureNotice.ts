@@ -7,7 +7,6 @@ type SyncFailure = NonNullable<SyncStatusResult["syncFailure"]>;
 type SyncFailureNotice = { title?: string; message: string; detail: string; toast: boolean };
 
 const COPY_FAILURE = "OutsideWriteCopyError: ";
-const PATH_OCCUPIED = "DaemonRefusalError: sync-path-occupied: ";
 // Windows: the engine refuses to replace a file whose own permissions it
 // cannot read, rather than give the new copy the folder's.
 const PERMISSIONS_NOT_KEPT = /^Error: Could not update (.+) on disk: permissions-not-kept$/;
@@ -16,7 +15,6 @@ const PERMISSIONS_NOT_KEPT = /^Error: Could not update (.+) on disk: permissions
 // not prove local writes are healthy, and each document shows its own save.
 // A copy dohc could not keep has a title, then its next step and what dohc
 // did with the file. Only a sync pass waits on the copy, so only it says so.
-// A pull that stops at a file names it; the file is on this machine.
 export function syncFailureNotice(failure: SyncFailure): { title?: string; message: string } {
   if (failure.cause === "claim-refused") return { message: failure.detail };
   const unreadPermissions = PERMISSIONS_NOT_KEPT.exec(failure.detail)?.[1];
@@ -31,13 +29,6 @@ export function syncFailureNotice(failure: SyncFailure): { title?: string; messa
       .slice(COPY_FAILURE.length)
       .split("\n");
     return { title, message: `${next}\n${left.replace(/\.$/, "")} and sync waits.` };
-  }
-  if (failure.detail.startsWith(PATH_OCCUPIED)) {
-    const path = failure.detail.slice(PATH_OCCUPIED.length);
-    return {
-      title: "dohc could not sync this workspace",
-      message: `dohc can't apply a change to ${path}, because this machine has a different file there. Other changes wait behind it.`,
-    };
   }
   const words = syncFailureWords(failure);
   return words.code === "conflict-wait-limit"
