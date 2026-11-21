@@ -11,6 +11,7 @@ import {
   ORPHANED_DRAFT_RETENTION_MS,
   remapStoredDraftPaths,
   replaceStoredDraft,
+  storedDraftSettled,
   storeDraft,
 } from "./orphanedDraftStorage";
 
@@ -130,6 +131,27 @@ it.each([
     );
   },
 );
+
+it("settles a draft once its own writes are answered, whatever other drafts wait on", async () => {
+  const answers = new Map<string, () => void>();
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    ...disk.calls,
+    writeSetAsideDraft: (input: Parameters<typeof disk.calls.writeSetAsideDraft>[0]) =>
+      new Promise<boolean>((resolve) =>
+        answers.set(JSON.parse(input.raw).text, () =>
+          resolve(disk.calls.writeSetAsideDraft(input)),
+        ),
+      ),
+  });
+  void storeDraft(draft);
+  void storeDraft({ ...draft, id: 2, text: "other" });
+  let settled = false;
+  void storedDraftSettled(draft.id).then(() => (settled = true));
+  answers.get(draft.text)!();
+  await expect.poll(() => settled).toBe(true);
+  answers.get("other")!();
+});
 
 it("reports a draft whose write failed as not kept", async () => {
   disk.fail(new Error("No space left on device"));

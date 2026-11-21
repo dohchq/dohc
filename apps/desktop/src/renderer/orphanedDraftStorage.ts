@@ -29,7 +29,7 @@ const pending = new Map<number, number>();
 const refused = new Set<number>();
 let stopHearing: (() => void) | null = null;
 let heldWhileListing: SetAsideDraftChange[] | null = null;
-const inFlight = new Set<Promise<unknown>>();
+const inFlight = new Map<Promise<unknown>, readonly number[]>();
 // Only a tracked path's draft may reach plaintext storage.
 export function persistable(path: string): boolean {
   return classifyEngineFilePathForRead(path, bridge().platform).kind === "tracked";
@@ -131,7 +131,7 @@ function send(
     notifyFiles();
     return written;
   });
-  inFlight.add(settled);
+  inFlight.set(settled, ids);
   return settled;
 }
 function removeIfCurrent(key: string | undefined, raw: string | undefined): void {
@@ -303,10 +303,13 @@ export function remapStoredDraftPaths(
   return dropped;
 }
 export async function storedDraftSettled(id: number): Promise<void> {
-  while (pending.has(id)) await Promise.all([...inFlight]);
+  while (pending.has(id))
+    await Promise.all(
+      [...inFlight].filter(([, ids]) => ids.includes(id)).map(([answer]) => answer),
+    );
 }
 export async function draftFileWritesSettled(): Promise<void> {
-  while (inFlight.size > 0) await Promise.all([...inFlight]);
+  while (inFlight.size > 0) await Promise.all(inFlight.keys());
 }
 export function clearStoredDrafts(): void {
   files.clear();
