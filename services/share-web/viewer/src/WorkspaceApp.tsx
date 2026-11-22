@@ -549,6 +549,12 @@ function useMemberFiles(
         reload = false,
         // The level or a rule changed, so the files shown carry levels the member no longer has.
         stale = false;
+      // Shows no files until the current ones load, so the page offers no control the relay now refuses.
+      const retire = () => {
+        if (stale) return;
+        stale = true;
+        setView({ status: "loading" });
+      };
       while (!signal.aborted) {
         const step = new AbortController(),
           stepSignal = AbortSignal.any([signal, step.signal]);
@@ -583,7 +589,7 @@ function useMemberFiles(
             };
             // A rule changed since the files were read, so the log's cursor may skip files that just became visible.
             // A file at a new path has no level yet. Either way the current files say.
-            stale ||= meta.reach !== files.meta.reach;
+            if (meta.reach !== files.meta.reach) retire();
             if (stale || next.files.some((file) => !files.levels.has(file.path))) {
               reload = true;
               continue;
@@ -599,7 +605,11 @@ function useMemberFiles(
             await waitForRetry(VIEW_LOG_HOLD_MS - elapsed, stepSignal).catch(() => {});
         } catch (error) {
           if (signal.aborted) return;
-          if (step.signal.aborted) continue;
+          // Try again ends a read of the current files only to start another.
+          if (step.signal.aborted) {
+            reload ||= reading;
+            continue;
+          }
           if (error instanceof VersionMismatchError) {
             setView({ status: "version-mismatch" });
             return;
@@ -608,25 +618,28 @@ function useMemberFiles(
             setView({ status: "too-large" });
             return;
           }
-          // A new epoch starts again from the current files. So does a refusal: a rule change refuses a held read
-          // as a lost membership does, and only a refused read of the current files ends the membership.
-          if (!reading && (error instanceof EpochFloorChangedError || refusedStatus(error))) {
-            reload = true;
-            continue;
-          }
           let granted: ViewMeta | undefined;
           if (reading && refusedStatus(error)) {
             const confirmed = await confirm();
             if (signal.aborted || refused(confirmed, "ended")) return;
             if (typeof confirmed === "object" && "open" in confirmed) granted = confirmed.open;
           }
-          // A refused held read may mean the level changed. The grant says, when it answers.
-          if (reading && !stale) {
+          // Any failed read may hide a level change. The grant says, when it answers.
+          if (!stale) {
             granted ??= await loadMeta(session, stepSignal).catch(() => undefined);
-            stale = granted !== undefined && granted.reach !== files.meta.reach;
+            if (signal.aborted) return;
+            if (granted !== undefined && granted.reach !== files.meta.reach) retire();
           }
-          if (signal.aborted) return;
-          // Old levels would offer controls the relay now refuses.
+          // A new epoch starts again from the current files. So do a refusal and a level change: a rule change
+          // refuses a held read as a lost membership does, and only a refused read of the current files ends the membership.
+          if (
+            !reading &&
+            (stale || error instanceof EpochFloorChangedError || refusedStatus(error))
+          ) {
+            reload = true;
+            continue;
+          }
+          // The current files could not load at the new level.
           if (stale) {
             setView({ status: "load-failed" });
             return;

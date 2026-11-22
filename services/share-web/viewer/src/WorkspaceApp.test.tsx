@@ -2185,6 +2185,48 @@ it("goes by the grant's first answer when a later read of it fails after a level
   await settle(() => text().includes("Leave at nine.") && badge() === "View only");
 });
 
+it("hides the old level's controls as soon as the grant reports a new level, before the files read again", async () => {
+  const options: { level: Level; openHeld?: boolean } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View. The fresh file list is slow to arrive.
+  options.level = "view";
+  options.openHeld = true;
+  await act(async () =>
+    following("log")[0]!.answer({ ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0 }),
+  );
+  await settle(() => held.some((item) => item.path === "current" && !item.signal.aborted));
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+  expect(text()).not.toContain("Can comment");
+});
+
+it("asks the grant when the file poll fails, and opens the new level it reports", async () => {
+  const options: { level: Level } = { level: "comment" };
+  server(options);
+  await render();
+  await opened();
+  await click("Comments");
+  await settle(() => commentBox() !== null);
+  // The owner lowered the members to View, and the poll that would have said so failed.
+  options.level = "view";
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "unavailable" }, 503));
+  await settle(() => text().includes("Leave at nine.") && badge() === "View only");
+  expect(container.querySelector('textarea[name="body"]')).toBeNull();
+});
+
+it("stops editing when the files read again at a lower level but their catch-up fails", async () => {
+  const options: { level: Level; catchUpFails?: boolean } = { level: "edit" };
+  await editing(options);
+  options.level = "view";
+  options.catchUpFails = true;
+  await act(async () => following("log")[0]!.answer({ ok: false, error: "not found" }, 404));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  expect(text()).not.toContain("membership");
+});
+
 it("keeps each file's comment draft apart when the relay lists files without their identity", async () => {
   // A development relay without a link key lists files with no object identity.
   server({
