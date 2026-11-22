@@ -851,10 +851,9 @@ function MemberWorkspace({
     );
   if (view.status === "other-account")
     return (
-      <StatePage icon="users" title="This browser is signed in as another account.">
+      <StatePage icon="users" title={`This browser is now signed in as ${view.name}.`}>
         <p>
-          It is now signed in as {view.name}. Sign in as {account.name} to keep working in{" "}
-          {lastName.current ?? "this workspace"}.
+          Sign in as {account.name} to keep working in {lastName.current ?? "this workspace"}.
         </p>
         <button
           className="handoff-button secondary"
