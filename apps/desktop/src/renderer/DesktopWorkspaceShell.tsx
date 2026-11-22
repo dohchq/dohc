@@ -8872,6 +8872,10 @@ function WorkspaceShell(props: {
                                                         key={`${tabPath}:${versionEpoch}`}
                                                         workspaceId={workspaceId}
                                                         versionId={groupTab.versionId ?? "main"}
+                                                        versions={workspaceVersions}
+                                                        disabled={
+                                                          !workspaceIsReady || workspaceStopped
+                                                        }
                                                       />
                                                     )
                                                   );

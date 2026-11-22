@@ -28,6 +28,7 @@ import {
   FileArchive,
   FileText,
   Hourglass,
+  Info,
   Layers,
   Lock,
   Merge,
@@ -816,9 +817,17 @@ export function VersionMenu(props: {
             type="button"
             data-testid="version-menu-button"
             aria-label={`Version: ${activeName}${onMain ? "" : " (not Main)"}`}
-            title={`Working in ${activeName}`}
+            title={
+              onMain
+                ? "Working in Main"
+                : `Working in ${activeName} (not Main). Agents connected through an Agent link still read files from Main.`
+            }
             disabled={busy !== null || props.disabled}
-            className="titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[13px] text-muted hover:bg-hover hover:text-ink focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
+            className={`titlebar-no-drag flex h-7 min-w-0 max-w-56 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-[13px] focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+              onMain
+                ? "border-transparent text-muted hover:bg-hover hover:text-ink"
+                : "border-line bg-panel-2 text-ink hover:bg-hover"
+            }`}
           >
             <Layers size={12} aria-hidden className="shrink-0" />
             {active !== null && !onMain ? (
@@ -1900,8 +1909,16 @@ function CompareFileDiff(props: { currentText?: string; incomingText?: string })
 // Full-page comparison of a version against Main (virtual editor tab).
 // Mirrors the history diff page's rendering so diffs look the same
 // everywhere.
-export function VersionComparePage(props: { workspaceId: string; versionId: string }) {
-  const { workspaceId, versionId } = props;
+export function VersionComparePage(props: {
+  workspaceId: string;
+  versionId: string;
+  versions?: WorkspaceVersions;
+  disabled?: boolean;
+}) {
+  const { workspaceId, versionId, versions, disabled } = props;
+  const record = versions?.snapshot?.versions.find((version) => version.id === versionId) ?? null;
+  const main = versions?.snapshot?.versions.find((version) => version.kind === "main") ?? null;
+  const locked = (versions?.busy ?? null) !== null || disabled === true;
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "error"; message: string }
@@ -1991,6 +2008,16 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       });
   }, [state, workspaceId, versionId]);
 
+  const showBackToMain = versions !== undefined && main !== null && !versions.onMain;
+  const showKeepInMain =
+    versions !== undefined &&
+    record !== null &&
+    record.kind !== "main" &&
+    record.canMergeIntoMain &&
+    state.status === "ready" &&
+    state.files.length > 0;
+  const cannotMerge = record !== null && record.kind !== "main" && !record.canMergeIntoMain;
+
   return (
     <section
       data-testid="version-compare-page"
@@ -1999,7 +2026,7 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
       {/* The tab says Compare with Main, so the header names the version and
           what the list is, the words the Versions page counts, and counts the
           files that differ. The empty state says when none do. */}
-      <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-2">
+      <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-line bg-panel px-4 py-2">
         <Layers size={14} aria-hidden className="shrink-0 text-subtle" />
         <h2 className="m-0 flex min-w-0 items-baseline gap-2 text-[14px] font-semibold text-ink">
           {state.status === "ready" ? (
@@ -2039,7 +2066,39 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
         >
           <RefreshCw size={13} aria-hidden />
         </button>
+        {showBackToMain ? (
+          <SecondaryButton
+            size="compact"
+            data-testid="version-compare-back-to-main"
+            disabled={locked}
+            onClick={() => versions.requestSwitch(main.id)}
+          >
+            {versions.busy === "switch" ? "Switching…" : "Back to Main"}
+          </SecondaryButton>
+        ) : null}
+        {showKeepInMain ? (
+          <PrimaryButton
+            size="compact"
+            data-testid="version-compare-keep-in-main"
+            disabled={locked}
+            onClick={() => versions.openMerge(record)}
+          >
+            Keep in Main…
+          </PrimaryButton>
+        ) : null}
       </header>
+
+      <div
+        data-testid="version-compare-scope"
+        className="flex shrink-0 items-start gap-2 border-b border-line bg-panel-2 px-4 py-2 text-[12px] text-muted"
+      >
+        <Info size={14} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
+        <span className="min-w-0">
+          Comparisons show tracked file changes. Chats are the same in every version, and agents
+          connected through an Agent link read files from Main.
+          {cannotMerge ? " Only versions made from Main can merge into Main." : ""}
+        </span>
+      </div>
 
       <div className="min-h-0 flex-1 overflow-auto overflow-x-hidden p-4">
         {state.status === "loading" ? (

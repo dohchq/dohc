@@ -402,7 +402,13 @@ export function VersionsPage(props: {
       {/* The document column, so the page lines up with the editor's text. */}
       <div className="mx-auto flex w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] flex-1 flex-col px-[var(--dohc-editor-gutter)] pb-6">
         <header className="flex shrink-0 items-start justify-between gap-4 pb-4 pt-10">
-          <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
+          <div className="min-w-0">
+            <h2 className="m-0 flex h-8 items-center text-base font-semibold text-ink">Versions</h2>
+            <p data-testid="versions-page-note" className="m-0 mt-1 text-[12px] text-muted">
+              Versions separate tracked files. Chats are the same in every version, and agents
+              connected through an Agent link read files from Main.
+            </p>
+          </div>
           {ready && !onlyMain ? newVersion : null}
         </header>
         {body}

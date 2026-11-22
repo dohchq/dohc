@@ -331,6 +331,7 @@ describe("VersionMenu", () => {
     ).toEqual([
       "dohc switches to the new version, and your edits go there.",
       "Changes leave Main untouched until you merge.",
+      "Agents connected through an Agent link still read files from Main.",
       same,
     ]);
     expect(screen.queryByTestId("version-new-no-merge")).toBeNull();
