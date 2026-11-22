@@ -8,6 +8,7 @@ export const DATASET_METADATA_MAX_BYTES = 256 * 1024;
 export const DATASET_MAX_TABLES = 64;
 export const DATASET_MAX_FIELDS = 128;
 export const DATASET_MAX_OPERATIONS = 128;
+export const APP_DATASET_MAX_BINDINGS = 16;
 
 export { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
 import { parseDatasetPath } from "@dohc/workspace-contracts/dataset-path";
@@ -138,6 +139,7 @@ export interface AppDatasetOperationDisplay {
 }
 /** Public dispatch metadata, derived from the approved revision rather than app source. */
 export interface AppDatasetCapability extends AppDatasetBinding {
+  alias?: string;
   name: string;
   operations: Array<
     Pick<DatasetOperation, "operationId" | "name" | "access" | "readOnly"> & {
@@ -166,6 +168,7 @@ export interface DatasetDescription {
 const ids = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const sqlNames = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const operationNames = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+const datasetAliases = /^[a-z][a-z0-9_-]{0,63}$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
 const fieldTypes = new Set<DatasetColumnFieldType>([
   "text",
@@ -1407,15 +1410,21 @@ function operationDisplay(value: unknown, path = "display"): AppDatasetOperation
     ),
   };
 }
+export function parseDatasetAlias(value: unknown): string {
+  const result = text(value, 64);
+  if (!datasetAliases.test(result) || forbidden.has(result)) fail();
+  return result;
+}
 /** Parse transport metadata. The host must verify it against its approved catalog. */
 export function parseAppDatasetCapability(value: unknown): AppDatasetCapability {
   const row = record(
     parseAppBackendJson(value, DATASET_METADATA_MAX_BYTES),
     ["kind", "datasetId", "revision", "revisionSha256", "operationIds", "operations", "name"],
-    ["createFields", "linkReads"],
+    ["alias", "createFields", "linkReads"],
     "capability",
   );
-  const { operations: values, name, ...reference } = row;
+  const { operations: values, name, alias, ...reference } = row;
+  const parsedAlias = alias === undefined ? undefined : parseDatasetAlias(alias);
   const binding = parseDatasetBindingReference(reference);
   const operations = boundedArray(values, DATASET_MAX_OPERATIONS, 1, "capability.operations")
     .map((entry, index) => {
@@ -1477,6 +1486,7 @@ export function parseAppDatasetCapability(value: unknown): AppDatasetCapability 
     fail("capability.operations must match capability.operationIds.");
   return {
     ...binding,
+    ...(parsedAlias === undefined ? {} : { alias: parsedAlias }),
     name: text(name, 128, "capability.name"),
     operationIds: [...binding.operationIds].sort(),
     operations,

@@ -263,13 +263,12 @@ function stored(storage: StorageContext, input: ReadAppPublicationInput): AppPub
   if (!bytes || bytes.byteLength > limits.maxMetadataBytes || sha(bytes) !== row.manifest_sha256)
     throw new PublicationManifestUnavailable();
   try {
-    return {
-      ...state,
-      candidate: parseAppPublicationCandidate(
-        JSON.parse(Buffer.from(bytes).toString("utf8")),
-        limits,
-      ),
-    };
+    const candidate = parseAppPublicationCandidate(
+      JSON.parse(Buffer.from(bytes).toString("utf8")),
+      limits,
+    );
+    if (candidate.capabilities.length > 1) throw new PublicationManifestUnavailable();
+    return { ...state, candidate };
   } catch {
     throw new PublicationManifestUnavailable();
   }
@@ -279,6 +278,8 @@ export function publishAppPublication(
   input: PublishAppPublicationInput,
 ): AppPublicationRow {
   const candidate = parseAppPublicationCandidate(input.candidate, input.limits);
+  if (candidate.capabilities.length > 1)
+    throw badRequest("Shared links support at most one Collection.");
   validateBuildIdentity(candidate);
   const owner = {
     workspaceId: input.workspaceId,

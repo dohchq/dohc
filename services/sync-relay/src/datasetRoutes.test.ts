@@ -1470,3 +1470,326 @@ it("admits a Collection request only once its body has arrived", async () => {
     }
   }
 });
+
+it("supports multi-Collection local apps on the relay, enforces isolation and deletion cleanup, and refuses >1 Collection on shared links", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+
+  // Activate a second Collection in the same workspace.
+  const secondDef: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(101),
+    name: "Workouts",
+    schemaPath: "workouts/schema.sql",
+    operationsPath: "workouts/operations.js",
+    tables: [
+      {
+        tableId: id(102),
+        name: "Workouts",
+        sqlName: "workouts",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(103),
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(104),
+            name: "Title",
+            sqlColumn: "title",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+          {
+            fieldId: id(107),
+            name: "Proof",
+            sqlColumn: "proof",
+            type: "attachment",
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(105),
+        name: "submit",
+        label: "Log",
+        tableId: id(102),
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [id(104)],
+      },
+      {
+        operationId: id(106),
+        name: "read",
+        label: "Read",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(103), id(104)],
+      },
+      {
+        operationId: id(108),
+        name: "receipt",
+        label: "Proof",
+        tableId: id(102),
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [id(107)],
+      },
+    ],
+  };
+  const secondSchema =
+    "CREATE TABLE workouts(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,proof TEXT);";
+  const secondSource = `globalThis.operations={submit(ctx,input){ctx.db.execute('INSERT INTO workouts VALUES(?,?,?)',[ctx.requestId,input.title,null]);return {ok:true};},read(ctx){return ctx.db.query('SELECT * FROM workouts ORDER BY id');},receipt(ctx,input){return {fileId:input.fileId};}};`;
+  const secondRevision = describeDatasetRevision({
+    definition: secondDef,
+    revision: 1,
+    schemaSql: secondSchema,
+    operationSource: secondSource,
+  });
+  pushFile(f.storage, "dataset-file-2", null, {
+    path: "workouts/dataset.json",
+    text: JSON.stringify({ datasetId: id(101) }),
+  });
+  expect(
+    (
+      await f.http(`w/datasets/${id(101)}/activate`, {
+        revision: secondRevision,
+        schemaSql: secondSchema,
+        operationSource: secondSource,
+        capacityBytes: 1024 * 1024,
+      })
+    ).status,
+  ).toBe(200);
+
+  const basePub = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const cap1 = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      alias: "expenses",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6), id(8)],
+    },
+    revision,
+  );
+  const cap2 = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      alias: "workouts",
+      datasetId: id(101),
+      revision: 1,
+      revisionSha256: secondRevision.revisionSha256,
+      operationIds: [id(105), id(106), id(108)],
+    },
+    secondRevision,
+  );
+  const digest = (domain: string, value: unknown) =>
+    createHash("sha256")
+      .update(JSON.stringify([domain, value]))
+      .digest("hex");
+  const files = basePub.candidate.files.filter((file) => file.path === "bundle.js");
+  const bundleDigest = digest("dohc-app-bundle-v1", files);
+  const buildDigest = digest("dohc-app-build-v1", {
+    sourceDigest: basePub.candidate.sourceDigest,
+    dependencyLockDigest: basePub.candidate.dependencyLockDigest,
+    compiler: basePub.candidate.compilerIdentity,
+    bundleDigest,
+  });
+  const multiCandidate = {
+    ...basePub.candidate,
+    files,
+    bundleDigest,
+    buildDigest,
+    capabilities: [cap1, cap2],
+  };
+
+  // Shared link publication MUST refuse >1 Collection (Decision 1A).
+  expect(
+    (
+      await f.http("w/app-publications", {
+        shareId: basePub.owner.shareId,
+        grantId: basePub.owner.grantId,
+        expectedGrantGeneration: basePub.owner.generation,
+        candidate: multiCandidate,
+      })
+    ).status,
+  ).toBe(400);
+
+  // Local workspace approval via /sync/w/local-apps succeeds for the owner.
+  const approvedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(approvedRes.status).toBe(200);
+  const approved = (await approvedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  const backendBase = `w/app-publications/${approved.publicationId}/backend`;
+
+  // Missing alias returns 400; unknown alias returns 404.
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        operation: "read",
+        input: {},
+        idempotencyKey: "no-alias",
+      })
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "other",
+        operation: "read",
+        input: {},
+        idempotencyKey: "bad-alias",
+      })
+    ).status,
+  ).toBe(404);
+
+  // Upload to expenses, attach, read via expenses, and verify workouts cannot read expenses' fileId.
+  const upRes = await f.http(`${backendBase}/upload`, {
+    authorityRevision: approved.authorityRevision,
+    dataset: "expenses",
+    idempotencyKey: "up-1",
+    name: "receipt.pdf",
+    contentType: "application/pdf",
+    bytesBase64: "JVBERi0=",
+  });
+  expect(upRes.status).toBe(200);
+  const uploaded = (await upRes.json()) as { file: { fileId: string } };
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "submit",
+        input: { name: "Coffee", fileId: uploaded.file.fileId },
+        idempotencyKey: "sub-1",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "workouts",
+        operation: "submit",
+        input: { title: "Run 5k" },
+        idempotencyKey: "wrk-1",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/file`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        fileId: uploaded.file.fileId,
+        operation: "receipt",
+        input: { fileId: uploaded.file.fileId },
+      })
+    ).status,
+  ).toBe(200);
+  // Cross-Collection file read MUST be refused.
+  expect(
+    (
+      await f.http(`${backendBase}/file`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "workouts",
+        fileId: uploaded.file.fileId,
+        operation: "receipt",
+        input: { fileId: uploaded.file.fileId },
+      })
+    ).status,
+  ).toBe(404);
+
+  // Archiving Collection 2 deactivates the whole app (including Collection 1 requests).
+  expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "read",
+        input: {},
+        idempotencyKey: "after-archive",
+      })
+    ).status,
+  ).toBe(404);
+
+  // Restoring Collection 2 re-enables the app; withdrawing via /local-apps revokes all bindings.
+  expect((await f.http(`w/datasets/${id(101)}/restore`, {})).status).toBe(200);
+  expect(
+    (
+      await f.http(`${backendBase}/invoke`, {
+        authorityRevision: approved.authorityRevision,
+        dataset: "expenses",
+        operation: "read",
+        input: {},
+        idempotencyKey: "after-restore",
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.http("w/local-apps", {
+        publicationId: approved.publicationId,
+        enabled: false,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE workspace_id=? AND app_id=?")
+      .get("w", approved.publicationId)!.n,
+  ).toBe(0);
+
+  // Re-approving increments authorityRevision, and permanently deleting Collection 2 cleans up Collection 1's binding.
+  const reapprovedRes = await f.http("w/local-apps", { localApp: multiCandidate });
+  expect(reapprovedRes.status).toBe(200);
+  const reapproved = (await reapprovedRes.json()) as {
+    publicationId: string;
+    authorityRevision: number;
+  };
+  expect(reapproved.authorityRevision).toBe(approved.authorityRevision + 1);
+  expect((await f.http(`w/datasets/${id(101)}/archive`, {})).status).toBe(200);
+  const delPreview = (await (await f.http(`w/datasets/${id(101)}/delete-preview`)).json()) as {
+    cursor: unknown;
+    reviewToken: string;
+  };
+  expect(
+    (
+      await f.http(`w/datasets/${id(101)}/delete`, {
+        expected: delPreview.cursor,
+        reviewToken: delPreview.reviewToken,
+        acknowledge: true,
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    f.storage.db
+      .prepare(
+        "SELECT 1 FROM dohc_dataset_bindings WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+      )
+      .get("w", id(1), reapproved.publicationId),
+  ).toBeUndefined();
+});

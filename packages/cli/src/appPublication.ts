@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { parseAppCollectionCapability } from "@dohc/security-contract/app-publication";
-import { parseAppDatasetCapability } from "@dohc/security-contract/dataset";
+import {
+  APP_DATASET_MAX_BINDINGS,
+  parseAppDatasetCapability,
+} from "@dohc/security-contract/dataset";
 
 const id = z.string().min(1).max(200);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -60,6 +63,12 @@ const localPublication = {
 };
 const LocalPublication = z.union([
   z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
+  z
+    .object({
+      ...localPublication,
+      datasetCapabilities: z.array(OwnerAppDatasetCapability).min(2).max(APP_DATASET_MAX_BINDINGS),
+    })
+    .strict(),
   z
     .object({
       ...localPublication,
@@ -273,7 +282,7 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
         .strict()
         .optional(),
       sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512),
-      capabilities: z.array(OwnerAppCapability).max(1),
+      capabilities: z.array(OwnerAppCapability).max(APP_DATASET_MAX_BINDINGS),
       externalNetwork: z.literal(true),
       local: z.literal(true).optional(),
     })

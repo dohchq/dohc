@@ -442,6 +442,29 @@ export function createLocalAppStore(options: {
         "DELETE FROM " + storage.publicationTable + " WHERE " + storage.resourceColumn + "=?",
       ).run(resourceId);
     },
+    deletePublications(kind: LocalAppKind, publicationIds: readonly string[]) {
+      options.assertCurrent();
+      if (publicationIds.length === 0) return;
+      const storage = source(kind);
+      for (const publicationId of publicationIds) {
+        assertCanAdvance(
+          "SELECT revision FROM local_app_roots WHERE active_kind=? AND active_publication_id=?",
+          [kind, publicationId],
+        );
+        db.prepare(
+          "UPDATE local_app_roots SET revision=revision+1,active_kind=NULL,active_publication_id=NULL WHERE active_kind=? AND active_publication_id=?",
+        ).run(kind, publicationId);
+        db.prepare("DELETE FROM local_app_approval_provenance WHERE publication_id=?").run(
+          publicationId,
+        );
+        db.prepare("DELETE FROM " + storage.artifactTable + " WHERE publication_id=?").run(
+          publicationId,
+        );
+        db.prepare("DELETE FROM " + storage.publicationTable + " WHERE publication_id=?").run(
+          publicationId,
+        );
+      }
+    },
   };
 }
 export type LocalAppStore = ReturnType<typeof createLocalAppStore>;

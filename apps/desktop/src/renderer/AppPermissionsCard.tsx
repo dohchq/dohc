@@ -30,7 +30,14 @@ export type ReportPermissionError = (
 
 type Reach = { text: string; added: boolean };
 type Line = { key: string; prefix?: string; items: Reach[] };
-type Access = { key: string; name: string; path?: string; reads: Line[]; changes: Line[] };
+type Access = {
+  key: string;
+  name: string;
+  alias?: string;
+  path?: string;
+  reads: Line[];
+  changes: Line[];
+};
 
 const addsRecords = "Adds records with ";
 
@@ -160,6 +167,7 @@ function accessOf(capability: AppCapability, approved: readonly AppCapability[] 
     return {
       key: capability.datasetId,
       name: capability.name,
+      ...(capability.alias ? { alias: capability.alias } : {}),
       reads: lines(capability.operations.filter((operation) => operation.readOnly)),
       changes: lines(capability.operations.filter((operation) => !operation.readOnly)),
     };
@@ -195,7 +203,9 @@ function boundaryLineFor(capabilities: readonly AppCapability[]): string {
     return "Cannot read or change workspace files or Collections.";
   }
   if (capability.kind === "dataset") {
-    return "Uses only this Collection's approved actions. It cannot read other workspace files.";
+    return capabilities.length > 1
+      ? "Uses only these Collections' approved actions. It cannot read other workspace files."
+      : "Uses only this Collection's approved actions. It cannot read other workspace files.";
   }
   return "Cannot change or delete existing records, or read other workspace files.";
 }
@@ -229,6 +239,11 @@ function AccessRows({ access }: { access: Access }) {
       <Table2 size={14} aria-hidden className="text-muted" />
       <span className="truncate text-[13px] font-medium text-ink" title={access.path}>
         {access.name}
+        {access.alias ? (
+          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+            {access.alias}
+          </span>
+        ) : null}
       </span>
       <dl className="col-start-2 m-0 mt-2 grid grid-cols-[88px_minmax(0,1fr)] gap-x-2 gap-y-1 text-[13px]">
         {access.reads.length ? (

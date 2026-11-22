@@ -1036,4 +1036,84 @@ describe("dohc/ui and dohc/charts", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("routes multi-Collection client.dataset(alias), useDatasetQuery, and useDatasetMutation over the broker", async () => {
+    const channel = new MessageChannel();
+    const seen: Array<Record<string, unknown>> = [];
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const msg = event.data as Record<string, unknown>;
+      seen.push(msg);
+      if (msg.op === "backend.invoke") {
+        channel.port1.postMessage({
+          id: msg.id,
+          ok: true,
+          value: {
+            result: { dataset: msg.dataset ?? null, op: msg.operation },
+            revision: 3,
+            replayed: false,
+          },
+        });
+      }
+    };
+    channel.port1.start();
+
+    const client = createAppClient({ port: channel.port2 });
+    try {
+      const expensesA = client.dataset("expenses");
+      const expensesB = client.dataset("expenses");
+      expect(expensesA).toBe(expensesB);
+      expect(() => client.dataset("BadAlias")).toThrow(/alias/i);
+      expect(() => client.dataset("prototype")).toThrow(/alias/i);
+
+      expensesA.close();
+      expect(await expensesA.read("list")).toEqual({ dataset: "expenses", op: "list" });
+
+      function MultiHarness() {
+        const q1 = useDatasetQuery<{ dataset: string | null; op: string }>(
+          "list",
+          {},
+          { dataset: "expenses" },
+        );
+        const q2 = useDatasetQuery<{ dataset: string | null; op: string }>(
+          "list",
+          {},
+          { dataset: "workouts" },
+        );
+        const addWorkout = useDatasetMutation<{ minutes: number }, { dataset: string | null }>(
+          "create",
+          { dataset: "workouts" },
+        );
+        return (
+          <div>
+            <p data-testid="q1">{q1.data ? `${q1.data.dataset}:${q1.data.op}` : "loading"}</p>
+            <p data-testid="q2">{q2.data ? `${q2.data.dataset}:${q2.data.op}` : "loading"}</p>
+            <button type="button" onClick={() => void addWorkout.mutate({ minutes: 30 })}>
+              Add workout
+            </button>
+          </div>
+        );
+      }
+
+      render(
+        <AppProvider client={client}>
+          <MultiHarness />
+        </AppProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("q1").textContent).toBe("expenses:list");
+        expect(screen.getByTestId("q2").textContent).toBe("workouts:list");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add workout" }));
+      await waitFor(() => {
+        expect(seen.some((msg) => msg.operation === "create" && msg.dataset === "workouts")).toBe(
+          true,
+        );
+      });
+    } finally {
+      client.close();
+      channel.port1.close();
+    }
+  });
 });

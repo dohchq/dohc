@@ -8,6 +8,7 @@ import {
   readLocalAppSource,
 } from "./ownerAppPublication";
 import { type AppDatasetBinding, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 
 const backend = {
@@ -778,6 +779,114 @@ describe("owner dataset publication", () => {
     };
     await expect(h2.prepare()).rejects.toThrow(/app\/dataset\.json changed while dohc prepared/);
     expect(h2.compile).not.toHaveBeenCalled();
+  });
+
+  it("prepares multi-Collection manifests for local apps and refuses >1 Collection on shared links", async () => {
+    const secondFields = approved.definition.tables[0]!.fields.map((field, index) => ({
+      ...field,
+      fieldId: id(12 + index),
+    }));
+    const secondDef = {
+      ...approved.definition,
+      datasetId: id(10),
+      name: "Workouts",
+      schemaPath: "workouts/schema.sql",
+      operationsPath: "workouts/operations.js",
+      tables: [
+        {
+          ...approved.definition.tables[0]!,
+          tableId: id(11),
+          fields: secondFields,
+        },
+      ],
+      operations: [
+        {
+          ...approved.definition.operations[0]!,
+          operationId: id(15),
+          tableId: id(11),
+          fieldIds: [secondFields[0]!.fieldId],
+        },
+      ],
+    };
+    const secondApproved = describeDatasetRevision({
+      definition: secondDef,
+      revision: 1,
+      schemaSql: "CREATE TABLE responses(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);",
+      operationSource: "globalThis.operations={submit(){return {ok:true};}};",
+    });
+    const byId = new Map([
+      [approved.datasetId, approved],
+      [secondApproved.datasetId, secondApproved],
+    ]);
+    const h = harness(async (lookup) => {
+      const found = byId.get(lookup.datasetId);
+      if (!found) throw new Error("missing");
+      return found;
+    });
+    h.sources.set("private/dataset.json", JSON.stringify(approved.definition));
+    h.sources.set("workouts/dataset.json", JSON.stringify(secondDef));
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      datasets: {
+        workouts: {
+          kind: "dataset",
+          datasetPath: "workouts/dataset.json",
+          operations: ["submit"],
+        },
+        expenses: {
+          kind: "dataset",
+          datasetPath: "private/dataset.json",
+          operations: ["submit"],
+        },
+      },
+    });
+    // Shared link preparation refuses >1 Collection (Decision 1A).
+    await expect(h.prepare()).rejects.toThrow(/Shared links support at most one Collection/);
+
+    // Local preparation succeeds and sorts capabilities deterministically with aliases preserved.
+    const localPrepared = await prepareLocalAppPublication(
+      { workspaceId: "w", appRoot: "app" },
+      {
+        deferredWrites: [],
+        adapter: h.adapter,
+        compile: h.compile,
+        signal: new AbortController().signal,
+        assertCurrent() {},
+        resolveDatasetRevision: async (lookup) => byId.get(lookup.datasetId)!,
+      },
+    );
+    expect(
+      localPrepared.candidate.capabilities.map((cap) =>
+        cap.kind === "dataset" ? [cap.alias, cap.datasetId, cap.name] : [],
+      ),
+    ).toEqual([
+      ["expenses", approved.datasetId, "Registrations"],
+      ["workouts", secondApproved.datasetId, "Workouts"],
+    ]);
+
+    // Duplicate datasetId across two aliases is refused.
+    h.setDeclaration({
+      version: 1,
+      entryPath: "main.ts",
+      datasets: {
+        a: { kind: "dataset", datasetPath: "private/dataset.json", operations: ["submit"] },
+        b: { kind: "dataset", datasetPath: "private/dataset.json", operations: ["submit"] },
+      },
+    });
+    await expect(
+      prepareLocalAppPublication(
+        { workspaceId: "w", appRoot: "app" },
+        {
+          deferredWrites: [],
+          adapter: h.adapter,
+          compile: h.compile,
+          signal: new AbortController().signal,
+          assertCurrent() {},
+          resolveDatasetRevision: async (lookup) => byId.get(lookup.datasetId)!,
+        },
+      ),
+    ).rejects.toThrow(/more than once/);
   });
 });
 

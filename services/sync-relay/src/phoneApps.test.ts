@@ -155,6 +155,7 @@ async function relay() {
                 datasetId: dataset?.datasetId ?? null,
                 authorityRevision: row.authorityRevision,
                 capability: dataset ?? null,
+                capabilities: dataset ? [dataset] : [],
                 candidate: row.candidate,
                 local,
               };
