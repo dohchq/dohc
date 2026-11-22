@@ -120,14 +120,16 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 - Split: insert one boundary at the caret, passing the formatting active at that index as the insert's attributes (never `{}`: Yjs would write negation items, and an undo could then change nearby marks).
 - Split at offset 0 of a block that is not empty: insert the new boundary BEFORE the existing one, so the existing boundary, its path and its container stay with the text.
 - Changing a block's kind or path: `setAttribute` on the same boundary. Never delete and insert. A writer sets `path` as one whole array.
-- A boundary carries every attribute its kind has (`level` for a heading, `language` for a code block) from the moment it has that kind, defaults included, so a later change to one is an overwrite.
+- A boundary carries every attribute its kind has (`level` for a heading, `language` for a code block) from the moment it has that kind, defaults included, so a later change to one is an overwrite. A change to another kind writes the asked value or the default, never a value left from an earlier time the line had that kind. An attribute of a kind the line no longer has may stay on the boundary; no reader reads it.
 - A writer skips a write that would store the value already there.
 - Text before the first boundary has no boundary to change. A writer that changes that line's kind or path, or splits it at offset 0, first inserts a boundary for it at the start of the sequence, in the same transaction.
 - A split's new line copies the line's kind and path, with these cases for a line that sits directly in a list item:
   - the item's first block, split anywhere but offset 0: the new line starts a new item below (fresh id, all its records), and the item's later blocks go with it;
   - the item's first block, not empty, split at offset 0: the new empty line is a new item above; the existing boundary, item and records stay with the text;
   - a later block of the item, split at offset 0: the new empty line stays in the same item, above the block;
-  - a later block of the item, split elsewhere: the new line stays in the same item, below.
+  - a later block of the item, split elsewhere: the new line stays in the same item, below;
+  - the item's first block, empty: the new line starts a new item below.
+- An empty note is one line with no boundary; a split there writes two boundaries.
 - No writer inserts or deletes between the two units of a surrogate pair. A split or a delete asked for there is refused.
 - Typing: insert letters with the marks the editor gives them.
 - Never copy letters.
@@ -140,7 +142,7 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
   - no writer gives two containers one id. When someone's change leaves one id on two containers (2.2), a writer that changes a record of one of them (a setting, or a type, as a change of a list's kind does for its items) first gives that one a fresh id, a copy of all its records and its leaves' paths, in the same transaction, and writes the change into the copy.
 - No record is ever deleted.
 - No writer repairs what it reads. In particular no editor writes table repairs (`fixTables`) or trailing lines in a live note. How an uneven table is drawn is the editor's business and writes nothing.
-- Undo is one `Y.UndoManager` over `[sequence, containers]` with `ignoreRemoteMapChanges: true` and a `deleteFilter` that refuses to delete any item whose parent is `containers`, following only the person's own origin. Changes from other people are applied with an origin the history does not follow.
+- Undo is one `Y.UndoManager` over `[sequence, containers]` with `ignoreRemoteMapChanges: true` and a `deleteFilter` that refuses to delete any item whose parent is `containers` and any attribute of an element of the sequence, following only the person's own origin. Without the second, two people's undos of kind changes on one line can leave a heading with no stored level, and a later undo then passes over a step. A boundary's attribute goes only with its boundary. Changes from other people are applied with an origin the history does not follow.
   - Undo of a split deletes its boundary. Undo of a join inserts a new boundary (new id, the attributes the person last saw) at the old place.
   - Undo of a change to a path or a record writes the earlier value back.
   - Undo of the change that made a container puts its lines' paths back and leaves its records for lines other people added to it: as the container was made, or as that same step or someone else last set them.
@@ -175,6 +177,8 @@ Accepted:
 - As in Yjs today: when other people's changes have already removed everything a step did (a letter typed and since deleted by someone else, or a change to the kind or path of a line someone has since removed), undo passes over that step and undoes the one before it. In 399,562 undos and redos by 2 to 4 people this happened 1,218 times, each time for a step with nothing left to undo.
 - With `ignoreRemoteMapChanges`, undoing a change to an attribute, a record or a path puts back the value the person had before it, even if someone changed it since, and redoing it writes back the value that undo replaced. A boundary or inline item restored by undo has the attributes the person last saw (someone else's change to it at the same moment is lost with the delete).
 - Two people changing one line's path at the same moment: one whole path wins.
+- Two people who each give the text before the first boundary a boundary at the same moment leave an empty line above it, and a letter one of them types at that line's start at that moment can stay as its own paragraph above.
+- Rarely an undo reports a change and changes nothing a person can see, without passing to the step before: its step changed a line that someone has since removed. Seen twice in 317,916 undos.
 - A setting changed while someone else lifts a line out of the middle of that container shows on the first part only; the later part has the copy made when it was split.
 - Records are never deleted, so a note keeps the records of every container it ever had. Measured with random runs: about 27 bytes for each record no line names; a quote, callout or list leaves 4 when it goes and a list item 2; one person wrapping and lifting 2,000 times left 1,486 such records, 41 KB. Nothing removes them yet, and removing them is not safe while an undo or an offline change can still name them.
 - A letter typed in an empty line that someone joins away at the same moment lands at the end of the line above.

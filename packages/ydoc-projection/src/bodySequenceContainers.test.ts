@@ -71,7 +71,7 @@ function person(baseline: Uint8Array, clientID: number) {
   const history = new Y.UndoManager([text, records], {
     trackedOrigins: new Set([LOCAL]),
     ignoreRemoteMapChanges: true,
-    deleteFilter: (item) => item.parent !== records,
+    deleteFilter: (item) => item.parentSub === null,
   });
   const changes = () => text.toDelta() as Change[];
   return {
