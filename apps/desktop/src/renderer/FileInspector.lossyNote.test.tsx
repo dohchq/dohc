@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { createHash } from "node:crypto";
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -11,6 +19,12 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { DohcDesktopBridge, EngineYDocLineageReplacementEvent } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 import { captureHeldLiveMessage } from "../ipc/errorWords";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 
 setupFileInspectorTests();
 

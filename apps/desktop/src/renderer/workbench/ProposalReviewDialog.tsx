@@ -5,6 +5,8 @@ import type {
   ShareProposalOperation,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { Overlay } from "../Overlay";
 import { ipcErrorMessage } from "../ipcError";
@@ -154,37 +156,22 @@ export function ProposalReviewDialog(props: {
   onClose: () => void;
 }) {
   const { workspaceId, proposalId } = props;
-  const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [settling, setSettling] = useState(false);
   const [settleError, setSettleError] = useState<string | null>(null);
-  // The renderer async-state invariant: an answer may only repaint the window
-  // that asked for it. Every unmount, and every change of workspace or
-  // proposal, retires the window in flight.
-  const liveToken = useRequestSequence();
-
+  const liveToken = useRequestSequence([workspaceId, proposalId]);
+  const read = useWorkspaceQuery(useWorkspaceSession(), {
+    key: JSON.stringify([workspaceId, proposalId]),
+    load: () => bridge().readShareProposalChanges({ workspaceId, proposalId }),
+  });
   useEffect(() => {
-    const token = liveToken.next();
-    setLoad({ status: "loading" });
     setSettleError(null);
-    void (async () => {
-      try {
-        // One read, and NO content: the files, their paths, sizes and drift.
-        // A file's two sides are read when its row is opened.
-        const changes = await bridge().readShareProposalChanges({
-          workspaceId,
-          proposalId,
-        });
-        if (!liveToken.isCurrent(token)) return;
-        setLoad({ status: "ready", changes });
-      } catch (error) {
-        if (!liveToken.isCurrent(token)) return;
-        setLoad({
-          status: "error",
-          message: ipcErrorMessage(error, "Couldn't load these changes."),
-        });
-      }
-    })();
   }, [workspaceId, proposalId]);
+  const load: LoadState =
+    read.error !== null
+      ? { status: "error", message: ipcErrorMessage(read.error, "Couldn't load these changes.") }
+      : read.value
+        ? { status: "ready", changes: read.value }
+        : { status: "loading" };
 
   const settle = useCallback(
     async (decision: "accept" | "decline") => {

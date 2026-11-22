@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -55,6 +57,10 @@ afterEach(() => {
   cleanup();
 });
 
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="ws-1">{children}</WorkspaceSessionProvider>;
+}
+
 function renderDialog(props: { proposalId?: string; onSettled?: () => void } = {}) {
   const onClose = vi.fn();
   const onSettled = props.onSettled ?? vi.fn();
@@ -65,6 +71,7 @@ function renderDialog(props: { proposalId?: string; onSettled?: () => void } = {
       onSettled={onSettled}
       onClose={onClose}
     />,
+    { wrapper: Session },
   );
   return { ...view, onClose, onSettled };
 }
