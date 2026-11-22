@@ -3860,6 +3860,350 @@ fn received_op_of_a_held_object_at_another_path_moves_it() {
             .unwrap();
     }
 }
+
+/// One page per entry, with cursors 0, 1, 2, ... and an empty page after them.
+fn share_view_pages(pages: Vec<Vec<ShareReplicationEnvelope>>) -> Vec<(i64, ShareViewResponse)> {
+    let last = i64::try_from(pages.len()).unwrap();
+    let mut served: Vec<_> = pages
+        .into_iter()
+        .zip(0..)
+        .map(|(ops, cursor)| {
+            (
+                cursor,
+                ShareViewResponse {
+                    work_references: Vec::new(),
+                    next_reference_after: None,
+                    reference_has_more: false,
+                    ops,
+                    next_cursor: cursor + 1,
+                    has_more: false,
+                },
+            )
+        })
+        .collect();
+    served.push((
+        last,
+        ShareViewResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops: vec![],
+            next_cursor: last,
+            has_more: false,
+        },
+    ));
+    served
+}
+
+fn sorted_changes(pull: &ShareViewPullOutcome) -> Vec<(String, &'static str, &'static str)> {
+    let mut changed: Vec<_> = pull
+        .changed_paths
+        .iter()
+        .map(|change| (change.path.clone(), change.operation, change.content_kind))
+        .collect();
+    changed.sort_unstable();
+    changed
+}
+
+/// A pull that moves a held object can be lost before the desktop records its
+/// changed paths: the app quits, or a later op on the page fails. The retry
+/// dedupes the move and still reports the path the object left, and never the
+/// op's own old path, which this copy did not hold.
+#[test]
+fn retried_move_of_a_held_object_reports_the_path_it_moved_from() {
+    for (shape, binary, lost) in [
+        ("write", false, "failed"),
+        ("write", false, "quit"),
+        ("rename", false, "failed"),
+        ("rename", false, "quit"),
+        ("write", true, "failed"),
+        ("rename", true, "failed"),
+    ] {
+        let (_scratch, database, mut engine) = open_store();
+        let token = format!("share-object:v1:{}", "c".repeat(64));
+        let body = b"held content".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let later = b"fetched after the move".to_vec();
+        let later_sha = dohc_engine_storage::hex_sha256(&later);
+        let mut op = if binary {
+            share_view_binary_write_op(1, "HR/b.md", &sha)
+        } else {
+            share_view_write_op(1, "HR/b.md", &sha)
+        };
+        op.payload["objectId"] = json!(token);
+        let target = if shape == "rename" {
+            op.payload["operation"] = json!("rename");
+            op.payload["payloadBeforePath"] = json!("HR/b.md");
+            op.payload["path"] = json!("HR/c.md");
+            op.payload["payloadAfterPath"] = json!("HR/c.md");
+            "HR/c.md"
+        } else {
+            "HR/b.md"
+        };
+        let mut initial = if binary {
+            share_view_binary_write_op(0, "HR/a.md", &sha)
+        } else {
+            share_view_write_op(0, "HR/a.md", &sha)
+        };
+        initial.payload["objectId"] = json!(token);
+        let pages = share_view_pages(vec![
+            vec![initial],
+            vec![op, share_view_write_op(2, "HR/later.md", &later_sha)],
+        ]);
+        let blobs = [(sha.clone(), body), (later_sha.clone(), later)];
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], pages.clone()).with_view_blobs(blobs.clone()),
+        );
+        let grant = tracked_grant(["HR"]);
+        let first = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+            .unwrap();
+        let label = format!("shape={shape}, binary={binary}, lost={lost}");
+        if lost == "quit" {
+            // The move commits, then the app quits before the desktop records
+            // the page's changed paths or commits its cursor.
+            client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            drop(engine);
+            engine = EngineStore::open(&database, 20).unwrap();
+        } else {
+            // The move commits, then a later blob on the same page fails.
+            let failed = RelaySyncClient::new(
+                PagedShareRelay::new([], pages)
+                    .with_view_blobs(blobs)
+                    .with_view_blob_errors([(later_sha, RelayError::InvalidResponse)]),
+            );
+            assert_eq!(
+                failed
+                    .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                    .unwrap_err(),
+                RelayError::InvalidResponse,
+                "{label}"
+            );
+        }
+        let retry = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        assert_eq!(retry.skipped, 0, "{label}");
+        let kind = if binary { "binary" } else { "text" };
+        let mut expected = vec![
+            ("HR/a.md".to_owned(), "delete", kind),
+            (target.to_owned(), "write", kind),
+            ("HR/later.md".to_owned(), "write", "text"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(sorted_changes(&retry), expected, "{label}");
+    }
+}
+
+/// A received object can move to a path this copy already uses: a member's
+/// unsent file, or the other half of a name swap made while the folder was
+/// hidden. The received head takes the path, as it does for any contested
+/// path, the move goes through, and the pull continues. A member's unsent
+/// file keeps its text in history.
+#[test]
+fn received_move_into_an_occupied_path_takes_the_path() {
+    for case in ["unsent", "swap"] {
+        let (_scratch, _path, mut engine) = open_store();
+        let x = format!("share-object:v1:{}", "1".repeat(64));
+        let y = format!("share-object:v1:{}", "2".repeat(64));
+        let x_body = b"first file".to_vec();
+        let y_body = b"second file".to_vec();
+        let x_sha = dohc_engine_storage::hex_sha256(&x_body);
+        let y_sha = dohc_engine_storage::hex_sha256(&y_body);
+        let write = |seq, path, sha: &str, token: &str| {
+            let mut op = share_view_write_op(seq, path, sha);
+            op.payload["objectId"] = json!(token);
+            op
+        };
+        let (held, served) = if case == "swap" {
+            (
+                vec![
+                    write(0, "HR/a.md", &x_sha, &x),
+                    write(1, "HR/b.md", &y_sha, &y),
+                ],
+                vec![
+                    write(2, "HR/a.md", &y_sha, &y),
+                    write(3, "HR/b.md", &x_sha, &x),
+                ],
+            )
+        } else {
+            (
+                vec![write(0, "HR/a.md", &x_sha, &x)],
+                vec![write(1, "HR/b.md", &x_sha, &x)],
+            )
+        };
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], share_view_pages(vec![held, served]))
+                .with_view_blobs([(x_sha.clone(), x_body), (y_sha.clone(), y_body)]),
+        );
+        let grant = tracked_grant(["HR"]);
+        let first = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+            .unwrap();
+        if case == "unsent" {
+            VersionedTextStore::new(&mut engine)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "local-draft".into(),
+                        path: "HR/b.md".into(),
+                        text: "unsent member file".into(),
+                        moment_id: "local-draft-write".into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        let pull = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap_or_else(|error| panic!("case={case}: {error:?}"));
+        assert_eq!(pull.skipped, 0, "case={case}");
+        let expected: Vec<(String, &str, &str)> = if case == "swap" {
+            vec![
+                ("HR/a.md".into(), "write", "text"),
+                ("HR/b.md".into(), "write", "text"),
+            ]
+        } else {
+            vec![
+                ("HR/a.md".into(), "delete", "text"),
+                ("HR/b.md".into(), "write", "text"),
+            ]
+        };
+        assert_eq!(sorted_changes(&pull), expected, "case={case}");
+        let heads: &[(&str, &str, &str)] = if case == "swap" {
+            &[("HR/a.md", &y, &y_sha), ("HR/b.md", &x, &x_sha)]
+        } else {
+            &[("HR/b.md", &x, &x_sha)]
+        };
+        engine
+            .read_with(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT a.path,a.object_id,s.blob_sha256 FROM path_aliases a
+                     JOIN snapshots s USING(workspace_id,version_id,object_id)
+                     WHERE a.workspace_id='ws' AND a.version_id='main' ORDER BY a.path",
+                )?;
+                let actual: Vec<(String, String, String)> = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<Result<_, _>>()?;
+                let expected: Vec<(String, String, String)> = heads
+                    .iter()
+                    .map(|(path, id, sha)| ((*path).into(), (*id).into(), (*sha).into()))
+                    .collect();
+                assert_eq!(actual, expected, "case={case}");
+                if case == "unsent" {
+                    // The unsent file leaves the path, and its text stays in history.
+                    let text: String = conn.query_row(
+                        "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256
+                         WHERE m.workspace_id='ws' AND m.moment_id='local-draft-write'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(text, "unsent member file");
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+            .unwrap();
+        assert_eq!(
+            client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .unwrap()
+                .applied,
+            0,
+            "case={case}"
+        );
+    }
+}
+
+/// While the folder is hidden the owner moves a text file, writes binary data
+/// to it, then saves its original bytes again as binary. The arriving write
+/// matches the held text's hash but not its kind, so the moved head must be
+/// binary, as the changed paths report.
+#[test]
+fn received_move_that_changes_a_held_files_kind_lands_as_that_kind() {
+    for shape in ["write", "rename"] {
+        let (_scratch, _path, mut engine) = open_store();
+        let token = format!("share-object:v1:{}", "9".repeat(64));
+        let body = b"same bytes, new kind".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let mut initial = share_view_write_op(0, "HR/a.txt", &sha);
+        initial.payload["objectId"] = json!(token);
+        let mut op = share_view_binary_write_op(1, "HR/b.bin", &sha);
+        op.payload["objectId"] = json!(token);
+        if shape == "rename" {
+            op.payload["operation"] = json!("rename");
+            op.payload["payloadBeforePath"] = json!("HR/a.txt");
+        }
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], share_view_pages(vec![vec![initial], vec![op]]))
+                .with_view_blobs([(sha.clone(), body.clone())]),
+        );
+        let grant = tracked_grant(["HR"]);
+        let first = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &first.pending_cursor, &NoFaults)
+            .unwrap();
+        let pull = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap_or_else(|error| panic!("shape={shape}: {error:?}"));
+        assert_eq!(pull.skipped, 0, "shape={shape}");
+        assert_eq!(
+            sorted_changes(&pull),
+            vec![
+                ("HR/a.txt".to_owned(), "delete", "binary"),
+                ("HR/b.bin".to_owned(), "write", "binary"),
+            ],
+            "shape={shape}"
+        );
+        engine
+            .read_with(|conn| {
+                let head: (String, String, Option<String>, Vec<u8>) = conn.query_row(
+                    "SELECT a.object_id,s.content_kind,s.binary_sha256,b.bytes FROM path_aliases a
+                     JOIN snapshots s USING(workspace_id,version_id,object_id)
+                     LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256
+                     WHERE a.workspace_id='ws' AND a.version_id='main' AND a.path='HR/b.bin'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3).unwrap_or_default())),
+                )?;
+                assert_eq!(
+                    head,
+                    (token.clone(), "binary".into(), Some(sha.clone()), body.clone()),
+                    "shape={shape}"
+                );
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path<>'HR/b.bin'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    0,
+                    "shape={shape}"
+                );
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+    }
+}
+
 fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) {
     for binary in [false, true] {
         let (_scratch, database, mut engine) = open_store();
