@@ -96,7 +96,10 @@ jobs:
           "$pg/psql" -h 127.0.0.1 -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE dohc LOGIN SUPERUSER PASSWORD 'dohc'" -c "CREATE DATABASE dohc OWNER dohc"
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      # Node's default heap on the 7 GB macOS runner is too small for the desktop build.
       - name: Verify in full
+        env:
+          NODE_OPTIONS: ${{ runner.os == 'macOS' && '--max-old-space-size=4096' || '' }}
         run: node scripts/verification/verify.mjs pr --base HEAD~1 --full --job ${{ matrix.gate }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
