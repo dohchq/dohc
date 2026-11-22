@@ -21,7 +21,7 @@ type Read<T> = Result<T, Unsure>;
 pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece>> {
     if !text
         .bytes()
-        .any(|byte| matches!(byte, b'*' | b'_' | b'`' | b'~' | b'[' | b'!'))
+        .any(|byte| matches!(byte, b'*' | b'_' | b'`' | b'~' | b'[' | b'!' | b'&'))
         || unsure_text(text)
         || (!paragraph && text.trim() != text)
     {
@@ -31,9 +31,16 @@ pub(super) fn read_inline(text: &str, paragraph: bool) -> Option<Vec<InlinePiece
     let mut pieces = Vec::new();
     let mut work = units.len().saturating_mul(SCAN_WORK_PER_UNIT);
     lex(&units, &[], false, &mut work, &mut pieces).ok()?;
-    let pieces = merged(pieces);
+    let mut pieces = merged(pieces);
     if pieces.iter().any(unsure_piece) {
         return None;
+    }
+    for piece in &mut pieces {
+        if let InlinePiece::Text(run) = piece {
+            if !run.marks.iter().any(|mark| mark.kind == MarkKind::Code) {
+                run.text = decoded_references(&run.text);
+            }
+        }
     }
     let read: Vec<MarkdownNode> = pieces
         .iter()
@@ -75,10 +82,45 @@ fn unsure_syntax(text: &str) -> bool {
         || text.contains(['<', '>', '&', '$', '{'])
 }
 
+// The projector writes `&`, `<` and `>` in text as these references, so a
+// text holding them reads back as written.
+const WRITTEN_REFERENCES: [(&str, char); 3] = [("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>')];
+
+fn decoded_references(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match WRITTEN_REFERENCES
+            .iter()
+            .find(|(reference, _)| rest.starts_with(reference))
+        {
+            Some((reference, character)) => {
+                out.push(*character);
+                rest = &rest[reference.len()..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn unsure_piece(piece: &InlinePiece) -> bool {
     match piece {
         InlinePiece::Text(run) => {
-            (!run.marks.iter().any(|mark| mark.kind == MarkKind::Code) && unsure_syntax(&run.text))
+            (!run.marks.iter().any(|mark| mark.kind == MarkKind::Code)
+                && unsure_syntax(
+                    &WRITTEN_REFERENCES
+                        .iter()
+                        .fold(run.text.clone(), |text, (reference, _)| {
+                            text.replace(reference, "")
+                        }),
+                ))
                 || run.marks.iter().any(|mark| {
                     mark.kind == MarkKind::Link
                         && ["href", "title"]
@@ -1125,21 +1167,63 @@ Run `make` and see [`npm install`](https://docs.example/install).
         assert!(read("**a `x[0]`** and [b](https://b.example)").is_some());
     }
 
+    fn runs(text: &str) -> Option<Vec<(String, Vec<MarkKind>)>> {
+        read_inline(text, true).map(|pieces| {
+            pieces
+                .into_iter()
+                .map(|piece| match piece {
+                    InlinePiece::Text(run) => {
+                        (run.text, run.marks.iter().map(|mark| mark.kind).collect())
+                    }
+                    InlinePiece::Image(_) => panic!("no image here"),
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn the_references_the_projector_writes_are_read_as_their_characters() {
+        let text = |text: &str| (text.to_owned(), vec![]);
+        let italic = |text: &str| (text.to_owned(), vec![MarkKind::Italic]);
+        assert_eq!(runs("&amp;"), Some(vec![text("&")]));
+        assert_eq!(
+            runs("*em* &amp; &lt;b&gt; and **s**"),
+            Some(vec![
+                italic("em"),
+                text(" & <b> and "),
+                ("s".into(), vec![MarkKind::Bold]),
+            ])
+        );
+        assert_eq!(
+            runs("`&amp;` &amp;lt; *x*"),
+            Some(vec![
+                ("&amp;".into(), vec![MarkKind::Code]),
+                text(" &lt; "),
+                italic("x"),
+            ])
+        );
+        assert_eq!(
+            runs("[a &amp; b](https://e.example) *em*"),
+            Some(vec![
+                ("a & b".into(), vec![MarkKind::Link]),
+                text(" "),
+                italic("em"),
+            ])
+        );
+        for unread in [
+            "a &copy; *x*",
+            "AT&T *x*",
+            "x &amp *y*",
+            "a &AMP; *x*",
+            "&l&amp;t; *x*",
+            "[a](https://e.example/?a=1&amp;b=2) *x*",
+        ] {
+            assert!(runs(unread).is_none(), "{unread:?}");
+        }
+    }
+
     #[test]
     fn a_code_span_holding_angle_brackets_or_ampersands_keeps_the_formatting_around_it() {
-        let runs = |text: &str| {
-            read_inline(text, true).map(|pieces| {
-                pieces
-                    .into_iter()
-                    .map(|piece| match piece {
-                        InlinePiece::Text(run) => {
-                            (run.text, run.marks.iter().map(|mark| mark.kind).collect())
-                        }
-                        InlinePiece::Image(_) => panic!("no image here"),
-                    })
-                    .collect::<Vec<(String, Vec<_>)>>()
-            })
-        };
         let code = vec![MarkKind::Code];
         let italic = vec![MarkKind::Italic];
         assert_eq!(

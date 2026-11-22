@@ -1251,6 +1251,283 @@
     ]
    },
    {
+    "markdown": "*em* &amp; &lt;b&gt; and **s**",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       },
+       {
+        "x": " & <b> and "
+       },
+       {
+        "x": "s",
+        "m": {
+         "bold": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "- &amp; *x*\n  - child",
+    "reading": [
+     {
+      "t": "bulletList",
+      "c": [
+       {
+        "t": "listItem",
+        "c": [
+         {
+          "t": "paragraph",
+          "c": [
+           {
+            "x": "& "
+           },
+           {
+            "x": "x",
+            "m": {
+             "italic": {}
+            }
+           }
+          ]
+         },
+         {
+          "t": "bulletList",
+          "c": [
+           {
+            "t": "listItem",
+            "c": [
+             {
+              "t": "paragraph",
+              "c": [
+               {
+                "x": "child"
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "[a &amp; b](https://e.example) *em*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a & b",
+        "m": {
+         "link": {
+          "href": "https://e.example",
+          "target": "_blank",
+          "rel": "noopener noreferrer nofollow",
+          "class": null,
+          "title": null
+         }
+        }
+       },
+       {
+        "x": " "
+       },
+       {
+        "x": "em",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "&amp;lt; and &amp;amp; *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "&lt; and &amp; "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "`&amp;` &amp; *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "&amp;",
+        "m": {
+         "code": {}
+        }
+       },
+       {
+        "x": " & "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "a &copy; *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "a &copy; "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "AT&T *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "AT&T "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "*a&amp;*b and **&lt;**x",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "*a&*b and **<**x"
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "# Title &amp; *x*",
+    "reading": [
+     {
+      "t": "heading",
+      "a": {
+       "level": 1
+      },
+      "c": [
+       {
+        "x": "Title & "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "&lt;b&gt;hidden&lt;/b&gt; *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "<b>hidden</b> "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "x &amp *y*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "x &amp "
+       },
+       {
+        "x": "y",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "markdown": "&gt; not a quote *x*",
+    "reading": [
+     {
+      "t": "paragraph",
+      "c": [
+       {
+        "x": "> not a quote "
+       },
+       {
+        "x": "x",
+        "m": {
+         "italic": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
     "markdown": "# ]``](\"![alt](x.png)*word_\"]?a~`code`[**c**](x.md)日本 a[a](https://e.example)[b](u \"t\")![alt](x.png)*em***__![alt](x.png).b![p](https://e.example/p.png \"t\")[`c`](u)",
     "reading": [
      {

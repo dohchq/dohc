@@ -1381,6 +1381,10 @@ function makeReaderParity() {
     "`{{atom:x}}` and `$x$` and `a==b++c[[d` *em*", "[`a<b`](https://e.example) *em*",
     "*a* `x>` and `<y` *b*", "`<a` *x* `b>`", "``<a`b`` *x* ``c`>``",
     "``a`<`` _x_ ``>`b``", "`a&b` *em* <b>tag</b>", "[a](https://e.example/?a=1&b=2) *em*",
+    "*em* &amp; &lt;b&gt; and **s**", "- &amp; *x*\n  - child", "[a &amp; b](https://e.example) *em*",
+    "&amp;lt; and &amp;amp; *x*", "`&amp;` &amp; *x*", "a &copy; *x*", "AT&T *x*",
+    "*a&amp;*b and **&lt;**x", "# Title &amp; *x*", "&lt;b&gt;hidden&lt;/b&gt; *x*", "x &amp *y*",
+    "&gt; not a quote *x*",
   ];
   const texts = [
     ...curated,
