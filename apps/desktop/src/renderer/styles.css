@@ -747,23 +747,23 @@ body {
 .dohc-notion-editor h1 {
   margin: 32px auto 12px;
   font-size: calc(var(--dohc-editor-font-size) * 31 / 15);
-  font-weight: 700;
-  letter-spacing: -0.021em;
+  font-weight: 600;
+  letter-spacing: -0.022em;
   line-height: 1.15;
 }
 
 .dohc-notion-editor h2 {
   margin: 30px auto 10px;
-  font-size: calc(var(--dohc-editor-font-size) * 22 / 15);
-  font-weight: 650;
-  letter-spacing: -0.014em;
+  font-size: calc(var(--dohc-editor-font-size) * 20 / 15);
+  font-weight: 600;
+  letter-spacing: -0.016em;
   line-height: 1.25;
 }
 
 .dohc-notion-editor h3 {
   margin: 24px auto 8px;
   font-size: calc(var(--dohc-editor-font-size) * 17 / 15);
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.008em;
 }
 

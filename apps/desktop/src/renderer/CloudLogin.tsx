@@ -364,10 +364,7 @@ export function CloudLogin(
             </p>
           ) : null}
           <p className="mb-2 mt-3 text-[12px] text-muted">Server address</p>
-          <p
-            data-testid="cloud-renew-server"
-            className="m-0 break-all font-mono text-[13px] text-ink"
-          >
+          <p data-testid="cloud-renew-server" className="m-0 break-all text-[13px] text-ink">
             {renewOrigin}
           </p>
           <PrimaryButton
@@ -425,7 +422,7 @@ export function CloudLogin(
                 setAddressProblem("problem" in address ? address.problem : null);
               }}
               placeholder="https://dohc.example.com"
-              className={`w-full rounded-md border bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle read-only:text-muted ${
+              className={`w-full rounded-md border bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle read-only:text-muted ${
                 addressProblem !== null
                   ? "border-danger focus:border-danger!"
                   : "border-line focus:border-ink"
@@ -450,20 +447,20 @@ export function CloudLogin(
                 type="button"
                 data-testid="cloud-setup-guide"
                 onClick={() => void openLinkExternally(SETUP_GUIDE_URL)}
-                className="flex items-center gap-1 text-[11px] text-muted underline underline-offset-2 transition-colors hover:text-ink"
+                className="flex items-center gap-1 text-[12px] text-muted underline underline-offset-2 transition-colors hover:text-ink"
               >
-                <ExternalLink size={11} aria-hidden />
+                <ExternalLink size={12} aria-hidden />
                 How to set up a server
               </button>
             </div>
           </form>
           {props.embedded ? null : (
             <div data-testid="cloud-drive-coming-soon" className="mt-4 border-t border-line pt-3">
-              <p className="m-0 flex items-center gap-1.5 text-[11px] font-semibold text-ink">
+              <p className="m-0 flex items-center gap-1.5 text-[12px] font-semibold text-ink">
                 dohc Drive
                 <Pill>Coming soon</Pill>
               </p>
-              <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
+              <p className="m-0 mt-1 text-[12px] leading-relaxed text-muted">
                 Hosting, setup, and maintenance managed by dohc.
               </p>
             </div>
@@ -478,7 +475,7 @@ export function CloudLogin(
           </p>
           <p
             data-testid="cloud-user-code"
-            className="my-3 text-center font-mono text-2xl font-semibold tracking-[0.3em] text-ink"
+            className="my-3 text-center font-mono text-2xl font-medium tracking-[0.04em] text-ink"
           >
             {phase.userCode}
           </p>
@@ -490,7 +487,7 @@ export function CloudLogin(
             <ExternalLink size={12} aria-hidden />
             Open browser
           </PrimaryButton>
-          <p role="status" className="mb-0 mt-2 text-[11px] text-subtle">
+          <p role="status" className="mb-0 mt-2 text-[12px] text-subtle">
             Waiting for approval
           </p>
         </div>
