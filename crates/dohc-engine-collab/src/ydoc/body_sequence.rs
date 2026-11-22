@@ -599,7 +599,8 @@ impl<T: ReadTxn> Reader<'_, T> {
         self.close_leaf();
         self.close_to(0);
         if self.top.is_empty() {
-            self.top.push(element(PARAGRAPH, Attributes::new(), Vec::new()));
+            let paragraph = element(PARAGRAPH, Attributes::new(), Vec::new());
+            self.top.push(paragraph);
         }
         self.top
     }
@@ -729,8 +730,8 @@ mod tests {
     }
 
     fn top_blocks(document: &Value) -> Vec<String> {
-        let blocks = document["content"].as_array();
-        blocks.into_iter().flatten().map(Value::to_string).collect()
+        let blocks = document["content"].as_array().into_iter().flatten();
+        blocks.map(Value::to_string).collect()
     }
 
     fn lines(markdown: &str) -> Vec<String> {
@@ -826,7 +827,11 @@ mod tests {
         let doc = Ydoc::wire().reading_body_sequence();
         doc.richdoc_append_paragraph("under body");
         let meta = doc.doc.get_or_insert_map(ROOT_META);
-        meta.insert(&mut doc.doc.transact_mut(), "schemaVersion", Any::Number(1.0));
+        meta.insert(
+            &mut doc.doc.transact_mut(),
+            "schemaVersion",
+            Any::Number(1.0),
+        );
         doc.validate_public_baseline(&doc.encode_full_state())
             .expect("a note whose body is under body is admitted as before");
         let written = doc.project(ContentKind::Richdoc).expect("it writes");
