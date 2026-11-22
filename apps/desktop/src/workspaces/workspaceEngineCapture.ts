@@ -577,6 +577,9 @@ export interface WorkspaceEngineCapture {
   beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
+  // Holds read outside the poll, such as after an access rule decision. One
+  // that another program holds brings the poll's next look forward.
+  noteHeldAccessRules(holds: readonly AccessRuleHold[]): void;
   noteWriteDeferred(path: string): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
@@ -5146,6 +5149,11 @@ export function createWorkspaceEngineCapture(
     daemonCaptureHealthTimer.unref?.();
   }
 
+  function lookAgainIfLocked(holds: readonly AccessRuleHold[] | undefined): void {
+    if (!stopped && holds?.some((hold) => hold.unreadable === "locked"))
+      scheduleDaemonCaptureHealth(LOCKED_ACCESS_RULE_POLL_MS);
+  }
+
   function pollDaemonCaptureHealth(): void {
     if (stopped || daemonCaptureHealthTimer !== null) return;
     scheduleDaemonCaptureHealth(DAEMON_CAPTURE_HEALTH_POLL_MS);
@@ -5168,8 +5176,7 @@ export function createWorkspaceEngineCapture(
           options.onHeldFiles?.(status.heldFiles);
           options.onOutsideChanges?.(outsideChangesOf(status));
           options.onHeldAccessRules?.(status.heldAccessRules);
-          if (!stopped && status.heldAccessRules?.some((hold) => hold.unreadable === "locked"))
-            scheduleDaemonCaptureHealth(LOCKED_ACCESS_RULE_POLL_MS);
+          lookAgainIfLocked(status.heldAccessRules);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy = captureWorks(status);
@@ -6854,6 +6861,10 @@ export function createWorkspaceEngineCapture(
   return {
     start() {
       pollDaemonCaptureHealth();
+    },
+
+    noteHeldAccessRules(holds) {
+      lookAgainIfLocked(holds);
     },
 
     noteWriteDeferred(path) {

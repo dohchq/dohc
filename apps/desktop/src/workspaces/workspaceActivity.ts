@@ -1231,7 +1231,16 @@ export function createWorkspaceActivity(
     stopEngine,
     getStatus,
     recordHeldFiles,
-    recordHeldAccessRules,
+    // A decision's read of the holds, which the capture's poll didn't make.
+    recordHeldAccessRules: (
+      workspace: ActivityWorkspace,
+      state: WorkspaceActivityState,
+      holds: NonNullable<SyncStatusResult["heldAccessRules"]>,
+    ) => {
+      if (state.entry?.workspace.attachmentId === workspace.attachmentId)
+        state.entry.capture?.noteHeldAccessRules(holds);
+      recordHeldAccessRules(workspace, state, holds);
+    },
     recordShareViewStoreRefusal,
     recordAtomicPlacementUnavailable,
     isOpen,
