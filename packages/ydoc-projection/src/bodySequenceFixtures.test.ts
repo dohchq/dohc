@@ -299,6 +299,11 @@ function built(): Record<string, Y.Doc> {
     taskList: ["taskList", "taskItem"],
     table: ["table", "tableRow", "tableCell"],
   };
+  const CELLS = new Set(["tableCell", "tableHeader"]);
+  const BOTH_WRITERS_WRITE_ALIKE_BESIDE_OTHER_BLOCKS_IN_A_CELL = new Set([
+    "bulletList",
+    "taskList",
+  ]);
   const holding = Object.entries(HOLDERS).map(([holder, outer], client) => {
     const made = note(12 + client);
     for (const [held, inner] of Object.entries(HELD)) {
@@ -308,9 +313,12 @@ function built(): Record<string, Y.Doc> {
         made.container(id, type);
         return id;
       });
-      made.line({ type: "paragraph", path: path.slice(0, outer.length) }, `the ${holder}`);
+      const alone =
+        CELLS.has(holder) && !BOTH_WRITERS_WRITE_ALIKE_BESIDE_OTHER_BLOCKS_IN_A_CELL.has(held);
+      const inHolder = { type: "paragraph", path: path.slice(0, outer.length) };
+      if (!alone) made.line(inHolder, `the ${holder}`);
       made.line({ type: "paragraph", path }, `the ${held} in it`);
-      made.line({ type: "paragraph", path: path.slice(0, outer.length) }, `the ${holder} again`);
+      if (!alone) made.line(inHolder, `the ${holder} again`);
     }
     return [`what a ${holder} holds`, made.doc] as const;
   });
@@ -347,6 +355,8 @@ function built(): Record<string, Y.Doc> {
     Number.POSITIVE_INFINITY,
   ])
     values.line({ type: "heading", level, path: [] }, `level stored as ${stored(level)}`);
+  values.line({ type: "heading", level: new Y.Map(), path: [] }, "level stored as a shared map");
+  values.line({ type: new Y.Text("heading"), path: [] }, "type stored as a shared text");
   for (const [at, start] of [
     0,
     7,
@@ -535,6 +545,8 @@ function built(): Record<string, Y.Doc> {
   ] as const)
     paths.container(id, type);
   paths.records.set("number", 3);
+  paths.records.set("shared", new Y.Text("blockquote"));
+  paths.records.set("c.title", new Y.Text("a title stored as a shared text"));
   paths.records.set("null", null);
   paths.records.set("leaf", "paragraph");
   paths.records.set("top", "doc");
@@ -561,6 +573,8 @@ function built(): Record<string, Y.Doc> {
     ["an id with no record", ["q", "missing", "q2"]],
     ["a record that is a number", ["q", "number", "q2"]],
     ["a record that is null", ["q", "null", "q2"]],
+    ["a record that is a shared text", ["q", "shared", "q2"]],
+    ["a path that is a shared array", new Y.Array()],
     ["a record that names a block with no blocks inside", ["q", "leaf", "q2"]],
     ["a record that names the document", ["q", "top", "q2"]],
     ["a record that names text", ["q", "letters", "q2"]],
