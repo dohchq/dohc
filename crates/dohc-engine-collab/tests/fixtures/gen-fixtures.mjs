@@ -1110,6 +1110,60 @@ const RICHDOC_PROJECTION_CASES = [
     name: "sealed-entity-alone",
     makeDoc: () => directRichdoc([paragraph([xmlElement("rawInline", { source: "&nbsp;" })])]),
   },
+  {
+    // #4107: two edits merged at once can leave a list with no items or an
+    // item with nothing in it. The editor leaves them out, so the file does.
+    name: "empty-list-items",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement("orderedList", { start: 1 }, [
+          xmlElement("listItem"),
+          xmlElement("listItem", {}, [paragraph("a")]),
+          xmlElement("listItem"),
+          xmlElement("listItem", {}, [paragraph("b")]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [paragraph("c")]),
+          xmlElement("taskItem", { checked: false }),
+          xmlElement("taskItem", { checked: true }),
+          xmlElement("taskItem", { checked: false }, [paragraph("d")]),
+        ]),
+      ]),
+  },
+  {
+    name: "empty-lists",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("a"),
+        xmlElement("bulletList"),
+        paragraph("b"),
+        xmlElement("bulletList", {}, [xmlElement("listItem"), xmlElement("listItem")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [xmlElement("bulletList"), paragraph("c")]),
+          xmlElement("listItem", {}, [paragraph("d"), xmlElement("orderedList", { start: 1 })]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: true }, [xmlElement("bulletList")]),
+          xmlElement("taskItem", { checked: false }, [paragraph("e")]),
+        ]),
+      ]),
+  },
+  {
+    name: "empty-list-in-table-cell",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("a"),
+              xmlElement("bulletList"),
+              paragraph("b"),
+            ]),
+          ]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
