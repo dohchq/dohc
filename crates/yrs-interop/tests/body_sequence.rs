@@ -370,7 +370,9 @@ fn written_with_bold(doc: &Doc, text: &impl Text) -> String {
             Out::YXmlElement(element) => element.tag().to_string(),
             other => panic!("unexpected item: {other:?}"),
         };
-        let bold = chunk.attributes.is_some_and(|attrs| attrs.contains_key("bold"));
+        let bold = chunk
+            .attributes
+            .is_some_and(|attrs| attrs.contains_key("bold"));
         let marker = if bold { "**" } else { "" };
         written.push(format!("{marker}{piece}{marker}"));
     }
