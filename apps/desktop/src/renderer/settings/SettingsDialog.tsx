@@ -140,6 +140,8 @@ export function SettingsDialog(props: {
     identity?: string,
   ) => void;
   onClearError?: (identity: string) => void;
+  /** The title bar says the server is unreachable. */
+  serverNamed?: boolean;
   onNotice?: (message: string, undo?: () => void) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
@@ -910,6 +912,7 @@ export function SettingsDialog(props: {
                 }}
                 {...(props.onError ? { onError: props.onError } : {})}
                 {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+                {...(props.serverNamed ? { serverNamed: true } : {})}
               />
             )}
           </div>

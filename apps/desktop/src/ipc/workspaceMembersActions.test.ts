@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
-import { createWorkspaceMembersActions, MEMBERS_UNREACHABLE } from "./workspaceMembersActions";
+import { createWorkspaceMembersActions } from "./workspaceMembersActions";
 import { memberOperations, MEMBERS_INACTIVE_MESSAGE } from "./memberOperations";
 import { operationBridge, registerOperations } from "./operationTable";
 import { deferred } from "../testing/deferred";
@@ -58,11 +58,13 @@ function harness(options: { shareView?: unknown } = {}) {
     }),
   );
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
+  const serverAnswered = vi.fn<() => void>();
   const members = createWorkspaceMembersActions<typeof workspace, Credentials>({
     remoteForWorkspace: remote,
     currentCredentialGeneration: () => generation,
     relayResponse: relay,
     sharesChanged,
+    serverAnswered,
   });
   const listeners = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>();
   registerOperations(
@@ -93,6 +95,7 @@ function harness(options: { shareView?: unknown } = {}) {
     relay,
     remote,
     sharesChanged,
+    serverAnswered,
     rotate: () => {
       generation++;
     },
@@ -163,7 +166,8 @@ describe("workspace members actions", () => {
     h.relay.mockRejectedValueOnce(new TypeError("fetch failed"));
     await expect(
       h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
-    ).rejects.toThrow(MEMBERS_UNREACHABLE);
+    ).rejects.toThrow(/^dohc could not reach your server\. Check your connection\.$/u);
+    expect(h.serverAnswered).not.toHaveBeenCalled();
     h.relay.mockImplementationOnce(async () => {
       h.rotate();
       throw new TypeError("aborted");
@@ -171,6 +175,19 @@ describe("workspace members actions", () => {
     await expect(
       h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
     ).rejects.toThrow("Your server session changed. Try again.");
+  });
+
+  // Any answer, even a refusal, shows the server is back, so sync need not wait out its backoff.
+  it("tells sync the server answered, even when it refused the change", async () => {
+    const h = harness();
+    h.relay.mockResolvedValueOnce(json({ error: "conflict" }, 409));
+    await expect(
+      h.bridge.workspaceMembers({
+        workspaceId: "ws-1",
+        request: { action: "level", level: "edit" },
+      }),
+    ).rejects.toThrow("Members changed first");
+    expect(h.serverAnswered).toHaveBeenCalledTimes(1);
   });
 
   it("drops an answer that arrives after the account changed", async () => {

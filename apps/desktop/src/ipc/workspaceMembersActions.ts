@@ -14,10 +14,11 @@ interface MembersDependencies<Workspace, Credentials> {
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
   /** The relay accepted a change, so this computer's grant listings refresh now. */
   sharesChanged(workspaceId: string): void;
+  /** The relay answered, so a sync that last found it unreachable tries again now. */
+  serverAnswered(): void;
 }
 
-export const MEMBERS_UNREACHABLE =
-  "dohc could not reach your server. Check your connection, then try again.";
+export const MEMBERS_UNREACHABLE = "dohc could not reach your server. Check your connection.";
 const SHARE_VIEW_REFUSAL = "Open the original workspace to manage its members.";
 
 const PHRASES: Record<MembersRequest["action"], string> = {
@@ -130,6 +131,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
             session.assertCurrent();
             throw new Error(MEMBERS_UNREACHABLE);
           }
+          dependencies.serverAnswered();
           let data: unknown = null;
           if (response.ok) {
             try {

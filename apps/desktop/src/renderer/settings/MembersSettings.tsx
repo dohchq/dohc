@@ -151,6 +151,8 @@ export function MembersSettings(props: {
   onOpenSync: () => void;
   onError?: ReportError;
   onClearError?: (identity: string) => void;
+  /** The title bar says the server is unreachable, so its report covers a failure here. */
+  serverNamed?: boolean;
 }) {
   const { workspaceId } = props;
   const gate = membersGate(props.cloud);
@@ -166,8 +168,30 @@ export function MembersSettings(props: {
     },
     [],
   );
-  const report = useRef({ onError: props.onError, onClearError: props.onClearError });
-  report.current = { onError: props.onError, onClearError: props.onClearError };
+  const report = useRef({
+    onError: props.onError,
+    onClearError: props.onClearError,
+    serverNamed: props.serverNamed,
+  });
+  report.current = {
+    onError: props.onError,
+    onClearError: props.onClearError,
+    serverNamed: props.serverNamed,
+  };
+  // One outage, one notice: while the title bar names the server, a failure
+  // here says so only in place, and a row filed before then is taken back.
+  // Choosing the level or confirming Remove again is the retry.
+  const filed = useRef(new Set<string>());
+  const fileFailure = useCallback<ReportError>((message, cause, retry, details, identity) => {
+    if (report.current.serverNamed) return;
+    if (identity !== undefined) filed.current.add(identity);
+    report.current.onError?.(message, cause, retry, details, identity);
+  }, []);
+  useEffect(() => {
+    if (!props.serverNamed) return;
+    for (const identity of filed.current) report.current.onClearError?.(identity);
+    filed.current.clear();
+  }, [props.serverNamed]);
 
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
   // One change runs at a time. Its controls wait, and the view it answers is
@@ -206,7 +230,7 @@ export function MembersSettings(props: {
           if (!scope.isCurrent(token)) return;
           const message = ipcErrorMessage(cause, FALLBACK.list);
           setLoad({ key: scopeKey, load: { status: "failed", message } });
-          report.current.onError?.(
+          fileFailure(
             message,
             cause,
             async () => setAttempt((count) => count + 1),
@@ -240,7 +264,7 @@ export function MembersSettings(props: {
         // workspace or account never hears it.
         if (scope.isCurrent(token) || (closed.current && scope.isCutOff(token))) {
           const reportFailure = (): void =>
-            report.current.onError?.(
+            fileFailure(
               ipcErrorMessage(cause, FALLBACK[request.action]),
               cause,
               async () => {
