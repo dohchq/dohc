@@ -647,6 +647,8 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
   dohc_list_outside_changes:
     "The owning workspace holds outside changes. Shared profiles do not offer this read.",
+  dohc_search_workspace:
+    "Workspace search runs only on the owning workspace. Shared profiles do not offer this read.",
 };
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
@@ -754,27 +756,29 @@ function verbReturns(command: string, name: string): string {
       ? "fileDuplicate"
       : command === "links"
         ? declaredSocketVerbs("links")[name]
-        : command === "chat"
-          ? (CHAT_SOCKET_VERBS[name] ?? name)
-          : command === "history"
-            ? HISTORY_RESULTS[name]
-            : command === "document"
-              ? DOCUMENT_RESULTS[name]
-              : command === "automation"
-                ? AUTOMATION_RESULTS[name]
-                : command === "access"
-                  ? ACCESS_RESULTS[name]
-                  : command === "sync"
-                    ? SYNC_RESULTS[name]
-                    : command === "notices"
-                      ? NOTICES_RESULTS[name]
-                      : command === "share"
-                        ? SHARE_RESULTS[name]
-                        : command === "version"
-                          ? VERSION_RESULTS[name]
-                          : command === "account"
-                            ? ACCOUNT_RESULTS[name]
-                            : undefined;
+        : command === "workspace"
+          ? declaredSocketVerbs("workspace")[name]
+          : command === "chat"
+            ? (CHAT_SOCKET_VERBS[name] ?? name)
+            : command === "history"
+              ? HISTORY_RESULTS[name]
+              : command === "document"
+                ? DOCUMENT_RESULTS[name]
+                : command === "automation"
+                  ? AUTOMATION_RESULTS[name]
+                  : command === "access"
+                    ? ACCESS_RESULTS[name]
+                    : command === "sync"
+                      ? SYNC_RESULTS[name]
+                      : command === "notices"
+                        ? NOTICES_RESULTS[name]
+                        : command === "share"
+                          ? SHARE_RESULTS[name]
+                          : command === "version"
+                            ? VERSION_RESULTS[name]
+                            : command === "account"
+                              ? ACCOUNT_RESULTS[name]
+                              : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -875,6 +879,9 @@ function commandSection(name: string, command: CliCommandSpec): string {
     name === "access" ? ACCESS_NOTES : "",
     name === "links"
       ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields."
+      : "",
+    name === "workspace"
+      ? "Works on the owning workspace only; standalone received shares and mounted shared folders are refused. `complete` is false when `indexBuilding` or `policyDegraded` is true, when `sharedChannelRowsUncovered` is non-zero, or when a short query exceeds its scan bound. `mountsCovered` is false when received folders are mounted under `shared-with-me/`. `truncated` is true when the response hit its 64 KiB wire cap."
       : "",
     name === "sync"
       ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority."

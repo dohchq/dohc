@@ -2449,6 +2449,7 @@ const HAND_WRITTEN_SHARE_RULES: {
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
   outsideChanges: "owner",
+  workspaceSearch: "owner",
   linksEdges: "anywhere",
   linksIn: "anywhere",
   linksResolve: "anywhere",
@@ -4850,6 +4851,9 @@ async function dispatchDeclaredRead(
 ): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  if (workspace.readOnly && RECEIVED_SHARE_RULES[request.verb] === "owner") {
+    throw new CliCommandError(OWNER_COMMAND_IN_RECEIVED_SHARE);
+  }
   const read = options.reads?.[request.verb] as
     | ((workspace: CliRegistryWorkspace, input: object) => Promise<unknown>)
     | undefined;

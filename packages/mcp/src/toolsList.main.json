@@ -4221,6 +4221,60 @@
       }
     },
     {
+      "name": "dohc_search_workspace",
+      "description": "Search across pages, Document Collections, typed records, transactional dataset pointers, and chats in one ranked call, with 1-hop linked context (wikilinks, Collection relations, chat mentions). Use this first to recall context in the owning workspace before listing files or grepping chat. Check complete, indexBuilding, policyDegraded, mountsCovered, sharedChannelRowsUncovered, and truncated for coverage.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "surfaces": {
+            "minItems": 1,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "page",
+                "collection",
+                "record",
+                "chat"
+              ]
+            }
+          },
+          "pathPrefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "includeNeighbors": {
+            "type": "boolean"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_set_record_fields",
       "description": "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
       "inputSchema": {

@@ -1,5 +1,6 @@
 import { captureOperations } from "./captureOperations";
 import { linksOperations } from "./linksOperations";
+import { retrievalOperations } from "./retrievalOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import {
   shareHandoffOperations,
@@ -75,6 +76,7 @@ export const OPERATION_TABLES = [
   relayShareOperations,
   shareCopyOperations,
   linksOperations,
+  retrievalOperations,
   captureOperations,
   heldChangeOperations,
   workspaceSyncOperations,

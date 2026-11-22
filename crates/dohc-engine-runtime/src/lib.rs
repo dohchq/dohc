@@ -29,6 +29,7 @@ mod conversation_links;
 pub mod error;
 pub mod identity;
 pub(crate) mod links;
+pub mod retrieval;
 pub mod search;
 pub mod supervisor;
 

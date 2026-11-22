@@ -402,7 +402,8 @@
     "desktop:write-set-aside-draft",
     "desktop:write-workspace-asset",
     "desktop:write-workspace-text",
-    "desktop:outside-changes"
+    "desktop:outside-changes",
+    "desktop:retrieve-workspace"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -460,6 +461,7 @@
     "desktop:make-message-link": "active-workspace",
     "desktop:resolve-work-link": "active-workspace",
     "desktop:describe-work-references": "active-workspace",
-    "desktop:outside-changes": "active-workspace"
+    "desktop:outside-changes": "active-workspace",
+    "desktop:retrieve-workspace": "active-workspace"
   }
 }

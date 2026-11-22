@@ -7,6 +7,7 @@ import {
   LinksResolveInput,
   LinksResolveResult,
 } from "@dohc/workspace-contracts/links";
+import { WorkspaceSearchInput, WorkspaceSearchResult } from "@dohc/workspace-contracts/retrieval";
 import type {
   HistoryOperationsStore,
   HistoryOperation,
@@ -921,6 +922,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     if (result.results.length !== params.literals.length)
       throw new DaemonProtocolError("links.resolve returned a different literal count.");
     return result;
+  }
+
+  async retrieveWorkspace(input: WorkspaceSearchInput): Promise<WorkspaceSearchResult> {
+    return WorkspaceSearchResult.parse(
+      await this.requester.request("retrieval.query", WorkspaceSearchInput.parse(input), {
+        workspace: this.workspace,
+      }),
+    );
   }
 
   /** Resolve only the requested file identities without listing or reading bodies. */

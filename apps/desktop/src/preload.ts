@@ -1,5 +1,6 @@
 import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
+import { retrievalOperations } from "./ipc/retrievalOperations";
 import { protectedCopyOperations, stoppedRunOperations } from "./ipc/writeOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import {
@@ -192,6 +193,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(linksOperations, invoke),
+  ...operationBridge(retrievalOperations, invoke),
   ...operationBridge(captureOperations, invoke),
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),

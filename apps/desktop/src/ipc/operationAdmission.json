@@ -241,5 +241,6 @@
   "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:outside-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:outside-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:retrieve-workspace": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

@@ -1,6 +1,7 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
+import { RetrievalKind, WorkspaceSearchInput } from "@dohc/workspace-contracts/retrieval";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
 import {
@@ -1976,6 +1977,39 @@ const DECLARED_PARSERS: {
     noExtraArgs(input.operands, command);
     return OutsideChangesInput.parse({});
   },
+  workspaceSearch: (input, command) => {
+    const [query, ...extra] = input.operands;
+    if (!query || !query.trim()) fail(`${command} requires a query`);
+    noExtraArgs(extra, command);
+    const rawSurfaces = allValues(input, "--surface");
+    const surfaces: RetrievalKind[] = [];
+    for (const raw of rawSurfaces) {
+      const parsed = RetrievalKind.safeParse(raw);
+      if (!parsed.success) fail("--surface must be page, collection, record, or chat");
+      if (!surfaces.includes(parsed.data)) surfaces.push(parsed.data);
+    }
+    const pathPrefix = lastValue(input, "--path-prefix");
+    const collectionPath = lastValue(input, "--collection");
+    const rawLimit = lastValue(input, "--limit");
+    let limit: number | undefined;
+    if (rawLimit !== undefined) {
+      limit = integerFlag(rawLimit, "--limit", { allowZero: false });
+      if (limit > 50) fail("--limit must be between 1 and 50");
+    }
+    const includeNeighbors = input.flags.has("--no-neighbors") ? false : undefined;
+    const result = WorkspaceSearchInput.safeParse({
+      query,
+      ...(surfaces.length > 0 ? { surfaces } : {}),
+      ...(pathPrefix !== undefined ? { pathPrefix } : {}),
+      ...(collectionPath !== undefined ? { collectionPath } : {}),
+      ...(includeNeighbors !== undefined ? { includeNeighbors } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    if (!result.success) {
+      fail(result.error.issues[0]?.message ?? "invalid workspace search input");
+    }
+    return result.data;
+  },
 };
 
 // Adds each declared operation's verb to the hand-written command it names.
@@ -2359,6 +2393,14 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     summary: "Review and delete the server account the dohc app is connected to.",
     notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
     verbs: ACCOUNT_VERBS,
+  },
+  workspace: {
+    summary: "Search pages, Collections, records, and chats across this workspace.",
+    notes: [
+      "Requires the original workspace; received shares and mounted folders are refused.",
+      "Paths in --path-prefix and --collection are relative to the workspace root.",
+    ],
+    verbs: {},
   },
 });
 

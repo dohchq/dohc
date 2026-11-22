@@ -4,8 +4,10 @@ import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { createWorkspaceRetrievalReader } from "./workspaces/workspaceRetrieval";
 import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
+import { retrievalOperations } from "./ipc/retrievalOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import { createWorkspaceHeldChanges } from "./workspaces/workspaceHeldChanges";
 import {
@@ -4192,6 +4194,10 @@ async function withEngineAdapter<T>(
 }
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
+const workspaceRetrieval = createWorkspaceRetrievalReader({
+  withAdapter: withEngineAdapter,
+  syncWorkspaceSharedChannels,
+});
 const workspaceHeldChanges = createWorkspaceHeldChanges(withEngineAdapter);
 // Live notes whose file changed outside dohc, as the engine holds them now.
 async function workspaceOutsideChanges(workspace: EngineWorkspace) {
@@ -7132,6 +7138,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
     outsideChanges: (workspace) => workspaceOutsideChanges(workspace),
+    workspaceSearch: (workspace, input) => workspaceRetrieval.search(workspace, input),
   },
   heldChanges: workspaceHeldChanges,
   findWorkspace,
@@ -8939,6 +8946,10 @@ function registerIpcHandlers(): void {
       workspaceLinks.incoming(operation.workspace, input),
     linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
       workspaceLinks.resolve(operation.workspace, input),
+  });
+  registerOperations(operationBoundary, retrievalOperations, {
+    workspaceSearch: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
+      workspaceRetrieval.search(operation.workspace, input),
   });
   registerOperations(operationBoundary, captureOperations, {
     outsideChanges: async (_input, { operation }) => {

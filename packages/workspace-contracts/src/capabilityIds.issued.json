@@ -306,6 +306,7 @@
   "workspace.name.suggest",
   "workspace.open.failures.take",
   "workspace.open.retry",
+  "workspace.search",
   "workspace.status",
   "workspace.sync.stop",
   "workspace.trust.read",

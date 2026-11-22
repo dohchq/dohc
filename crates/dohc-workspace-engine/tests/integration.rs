@@ -54,6 +54,8 @@ mod rpc_read_surface;
 mod rpc_received_ydoc;
 #[path = "rpc_relay.rs"]
 mod rpc_relay;
+#[path = "rpc_retrieval.rs"]
+mod rpc_retrieval;
 #[path = "rpc_search_page.rs"]
 mod rpc_search_page;
 #[path = "rpc_secret_queued_jobs.rs"]

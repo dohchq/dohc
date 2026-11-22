@@ -23,6 +23,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("share.")
         || method.starts_with("links.")
         || method.starts_with("search.")
+        || method.starts_with("retrieval.")
         || method.starts_with("collections.")
         // A recovery store has no capture to wait for.
         || (method.starts_with("liveApplication.")
@@ -723,6 +724,10 @@ impl EngineService {
                 self.search_ensure_index(&ctx, request.workspace, request.params)
                     .await?
             }
+            "retrieval.query" => {
+                self.retrieval_query(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "collections.list" => {
                 self.collections_list(&ctx, request.workspace, request.params)
                     .await?
@@ -1389,6 +1394,12 @@ impl EngineService {
                     "received shares do not make work references",
                 ));
             }
+            if method == "retrieval.query" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not support workspace retrieval",
+                ));
+            }
         }
         if read_only
             && !matches!(
@@ -1399,6 +1410,7 @@ impl EngineService {
                     | "links.resolve"
                     | "files.changesSince"
                     | "files.drain"
+                    | "retrieval.query"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
                     | "history.page"
@@ -1848,6 +1860,7 @@ mod tests {
             "keys.upload",
             "moments.get",
             "moments.list",
+            "retrieval.query",
             "search.ensureIndex",
             "search.queryChatMessagesGranular",
             "search.queryPage",

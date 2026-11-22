@@ -399,6 +399,27 @@ impl EngineStore {
         .map_err(StorageError::corrupt)
     }
 
+    /// Install or clear a SQLite cancellation progress handler on a read-only
+    /// connection. Writer connections check cancellation between bounded units
+    /// instead so an active savepoint rollback can never be interrupted.
+    pub fn set_read_progress_handler<F>(
+        &mut self,
+        step_ops: std::ffi::c_int,
+        handler: Option<F>,
+    ) -> Result<(), StorageError>
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
+        if self.pages_checked.is_some() {
+            return Err(StorageError::InvalidInput {
+                reason: "read progress handler requires a read-only store",
+            });
+        }
+        self.conn
+            .progress_handler(step_ops, handler)
+            .map_err(StorageError::corrupt)
+    }
+
     /// Whether this open initialized a fresh database rather than reopening an
     /// existing v2 store.
     pub fn was_freshly_created(&self) -> bool {
