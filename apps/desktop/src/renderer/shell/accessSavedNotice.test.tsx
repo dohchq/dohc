@@ -45,7 +45,7 @@ describe("the notice for items an access change saved", () => {
     const report = vi.fn<AccessSavedReport>();
     renderHook(() => useAccessSavedNotice("w", { folder, count: 0 }, report));
     expect(report.mock.calls[0]![0].message).toBe(
-      "Your access changed. dohc undid changes that weren't sent. The recovery folder lists them.",
+      "Your access changed. dohc undid changes that weren't sent.",
     );
   });
 

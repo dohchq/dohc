@@ -196,6 +196,8 @@ export type ReportShellFailure = (failure: {
   title?: string;
   message: string;
   cause?: unknown;
+  // Files the row with no toast, for a failure its own surface already shows.
+  quiet?: boolean;
   retry?: (() => void) | null;
   action?: ShellError["action"];
   target?: NoticeTarget;

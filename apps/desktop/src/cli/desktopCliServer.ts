@@ -390,7 +390,9 @@ function refuseClosedCopy(workspace: RegistryEntry): void {
   const rebuild = workspace.shareView?.rebuild;
   if (!rebuild) return;
   if (workspace.shareView?.ended === true || rebuild.stopped?.reason === "ended") {
-    throw new Error("Your membership of this workspace ended. What arrived stays in its folder.");
+    throw new Error(
+      "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
+    );
   }
   // A stopped update reopens only once someone chooses Try again.
   throw new Error(

@@ -228,7 +228,8 @@ describe("rebuilding a joined copy", () => {
     expect(state.notices).toEqual([{ kind: "running" }, { kind: "ended" }]);
     expect(shareViewRebuildStop({ kind: "ended" })).toEqual({
       reason: "ended",
-      detail: "Your membership ended. What arrived stays in this folder.",
+      detail:
+        "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.",
     });
   });
 
