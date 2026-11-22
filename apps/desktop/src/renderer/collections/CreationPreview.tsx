@@ -29,6 +29,50 @@ export function CollectionKindShape({ documents }: { documents?: boolean }) {
   );
 }
 
+function PreviewCellSchematic({ type, row }: { type: string; row: number }) {
+  if (type === "checkbox") {
+    return (
+      <span
+        className={`inline-block size-3.5 rounded border ${row === 0 ? "border-subtle/60 bg-panel-2" : "border-line"}`}
+      />
+    );
+  }
+  if (type === "select" || type === "multi-select") {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span
+          className={`inline-block h-4 rounded-full bg-panel-2 ${row === 0 ? "w-12" : "w-10"}`}
+        />
+        {type === "multi-select" && row === 0 ? (
+          <span className="inline-block h-4 w-8 rounded-full bg-panel-2" />
+        ) : null}
+      </span>
+    );
+  }
+  if (type === "number") {
+    return (
+      <span className="flex justify-end">
+        <span
+          className={`inline-block h-2 rounded-full bg-panel-2 ${row === 0 ? "w-10" : "w-7"}`}
+        />
+      </span>
+    );
+  }
+  if (type === "date") {
+    return <span className="inline-block h-2 w-14 rounded-full bg-panel-2" />;
+  }
+  if (type === "attachment" || type === "relation" || type === "url") {
+    return (
+      <span
+        className={`inline-block h-4 rounded border border-line/70 bg-panel/60 ${row === 0 ? "w-16" : "w-12"}`}
+      />
+    );
+  }
+  return (
+    <span className={`inline-block h-2 rounded-full bg-panel-2 ${row === 0 ? "w-3/4" : "w-1/2"}`} />
+  );
+}
+
 export function CollectionCreationPreview({
   name,
   fields,
@@ -79,11 +123,18 @@ export function CollectionCreationPreview({
               </tr>
             </thead>
             <tbody aria-hidden="true">
-              <tr>
-                {fields.map((_, index) => (
-                  <td key={index} className="h-16 border-r border-line last:border-r-0" />
-                ))}
-              </tr>
+              {[0, 1].map((row) => (
+                <tr key={row}>
+                  {fields.map((field, index) => (
+                    <td
+                      key={index}
+                      className="h-9 border-b border-r border-line/60 px-3 align-middle last:border-r-0"
+                    >
+                      <PreviewCellSchematic type={field.type} row={row} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

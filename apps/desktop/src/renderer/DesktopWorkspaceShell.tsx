@@ -14,7 +14,13 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
-import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
+import {
+  SHORTCUTS,
+  matchShellShortcut,
+  matchShellShortcutChord,
+  shortcutTitle,
+  type ShortcutId,
+} from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -203,7 +209,7 @@ import { knownPersonalAgents, usePersonalAgents } from "./usePersonalAgents";
 import { setPersonalAgents } from "./workbench/chosenColors";
 import { MessageLinks, useMessageLinkMaker } from "./workbench/messageLinks";
 import { WorkReferences, useWorkReferenceLinks } from "./workbench/workReferences";
-import { CommandPalette, type Command } from "./CommandPalette";
+import { CommandPalette, renderCommandIcon, type Command } from "./CommandPalette";
 import {
   isCommandAvailable,
   paletteCommandRows,
@@ -3284,7 +3290,7 @@ function WorkspaceShell(props: {
   const showSettingsNotice = useCallback(
     (message: string, undo?: () => void) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
-      showSuccessNotice(message, undo);
+      return showSuccessNotice(message, undo);
     },
     [workspaceAdmission, workspaceId, showSuccessNotice],
   );
@@ -3417,6 +3423,7 @@ function WorkspaceShell(props: {
   // every open conflict (two machines editing apart, or a merge left with
   // "Finish later") with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
+  const [noticeOpenRequest, setNoticeOpenRequest] = useState(0);
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string, lineageChanged = true) => {
       if (lineageChanged) {
@@ -4471,9 +4478,8 @@ function WorkspaceShell(props: {
       onError: (message: string, error: unknown, retry: (() => void) | null, identity?: string) => {
         if (current()) reportButtonError(message, error, whileCurrent(retry) ?? null, identity);
       },
-      onNotice: (message: string, undo?: () => void) => {
-        if (current()) showSuccessNotice(message, whileCurrent(undo) ?? undefined);
-      },
+      onNotice: (message: string, undo?: () => void) =>
+        current() ? showSuccessNotice(message, whileCurrent(undo) ?? undefined) : undefined,
     };
   }, [workspaceId, reportButtonError, showSuccessNotice]);
   // The Explorer's notices and failures, held to their workspace rather than
@@ -6508,11 +6514,20 @@ function WorkspaceShell(props: {
     },
     [commandHandlers],
   );
-  const commands = useMemo<Command[]>(
-    () =>
-      paletteCommandRows(commandContext).map((row) => ({ ...row, run: () => runCommand(row.id) })),
-    [commandContext, runCommand],
-  );
+  const commands = useMemo<Command[]>(() => {
+    const platform = bridge().platform;
+    return paletteCommandRows(commandContext).map((row) => ({
+      id: row.id,
+      label: row.label,
+      group: row.group,
+      keywords: row.keywords,
+      icon: renderCommandIcon(row.icon),
+      shortcut: Object.hasOwn(SHORTCUTS, row.id)
+        ? shortcutTitle(row.id as ShortcutId, platform)
+        : undefined,
+      run: () => runCommand(row.id),
+    }));
+  }, [commandContext, runCommand]);
   // The start surface's tiles: each kind's existing create action, where the
   // workspace allows it.
   const startActions = useMemo(
@@ -8166,6 +8181,11 @@ function WorkspaceShell(props: {
                           setQuickOpenOpen={setQuickOpenOpen}
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
+                          onOpenConflicts={() => setConflictReviewOpen(true)}
+                          onOpenSyncSettings={openSyncSettings}
+                          onConnectServer={cloudSettings.onConnect}
+                          onSignInAgain={signInAgain}
+                          onOpenNotices={() => setNoticeOpenRequest((n) => n + 1)}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
@@ -8360,7 +8380,7 @@ function WorkspaceShell(props: {
                                   onClick={() => void sendShareChanges()}
                                   className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                                 >
-                                  <Send size={11} aria-hidden />
+                                  <Send size={12} aria-hidden />
                                   {shareChangesSubmitting ? "Sending…" : "Send changes"}
                                 </button>
                               </>
@@ -8374,7 +8394,7 @@ function WorkspaceShell(props: {
                                 className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                               >
                                 <RefreshCw
-                                  size={11}
+                                  size={12}
                                   aria-hidden
                                   className={shareRefreshing ? "animate-spin" : undefined}
                                 />
@@ -8397,6 +8417,7 @@ function WorkspaceShell(props: {
                             notices={
                               <NoticeCenter
                                 workspaceId={workspaceId}
+                                openRequest={noticeOpenRequest}
                                 syncStatus={syncStatus}
                                 failedSaves={failedSaves}
                                 agentActive={agentActive}
@@ -8663,6 +8684,9 @@ function WorkspaceShell(props: {
                                             onMove={moveFileTab}
                                             onMoveToGroup={moveFileTabToGroup}
                                             onCreateGroupRight={openEditorGroupRight}
+                                            {...(isCommandAvailable("new-file", commandContext)
+                                              ? { onNewPage: () => openNewPage("") }
+                                              : {})}
                                             {...(wb.editorGroups.length > 1
                                               ? { onCloseGroup: closeGroupAfterFlush }
                                               : {})}
@@ -9252,6 +9276,15 @@ function WorkspaceShell(props: {
                                                             commandContext,
                                                           )
                                                             ? importDroppedFiles
+                                                            : undefined
+                                                        }
+                                                        onImportFiles={
+                                                          isCommandAvailable(
+                                                            "import-files",
+                                                            commandContext,
+                                                          )
+                                                            ? () =>
+                                                                void importFiles("start-surface")
                                                             : undefined
                                                         }
                                                       />

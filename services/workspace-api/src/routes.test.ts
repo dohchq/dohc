@@ -239,6 +239,9 @@ describe("account pages", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(body).toContain(ACCOUNT_CSS_PATH);
     expect(body).toContain(ACCOUNT_JS_PATH);
+    expect(body).toContain('class="brand-mark"');
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<style");
     expect(body).not.toMatch(/https?:\/\/(?!localhost)/);
   });
 
@@ -365,6 +368,7 @@ describe("device verification page", () => {
     expect(body).toContain("ABCD-EFGH");
     expect(body).toContain("Approve");
     expect(body).toContain("Deny");
+    expect(body.indexOf('id="deny"')).toBeLessThan(body.indexOf('id="approve"'));
     expect(body).toContain("ada@example.com");
     expect(body).toContain("Connect this phone to dohc?");
     expect(body).toContain(

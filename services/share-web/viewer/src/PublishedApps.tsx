@@ -131,7 +131,7 @@ function PublicationList({
       {status === "failed" && (
         <>
           <p role="status">{error}</p>
-          <button className="handoff-button" onClick={() => void load(cursor)}>
+          <button className="handoff-button secondary" onClick={() => void load(cursor)}>
             Retry
           </button>
         </>
@@ -140,7 +140,7 @@ function PublicationList({
         <p>No apps are available on this link. Ask the owner to publish one.</p>
       )}
       {status === "ready" && cursor !== null && (
-        <button className="handoff-button" onClick={() => void load(cursor)}>
+        <button className="handoff-button secondary" onClick={() => void load(cursor)}>
           Load more apps
         </button>
       )}

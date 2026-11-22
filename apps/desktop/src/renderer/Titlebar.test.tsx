@@ -406,7 +406,7 @@ it("returns focus after choosing a workspace", async () => {
   const trigger = screen.getByTestId("workspace-switcher");
   trigger.focus();
   fireEvent.click(trigger);
-  const option = screen.getAllByTestId("workspace-switcher-option")[1]!;
+  const option = screen.getAllByTestId("workspace-switcher-option")[1]!.querySelector("button")!;
   option.focus();
   fireEvent.click(option);
   await waitFor(() => expect(document.activeElement).toBe(trigger));

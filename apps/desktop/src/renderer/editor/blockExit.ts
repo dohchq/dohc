@@ -171,10 +171,48 @@ function handleDelete(view: EditorView): boolean {
   return false;
 }
 
+function handleClickBelowLastBlock(view: EditorView, event: MouseEvent): boolean {
+  if (
+    event.button !== 0 ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    view.editable === false
+  ) {
+    return false;
+  }
+  if (event.target !== view.dom) return false;
+  const last = view.state.doc.lastChild;
+  if (!last || last.type.name === "paragraph") return false;
+  const lastPos = view.state.doc.content.size - last.nodeSize;
+  const lastDom = view.nodeDOM(lastPos);
+  if (!(lastDom instanceof HTMLElement)) return false;
+  let bottom = lastDom.getBoundingClientRect().bottom;
+  let sibling = lastDom.nextElementSibling;
+  while (sibling) {
+    if (sibling instanceof HTMLElement) {
+      const rect = sibling.getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > bottom) bottom = rect.bottom;
+    }
+    sibling = sibling.nextElementSibling;
+  }
+  if (event.clientY <= bottom) return false;
+  if (!caretIntoParagraphAt(view, view.state.doc.content.size)) return false;
+  event.preventDefault();
+  view.focus();
+  return true;
+}
+
 export function makeBlockExitPlugin(): Plugin {
   return new Plugin({
     key: blockExitKey,
     props: {
+      handleDOMEvents: {
+        mousedown(view, event) {
+          return handleClickBelowLastBlock(view, event);
+        },
+      },
       handleKeyDown(view, event) {
         if (event.key === "Backspace" || event.key === "Delete") {
           const handled = event.key === "Backspace" ? handleBackspace(view) : handleDelete(view);

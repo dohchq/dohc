@@ -74,7 +74,7 @@ describe("ChatsView archive and row menus", () => {
 
     await user.click(toggle);
     const trip = within(screen.getByTestId("chats-archived-list")).getByTestId("chats-channel");
-    expect(within(trip).getByTestId("chats-channel-name").className).toContain("font-medium");
+    expect(within(trip).getByTestId("chats-channel-name").className).toContain("font-semibold");
     expect(within(trip).getByTestId("chats-channel-unread").textContent).toBe("2");
 
     fireEvent.contextMenu(trip, { clientX: 40, clientY: 200 });

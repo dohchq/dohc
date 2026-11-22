@@ -27,55 +27,298 @@ export const COMMAND_AVAILABILITY = {
     context.pinnedApps.some((app) => pinnedAppCommandId(app.root) === id),
 };
 
+export type CommandIconId =
+  | "file-plus"
+  | "pen-tool"
+  | "folder-plus"
+  | "table"
+  | "search"
+  | "folder-open"
+  | "upload"
+  | "download"
+  | "panel-left"
+  | "x"
+  | "arrow-right"
+  | "arrow-left"
+  | "columns"
+  | "code"
+  | "share"
+  | "panel-right"
+  | "files"
+  | "message-circle"
+  | "workflow"
+  | "history"
+  | "layers"
+  | "app-window"
+  | "cloud"
+  | "settings"
+  | "palette"
+  | "sparkles"
+  | "refresh"
+  | "gift"
+  | "sun-moon"
+  | "zoom-in"
+  | "zoom-out"
+  | "rotate-ccw";
+
+export type CommandGroup = "Create" | "Files" | "Editor & layout" | "Views" | "Settings & app";
+
 interface StaticRow {
   label: string;
   availability: Exclude<keyof typeof COMMAND_AVAILABILITY, "pinnedApp">;
   capabilityId?: CapabilityId;
+  group: CommandGroup;
+  icon: CommandIconId;
+  keywords?: readonly string[];
 }
 
 export const COMMAND_ROWS = {
-  "new-file": { label: "New file", availability: "workspaceWritable" },
-  "new-file-at-path": { label: "New file…", availability: "workspaceWritable" },
-  "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
+  "new-file": {
+    label: "New file",
+    availability: "workspaceWritable",
+    group: "Create",
+    icon: "file-plus",
+    keywords: ["page", "document", "markdown", "note", "create"],
+  },
+  "new-file-at-path": {
+    label: "New file…",
+    availability: "workspaceWritable",
+    group: "Create",
+    icon: "file-plus",
+    keywords: ["path", "create", "document", "page"],
+  },
+  "new-drawing": {
+    label: "New drawing",
+    availability: "workspaceWritable",
+    group: "Create",
+    icon: "pen-tool",
+    keywords: ["sketch", "canvas", "excalidraw", "diagram"],
+  },
   "new-folder": {
     label: "New folder",
     availability: "folderCreatable",
     capabilityId: "folder.create",
+    group: "Create",
+    icon: "folder-plus",
+    keywords: ["directory", "create"],
   },
-  "new-collection": { label: "New collection", availability: "collectionCreatable" },
-  "quick-open": { label: "Go to", availability: "always" },
-  "open-workspace": { label: "Open workspace folder…", availability: "always" },
-  "import-files": { label: "Import files", availability: "workspaceWritable" },
-  "export-workspace": { label: "Export workspace as zip", availability: "always" },
-  "toggle-sidebar": { label: "Toggle sidebar", availability: "always" },
-  "close-tab": { label: "Close tab", availability: "always" },
-  "next-tab": { label: "Show next tab", availability: "always" },
-  "previous-tab": { label: "Show previous tab", availability: "always" },
-  "new-editor-group-right": { label: "New editor group right", availability: "always" },
+  "new-collection": {
+    label: "New collection",
+    availability: "collectionCreatable",
+    group: "Create",
+    icon: "table",
+    keywords: ["database", "table", "dataset", "records"],
+  },
+  "quick-open": {
+    label: "Go to",
+    availability: "always",
+    group: "Files",
+    icon: "search",
+    keywords: ["quick open", "find file", "jump", "switch"],
+  },
+  "open-workspace": {
+    label: "Open workspace folder…",
+    availability: "always",
+    group: "Files",
+    icon: "folder-open",
+    keywords: ["directory", "folder", "project"],
+  },
+  "import-files": {
+    label: "Import files",
+    availability: "workspaceWritable",
+    group: "Files",
+    icon: "upload",
+    keywords: ["add", "upload", "copy"],
+  },
+  "export-workspace": {
+    label: "Export workspace as zip",
+    availability: "always",
+    group: "Files",
+    icon: "download",
+    keywords: ["backup", "archive", "download"],
+  },
+  "toggle-sidebar": {
+    label: "Toggle sidebar",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "panel-left",
+    keywords: ["sidebar", "panel", "explorer", "hide", "show"],
+  },
+  "close-tab": {
+    label: "Close tab",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "x",
+    keywords: ["editor", "dismiss"],
+  },
+  "next-tab": {
+    label: "Show next tab",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "arrow-right",
+    keywords: ["switch tab", "cycle"],
+  },
+  "previous-tab": {
+    label: "Show previous tab",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "arrow-left",
+    keywords: ["switch tab", "cycle"],
+  },
+  "new-editor-group-right": {
+    label: "New editor group right",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "columns",
+    keywords: ["split", "pane", "side by side", "columns"],
+  },
   "toggle-markdown-source": {
     label: "Toggle markdown source view",
     availability: "activeMarkdown",
+    group: "Editor & layout",
+    icon: "code",
+    keywords: ["raw", "code", "source", "markdown"],
   },
-  "share-file": { label: "Share…", availability: "activeShareable" },
-  "toggle-about": { label: "Toggle About", availability: "always" },
-  "show-explorer": { label: "View: Explorer", availability: "always" },
-  "show-chats": { label: "View: Chats", availability: "localWorkspace" },
-  "show-search": { label: "View: Search", availability: "always" },
-  "show-graph": { label: "View: Graph", availability: "always" },
-  "show-history": { label: "View: History", availability: "always" },
-  "open-versions": { label: "Show all versions", availability: "localWorkspace" },
-  "connect-cloud": { label: "Connect server", availability: "always" },
-  settings: { label: "Settings", availability: "always" },
-  "settings-appearance": { label: "Settings: Open Appearance", availability: "always" },
-  "settings-agents": { label: "Settings: Open Agents (MCP)", availability: "always" },
-  "check-updates": { label: "Check for updates", availability: "always" },
-  "download-update": { label: "Update dohc", availability: "updateAvailable" },
-  "install-update": { label: "Restart to update", availability: "updateReady" },
-  "whats-new": { label: "What's new", availability: "always" },
-  "toggle-theme": { label: "Toggle light/dark theme", availability: "always" },
-  "zoom-in": { label: "Zoom in", availability: "always" },
-  "zoom-out": { label: "Zoom out", availability: "always" },
-  "zoom-reset": { label: "Reset zoom", availability: "always" },
+  "share-file": {
+    label: "Share…",
+    availability: "activeShareable",
+    group: "Editor & layout",
+    icon: "share",
+    keywords: ["link", "invite", "collaborate"],
+  },
+  "toggle-about": {
+    label: "Toggle About",
+    availability: "always",
+    group: "Editor & layout",
+    icon: "panel-right",
+    keywords: ["inspector", "right sidebar", "info", "details", "sidebar"],
+  },
+  "show-explorer": {
+    label: "View: Explorer",
+    availability: "always",
+    group: "Views",
+    icon: "files",
+    keywords: ["files", "tree", "sidebar"],
+  },
+  "show-chats": {
+    label: "View: Chats",
+    availability: "localWorkspace",
+    group: "Views",
+    icon: "message-circle",
+    keywords: ["messages", "channels", "discussion"],
+  },
+  "show-search": {
+    label: "View: Search",
+    availability: "always",
+    group: "Views",
+    icon: "search",
+    keywords: ["find", "grep", "text"],
+  },
+  "show-graph": {
+    label: "View: Graph",
+    availability: "always",
+    group: "Views",
+    icon: "workflow",
+    keywords: ["links", "backlinks", "network"],
+  },
+  "show-history": {
+    label: "View: History",
+    availability: "always",
+    group: "Views",
+    icon: "history",
+    keywords: ["timeline", "changes", "diff", "restore"],
+  },
+  "open-versions": {
+    label: "Show all versions",
+    availability: "localWorkspace",
+    group: "Views",
+    icon: "layers",
+    keywords: ["branches", "versions", "merge"],
+  },
+  "connect-cloud": {
+    label: "Connect server",
+    availability: "always",
+    group: "Settings & app",
+    icon: "cloud",
+    keywords: ["sync", "sign in", "login", "account", "relay"],
+  },
+  settings: {
+    label: "Settings",
+    availability: "always",
+    group: "Settings & app",
+    icon: "settings",
+    keywords: ["prefs", "preferences", "options", "config"],
+  },
+  "settings-appearance": {
+    label: "Settings: Open Appearance",
+    availability: "always",
+    group: "Settings & app",
+    icon: "palette",
+    keywords: ["prefs", "preferences", "theme", "dark", "light", "font", "accent", "sidebar"],
+  },
+  "settings-agents": {
+    label: "Settings: Open Agents (MCP)",
+    availability: "always",
+    group: "Settings & app",
+    icon: "sparkles",
+    keywords: ["prefs", "preferences", "mcp", "ai", "claude", "codex"],
+  },
+  "check-updates": {
+    label: "Check for updates",
+    availability: "always",
+    group: "Settings & app",
+    icon: "refresh",
+    keywords: ["upgrade", "version", "release"],
+  },
+  "download-update": {
+    label: "Update dohc",
+    availability: "updateAvailable",
+    group: "Settings & app",
+    icon: "download",
+    keywords: ["upgrade", "install"],
+  },
+  "install-update": {
+    label: "Restart to update",
+    availability: "updateReady",
+    group: "Settings & app",
+    icon: "refresh",
+    keywords: ["upgrade", "relaunch"],
+  },
+  "whats-new": {
+    label: "What's new",
+    availability: "always",
+    group: "Settings & app",
+    icon: "gift",
+    keywords: ["changelog", "release notes", "updates"],
+  },
+  "toggle-theme": {
+    label: "Toggle light/dark theme",
+    availability: "always",
+    group: "Settings & app",
+    icon: "sun-moon",
+    keywords: ["theme", "dark", "light", "appearance", "color scheme"],
+  },
+  "zoom-in": {
+    label: "Zoom in",
+    availability: "always",
+    group: "Settings & app",
+    icon: "zoom-in",
+    keywords: ["scale", "bigger", "font size"],
+  },
+  "zoom-out": {
+    label: "Zoom out",
+    availability: "always",
+    group: "Settings & app",
+    icon: "zoom-out",
+    keywords: ["scale", "smaller", "font size"],
+  },
+  "zoom-reset": {
+    label: "Reset zoom",
+    availability: "always",
+    group: "Settings & app",
+    icon: "rotate-ccw",
+    keywords: ["scale", "default", "100%"],
+  },
 } as const satisfies Record<string, StaticRow>;
 
 export type StaticCommandId = keyof typeof COMMAND_ROWS;
@@ -88,6 +331,9 @@ export interface CommandRow {
   label: string;
   availability: keyof typeof COMMAND_AVAILABILITY;
   capabilityId?: CapabilityId;
+  group: CommandGroup;
+  icon: CommandIconId;
+  keywords?: readonly string[];
 }
 
 export function pinnedAppCommandId(root: string): PinnedAppCommandId {
@@ -114,6 +360,9 @@ export function paletteCommandRows(context: CommandContext): CommandRow[] {
           id: pinnedAppCommandId(app.root),
           label: `View: ${app.label}`,
           availability: "pinnedApp" as const,
+          group: "Views" as const,
+          icon: "app-window" as const,
+          keywords: ["app", "pinned", app.label],
         })),
       );
     }

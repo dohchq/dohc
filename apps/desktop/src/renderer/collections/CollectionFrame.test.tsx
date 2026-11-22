@@ -760,6 +760,68 @@ describe("the toolbar", () => {
     expect(onSubmit).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect(onSubmit).toHaveBeenCalledTimes(2);
+    expect(onSubmit).toHaveBeenLastCalledWith("camera");
+
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(box.value).toBe("");
+    expect(onSubmit).toHaveBeenCalledTimes(3);
+    expect(onSubmit).toHaveBeenLastCalledWith("");
+  });
+
+  it("cancels a pending debounced search when switching tabs or resetting the search value externally", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onSubmit = vi.fn();
+      function SwitchingSearch() {
+        const [active, setActive] = useState("all");
+        const [value, setValue] = useState("");
+        return (
+          <>
+            <button type="button" onClick={() => setValue("saved")}>
+              External reset
+            </button>
+            <CollectionFrame
+              name="Launch tracker"
+              tabs={TABS}
+              activeTabId={active}
+              onSelectTab={(id) => {
+                setActive(id);
+                setValue("");
+              }}
+              menuLabel="Collection actions"
+              menu={MENU}
+              search={{ value, onChange: setValue, onSubmit }}
+            >
+              <p>Records</p>
+            </CollectionFrame>
+          </>
+        );
+      }
+      render(<SwitchingSearch />);
+      const box = screen.getByLabelText<HTMLInputElement>("Search collection");
+
+      fireEvent.change(box, { target: { value: "old query" } });
+      fireEvent.click(tab("By status"));
+      vi.advanceTimersByTime(300);
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.change(box, { target: { value: "stale" } });
+      fireEvent.click(screen.getByRole("button", { name: "External reset" }));
+      vi.advanceTimersByTime(300);
+      expect(onSubmit).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("styles view-tab overflow fades with visible edge gradients", () => {
+    const { container } = render(<Frame />);
+    const leftFade = container.querySelector<HTMLElement>('[data-strip-fade="left"]');
+    const rightFade = container.querySelector<HTMLElement>('[data-strip-fade="right"]');
+    expect(leftFade?.className).toContain("bg-linear-to-r");
+    expect(leftFade?.className).toContain("from-bg");
+    expect(rightFade?.className).toContain("bg-linear-to-l");
+    expect(rightFade?.className).toContain("from-bg");
   });
 
   it("shows no search for a page that has none, and holds one that is disabled", () => {

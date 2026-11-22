@@ -268,8 +268,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     (
       error: Omit<ShellError, "id" | "atMs" | "seen"> & { id?: string },
       seen: boolean | "keep" | "repeat" | "reader" | "quiet" = false,
-    ) => {
-      if (currentWorkspace.current !== workspaceId) return;
+    ): string | null => {
+      if (currentWorkspace.current !== workspaceId) return null;
       nextId.current += 1;
       const id = error.id ?? `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -309,6 +309,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         };
         return [...current.filter((existing) => !matches(existing)), next];
       });
+      return id;
     },
     [workspaceId],
   );
@@ -1160,8 +1161,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       kind?: ShellErrorKind,
       action?: ShellError["action"],
       target?: NoticeTarget,
-    ) => {
-      push({
+    ): (() => void) => {
+      const id = push({
         message,
         retry: null,
         tone: "success",
@@ -1169,6 +1170,14 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         ...(target ? { target } : {}),
         ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
+      return () => {
+        if (!id) return;
+        setShellErrors((current) =>
+          current.some((error) => error.id === id)
+            ? current.filter((error) => error.id !== id)
+            : current,
+        );
+      };
     },
     [push],
   );

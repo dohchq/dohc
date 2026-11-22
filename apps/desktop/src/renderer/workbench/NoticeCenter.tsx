@@ -1436,9 +1436,13 @@ export function NoticeCenter(props: {
   // someone dismisses it.
   automationStops?: readonly AutomationStopNotice[];
   onDismissAutomationStops?: (stops: readonly AutomationStopNotice[]) => void;
+  openRequest?: number;
 }) {
   const host: NoticeHostPlacement = props.host ?? "rail";
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (props.openRequest) setOpen(true);
+  }, [props.openRequest]);
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
@@ -2287,11 +2291,16 @@ export function NoticeCenter(props: {
     Boolean(props.onRetrySentNotice);
   const sentToastOpens =
     sentToast !== null && sentToast.openable && Boolean(props.onOpenSentNotice);
+  const [sentToastPaused, setSentToastPaused] = useState(false);
   useEffect(() => {
-    if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
+    setSentToastPaused(false);
+  }, [sentToastKey]);
+  useEffect(() => {
+    if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast || sentToastPaused)
+      return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
     return () => clearTimeout(timer);
-  }, [sentToastKey, sentToastFades, onHideSentNoticeToast]);
+  }, [sentToastKey, sentToastFades, onHideSentNoticeToast, sentToastPaused]);
 
   // A row about to go takes focus to the next row, or the one before, or
   // the panel, so the keyboard keeps its place in the list.
@@ -2379,6 +2388,13 @@ export function NoticeCenter(props: {
                     <div
                       data-testid="sent-notice-toast"
                       role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
+                      onPointerEnter={() => setSentToastPaused(true)}
+                      onPointerLeave={() => setSentToastPaused(false)}
+                      onFocusCapture={() => setSentToastPaused(true)}
+                      onBlurCapture={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+                          setSentToastPaused(false);
+                      }}
                       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
                     >
                       {isHeld(sentToast.notice) ? (
@@ -3045,7 +3061,9 @@ export function NoticeCenter(props: {
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((value) => !value)}
-        className="relative grid size-9 shrink-0 place-items-center rounded-lg text-subtle transition-colors duration-100 hover:bg-hover hover:text-ink"
+        className={`relative grid size-9 shrink-0 place-items-center rounded-lg transition-colors duration-100 ${
+          open ? "bg-selected text-ink" : "text-subtle hover:bg-hover hover:text-ink"
+        }`}
       >
         <Bell size={18} strokeWidth={1.9} aria-hidden />
         {count > 0 ? (

@@ -194,6 +194,32 @@ describe("PropertiesPanel", () => {
         "---\nrelease: September\n---\n\nBody",
       );
     });
+
+    it("auto-discards an untouched blank ghost row on blur and moves key -> value -> blur on Enter", async () => {
+      const user = userEvent.setup();
+      render(
+        <>
+          <ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />
+          <button type="button">outside</button>
+        </>,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Add a property" }));
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      await user.click(screen.getByRole("button", { name: "outside" }));
+      expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+
+      await user.click(screen.getByRole("button", { name: "Add a property" }));
+      const keyInput = screen.getByLabelText("Property 2 name");
+      await user.type(keyInput, "status{Enter}");
+      const valueInput = screen.getByLabelText("Property status value");
+      expect(document.activeElement).toBe(valueInput);
+      await user.type(valueInput, "ready{Enter}");
+      expect(document.activeElement).not.toBe(valueInput);
+      expect(screen.getByTestId("current-body").textContent).toBe(
+        "---\nowner: Sam\nstatus: ready\n---\n\nBody",
+      );
+    });
   });
 
   it("keeps saving other properties while a name another property has is held", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { isComposingKey } from "./ui/keys";
 import {
   APP_BACKEND_UPLOAD_BYTES,
@@ -8,7 +8,7 @@ import {
 } from "@dohc/security-contract/app-backend";
 import type { TransactionalField } from "./transactionalCollectionModel";
 import { inputClass } from "./collections/FieldForm";
-import { SecondaryButton } from "./ui/controls";
+import { FieldError, SecondaryButton } from "./ui/controls";
 import {
   downloadCollectionFile,
   type CollectionResourceScope,
@@ -41,6 +41,7 @@ export function CollectionAttachmentInput(
     onBusy(busy: boolean): void;
   },
 ) {
+  const errorId = useId();
   const [file, setFile] = useState<AppBackendFile | null>(null),
     [pending, setPending] = useState(false),
     [invalid, setInvalid] = useState<string | null>(null);
@@ -90,7 +91,7 @@ export function CollectionAttachmentInput(
         aria-label={props.field.name}
         {...invalidField(props.describedBy)}
         disabled={props.disabled || pending}
-        className={inputClass}
+        className={`${inputClass} cursor-pointer py-1 text-[12px] text-muted file:mr-2.5 file:cursor-pointer file:rounded-md file:border file:border-line file:bg-panel-2 file:px-2.5 file:py-1 file:text-[12px] file:font-medium file:text-ink hover:file:bg-hover disabled:cursor-not-allowed`}
         onChange={(event) => {
           const selected = event.target.files?.[0];
           event.target.value = "";
@@ -131,11 +132,7 @@ export function CollectionAttachmentInput(
       ) : (
         <span className="text-[12px] text-subtle">Up to 5 MB</span>
       )}
-      {invalid ? (
-        <p role="alert" className="m-0 text-[12px] text-danger">
-          {invalid}
-        </p>
-      ) : null}
+      {invalid ? <FieldError id={errorId}>{invalid}</FieldError> : null}
     </div>
   );
 }
@@ -205,11 +202,19 @@ export function CollectionRelationInput(
     [invalid, setInvalid] = useState<string | null>(null);
   const alive = useRef(true),
     active = useRef<AbortController | null>(null),
+    debounceTimer = useRef<number | null>(null),
     sequence = useRef(0);
+  const cancelDebounce = () => {
+    if (debounceTimer.current !== null) {
+      window.clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+  };
   useLayoutEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      cancelDebounce();
       active.current?.abort();
     };
   }, []);
@@ -275,15 +280,31 @@ export function CollectionRelationInput(
           maxLength={200}
           value={search}
           className={inputClass}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setSearch(next);
+            cancelDebounce();
+            debounceTimer.current = window.setTimeout(() => {
+              debounceTimer.current = null;
+              void load(next);
+            }, 200);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !isComposingKey(event)) {
               event.preventDefault();
+              cancelDebounce();
               void load(search);
             }
           }}
         />
-        <SecondaryButton onClick={() => void load(search)}>Find records</SecondaryButton>
+        <SecondaryButton
+          onClick={() => {
+            cancelDebounce();
+            void load(search);
+          }}
+        >
+          Find records
+        </SecondaryButton>
       </div>
       {values.map((value) => (
         <div key={JSON.stringify(value)} className="flex items-center gap-2 text-[12px] text-ink">
@@ -335,9 +356,7 @@ export function CollectionRelationInput(
         </div>
       )}
       {invalid ? (
-        <p role="alert" className="m-0 text-[12px] text-danger">
-          {invalid}
-        </p>
+        <FieldError id={`relation-error-${props.field.fieldId}`}>{invalid}</FieldError>
       ) : null}
     </fieldset>
   );

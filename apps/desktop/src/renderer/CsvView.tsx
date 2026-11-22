@@ -5,6 +5,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -111,9 +112,11 @@ const UNDO_FAILED = "Cannot undo this import.";
 // The shell's hooks an import answers through. They outlive the CSV's view,
 // and the shell remounts for each workspace (DesktopRoot), so they never
 // reach another.
+type CsvNoticeCallback = (message: string, undo: () => void) => (() => void) | void;
+
 interface ImportHooks {
   onOpenPath?: (path: string) => void;
-  onNotice?: (message: string, undo: () => void) => void;
+  onNotice?: CsvNoticeCallback;
   onClosePath?: (path: string) => void;
   onError?: ReportButtonError;
 }
@@ -272,12 +275,34 @@ const CELL_INPUT = "dohc-csv-cell w-full bg-transparent outline-none [text-align
 const DELETE_BUTTON =
   "grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-danger";
 
-// Enter ends a cell's edit and keeps focus there, as leaving the cell does.
-// An Enter that finishes composing a character is the input method's.
-const endEditOnEnter =
-  (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
+// Enter/Shift+Enter and ArrowUp/ArrowDown step vertically between rows in the
+// same column. Pressing Enter on the last row appends a new row when editable.
+const handleCellKeyDown =
+  (
+    rowIndex: number,
+    cellIndex: number,
+    onEndEdit: (cellIndex: number) => void,
+    onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void,
+  ) =>
   (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter" && !isComposingKey(event)) onEndEdit(cellIndex);
+    if (isComposingKey(event)) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, event.shiftKey ? -1 : 1, !event.shiftKey);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, 1, false);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onEndEdit(cellIndex);
+      onStepRow(rowIndex, cellIndex, -1, false);
+    }
   };
 
 const CsvTableHeader = memo(function CsvTableHeader({
@@ -287,6 +312,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
   truncated,
   onUpdateCell,
   onEndEdit,
+  onStepRow,
   onDeleteColumn,
   onAddColumn,
 }: {
@@ -296,6 +322,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
+  onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void;
   onDeleteColumn: (cellIndex: number) => void;
   onAddColumn: () => void;
 }) {
@@ -312,12 +339,14 @@ const CsvTableHeader = memo(function CsvTableHeader({
             >
               <input
                 data-testid="csv-cell"
+                data-csv-row={0}
+                data-csv-col={index}
                 aria-label={`Header column ${index + 1}`}
                 size={1}
                 value={header[index] ?? ""}
                 readOnly={truncated}
                 onChange={(event) => onUpdateCell(0, index, event.target.value)}
-                onKeyDown={endEditOnEnter(onEndEdit, index)}
+                onKeyDown={handleCellKeyDown(0, index, onEndEdit, onStepRow)}
                 onBlur={() => onEndEdit(index)}
                 className={CELL_INPUT}
               />
@@ -363,6 +392,7 @@ const CsvTableRow = memo(function CsvTableRow({
   truncated,
   onUpdateCell,
   onEndEdit,
+  onStepRow,
   onDeleteRow,
 }: {
   row: string[];
@@ -371,6 +401,7 @@ const CsvTableRow = memo(function CsvTableRow({
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
+  onStepRow: (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => void;
   onDeleteRow: (rowIndex: number) => void;
 }) {
   return (
@@ -396,12 +427,14 @@ const CsvTableRow = memo(function CsvTableRow({
         <DataGridCell key={cellIndex} column={cellIndex}>
           <input
             data-testid="csv-cell"
+            data-csv-row={rowIndex}
+            data-csv-col={cellIndex}
             aria-label={`Row ${rowIndex} column ${cellIndex + 1}`}
             size={1}
             value={row[cellIndex] ?? ""}
             readOnly={truncated}
             onChange={(event) => onUpdateCell(rowIndex, cellIndex, event.target.value)}
-            onKeyDown={endEditOnEnter(onEndEdit, cellIndex)}
+            onKeyDown={handleCellKeyDown(rowIndex, cellIndex, onEndEdit, onStepRow)}
             onBlur={() => onEndEdit(cellIndex)}
             className={`${CELL_INPUT} text-ink`}
           />
@@ -413,25 +446,35 @@ const CsvTableRow = memo(function CsvTableRow({
   );
 });
 
-// The table's quiet last row: Add row in the gutter, under the row numbers.
-// Its 20px button sits 4px from the edge, so its 12px + ends where the
-// numbers do, 8px in.
+// The table's quiet last row: clicking anywhere on the row adds a new row and
+// focuses its first cell.
 function CsvAddRow(props: { columnCount: number; onAddRow: () => void }) {
   return (
-    <tr>
+    <tr
+      onClick={props.onAddRow}
+      className="cursor-pointer transition-colors duration-75 hover:bg-hover"
+    >
       <td className="h-7 border-t border-line pr-1 text-right">
         <button
           type="button"
           data-testid="csv-add-row"
           aria-label="Add row"
           title="Add row"
-          onClick={props.onAddRow}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onAddRow();
+          }}
           className="ml-auto grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
         >
           <Plus size={12} aria-hidden />
         </button>
       </td>
-      <td colSpan={props.columnCount + 1} className="border-t border-line" />
+      <td
+        colSpan={props.columnCount + 1}
+        className="border-t border-line px-2 text-[12px] text-subtle"
+      >
+        New row
+      </td>
     </tr>
   );
 }
@@ -487,12 +530,25 @@ export function CsvView({
   // The shell's hooks: a failed import is a toast and a Notices row, and a
   // finished one a toast whose Undo closes the database's tabs.
   onError?: ReportButtonError;
-  onNotice?: (message: string, undo: () => void) => void;
+  onNotice?: CsvNoticeCallback;
   onClosePath?: (path: string) => void;
 }) {
   const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
   const importing = useImportRunning(workspaceId, path);
+  const pendingUndoDismissRef = useRef<Array<() => void>>([]);
+  const tableSessionRef = useRef(1);
+  const editedAfterDeleteRef = useRef(new Set<number>());
+  const retirePendingUndos = useCallback(() => {
+    tableSessionRef.current += 1;
+    editedAfterDeleteRef.current.clear();
+    for (const dismiss of pendingUndoDismissRef.current.splice(0)) dismiss();
+  }, []);
+  const clearDismiss = useCallback((dismiss?: () => void) => {
+    if (!dismiss) return;
+    const index = pendingUndoDismissRef.current.indexOf(dismiss);
+    if (index >= 0) pendingUndoDismissRef.current.splice(index, 1);
+  }, []);
   // The file the view shows, or null once it closes, so a late import answer
   // never opens or reports into a workspace or file the view has left.
   const target = useRef<{ workspaceId: string; path: string } | null>(null);
@@ -502,6 +558,10 @@ export function CsvView({
       target.current = null;
     };
   }, [workspaceId, path]);
+  useEffect(
+    () => () => retirePendingUndos(),
+    [workspaceId, path, reopenKey, locked, localBuffer, retirePendingUndos],
+  );
   const draft = useAutosavedTextDraft({
     body,
     contentHash,
@@ -529,6 +589,10 @@ export function CsvView({
   });
   const rows = grid.rows;
   const rowsRef = useRef(rows);
+  const rawRef = useRef(raw);
+  rawRef.current = raw;
+  const undoScopeRef = useRef({ reopenKey, locked, localBuffer });
+  undoScopeRef.current = { reopenKey, locked, localBuffer };
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
     setGrid((shown) => ({
@@ -577,8 +641,9 @@ export function CsvView({
     if (identity.text === text && identity.delimiter === delimiter) return;
     const nextRows = delimitedTextCodec.parse(text, delimiter);
     tableDraftIdentity.current = { text, delimiter };
+    retirePendingUndos();
     showRows(nextRows);
-  }, [delimiter, draft.draft, raw, showRows]);
+  }, [delimiter, draft.draft, raw, retirePendingUndos, showRows]);
 
   // The import reads the file in main, not this preview, so the offer needs
   // only its count, its source, and a way to open the database.
@@ -631,6 +696,7 @@ export function CsvView({
 
   const updateCell = useCallback(
     (rowIndex: number, cellIndex: number, value: string) => {
+      editedAfterDeleteRef.current.add(rowIndex);
       const nextRows = [...rowsRef.current];
       while (nextRows.length <= rowIndex) nextRows.push([]);
       const nextRow = [...nextRows[rowIndex]!];
@@ -646,6 +712,7 @@ export function CsvView({
   );
 
   const addRow = useCallback(() => {
+    retirePendingUndos();
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
       setRows([["column"], [""]]);
@@ -653,58 +720,169 @@ export function CsvView({
     }
     const width = Math.max(1, columnCountFor(nextRows));
     setRows([...nextRows, Array.from({ length: width }, () => "")]);
-  }, [setRows]);
+  }, [retirePendingUndos, setRows]);
 
   const addColumn = useCallback(() => {
+    retirePendingUndos();
     const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
       setRows([["column"]]);
       return;
     }
     const width = columnCountFor(nextRows);
+    const newHeader = columnName(width);
     const next = nextRows.map((row, index) => {
       const cells = [...row];
       while (cells.length < width) cells.push("");
-      cells.push(index === 0 ? columnName(width) : "");
+      cells.splice(width, 0, index === 0 ? newHeader : "");
       return cells;
     });
     setRows(next);
-  }, [columnName, setRows]);
+  }, [columnName, retirePendingUndos, setRows]);
 
   const deleteRow = useCallback(
     (rowIndex: number) => {
-      const next = rowsRef.current.filter((_, index) => index !== rowIndex);
-      setRows(next);
+      const previous = rowsRef.current;
+      const removed = previous[rowIndex];
+      if (!removed) return;
+      retirePendingUndos();
+      const session = tableSessionRef.current;
+      setRows(previous.filter((_, index) => index !== rowIndex));
+      let undone = false;
+      let dismissNotice: (() => void) | undefined;
+      const dismiss = onNotice?.(`Deleted row ${rowIndex}.`, () => {
+        if (
+          undone ||
+          rawRef.current ||
+          undoScopeRef.current.locked ||
+          undoScopeRef.current.reopenKey !== reopenKey ||
+          undoScopeRef.current.localBuffer !== localBuffer ||
+          tableSessionRef.current !== session ||
+          target.current?.workspaceId !== workspaceId ||
+          target.current?.path !== path
+        )
+          return;
+        undone = true;
+        clearDismiss(dismissNotice);
+        const updated = [...rowsRef.current];
+        updated.splice(rowIndex, 0, removed);
+        setRows(updated);
+      });
+      if (dismiss) {
+        dismissNotice = dismiss;
+        pendingUndoDismissRef.current.push(dismiss);
+      }
     },
-    [setRows],
+    [
+      clearDismiss,
+      localBuffer,
+      onNotice,
+      path,
+      reopenKey,
+      retirePendingUndos,
+      setRows,
+      workspaceId,
+    ],
   );
 
   const deleteColumn = useCallback(
     (cellIndex: number) => {
-      const next = rowsRef.current.map((row) => row.filter((_, index) => index !== cellIndex));
-      if (next.every((row) => row.length === 0)) {
-        setRows([]);
-        return;
-      }
+      const previous = rowsRef.current;
+      if (previous.length === 0) return;
+      const headerName = previous[0]?.[cellIndex]?.trim();
+      retirePendingUndos();
+      const session = tableSessionRef.current;
+      const removedCells = previous.map((row) =>
+        cellIndex < row.length ? row[cellIndex] : undefined,
+      );
+      const emptiedRows = new Set<number>();
+      const filtered = previous.map((row) => row.filter((_, index) => index !== cellIndex));
+      const emptiedTable = filtered.every((row) => row.length === 0);
+      const next = emptiedTable
+        ? []
+        : filtered.map((row, rowIndex) => {
+            if (row.length === 0) {
+              emptiedRows.add(rowIndex);
+              return [""];
+            }
+            return row;
+          });
       setRows(next);
+      let undone = false;
+      let dismissNotice: (() => void) | undefined;
+      const dismiss = onNotice?.(
+        headerName ? `Deleted column "${headerName}".` : `Deleted column ${cellIndex + 1}.`,
+        () => {
+          if (
+            undone ||
+            rawRef.current ||
+            undoScopeRef.current.locked ||
+            undoScopeRef.current.reopenKey !== reopenKey ||
+            undoScopeRef.current.localBuffer !== localBuffer ||
+            tableSessionRef.current !== session ||
+            target.current?.workspaceId !== workspaceId ||
+            target.current?.path !== path
+          )
+            return;
+          undone = true;
+          clearDismiss(dismissNotice);
+          if (emptiedTable) {
+            setRows(previous);
+            return;
+          }
+          const edited = editedAfterDeleteRef.current;
+          const restored = rowsRef.current.map((row, rowIndex) => {
+            const removed = removedCells[rowIndex];
+            if (removed === undefined) {
+              if (row.length <= cellIndex) return row;
+              const cells = [...row];
+              cells.splice(cellIndex, 0, "");
+              return cells;
+            }
+            if (emptiedRows.has(rowIndex) && !edited.has(rowIndex)) {
+              return [removed];
+            }
+            const cells = [...row];
+            while (cells.length < cellIndex) cells.push("");
+            cells.splice(cellIndex, 0, removed);
+            return cells;
+          });
+          setRows(restored);
+        },
+      );
+      if (dismiss) {
+        dismissNotice = dismiss;
+        pendingUndoDismissRef.current.push(dismiss);
+      }
     },
-    [setRows],
+    [
+      clearDismiss,
+      localBuffer,
+      onNotice,
+      path,
+      reopenKey,
+      retirePendingUndos,
+      setRows,
+      workspaceId,
+    ],
   );
 
   const chooseMode = useCallback(
     (mode: CsvMode) => {
       if (mode === (raw ? "raw" : "table")) return;
       if (mode === "raw") {
+        retirePendingUndos();
         setRaw(true);
         return;
       }
       const text = draftRef.current.getDraft();
       const nextRows = delimitedTextCodec.parse(text, delimiter);
       tableDraftIdentity.current = { text, delimiter };
+      retirePendingUndos();
       showRows(nextRows);
       setRaw(false);
     },
-    [delimiter, raw, showRows],
+    [delimiter, raw, retirePendingUndos, showRows],
   );
 
   // The tab row's Import and the preview bound's run this one import.
@@ -783,6 +961,53 @@ export function CsvTable(props: {
   onImport?: () => void;
 }) {
   const { rows, columns, locked } = props;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pendingFocus = useRef<{ row: number; col: number } | null>(null);
+  const previewRows = rows.slice(1, MAX_CSV_PREVIEW_ROWS + 1);
+  const dataRowCount = Math.max(0, rows.length - 1);
+  const columnCount = columnCountFor(rows);
+  const focusCell = useCallback((row: number, col: number) => {
+    const input = containerRef.current?.querySelector<HTMLInputElement>(
+      `input[data-csv-row="${row}"][data-csv-col="${col}"]`,
+    );
+    if (input) {
+      input.focus();
+      return true;
+    }
+    return false;
+  }, []);
+  useLayoutEffect(() => {
+    const target = pendingFocus.current;
+    if (!target) return;
+    if (focusCell(target.row, target.col)) pendingFocus.current = null;
+  }, [rows, focusCell]);
+  const addRowAndFocus = useCallback(
+    (col = 0) => {
+      pendingFocus.current = { row: Math.max(1, rows.length), col };
+      props.onAddRow();
+    },
+    [props.onAddRow, rows.length],
+  );
+  const addColumnAndFocus = useCallback(() => {
+    pendingFocus.current = { row: 0, col: columnCount };
+    props.onAddColumn();
+  }, [columnCount, props.onAddColumn]);
+  const stepRow = useCallback(
+    (rowIndex: number, cellIndex: number, delta: -1 | 1, addIfLast: boolean) => {
+      const nextRow = rowIndex + delta;
+      if (nextRow < 0) return;
+      if (nextRow <= previewRows.length) {
+        focusCell(nextRow, cellIndex);
+        return;
+      }
+      const currentRow = rows[rowIndex];
+      const hasContent = currentRow?.some((cell) => cell.trim() !== "") ?? false;
+      if (addIfLast && hasContent && !locked && dataRowCount < MAX_CSV_PREVIEW_ROWS) {
+        addRowAndFocus(cellIndex);
+      }
+    },
+    [addRowAndFocus, dataRowCount, focusCell, locked, previewRows.length, rows],
+  );
   const header = rows[0];
   if (!header) {
     return (
@@ -795,7 +1020,7 @@ export function CsvTable(props: {
           <>
             <SecondaryButton
               size="compact"
-              onClick={props.onAddRow}
+              onClick={() => addRowAndFocus(0)}
               className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-row"
             >
@@ -804,7 +1029,7 @@ export function CsvTable(props: {
             </SecondaryButton>
             <SecondaryButton
               size="compact"
-              onClick={props.onAddColumn}
+              onClick={addColumnAndFocus}
               className="inline-flex items-center gap-1.5"
               data-testid="csv-empty-add-column"
             >
@@ -816,15 +1041,8 @@ export function CsvTable(props: {
       </EmptyState>
     );
   }
-  // Bounded preview: an unbounded <table> over 10,000+ rows
-  // freezes the renderer for tens of seconds. The first rows are enough to
-  // inspect and edit common CSVs; working with all of them is what Import to
-  // SQLite or raw mode is for.
-  const previewRows = rows.slice(1, MAX_CSV_PREVIEW_ROWS + 1);
-  const dataRowCount = rows.length - 1;
-  const columnCount = columnCountFor(rows);
   return (
-    <div className="min-h-0 flex-1 overflow-auto p-4">
+    <div ref={containerRef} className="min-h-0 flex-1 overflow-auto p-4">
       {/* Room for Delete column: its 20px button and a 4px gap. */}
       <DataGrid columns={columns} headerRoom={locked ? 0 : 24} trailing={!locked}>
         <CsvTableHeader
@@ -834,8 +1052,9 @@ export function CsvTable(props: {
           truncated={locked}
           onUpdateCell={props.onUpdateCell}
           onEndEdit={props.onEndEdit}
+          onStepRow={stepRow}
           onDeleteColumn={props.onDeleteColumn}
-          onAddColumn={props.onAddColumn}
+          onAddColumn={addColumnAndFocus}
         />
         <tbody>
           {previewRows.map((row, r) => (
@@ -847,10 +1066,13 @@ export function CsvTable(props: {
               truncated={locked}
               onUpdateCell={props.onUpdateCell}
               onEndEdit={props.onEndEdit}
+              onStepRow={stepRow}
               onDeleteRow={props.onDeleteRow}
             />
           ))}
-          {!locked ? <CsvAddRow columnCount={columnCount} onAddRow={props.onAddRow} /> : null}
+          {!locked ? (
+            <CsvAddRow columnCount={columnCount} onAddRow={() => addRowAndFocus(0)} />
+          ) : null}
         </tbody>
       </DataGrid>
       {dataRowCount > previewRows.length ? (

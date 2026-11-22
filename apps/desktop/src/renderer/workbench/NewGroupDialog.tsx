@@ -203,11 +203,7 @@ export function NewGroupDialog(props: {
             >
               Cancel
             </SecondaryButton>
-            <PrimaryButton
-              type="submit"
-              data-testid="chats-new-channel-submit"
-              disabled={!named || busy}
-            >
+            <PrimaryButton type="submit" data-testid="chats-new-channel-submit" disabled={busy}>
               Create group
             </PrimaryButton>
           </div>

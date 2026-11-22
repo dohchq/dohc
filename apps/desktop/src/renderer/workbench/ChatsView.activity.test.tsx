@@ -189,7 +189,7 @@ describe("ChatsView live activity refresh", () => {
 
     await screen.findByTestId("chats-channel-name");
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
-    expect(screen.getByTestId("chats-channel-name").className).not.toContain("font-medium");
+    expect(screen.getByTestId("chats-channel-name").className).not.toContain("font-semibold");
     expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
 
     unreadCount = 3;
@@ -198,7 +198,7 @@ describe("ChatsView live activity refresh", () => {
     const unread = await screen.findByTestId("chats-channel-unread");
     expect(unread.textContent).toBe("3 unread");
     expect(unread.className).toBe("sr-only");
-    expect(screen.getByTestId("chats-channel-name").className).toContain("font-medium");
+    expect(screen.getByTestId("chats-channel-name").className).toContain("font-semibold");
     expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });

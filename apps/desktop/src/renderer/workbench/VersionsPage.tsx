@@ -586,7 +586,7 @@ function VersionRow(props: {
             on the version you're in. A click on the row's text focuses the row,
             which doesn't hold them open. */}
         <div
-          className={`flex items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}
+          className={`flex items-center gap-2 transition-opacity ${props.active ? "" : "opacity-70 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}
         >
           {props.active ? null : (
             <SecondaryButton

@@ -277,6 +277,7 @@ export function CopyButton(props: {
   failure?: string | undefined;
   testId?: string | undefined;
   disabled?: boolean;
+  className?: string | undefined;
   ref?: Ref<HTMLButtonElement> | undefined;
 }) {
   const label = props.label ?? "Copy";
@@ -289,6 +290,7 @@ export function CopyButton(props: {
 
   const shown = feedback ? words[feedback] : label;
   const Icon = feedback ? ICON[feedback] : (props.icon ?? Copy);
+  const extraClass = props.className ? ` ${props.className}` : "";
   if (props.primary) {
     return (
       <>
@@ -298,7 +300,7 @@ export function CopyButton(props: {
           disabled={props.disabled}
           aria-label={props.pinName ? label : undefined}
           onClick={() => copy()}
-          className="inline-flex shrink-0 items-center gap-1.5"
+          className={`inline-flex shrink-0 items-center gap-1.5${extraClass}`}
         >
           <Icon size={13} aria-hidden />
           {shown}
@@ -321,8 +323,8 @@ export function CopyButton(props: {
         onClick={() => copy()}
         className={
           props.iconOnly
-            ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`
-            : `${wordsClass} ${WORDS_SIZE[props.size ?? "row"]}`
+            ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}${extraClass}`
+            : `${wordsClass} ${WORDS_SIZE[props.size ?? "row"]}${extraClass}`
         }
       >
         <Icon

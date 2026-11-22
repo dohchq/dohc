@@ -208,9 +208,25 @@ describe("PageIdentity", () => {
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
 
       await user.click(screen.getByTestId("page-icon-add"));
+      expect(screen.queryByTestId("page-icon-remove")).toBeNull();
       await user.type(screen.getByTestId("page-icon-input"), "🌵{Enter}");
 
       expect(currentMeta().icon).toBe("🌵");
+    });
+
+    it("filters emoji live when typing a word and picks the top match on Enter without committing raw ASCII", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);
+
+      await user.click(screen.getByTestId("page-icon-add"));
+      const input = screen.getByTestId("page-icon-input");
+      await user.type(input, "zzzznomatch{Enter}");
+      expect(currentMeta().icon).toBeUndefined();
+      expect(screen.getByTestId("page-icon-picker")).toBeTruthy();
+
+      await user.clear(input);
+      await user.type(input, "rocket{Enter}");
+      expect(currentMeta().icon).toBe("🚀");
     });
 
     it("removes an existing icon", async () => {

@@ -1,9 +1,12 @@
 import { TextSelection, type EditorState, type Selection } from "@tiptap/pm/state";
 import { turnIntoIdAt, type BlockMenuTurnIntoId } from "./blockControls";
+import { isCodeBlock } from "./pmHelpers";
 
-// The selection toolbar shows only for a non-empty text selection.
+// The selection toolbar shows only for a non-empty text selection outside a
+// code block (cross-boundary selections that reach into prose still show it).
 export function hasFormattableSelection(selection: Selection): selection is TextSelection {
-  return selection instanceof TextSelection && !selection.empty;
+  if (!(selection instanceof TextSelection) || selection.empty) return false;
+  return !(isCodeBlock(selection.$from.parent) && isCodeBlock(selection.$to.parent));
 }
 
 const FORMAT_MARKS = [

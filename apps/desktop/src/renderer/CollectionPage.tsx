@@ -1173,6 +1173,32 @@ export function CollectionPage({
     },
     [applySchemaChange, onActiveViewChange, onError, schemaWrites],
   );
+  const duplicateView = useCallback(
+    function duplicate(name: string) {
+      const source = details?.schema.views.find((view) => view.name === name);
+      if (!source) return;
+      const taken = new Set(details?.schema.views.map((view) => view.name) ?? []);
+      let copyName = `${source.name} copy`;
+      let n = 2;
+      while (taken.has(copyName)) {
+        copyName = `${source.name} copy ${n}`;
+        n += 1;
+      }
+      const dialog = currentSchemaDialog.current;
+      const request = schemaWrites.current();
+      void applySchemaChange((current) => addView(current, { ...source, name: copyName })).then(
+        (failure) => {
+          if (!schemaWrites.isCurrent(request)) return;
+          if (failure === null) {
+            onActiveViewChange(copyName);
+          } else if (currentSchemaDialog.current === dialog) {
+            onError(failure, new Error(failure), () => duplicate(name));
+          }
+        },
+      );
+    },
+    [applySchemaChange, details, onActiveViewChange, onError, schemaWrites],
+  );
 
   // A typed select value not in the options yet: the whole edit enters the
   // global queue synchronously — before any schema IPC — so navigation and
@@ -1325,10 +1351,31 @@ export function CollectionPage({
         onAddDateField: () => setFieldsOpen("date"),
         create: createView,
         rename: renameOpenView,
+        duplicate: duplicateView,
         remove: removeView,
         // Deleting a view drops its configuration with no reverse path, so the menu asks twice.
         confirmDelete: true,
       };
+
+  const orderedRecords =
+    boardReady && state.groups ? state.groups.flatMap((group) => group.records) : state.records;
+  const openRecordIndex =
+    openRecordId === null ? -1 : orderedRecords.findIndex((entry) => entry.id === openRecordId);
+  const activeSorts = state.query.sort ?? [];
+  const activeQuery =
+    activeSorts.length > 0
+      ? {
+          items: activeSorts.map((clause) => ({
+            id: `sort:${clause.field}`,
+            label: `Sort: ${clause.field} (${clause.direction})`,
+            onRemove: () =>
+              void store.setQuery({
+                sort: activeSorts.filter((entry) => entry.field !== clause.field),
+              }),
+          })),
+          onClearAll: () => void store.setQuery({ sort: [] }),
+        }
+      : undefined;
 
   // The open record, in the panel: its name as the table calls it, a row for each field of the Collection with
   // the table's own editors, and its page body. The ⚡ panel has the place while it is open.
@@ -1403,6 +1450,25 @@ export function CollectionPage({
         onOpenAsPage={
           record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))
         }
+        onPrevious={
+          openRecordIndex >= 0
+            ? () => {
+                const prev = orderedRecords[openRecordIndex - 1];
+                if (prev) openRecord(prev);
+              }
+            : undefined
+        }
+        onNext={
+          openRecordIndex >= 0
+            ? () => {
+                const next = orderedRecords[openRecordIndex + 1];
+                if (next) openRecord(next);
+              }
+            : undefined
+        }
+        canPrevious={openRecordIndex > 0}
+        canNext={openRecordIndex >= 0 && openRecordIndex < orderedRecords.length - 1}
+        onAddField={readOnly ? undefined : () => setFieldsOpen(true)}
         commands={commands}
         loading={record === null && recordProblem === undefined}
         unavailable={recordProblem}
@@ -1475,6 +1541,7 @@ export function CollectionPage({
         if (id !== "") onActiveViewChange(id);
       }}
       views={frameViews}
+      activeQuery={activeQuery}
       automations={{
         open: automationsOpen,
         count: automationCount(automations.file),
@@ -1629,6 +1696,7 @@ export function CollectionPage({
             renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
             newRecord={readOnly ? undefined : tableNewRecord}
+            onAddField={readOnly ? undefined : () => setFieldsOpen(true)}
           />
         )}
       </div>

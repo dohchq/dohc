@@ -158,9 +158,19 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
 export function WorkspaceSyncStatus({
   syncStatus,
   failedSaves,
+  onOpenConflicts,
+  onOpenSyncSettings,
+  onConnectServer,
+  onSignInAgain,
+  onOpenNotices,
 }: {
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  onOpenConflicts?: () => void;
+  onOpenSyncSettings?: () => void;
+  onConnectServer?: () => void;
+  onSignInAgain?: () => void;
+  onOpenNotices?: () => void;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? (syncStatus?.conflictCount ?? 0) : 0;
@@ -202,6 +212,19 @@ export function WorkspaceSyncStatus({
   // A state that needs the person, or waits on the person to connect, says
   // so in words beside the mark.
   const worded = dot === "attention" || dot === "off";
+  const action = saveFailed
+    ? onOpenNotices
+    : state === "conflict"
+      ? onOpenConflicts
+      : state === "not-connected"
+        ? (onConnectServer ?? onOpenSyncSettings)
+        : state === "sign-in-expired"
+          ? (onSignInAgain ?? onOpenSyncSettings)
+          : state === "account-unconfirmed" ||
+              state === "update-required" ||
+              (state === "sync-failed" && !busy)
+            ? onOpenSyncSettings
+            : undefined;
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.
@@ -221,11 +244,27 @@ export function WorkspaceSyncStatus({
         role="status"
         aria-label={description}
         title={description}
-        // The dot's box keeps a 20x24 hover target for its tooltip.
-        className={`flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
+        className={
+          action
+            ? "flex h-6 shrink-0 items-center"
+            : `flex h-6 shrink-0 items-center gap-1.5 text-[12px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`
+        }
       >
-        <Dot kind={dot} />
-        <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+        {action ? (
+          <button
+            type="button"
+            onClick={action}
+            className={`titlebar-no-drag flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink ${worded ? "px-1.5" : "w-5 justify-center"}`}
+          >
+            <Dot kind={dot} />
+            <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+          </button>
+        ) : (
+          <>
+            <Dot kind={dot} />
+            <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
+          </>
+        )}
       </span>
       {liveDelivery && liveLabel ? (
         <span

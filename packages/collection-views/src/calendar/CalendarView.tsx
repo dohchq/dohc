@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
-import { Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Calendar, dateFnsLocalizer } from "react-big-calendar";
-import type { CalendarProps, DateHeaderProps } from "react-big-calendar";
+import type { CalendarProps, DateHeaderProps, EventProps } from "react-big-calendar";
 import dragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
 import type { EventInteractionArgs } from "react-big-calendar/lib/addons/dragAndDrop";
+import { addDays } from "date-fns/addDays";
 import { addMonths } from "date-fns/addMonths";
 import { differenceInCalendarDays } from "date-fns/differenceInCalendarDays";
 import { endOfMonth } from "date-fns/endOfMonth";
@@ -18,14 +19,18 @@ import { startOfWeek } from "date-fns/startOfWeek";
 import { enUS } from "date-fns/locale/en-US";
 import type { CollectionRecord, CollectionSchema } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
+import { recordLabel } from "../recordLabel";
 import { fieldDisplayText } from "../table/cells";
 import type { CollectionCellChange } from "../table/TableView";
+import { optionColor, optionTone } from "../values";
 import "react-big-calendar/lib/css/react-big-calendar.css";
 import "react-big-calendar/lib/addons/dragAndDrop/styles.css";
 import "./calendar.css";
 
 /** The engine's date field value format (workspace-contracts validation). */
 const DATE_VALUE_FORMAT = "yyyy-MM-dd";
+
+export type CalendarViewMode = "month" | "week";
 
 export interface CalendarViewProps {
   schema: CollectionSchema;
@@ -60,6 +65,9 @@ export interface CalendarViewProps {
   /** A querying host controls the visible month and loads its full date range. */
   date?: Date;
   onNavigate?: (date: Date) => void;
+  /** Optional host-controlled calendar layout mode so reloads preserve Week selection. */
+  viewMode?: CalendarViewMode;
+  onViewModeChange?: (mode: CalendarViewMode) => void;
   /**
    * For a host that reads only the visible month: the dates of the nearest
    * records before and after it. An empty month offers to go to the closer one.
@@ -72,6 +80,7 @@ export interface CalendarRecordEvent {
   title: string;
   start: Date;
   end: Date;
+  dotClass?: string;
 }
 
 const localizer = dateFnsLocalizer({
@@ -83,25 +92,18 @@ const localizer = dateFnsLocalizer({
 });
 
 const textButtonClass =
-  "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink";
+  "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
 const iconButtonClass =
-  "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink";
+  "grid size-6 place-items-center rounded-md text-subtle transition-colors duration-75 hover:bg-hover hover:text-ink";
 
-function Chevron({ next }: { next: boolean }) {
+function CalendarEventPill({ event }: EventProps<CalendarRecordEvent>) {
   return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d={next ? "m9 18 6-6-6-6" : "m15 18-6-6 6-6"} />
-    </svg>
+    <span className="flex w-full min-w-0 items-center gap-1.5 rounded-md border border-line bg-bg px-1.5 py-0.5 text-[12px] text-ink transition-colors duration-75 hover:bg-hover">
+      {event.dotClass ? (
+        <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${event.dotClass}`} />
+      ) : null}
+      <span className="truncate">{event.title}</span>
+    </span>
   );
 }
 
@@ -153,6 +155,8 @@ export function CalendarView({
   defaultDate,
   date,
   onNavigate,
+  viewMode,
+  onViewModeChange,
   nearbyDates,
 }: CalendarViewProps) {
   // The day's number, and before it the control that adds a record on that day. One component for the
@@ -161,29 +165,56 @@ export function CalendarView({
   addRecord.current = onNewRecord;
   const offersNew = onNewRecord !== undefined;
   const components = useMemo(
-    () =>
-      offersNew
-        ? {
-            month: {
-              dateHeader: ({ date: day, label }: DateHeaderProps) => (
-                <span className="flex items-center justify-between gap-1">
-                  <button
-                    type="button"
-                    aria-label={`New record on ${format(day, "MMMM d, yyyy")}`}
-                    title="New record"
-                    className="dohc-calendar-new grid size-5 shrink-0 place-items-center rounded text-subtle transition-opacity duration-75 hover:bg-hover hover:text-ink"
-                    onClick={() => addRecord.current?.(format(day, DATE_VALUE_FORMAT))}
-                  >
-                    <Plus size={12} strokeWidth={1.9} aria-hidden />
-                  </button>
-                  <span>{label}</span>
-                </span>
-              ),
-            },
-          }
-        : undefined,
+    () => ({
+      event: CalendarEventPill,
+      month: {
+        dateHeader: ({ date: day, label }: DateHeaderProps) =>
+          offersNew ? (
+            <span className="flex items-center justify-between gap-1">
+              <button
+                type="button"
+                aria-label={`New record on ${format(day, "MMMM d, yyyy")}`}
+                title="New record"
+                className="dohc-calendar-new grid size-5 shrink-0 place-items-center rounded text-subtle transition-opacity duration-75 hover:bg-hover hover:text-ink"
+                onClick={() => addRecord.current?.(format(day, DATE_VALUE_FORMAT))}
+              >
+                <Plus size={12} strokeWidth={1.9} aria-hidden />
+              </button>
+              <span className="dohc-calendar-day-num">{label}</span>
+            </span>
+          ) : (
+            <span className="dohc-calendar-day-num">{label}</span>
+          ),
+      },
+    }),
     [offersNew],
   );
+  const [ownView, setOwnView] = useState<CalendarViewMode>("month");
+  const view = viewMode ?? ownView;
+  const setView = useCallback(
+    (next: CalendarViewMode) => {
+      if (viewMode === undefined) setOwnView(next);
+      onViewModeChange?.(next);
+    },
+    [viewMode, onViewModeChange],
+  );
+  const [undatedOpen, setUndatedOpen] = useState(false);
+  const undatedRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!undatedOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!undatedRef.current?.contains(event.target as Node)) setUndatedOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setUndatedOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [undatedOpen]);
   const [ownDate, setOwnDate] = useState(() => defaultDate ?? new Date());
   const shown = date ?? ownDate;
   const navigate = useCallback(
@@ -195,15 +226,15 @@ export function CalendarView({
   );
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const titleField = fields[0] ?? null;
+  const selectField = useMemo(
+    () => schema.fields.find((field) => field.type === "select") ?? null,
+    [schema],
+  );
 
-  const events = useMemo(() => {
-    const result: CalendarRecordEvent[] = [];
+  const { events, undated } = useMemo(() => {
+    const dated: CalendarRecordEvent[] = [];
+    const missing: Array<{ record: CollectionRecord; title: string }> = [];
     for (const record of records) {
-      const indexed = record.values.find((entry) => entry.field === dateField);
-      if (!indexed || indexed.validation.status !== "valid") continue;
-      if (typeof indexed.value !== "string") continue;
-      const start = day(indexed.value);
-      if (!start) continue;
       const title = titleField
         ? fieldDisplayText(
             titleField,
@@ -211,10 +242,31 @@ export function CalendarView({
             personLabel,
           )
         : record.id;
-      result.push({ record, title, start, end: start });
+      const indexed = record.values.find((entry) => entry.field === dateField);
+      const start =
+        indexed && indexed.validation.status === "valid" && typeof indexed.value === "string"
+          ? day(indexed.value)
+          : null;
+      if (!start) {
+        missing.push({ record, title: title || recordLabel(record) });
+        continue;
+      }
+      let dotClass: string | undefined;
+      if (selectField) {
+        const selectIndexed = record.values.find((entry) => entry.field === selectField.name);
+        if (
+          selectIndexed &&
+          selectIndexed.validation.status !== "flagged" &&
+          typeof selectIndexed.value === "string" &&
+          selectIndexed.value !== ""
+        ) {
+          dotClass = optionTone(optionColor(selectField, selectIndexed.value)).dot;
+        }
+      }
+      dated.push({ record, title, start, end: start, dotClass });
     }
-    return result;
-  }, [records, dateField, titleField, personLabel]);
+    return { events: dated, undated: missing };
+  }, [records, dateField, titleField, selectField, personLabel]);
 
   const handleEventDrop = useCallback(
     (args: EventInteractionArgs<CalendarRecordEvent>) => {
@@ -239,33 +291,38 @@ export function CalendarView({
     [shown, events, nearbyDates],
   );
 
-  if (records.length === 0 && !onNavigate) {
-    return <div className="px-3 py-4 text-sm text-muted">No records in this collection yet.</div>;
+  if (records.length === 0 && !onNavigate && !onNewRecord) {
+    return <div className="px-5 py-6 text-sm text-muted">No records in this collection yet.</div>;
   }
 
+  const stepPeriod = (delta: number) =>
+    navigate(view === "week" ? addDays(shown, delta * 7) : addMonths(shown, delta));
+  const prevLabel = view === "week" ? "Previous week" : "Previous month";
+  const nextLabel = view === "week" ? "Next week" : "Next month";
+
   return (
-    <div className="dohc-collection-calendar flex h-full flex-col gap-2">
-      <div className="flex shrink-0 items-center gap-2">
+    <div className="dohc-collection-calendar flex h-full flex-col gap-2 px-5 pb-4 pt-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <button type="button" className={textButtonClass} onClick={() => navigate(new Date())}>
           Today
         </button>
         <button
           type="button"
-          aria-label="Previous month"
-          title="Previous month"
+          aria-label={prevLabel}
+          title={prevLabel}
           className={iconButtonClass}
-          onClick={() => navigate(addMonths(shown, -1))}
+          onClick={() => stepPeriod(-1)}
         >
-          <Chevron next={false} />
+          <ChevronLeft size={16} strokeWidth={1.9} aria-hidden />
         </button>
         <button
           type="button"
-          aria-label="Next month"
-          title="Next month"
+          aria-label={nextLabel}
+          title={nextLabel}
           className={iconButtonClass}
-          onClick={() => navigate(addMonths(shown, 1))}
+          onClick={() => stepPeriod(1)}
         >
-          <Chevron next />
+          <ChevronRight size={16} strokeWidth={1.9} aria-hidden />
         </button>
         <span className="text-sm font-medium text-ink">{format(shown, "MMMM yyyy")}</span>
         {nearest ? (
@@ -273,16 +330,76 @@ export function CalendarView({
             {`Go to ${format(nearest, "MMMM yyyy")}`}
           </button>
         ) : null}
+        <span className="flex-1" />
+        {undated.length > 0 ? (
+          <div ref={undatedRef} className="relative">
+            <button
+              type="button"
+              aria-expanded={undatedOpen}
+              aria-haspopup="dialog"
+              className={textButtonClass}
+              onClick={() => setUndatedOpen((open) => !open)}
+            >
+              {`No date · ${undated.length}`}
+            </button>
+            {undatedOpen ? (
+              <div
+                role="dialog"
+                aria-label="Records without a date"
+                className="dohc-popover dohc-pop-in absolute right-0 top-9 z-30 flex max-h-64 w-60 flex-col overflow-y-auto rounded-xl border border-line bg-panel p-1"
+              >
+                {undated.map(({ record, title }) => (
+                  <button
+                    key={record.id}
+                    type="button"
+                    disabled={!onOpenRecord}
+                    onClick={() => {
+                      setUndatedOpen(false);
+                      onOpenRecord?.(record);
+                    }}
+                    className="flex h-8 w-full items-center rounded-md px-2 text-left text-[13px] text-ink transition-colors duration-75 enabled:hover:bg-hover disabled:text-muted"
+                  >
+                    <span className="truncate">{title}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <div
+          role="radiogroup"
+          aria-label="Calendar view"
+          className="flex rounded-lg border border-line bg-panel-2 p-0.5"
+        >
+          {(["month", "week"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={view === mode}
+              onClick={() => setView(mode)}
+              className={`rounded-md px-2.5 py-1 text-xs transition-colors duration-75 ${
+                view === mode ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+              }`}
+            >
+              {mode === "month" ? "Month" : "Week"}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="min-h-0 flex-1">
         <DnDCalendar
           localizer={localizer}
           events={events}
           date={shown}
+          view={view}
+          onView={(next) => {
+            if (next === "month" || next === "week") setView(next);
+          }}
           onNavigate={navigate}
           toolbar={false}
           defaultView="month"
-          views={["month"]}
+          views={["month", "week"]}
           resizable={false}
           components={components}
           draggableAccessor={() => !!onCellChange}
@@ -290,7 +407,7 @@ export function CalendarView({
           onSelectEvent={onOpenRecord ? (event) => onOpenRecord(event.record) : undefined}
           eventPropGetter={(event) =>
             event.record.id === openRecordId
-              ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" }
+              ? { className: "ring-2 ring-accent ring-offset-1 ring-offset-bg" }
               : {}
           }
         />

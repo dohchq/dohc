@@ -547,7 +547,7 @@ export const TreeRow = memo(function TreeRow(props: {
             <span
               data-testid="tree-row-chevron"
               onClick={(event) => props.onRowChevronClick(row.fullPath, event)}
-              className="grid shrink-0 place-items-center"
+              className="-ml-1 grid size-5 shrink-0 place-items-center rounded transition-colors hover:bg-hover"
             >
               <ChevronRight
                 size={12}
@@ -565,7 +565,7 @@ export const TreeRow = memo(function TreeRow(props: {
           </>
         ) : (
           <>
-            <span aria-hidden className="w-3 shrink-0" />
+            <span aria-hidden className="-ml-1 w-5 shrink-0" />
             <FileGlyph
               kind={listedFileKind(row.fullPath, row.kind)}
               icon={row.icon}
@@ -2561,8 +2561,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 openEditorsExpanded && openEditorCount === 0 ? openEditorsEmptyId : undefined
               }
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
-              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
+              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
+              <ChevronRight
+                size={12}
+                aria-hidden
+                className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
+              />
               <span className="min-w-0 truncate">Open editors</span>
               {openEditorCount > 0 ? (
                 <span
@@ -2572,11 +2577,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   {openEditorCount}
                 </span>
               ) : null}
-              <ChevronRight
-                size={11}
-                aria-hidden
-                className={`shrink-0 dark:text-muted transition-transform ${openEditorsExpanded ? "rotate-90" : ""}`}
-              />
             </button>
             <div className="flex shrink-0 items-center gap-0.5">
               <SectionActionButton
@@ -2771,16 +2771,27 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 data-testid="explorer-files-toggle"
                 aria-expanded={filesExpanded}
                 onClick={() => setFilesExpanded((expanded) => !expanded)}
-                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
+                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
-                <span className="min-w-0 truncate">Files</span>
                 <ChevronRight
-                  size={11}
+                  size={12}
                   aria-hidden
                   className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
                 />
+                <span className="min-w-0 truncate">Files</span>
               </button>
               <div className="flex shrink-0 items-center gap-0.5">
+                <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                  <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
+                    <RefreshCw size={13} aria-hidden />
+                  </SectionActionButton>
+                  <SectionActionButton
+                    label="Collapse folders in explorer"
+                    onClick={props.onCollapseFolders}
+                  >
+                    <ChevronsUp size={13} aria-hidden />
+                  </SectionActionButton>
+                </span>
                 <SectionActionButton
                   label="New file"
                   onClick={() => props.onNewPage(creationParentPath())}
@@ -2792,15 +2803,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   onClick={() => beginCreateFolder(creationParentPath())}
                 >
                   <FolderPlus size={13} aria-hidden />
-                </SectionActionButton>
-                <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
-                  <RefreshCw size={13} aria-hidden />
-                </SectionActionButton>
-                <SectionActionButton
-                  label="Collapse folders in explorer"
-                  onClick={props.onCollapseFolders}
-                >
-                  <ChevronsUp size={13} aria-hidden />
                 </SectionActionButton>
               </div>
             </header>

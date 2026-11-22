@@ -29,6 +29,7 @@ export function LinkDocumentEditor({
   barSlot,
   onOpenChange,
   otherWay,
+  resolveImage,
 }: {
   discriminator: string;
   path: string;
@@ -37,6 +38,7 @@ export function LinkDocumentEditor({
   barSlot?: HTMLElement | null;
   onOpenChange?(open: boolean): void;
   otherWay?: ReactNode;
+  resolveImage?: (src: string) => string | null;
 }) {
   const current = useRef<NamedDocumentSession | null>(null),
     request = useRef<AbortController | null>(null);
@@ -189,6 +191,7 @@ export function LinkDocumentEditor({
           link
           statusSlot={barSlot}
           bodyHidden={!live}
+          resolveImage={resolveImage}
           onState={receive}
         />
       )}

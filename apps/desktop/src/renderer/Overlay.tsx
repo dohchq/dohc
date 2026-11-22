@@ -51,7 +51,7 @@ export function OverlayFrame(props: {
   return (
     <div
       data-dohc-modal="true"
-      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
+      className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim transition-opacity duration-[120ms] ease-out starting:opacity-0"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
       {...(props.onBackdropClick
         ? {
             onPointerDown: (event: PointerEvent<HTMLDivElement>) => {

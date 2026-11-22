@@ -51,10 +51,12 @@ export interface TablePerson {
 
 const PICKER_WIDTH = 240;
 const DATE_PICKER_WIDTH = 250;
+const RELATION_PICKER_WIDTH = 260;
 
 /** How wide a field's picker is, or null for a field edited in its cell. */
 export function pickerWidth(field: FieldDefinition, hasPeople: boolean): number | null {
   if (field.type === "date") return DATE_PICKER_WIDTH;
+  if (field.type === "relation") return RELATION_PICKER_WIDTH;
   if (field.type === "select" || field.type === "multi-select") return PICKER_WIDTH;
   return field.type === "person" && hasPeople ? PICKER_WIDTH : null;
 }
@@ -69,14 +71,16 @@ function paused(element: Element): boolean {
  * holds and closes it. Tab does the same and moves the selection sideways,
  * as in a text cell. Escape closes it and saves nothing.
  */
-function PickerFrame({
+export function PickerFrame({
   save,
   close,
+  className,
   children,
 }: {
   /** Saves picks the picker still holds. A picker that saves each pick has none. */
   save?: () => void;
   close: CellClose;
+  className?: string;
   children: ReactNode;
 }) {
   const frame = useRef<HTMLDivElement>(null);
@@ -99,7 +103,7 @@ function PickerFrame({
   return (
     <div
       ref={frame}
-      className="flex flex-col gap-1 p-1"
+      className={`flex flex-col gap-1 p-1${className ? ` ${className}` : ""}`}
       // The table's fieldset disables only form controls. A paused picker's
       // rows and calendar take no press and no key either.
       onClickCapture={(event) => {
@@ -461,17 +465,16 @@ export function OptionPicker({
   );
 }
 
-const NO_PICKS: { added: string[]; removed: string[]; created: string | null } = {
+const NO_PICKS: { added: string[]; removed: string[] } = {
   added: [],
   removed: [],
-  created: null,
 };
 
 /**
  * Any number of options for a multi-select field. Picks change only what
  * the picker shows. It saves once, when it closes, and Escape drops the
- * picks. The picks replay over the value the table shows, so a change from
- * elsewhere that arrives while the picker is open is kept.
+ * picks. Creating a new option flushes immediately so a second new option
+ * can be created in the same open session.
  */
 export function TagsPicker({
   field,
@@ -510,27 +513,25 @@ export function TagsPicker({
   });
   const [query, setQuery] = useState(typed ?? "");
   const [draft, setDraft] = useState(NO_PICKS);
+  const [createdOptions, setCreatedOptions] = useState<string[]>([]);
+  const [flushed, setFlushed] = useState<{ base: readonly string[]; picks: string[] } | null>(null);
+  const base = flushed && sameSelection(flushed.base, selected) ? flushed.picks : selected;
   // Chips keep the order they were picked in: the saved ones, then the new.
-  const kept = selected.filter((option) => !draft.removed.includes(option));
+  const kept = base.filter((option) => !draft.removed.includes(option));
   const picks = [...kept, ...draft.added.filter((option) => !kept.includes(option))];
-  // One edit can add one option: the host adds it, then writes the value.
-  const created =
-    draft.created !== null &&
-    picks.includes(draft.created) &&
-    !field.options.includes(draft.created)
-      ? draft.created
-      : null;
-  const options = created === null ? field.options : [...field.options, created];
+  const options = [
+    ...field.options,
+    ...createdOptions.filter((option) => !field.options.includes(option)),
+  ];
   const name = query.trim();
   const toggle = (option: string) => {
     setQuery("");
     setDraft(
       picks.includes(option)
         ? {
-            ...draft,
             added: draft.added.filter((entry) => entry !== option),
             removed:
-              selected.includes(option) && !draft.removed.includes(option)
+              base.includes(option) && !draft.removed.includes(option)
                 ? [...draft.removed, option]
                 : draft.removed,
           }
@@ -538,35 +539,39 @@ export function TagsPicker({
     );
   };
   const save = () => {
-    if (sameSelection(picks, selected)) return;
-    select(
-      picks,
-      created === null || !onCreateOption
-        ? undefined
-        : (next, previousValues) => onCreateOption(created, next, previousValues),
-    );
+    if (sameSelection(picks, base)) return;
+    select(picks);
+    setFlushed(null);
     setDraft(NO_PICKS);
   };
   const rows = options
     .filter((option) => matches(option, name.toLowerCase()))
-    // An option that is not saved yet has no color to change.
     .map((option) =>
       optionRow(
         field,
         option,
         picks.includes(option),
         () => toggle(option),
-        option === created ? undefined : onColor,
+        field.options.includes(option) ? onColor : undefined,
       ),
     );
   const creates = onCreateOption !== undefined && name !== "" && !options.includes(name);
-  if (creates && created === null) {
+  if (creates) {
     rows.push({
       key: "create",
       content: createContent(field, name),
       pick: () => {
+        const nextPicks = [...picks, name];
+        let writeId: number | void = undefined;
+        select(nextPicks, (next, previousValues) => {
+          writeId = onCreateOption(name, next, previousValues);
+          return writeId;
+        });
+        setCreatedOptions((current) => (current.includes(name) ? current : [...current, name]));
         setQuery("");
-        setDraft({ ...draft, added: [...draft.added, name], created: name });
+        setDraft(NO_PICKS);
+        if (typeof writeId !== "number") setFlushed({ base: selected, picks: nextPicks });
+        else setFlushed(null);
       },
     });
   }
@@ -592,21 +597,6 @@ export function TagsPicker({
           if (last !== undefined) toggle(last);
         }}
         empty={noOptions(name, onCreateOption !== undefined)}
-        footer={
-          creates && created !== null ? (
-            <div
-              role="option"
-              aria-selected={false}
-              aria-disabled="true"
-              className="flex flex-col gap-1 px-2 py-1"
-            >
-              <span className="flex items-center gap-2 text-[13px] text-subtle">
-                {createContent(field, name)}
-              </span>
-              <span className="text-[12px] text-muted">Click away to save "{created}" first.</span>
-            </div>
-          ) : null
-        }
       />
     </PickerFrame>
   );
@@ -686,13 +676,23 @@ export function PeoplePicker({
 const DATE_VALUE_FORMAT = "yyyy-MM-dd";
 const DAY_ROW =
   "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+const PRESET_BUTTON =
+  "flex h-7 items-center justify-center rounded-md px-1.5 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
 const MONTH_BUTTON =
   "grid size-6 place-items-center rounded-md text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+
+function parseIsoDate(raw: string, reference: Date): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const parsed = parse(raw, DATE_VALUE_FORMAT, reference);
+  if (!isValid(parsed) || format(parsed, DATE_VALUE_FORMAT) !== raw) return null;
+  return parsed;
+}
 
 /**
  * A month of days for a date field. A pick saves and closes. Focus stays on
  * the month: the arrow keys move a day or a week, Page Up and Page Down
- * change the month, and Enter picks the highlighted day.
+ * change the month, and Enter picks the highlighted day. A date text box
+ * lets people type YYYY-MM-DD directly.
  */
 export function DatePicker({
   label,
@@ -710,9 +710,12 @@ export function DatePicker({
   const parsed = current === null ? null : parse(current, DATE_VALUE_FORMAT, today);
   const stored = parsed !== null && isValid(parsed) ? parsed : null;
   const [cursor, setCursor] = useState(stored ?? today);
+  const [draft, setDraft] = useState(() => (stored ? format(stored, DATE_VALUE_FORMAT) : ""));
+  const [invalid, setInvalid] = useState(false);
   const grid = useRef<HTMLDivElement>(null);
   useEffect(() => grid.current?.focus({ preventScroll: true }), []);
   const gridId = useId();
+  const errorId = useId();
   const dayId = (day: Date) => `${gridId}-${format(day, DATE_VALUE_FORMAT)}`;
   const pick = (next: string | null) => {
     if (next !== current) emit(next);
@@ -728,6 +731,39 @@ export function DatePicker({
   );
   return (
     <PickerFrame close={close}>
+      <div className="px-1 pt-1">
+        <input
+          type="text"
+          aria-label="Date"
+          placeholder="YYYY-MM-DD"
+          value={draft}
+          aria-invalid={invalid || undefined}
+          aria-describedby={invalid ? errorId : undefined}
+          className="w-full rounded-md border border-line bg-bg px-2.5 py-1 text-[13px] tabular-nums text-ink placeholder:text-subtle focus:border-ink"
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            setDraft(next);
+            setInvalid(false);
+            const live = parseIsoDate(next.trim(), today);
+            if (live) setCursor(live);
+          }}
+          onKeyDown={(event) => {
+            if (composing(event)) return;
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const trimmed = draft.trim();
+            if (trimmed === "") return pick(null);
+            const valid = parseIsoDate(trimmed, today);
+            if (!valid) return setInvalid(true);
+            pick(format(valid, DATE_VALUE_FORMAT));
+          }}
+        />
+        {invalid ? (
+          <p id={errorId} role="alert" className="m-0 mt-1 text-[12px] text-danger">
+            Use YYYY-MM-DD.
+          </p>
+        ) : null}
+      </div>
       <div className="flex items-center gap-1 px-2 pt-1">
         <span className="text-[13px] font-semibold text-ink">{format(cursor, "MMMM yyyy")}</span>
         <span className="flex-1" />
@@ -821,15 +857,33 @@ export function DatePicker({
           </div>
         ))}
       </div>
-      <div className="flex flex-col">
-        <button
-          type="button"
-          tabIndex={-1}
-          className={DAY_ROW}
-          onClick={() => pick(format(today, DATE_VALUE_FORMAT))}
-        >
-          Today
-        </button>
+      <div className="flex flex-col gap-0.5 border-t border-line pt-1">
+        <div className="grid grid-cols-3 gap-0.5 px-1">
+          <button
+            type="button"
+            tabIndex={-1}
+            className={PRESET_BUTTON}
+            onClick={() => pick(format(today, DATE_VALUE_FORMAT))}
+          >
+            Today
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className={PRESET_BUTTON}
+            onClick={() => pick(format(addDays(today, 1), DATE_VALUE_FORMAT))}
+          >
+            Tomorrow
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            className={PRESET_BUTTON}
+            onClick={() => pick(format(addDays(today, 7), DATE_VALUE_FORMAT))}
+          >
+            Next week
+          </button>
+        </div>
         {current !== null ? (
           <button type="button" tabIndex={-1} className={DAY_ROW} onClick={() => pick(null)}>
             Clear

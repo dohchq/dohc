@@ -14,6 +14,7 @@ import {
   HOME_TOOLBAR,
   PostCard,
   SaveAsFileActions,
+  stripPostMarkdown,
   type PostData,
 } from "./PostCard";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
@@ -79,10 +80,12 @@ import {
   Hash,
   House,
   MessageSquare,
+  MoreHorizontal,
   Plus,
   Settings,
   Sparkles,
   Square,
+  TriangleAlert,
   UserPlus,
   Users,
   X,
@@ -141,9 +144,12 @@ import { HideAgentChatDialog, RemoveAgentDialog } from "../settings/agentDialogs
 import { hideAgentChat } from "../settings/ArchivedAgents";
 import { launchCommand } from "../../agents/agentToolCatalog";
 import {
+  chatMentions,
   extractChatFileReferences,
+  scanChatLinks,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import { stripMarkdown } from "../markdown/stripMarkdown";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
@@ -413,6 +419,18 @@ function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   );
 }
 
+function stripFeedMarkdown(body: string, candidates: readonly MentionCandidate[]): string {
+  if (!body) return "";
+  const { files, works } = scanChatLinks(body);
+  const mentions = chatMentions(body, candidates, files);
+  const atoms = [
+    ...files.map((token) => ({ start: token.start, end: token.end })),
+    ...works.map((token) => ({ start: token.start, end: token.end })),
+    ...mentions.map((token) => ({ start: token.start, end: token.end })),
+  ].sort((a, b) => a.start - b.start);
+  return stripMarkdown(body, atoms).text;
+}
+
 // One row of the chat nav: an icon, a name, and what is waiting on the right.
 // The active row is the one the panel currently shows.
 function NavRow(props: {
@@ -439,65 +457,94 @@ function NavRow(props: {
   // own contextmenu event, which must not open the menu again at the pointer.
   const keyedMenu = useRef(false);
   return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      data-active={props.active ? "true" : "false"}
-      aria-current={props.active ? "page" : undefined}
-      aria-haspopup={onMenu ? "menu" : undefined}
-      onClick={props.onClick}
-      onKeyDown={
-        onMenu
-          ? (event) => {
-              if (!isContextMenuKey(event)) return;
-              event.preventDefault();
-              if (!keyedMenu.current) {
-                keyedMenu.current = true;
-                window.addEventListener(
-                  "pointerdown",
-                  () => {
-                    keyedMenu.current = false;
-                  },
-                  { capture: true, once: true },
-                );
+    <div className={`group/nav relative mx-1 ${props.className ?? ""}`}>
+      <button
+        type="button"
+        data-testid={props.testId}
+        data-active={props.active ? "true" : "false"}
+        aria-current={props.active ? "page" : undefined}
+        aria-haspopup={onMenu ? "menu" : undefined}
+        onClick={props.onClick}
+        onKeyDown={
+          onMenu
+            ? (event) => {
+                if (!isContextMenuKey(event)) return;
+                event.preventDefault();
+                if (!keyedMenu.current) {
+                  keyedMenu.current = true;
+                  window.addEventListener(
+                    "pointerdown",
+                    () => {
+                      keyedMenu.current = false;
+                    },
+                    { capture: true, once: true },
+                  );
+                }
+                const box = event.currentTarget.getBoundingClientRect();
+                onMenu({ x: box.left, y: box.bottom }, true);
               }
-              const box = event.currentTarget.getBoundingClientRect();
-              onMenu({ x: box.left, y: box.bottom }, true);
-            }
-          : undefined
-      }
-      onContextMenu={
-        onMenu
-          ? (event) => {
-              event.preventDefault();
-              if (keyedMenu.current) {
-                keyedMenu.current = false;
-                return;
+            : undefined
+        }
+        onContextMenu={
+          onMenu
+            ? (event) => {
+                event.preventDefault();
+                if (keyedMenu.current) {
+                  keyedMenu.current = false;
+                  return;
+                }
+                onMenu({ x: event.clientX, y: event.clientY }, false);
               }
-              onMenu({ x: event.clientX, y: event.clientY }, false);
-            }
-          : undefined
-      }
-      {...props.data}
-      className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
-        props.active ? "bg-selected font-medium" : props.menuOpen ? "bg-hover" : "hover:bg-hover"
-      } ${props.className ?? ""}`}
-    >
-      {props.icon}
-      <span
-        data-testid={props.labelTestId}
-        className={`min-w-0 flex-1 truncate text-[13px] ${
-          props.active || props.unread
-            ? "font-medium text-ink"
-            : props.muted
-              ? "text-muted"
-              : "text-ink"
+            : undefined
+        }
+        {...props.data}
+        className={`dohc-focus-row flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
+          onMenu ? "group-hover/nav:pr-8 group-focus-within/nav:pr-8" : ""
+        } ${props.menuOpen ? "pr-8" : ""} ${
+          props.active
+            ? "bg-selected font-medium"
+            : props.menuOpen
+              ? "bg-hover"
+              : "hover:bg-hover group-hover/nav:bg-hover"
         }`}
       >
-        {props.label}
-      </span>
-      {props.trailing}
-    </button>
+        {props.icon}
+        <span
+          data-testid={props.labelTestId}
+          className={`min-w-0 flex-1 truncate text-[13px] ${
+            props.unread
+              ? "font-semibold text-ink"
+              : props.active
+                ? "font-medium text-ink"
+                : props.muted
+                  ? "text-muted"
+                  : "text-ink"
+          }`}
+        >
+          {props.label}
+        </span>
+        {props.trailing}
+      </button>
+      {onMenu ? (
+        <button
+          type="button"
+          aria-label={`More actions for ${props.label}`}
+          title="More actions"
+          onClick={(event) => {
+            event.stopPropagation();
+            const box = event.currentTarget.getBoundingClientRect();
+            onMenu({ x: box.left, y: box.bottom }, event.detail === 0);
+          }}
+          className={`absolute right-1 top-1 grid size-6 place-items-center rounded-md text-subtle transition-opacity duration-75 hover:bg-hover hover:text-ink ${
+            props.menuOpen
+              ? "opacity-100"
+              : "pointer-events-none opacity-0 group-hover/nav:pointer-events-auto group-hover/nav:opacity-100 group-focus-within/nav:pointer-events-auto group-focus-within/nav:opacity-100"
+          }`}
+        >
+          <MoreHorizontal size={14} aria-hidden />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -4541,16 +4588,9 @@ export function ChatsView(props: {
 
   if (overview.status === "unavailable") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-xs text-danger">{overview.message}</span>
-        <button
-          type="button"
-          onClick={() => void refreshOverview()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
-        >
-          Try again
-        </button>
-      </div>
+      <EmptyState icon={TriangleAlert} tone="danger" title={overview.message}>
+        <SecondaryButton onClick={() => void refreshOverview()}>Try again</SecondaryButton>
+      </EmptyState>
     );
   }
 
@@ -4593,14 +4633,13 @@ export function ChatsView(props: {
             <>
               {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
               {personalFeedNextCursor && !personalFeedLoading ? (
-                <button
-                  type="button"
+                <SecondaryButton
                   data-testid="chats-feed-more"
                   onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
-                  className="mt-4 h-8 w-full rounded-md border border-line text-[12px] text-muted hover:bg-hover hover:text-ink"
+                  className="mt-4 w-full justify-center"
                 >
                   Load older
-                </button>
+                </SecondaryButton>
               ) : null}
             </>
           }
@@ -4694,10 +4733,12 @@ export function ChatsView(props: {
                 focusMessageId: item.message.id,
               });
             };
+            const strippedBody = stripFeedMarkdown(item.message.body, mentionCandidates);
+            const strippedTitle = stripPostMarkdown(item.thread.title) || item.thread.title;
             const body = (
               <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
                 <MentionText
-                  body={item.message.body}
+                  body={strippedBody}
                   candidates={mentionCandidates}
                   attachments={item.message.attachments}
                   onOpenPath={hasFileMentions ? props.onOpenPath : undefined}
@@ -4756,7 +4797,7 @@ export function ChatsView(props: {
                       <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
                         <MessageSquare size={12} aria-hidden className="shrink-0" />
                         <span className="truncate">
-                          <WorkLinkText text={item.thread.title} interactive={false} />
+                          <WorkLinkText text={strippedTitle} interactive={false} />
                         </span>
                       </span>
                     ) : null}
@@ -5111,18 +5152,18 @@ export function ChatsView(props: {
                 testId="chats-thread-bookmark"
               />
               {!threadLocked && liveRunId !== null ? (
-                <button
-                  type="button"
+                <SecondaryButton
+                  size="row"
                   data-testid="chats-stop-agent-run"
                   aria-label="Stop agent run"
                   title="Stop agent run"
                   disabled={dispatchActionBusy}
                   onClick={() => void stopThreadRun()}
-                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50"
+                  className="shrink-0"
                 >
-                  <Square size={8} fill="currentColor" aria-hidden />
+                  <Square size={12} strokeWidth={2} aria-hidden />
                   Stop
-                </button>
+                </SecondaryButton>
               ) : null}
             </span>
           }
@@ -5400,7 +5441,7 @@ export function ChatsView(props: {
           <div
             role="tablist"
             aria-label="Group lanes"
-            className="flex rounded-lg border border-line bg-panel-2 p-0.5"
+            className="flex rounded-lg border border-line bg-panel-2 p-0.5 dark:bg-bg"
           >
             {(
               [
@@ -5415,8 +5456,10 @@ export function ChatsView(props: {
                 aria-selected={lane === value}
                 data-testid={`chats-group-lane-${value}`}
                 onClick={() => setLane(value)}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  lane === value ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
+                className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                  lane === value
+                    ? "border-transparent bg-bg text-ink shadow-sm dark:border-line/70 dark:bg-panel-2"
+                    : "border-transparent text-muted hover:text-ink"
                 }`}
               >
                 {label}
@@ -5733,21 +5776,11 @@ export function ChatsView(props: {
 
   if (variant === "page") {
     return (
-      <div
-        data-testid="chats-page-empty"
-        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
-      >
-        <p className="m-0 text-sm text-muted">Choose a conversation in Chats.</p>
+      <EmptyState data-testid="chats-page-empty" title="Choose a conversation in Chats.">
         {props.onOpenNavigator ? (
-          <button
-            type="button"
-            onClick={props.onOpenNavigator}
-            className="rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink"
-          >
-            Open Chats
-          </button>
+          <SecondaryButton onClick={props.onOpenNavigator}>Open Chats</SecondaryButton>
         ) : null}
-      </div>
+      </EmptyState>
     );
   }
 
@@ -5830,7 +5863,7 @@ export function ChatsView(props: {
           }}
           active={selectedChannelId === channel.id}
           unread={unread}
-          muted={archived && !unread}
+          muted={!unread}
           onClick={() => openConversation({ level: "channel", channel })}
           icon={<Hash size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
           label={channel.name}
@@ -5868,9 +5901,12 @@ export function ChatsView(props: {
                   testId="chats-channel-unread"
                 />
               ) : unread ? (
-                <span data-testid="chats-channel-unread" className="sr-only">
-                  {channel.unreadCount} unread
-                </span>
+                <>
+                  <span aria-hidden className="size-[5px] shrink-0 rounded-full bg-ink" />
+                  <span data-testid="chats-channel-unread" className="sr-only">
+                    {channel.unreadCount} unread
+                  </span>
+                </>
               ) : null}
             </>
           }
@@ -5950,7 +5986,7 @@ export function ChatsView(props: {
         }}
         active={selectedChannelId === channel.id}
         unread={unread}
-        muted={archived && !unread}
+        muted={!unread}
         onClick={() => openConversation({ level: "channel", channel })}
         icon={<ChatAvatar presentation={presentation} name={label} kind="agent" size="strip" />}
         label={label}

@@ -130,6 +130,11 @@ it("shows no properties section for a file without frontmatter", async () => {
     ),
   );
   expect(container.querySelector('section[aria-label="Properties"]')).toBeNull();
+  const toolbar = container.querySelector('[role="toolbar"]');
+  expect(toolbar).not.toBeNull();
+  expect(toolbar?.querySelector('button[aria-label="Bold"]')).not.toBeNull();
+  expect(toolbar?.querySelector('button[aria-label="Undo"]')).not.toBeNull();
+  expect(container.querySelector('[role="textbox"] [role="toolbar"]')).toBeNull();
 });
 
 it("says the file could not open, not that the connection failed, when the share service refuses it", async () => {

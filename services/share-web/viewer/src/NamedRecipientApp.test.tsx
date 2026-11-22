@@ -373,9 +373,52 @@ it.each([200, 401, 403])(
     } else {
       expect(container.textContent).not.toContain("Alice");
       expect(error).toContain("Check your email and password");
+      expect(container.querySelector<HTMLInputElement>('input[name="email"]')?.value).toBe(
+        "alice@example.test",
+      );
+      const passwordInput = container.querySelector<HTMLInputElement>('input[name="password"]')!;
+      expect(passwordInput.value).toBe("");
+      expect(passwordInput.type).toBe("password");
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Show password"]',
+      )!;
+      await act(async () => toggle.click());
+      expect(passwordInput.type).toBe("text");
+      expect(toggle.getAttribute("aria-label")).toBe("Hide password");
     }
   },
 );
+it("clears and hides the password on submit while keeping the email after a failed sign-in", async () => {
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/account/session") return jsonResponse({ user: null });
+    if (path === "/api/account/sign-in") {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        email: "alice@example.test",
+        password: "secret",
+      });
+      return jsonResponse({ ok: false }, 401);
+    }
+    throw Error(path);
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  const emailInput = container.querySelector<HTMLInputElement>('input[name="email"]')!;
+  const passwordInput = container.querySelector<HTMLInputElement>('input[name="password"]')!;
+  await act(async () => {
+    setControlValue(emailInput, "alice@example.test");
+    setControlValue(passwordInput, "secret");
+  });
+  const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Show password"]')!;
+  await act(async () => toggle.click());
+  expect(passwordInput.type).toBe("text");
+  await click("Sign in");
+  expect(emailInput.value).toBe("alice@example.test");
+  expect(passwordInput.value).toBe("");
+  expect(passwordInput.type).toBe("password");
+  expect(toggle.getAttribute("aria-label")).toBe("Show password");
+  expect(toggle.getAttribute("aria-pressed")).toBe("false");
+});
 it("ignores a late invitation response after navigation changes the grant", async () => {
   let resolve!: (value: Response) => void;
   vi.stubGlobal(

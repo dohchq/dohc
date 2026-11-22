@@ -75,20 +75,26 @@ afterEach(() => {
  */
 function setRect(element: Element, x: number, y: number, width: number, height: number): void {
   element.getBoundingClientRect = () => {
-    const translate =
-      element instanceof HTMLElement ? element.style.getPropertyValue("--dnd-translate") : "";
-    const match = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(translate ?? "");
-    const left = x + (match ? Number(match[1]) : 0);
-    const top = y + (match ? Number(match[2]) : 0);
+    const style = element instanceof HTMLElement ? element.style : null;
+    const translate = style?.getPropertyValue("--dnd-translate") ?? "";
+    const match = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(translate);
+    const baseLeft = Number.parseFloat(style?.getPropertyValue("--dnd-left") ?? "");
+    const baseTop = Number.parseFloat(style?.getPropertyValue("--dnd-top") ?? "");
+    const baseWidth = Number.parseFloat(style?.getPropertyValue("--dnd-width") ?? "");
+    const baseHeight = Number.parseFloat(style?.getPropertyValue("--dnd-height") ?? "");
+    const left = (Number.isFinite(baseLeft) ? baseLeft : x) + (match ? Number(match[1]) : 0);
+    const top = (Number.isFinite(baseTop) ? baseTop : y) + (match ? Number(match[2]) : 0);
+    const rectWidth = Number.isFinite(baseWidth) ? baseWidth : width;
+    const rectHeight = Number.isFinite(baseHeight) ? baseHeight : height;
     return {
       x: left,
       y: top,
-      width,
-      height,
+      width: rectWidth,
+      height: rectHeight,
       top,
       left,
-      right: left + width,
-      bottom: top + height,
+      right: left + rectWidth,
+      bottom: top + rectHeight,
       toJSON: () => ({}),
     } as DOMRect;
   };
@@ -154,6 +160,8 @@ function layOutBoard(): void {
         }
       });
   });
+  const overlay = document.querySelector("[data-dnd-overlay]");
+  if (overlay) setRect(overlay, 0, 0, 220, 80);
 }
 
 async function waitForLift(card: HTMLElement, lifted: boolean) {
@@ -166,11 +174,13 @@ async function keyboardDrag(card: HTMLElement, arrows: { key: string; code: stri
   card.focus();
   fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
   await waitForLift(card, true);
+  const moved =
+    (card.ownerDocument.querySelector("[data-dnd-overlay]") as HTMLElement | null) ?? card;
   for (const arrow of arrows) {
-    const before = card.style.getPropertyValue("--dnd-translate");
+    const before = moved.style.getPropertyValue("--dnd-translate");
     fireEvent.keyDown(card.ownerDocument, { ...arrow, shiftKey: true });
     await waitFor(() => {
-      expect(card.style.getPropertyValue("--dnd-translate")).not.toBe(before);
+      expect(moved.style.getPropertyValue("--dnd-translate")).not.toBe(before);
     });
   }
   fireEvent.keyDown(card.ownerDocument, { key: "Enter", code: "Enter" });
@@ -575,5 +585,60 @@ describe("BoardView", () => {
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ id: "rec-a", path: "tasks/rec-a.md" }),
     );
+  });
+
+  it("toggles a checkbox chip inline without opening the record", () => {
+    const onCellChange = vi.fn();
+    const onOpenRecord = vi.fn();
+    const groups = [
+      makeGroup("todo", [
+        makeRecord("rec-a", [
+          indexedValue("title", "Write the spec"),
+          indexedValue("status", "todo"),
+          indexedValue("done", false),
+        ]),
+      ]),
+    ];
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={groups}
+        groupBy="status"
+        visibleFields={["title", "done"]}
+        onCellChange={onCellChange}
+        onOpenRecord={onOpenRecord}
+      />,
+    );
+    const toggle = screen.getByRole("checkbox", { name: "done" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "done",
+      value: true,
+    });
+    expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("renders an elevated drag overlay while a card is lifted", async () => {
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onCellChange={vi.fn()}
+      />,
+    );
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    await waitForLift(card, true);
+    const overlay = document.querySelector("[data-drag-overlay]");
+    expect(overlay).not.toBeNull();
+    expect(overlay?.textContent).toContain("Write the spec");
+    fireEvent.keyDown(card.ownerDocument, { key: "Escape", code: "Escape" });
+    await waitForLift(card, false);
   });
 });

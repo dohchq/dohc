@@ -123,10 +123,8 @@ function ModeOption(props: {
       aria-checked={props.checked}
       data-testid={props.testId}
       onClick={props.onClick}
-      className={`flex h-9 items-center justify-center gap-2 rounded-md text-[12.5px] font-medium transition-colors ${
-        props.checked
-          ? "border border-line bg-panel text-ink shadow-[0_1px_2px_rgba(28,27,24,0.06)]"
-          : "border border-transparent text-muted hover:text-ink"
+      className={`flex h-9 items-center justify-center gap-2 rounded-md text-xs font-medium transition-colors ${
+        props.checked ? "bg-bg text-ink shadow-sm" : "text-muted hover:text-ink"
       }`}
     >
       {props.icon}
@@ -419,7 +417,7 @@ export function OpenSharedView(
         <div className="flex flex-col gap-1.5">
           <SectionLabel>Open it</SectionLabel>
           <div
-            className="grid grid-cols-2 gap-1 rounded-lg border border-line bg-bg p-1"
+            className="grid grid-cols-2 gap-1 rounded-lg border border-line bg-panel-2 p-0.5"
             role="radiogroup"
             aria-label="How to open it"
           >

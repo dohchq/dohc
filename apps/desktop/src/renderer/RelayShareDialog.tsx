@@ -291,7 +291,7 @@ export function RelayShareDialog(props: {
     <div
       data-testid="share-dialog"
       data-scrolls={scrolls ? "" : undefined}
-      className={`dohc-elevated flex w-105 flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-3 p-5"} ${DIALOG_HEIGHT_CLASS}`}
+      className={`dohc-elevated flex w-120 max-w-[calc(100vw-2rem)] flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-3 p-5"} ${DIALOG_HEIGHT_CLASS}`}
     >
       <div
         className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}

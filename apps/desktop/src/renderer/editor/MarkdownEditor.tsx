@@ -36,9 +36,11 @@ import {
   Code,
   Highlighter,
   Italic,
+  RemoveFormatting,
   Strikethrough,
   Underline as UnderlineIcon,
 } from "lucide-react";
+import { shortcutTitle, type ShortcutId } from "../../shortcuts/shortcutRegistry";
 import type * as Y from "yjs";
 import type { Awareness } from "y-protocols/awareness";
 import { caretSelectionRender, resolveCaretUser } from "../collab/caretPresence";
@@ -84,12 +86,8 @@ import { WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import { makeEmojiPlugin } from "./emojiTrigger";
 import { EmojiPicker, type EmojiPickerState } from "./EmojiPicker";
 import {
-  FLOATING_MENU_MAX_HEIGHT,
-  resolveFloatingMenuPosition,
-  type FloatingMenuPlacement,
-} from "./floatingMenuPosition";
-import {
   CLOSED_SLASH_COMMAND_STATE,
+  dismissSlashCommand,
   makeSlashCommandPlugin,
   runSlashCommand as runSlashCommandCore,
   slashCommandStatesEqual,
@@ -264,7 +262,12 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
   // empty paragraph in the document stamps "Type '/' for commands" at once.
   showOnlyCurrent: true,
   placeholder: ({ node }) => {
-    if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
+    if (
+      node.type.name === "tableCell" ||
+      node.type.name === "tableHeader" ||
+      node.type.name === "codeBlock" ||
+      node.type.spec.code === true
+    ) {
       return "";
     }
     if (node.type.name === "heading") return "Heading";
@@ -302,15 +305,20 @@ function markdownContent(markdown: string): JSONContent | string {
 
 function BubbleButton(props: {
   label: string;
+  shortcut?: ShortcutId;
   active?: boolean;
   onClick: () => void;
   children: ReactNode;
 }) {
+  const title = props.shortcut
+    ? `${props.label} (${shortcutTitle(props.shortcut, window.dohcDesktop?.platform)})`
+    : props.label;
   return (
     <button
       type="button"
       aria-label={props.label}
-      title={props.label}
+      aria-pressed={Boolean(props.active)}
+      title={title}
       className={`dohc-bubble-menu__button${props.active ? " is-active" : ""}`}
       onClick={props.onClick}
     >
@@ -335,6 +343,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       <span className="dohc-bubble-menu__divider" aria-hidden="true" />
       <BubbleButton
         label="Bold"
+        shortcut="editor-bold"
         active={active.bold}
         onClick={() => editor.chain().focus().toggleBold().run()}
       >
@@ -342,6 +351,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Italic"
+        shortcut="editor-italic"
         active={active.italic}
         onClick={() => editor.chain().focus().toggleItalic().run()}
       >
@@ -349,6 +359,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Underline"
+        shortcut="editor-underline"
         active={active.underline}
         onClick={() => editor.chain().focus().toggleUnderline().run()}
       >
@@ -356,6 +367,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Strikethrough"
+        shortcut="editor-strike"
         active={active.strike}
         onClick={() => editor.chain().focus().toggleStrike().run()}
       >
@@ -363,6 +375,7 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Code"
+        shortcut="editor-code"
         active={active.code}
         onClick={() => editor.chain().focus().toggleCode().run()}
       >
@@ -370,12 +383,19 @@ function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuS
       </BubbleButton>
       <BubbleButton
         label="Highlight"
+        shortcut="editor-highlight"
         active={active.highlight}
         onClick={() => editor.chain().focus().toggleMark("highlight").run()}
       >
         <Highlighter size={14} aria-hidden />
       </BubbleButton>
       <LinkBubbleButton editor={editor} active={active.link} onOpen={props.onOpenLink} />
+      <BubbleButton
+        label="Clear formatting"
+        onClick={() => editor.chain().focus().unsetAllMarks().run()}
+      >
+        <RemoveFormatting size={14} aria-hidden />
+      </BubbleButton>
     </>
   );
 }
@@ -482,6 +502,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [chromeReady, setChromeReady] = useState(false);
     const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(CLOSED_LINK_MENU_STATE);
     const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
+    linkMenuStateRef.current = linkMenuState;
     const containerRef = useRef<HTMLDivElement>(null);
     const slashStateRef = useRef<SlashCommandState>(slashState);
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
@@ -892,49 +913,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       if (editor && !editor.isDestroyed) dismissUrlPasteOffer(editor.view);
     }, [editor]);
 
-    const openSlashMenuAtPosition = useCallback(
-      (pos: number) => {
-        const view = editor?.view;
-        if (!view) return;
-
-        let x = 12;
-        let y = 40;
-        let bottom: number | null = null;
-        let maxHeight = FLOATING_MENU_MAX_HEIGHT;
-        let placement: FloatingMenuPlacement = "below";
-        try {
-          const coords = view.coordsAtPos(pos);
-          const position = resolveFloatingMenuPosition({ cursorRect: coords });
-          x = position.x;
-          y = position.y;
-          bottom = position.bottom ?? null;
-          maxHeight = position.maxHeight;
-          placement = position.placement;
-        } catch {
-          // Offscreen/jsdom editors cannot always resolve coordinates.
-        }
-
-        publishSlashState({
-          open: true,
-          from: pos,
-          to: pos,
-          query: "",
-          selected: 0,
-          x,
-          y,
-          bottom,
-          maxHeight,
-          placement,
-        });
-      },
-      [editor, publishSlashState],
-    );
-
     const insertBlockAfter = useCallback(
       (pos: number) => {
-        insertBlockAfterCore(editor, pos, openSlashMenuAtPosition);
+        insertBlockAfterCore(editor, pos);
       },
-      [editor, openSlashMenuAtPosition],
+      [editor],
     );
 
     // The handle of the block whose menu is open closes it, like any trigger.
@@ -1186,6 +1169,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             </span>
           </div>
         ) : null}
+        {editor ? <FindReplaceBar editor={editor} /> : null}
         {/* .dohc-editor-surface — not.dohc-tiptap-editor — is the CSS
          * container-query context for the outline/word-count grid trick.
          * Every position: fixed popover below (slash menu, block menu,
@@ -1196,15 +1180,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
          * editor-pane-relative ones. See the comment on .dohc-editor-surface
          * in styles.css for the full mechanism. */}
         <div className="dohc-editor-surface">
-          <EditorContent editor={editor} />
+          <EditorContent editor={editor} className="dohc-editor-content" />
           <OutlinePanel editor={editor} containerRef={containerRef} headingTarget={headingTarget} />
         </div>
-        {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
-            className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => hasFormattableSelection(instance.state.selection)}
+            className={linkMenuState.open ? "dohc-bubble-menu hidden" : "dohc-bubble-menu"}
+            shouldShow={({ editor: instance }) =>
+              !linkMenuStateRef.current.open && hasFormattableSelection(instance.state.selection)
+            }
           >
             <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
@@ -1219,6 +1204,9 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                   current.open ? { ...current, selected: index } : current,
                 )
               }
+              onDismiss={() => {
+                if (editor && !editor.isDestroyed) dismissSlashCommand(editor.view);
+              }}
             />
             <BlockMenu
               state={blockMenuState}

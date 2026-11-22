@@ -814,8 +814,13 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                   setFocusedKey(sectionKey);
                   toggleSection(section.id);
                 }}
-                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
+                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
+                <ChevronRight
+                  size={12}
+                  aria-hidden
+                  className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+                />
                 <span className="min-w-0 truncate">{section.label}</span>
                 {section.count ? (
                   <span
@@ -827,11 +832,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     {section.countMore ? "+" : null}
                   </span>
                 ) : null}
-                <ChevronRight
-                  size={11}
-                  aria-hidden
-                  className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
-                />
               </button>
               {section.actions ? (
                 <SectionActions
@@ -1056,7 +1056,7 @@ const HomeRow = memo(function HomeRow(props: {
             row.folder ? (
               <span
                 onClick={(event) => props.onChevronClick(row, event)}
-                className="grid shrink-0 place-items-center"
+                className="-ml-1 grid size-5 shrink-0 place-items-center rounded transition-colors hover:bg-hover"
               >
                 <ChevronRight
                   size={12}
@@ -1065,7 +1065,7 @@ const HomeRow = memo(function HomeRow(props: {
                 />
               </span>
             ) : (
-              <span aria-hidden className="w-3 shrink-0" />
+              <span aria-hidden className="-ml-1 w-5 shrink-0" />
             )
           ) : null}
           <HomeGlyph

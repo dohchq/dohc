@@ -2292,7 +2292,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         value: search,
         onChange: setSearch,
         disabled: paused,
-        onSubmit: () => void load({ ...query, after: null, search }, []),
+        onSubmit: (nextSearch = search) =>
+          void load({ ...query, after: null, search: nextSearch }, []),
       }}
       actions={[
         ...(undo && !offline

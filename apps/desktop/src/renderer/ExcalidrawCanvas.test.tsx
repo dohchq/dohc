@@ -24,58 +24,75 @@ const drawingLink = vi.hoisted(() => ({
   preventDefault: vi.fn(),
 }));
 
-vi.mock("@excalidraw/excalidraw", () => ({
-  restore: excalidraw.restore,
-  serializeAsJSON: excalidraw.serializeAsJSON,
-  Excalidraw: (props: {
-    viewModeEnabled?: boolean;
-    autoFocus?: boolean;
-    theme?: "light" | "dark";
-    onLinkOpen?: (element: { id: string; link: string }, event: { preventDefault(): void }) => void;
-    onChange?: (
-      elements: readonly unknown[],
-      appState: Record<string, unknown>,
-      files: Record<string, unknown>,
-    ) => void;
-  }) => (
-    <div>
-      <button
-        type="button"
-        data-testid="mock-upstream-excalidraw"
-        data-read-only={String(props.viewModeEnabled)}
-        data-auto-focus={String(props.autoFocus)}
-        data-theme={props.theme}
-        onClick={() =>
-          props.onChange?.(
-            [{ id: "image-1", type: "image", fileId: "file-1" }],
-            { viewBackgroundColor: "#ffffff" },
-            {
-              "file-1": {
-                id: "file-1",
-                dataURL: "data:image/png;base64,iVBORw0KGgo=",
-                mimeType: "image/png",
+vi.mock("@excalidraw/excalidraw", () => {
+  const MainMenu = Object.assign(
+    ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+    {
+      DefaultItems: {
+        ClearCanvas: () => null,
+        SaveAsImage: () => null,
+        ChangeCanvasBackground: () => null,
+        Help: () => null,
+      },
+    },
+  );
+  return {
+    MainMenu,
+    restore: excalidraw.restore,
+    serializeAsJSON: excalidraw.serializeAsJSON,
+    Excalidraw: (props: {
+      viewModeEnabled?: boolean;
+      autoFocus?: boolean;
+      theme?: "light" | "dark";
+      onLinkOpen?: (
+        element: { id: string; link: string },
+        event: { preventDefault(): void },
+      ) => void;
+      onChange?: (
+        elements: readonly unknown[],
+        appState: Record<string, unknown>,
+        files: Record<string, unknown>,
+      ) => void;
+    }) => (
+      <div>
+        <button
+          type="button"
+          data-testid="mock-upstream-excalidraw"
+          data-read-only={String(props.viewModeEnabled)}
+          data-auto-focus={String(props.autoFocus)}
+          data-theme={props.theme}
+          onClick={() =>
+            props.onChange?.(
+              [{ id: "image-1", type: "image", fileId: "file-1" }],
+              { viewBackgroundColor: "#ffffff" },
+              {
+                "file-1": {
+                  id: "file-1",
+                  dataURL: "data:image/png;base64,iVBORw0KGgo=",
+                  mimeType: "image/png",
+                },
               },
-            },
-          )
-        }
-      >
-        Drawing
-      </button>
-      <button
-        type="button"
-        data-testid="mock-drawing-link"
-        onClick={() =>
-          props.onLinkOpen?.(
-            { id: "linked", link: drawingLink.href },
-            { preventDefault: drawingLink.preventDefault },
-          )
-        }
-      >
-        Link
-      </button>
-    </div>
-  ),
-}));
+            )
+          }
+        >
+          Drawing
+        </button>
+        <button
+          type="button"
+          data-testid="mock-drawing-link"
+          onClick={() =>
+            props.onLinkOpen?.(
+              { id: "linked", link: drawingLink.href },
+              { preventDefault: drawingLink.preventDefault },
+            )
+          }
+        >
+          Link
+        </button>
+      </div>
+    ),
+  };
+});
 
 import ExcalidrawCanvas from "./ExcalidrawCanvas";
 

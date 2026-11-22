@@ -289,7 +289,7 @@ export type PageEditor = {
  * the record's name, its buttons and its fields.
  */
 function TopMatter(props: { hidden?: boolean; children: React.ReactNode }) {
-  return props.hidden ? null : <div className="group/topmatter">{props.children}</div>;
+  return props.hidden ? null : <div className="group/topmatter shrink-0">{props.children}</div>;
 }
 
 function MarkdownRenderCommitted(props: { onRendered: () => void }) {
@@ -2440,7 +2440,9 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className={`min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable] ${
+            showSource ? "hidden" : "flex flex-col"
+          }`}
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" + on empty docs). */}
@@ -2655,7 +2657,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <TopMatter hidden={props.recordBody}>
             <PageIdentity
@@ -2731,7 +2733,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
+          className="flex min-h-0 flex-1 flex-col overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
           onScroll={(event) => {
             readScroll.current = {
               key: props.documentKey,

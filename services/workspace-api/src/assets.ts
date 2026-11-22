@@ -62,10 +62,19 @@ main {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0 0 1.25rem;
   font-family: var(--serif);
   font-size: 15px;
   color: var(--subtle);
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+  color: var(--ink);
 }
 
  .server { overflow-wrap: anywhere; font-size: 12px; }
@@ -130,7 +139,58 @@ button.secondary {
 
 button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 
+.password-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-wrap input {
+  padding-right: 3.5rem;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 0.25rem;
+  width: auto;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.password-toggle:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+  opacity: 1;
+}
+
 .actions { display: flex; gap: 0.5rem; }
+
+#verified a,
+#after a {
+  display: inline-flex;
+  width: 100%;
+  justify-content: center;
+  align-items: center;
+  padding: 0.5625rem 0.75rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: opacity 100ms ease-out;
+}
+
+#verified a:hover,
+#after a:hover {
+  color: var(--bg);
+  opacity: 0.9;
+}
 
 .status {
   margin-top: 0.875rem;
@@ -154,15 +214,30 @@ button.secondary:hover { background: var(--panel-2); color: var(--ink); }
 }
 
 .code {
-  display: inline-block;
+  display: block;
   margin-bottom: 1rem;
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  padding: 1rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--panel-2);
+  color: var(--ink);
   font-family: var(--mono);
-  font-size: 20px;
-  letter-spacing: 0.18em;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-align: center;
   word-break: break-all;
+}
+
+.device-done .code {
+  opacity: 0.6;
+}
+
+.device-done .status.done {
+  padding: 0.75rem 0.875rem;
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .meta {
@@ -191,6 +266,7 @@ a:hover { color: var(--ink); }
 
 @media (max-width: 30rem) {
   main { padding: 1.25rem; border: none; background: var(--bg); }
+  input { font-size: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -202,6 +278,25 @@ export const ACCOUNT_JS = `const page = document.body.dataset.page || "";
 const closed = document.body.dataset.signUp === "closed";
 const byId = (id) => document.getElementById(id);
 if (byId("server-host")) byId("server-host").textContent = location.host;
+
+for (const input of document.querySelectorAll('input[type="password"]')) {
+  const wrap = document.createElement("div");
+  wrap.className = "password-wrap";
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "password-toggle";
+  toggle.textContent = "Show";
+  toggle.setAttribute("aria-label", "Show password");
+  toggle.addEventListener("click", () => {
+    const showing = input.type === "password";
+    input.type = showing ? "text" : "password";
+    toggle.textContent = showing ? "Hide" : "Show";
+    toggle.setAttribute("aria-label", showing ? "Hide password" : "Show password");
+  });
+  wrap.appendChild(toggle);
+}
 
 function setStatus(kind, text) {
   const status = byId("status");
@@ -348,13 +443,17 @@ if (page === "device") {
   const userCode = document.body.dataset.userCode;
   const approve = byId("approve");
   const deny = byId("deny");
-  const decide = async (path, working, done) => {
+  const decide = async (path, working, done, heading) => {
     approve.disabled = true;
     deny.disabled = true;
     setStatus("working", working);
     try {
       await call(path, { userCode });
       byId("actions").hidden = true;
+      const main = document.querySelector("main");
+      if (main) main.classList.add("device-done");
+      const h1 = document.querySelector("h1");
+      if (h1 && heading) h1.textContent = heading;
       setStatus("done", done);
     } catch (error) {
       setStatus("error", error.message);
@@ -369,10 +468,16 @@ if (page === "device") {
       document.body.dataset.deviceKind === "phone"
         ? "Your phone is connected. Return to dohc on your phone."
         : "Your computer is connected. Return to dohc.",
+      document.body.dataset.deviceKind === "phone" ? "Phone connected" : "Computer connected",
     ),
   );
   deny.addEventListener("click", () =>
-    decide("/api/auth/device/deny", "Refusing the code\\u2026", "dohc did not connect this device. You can close this page."),
+    decide(
+      "/api/auth/device/deny",
+      "Refusing the code\\u2026",
+      "dohc did not connect this device. You can close this page.",
+      "Device not connected",
+    ),
   );
 }
 

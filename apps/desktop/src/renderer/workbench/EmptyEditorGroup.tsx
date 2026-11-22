@@ -3,6 +3,7 @@ import { Upload } from "lucide-react";
 import { FILE_KIND_RECORDS, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { shortcutAria, shortcutText } from "../../shortcuts/shortcutRegistry";
+import { dirnameOf } from "../path";
 import { EmptyState } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { fileName } from "./EditorTabs";
@@ -61,7 +62,7 @@ function recentFiles(recent: readonly string[], files: readonly ListedFile[]): L
   return recent.flatMap((path) => listed.get(path) ?? []).slice(0, RECENT_LIMIT);
 }
 
-function fileTone(kind: FileKindRecord): string | undefined {
+export function fileTone(kind: FileKindRecord): string | undefined {
   return kind.displayKind === "markdown" || kind.displayKind === "drawing"
     ? KIND_TONE[kind.displayKind]
     : undefined;
@@ -79,10 +80,13 @@ export function EmptyEditorGroup(props: {
   onOpen: (path: string) => void;
   // Adds dropped files. Absent where the workspace takes no import.
   onDropFiles?: (files: File[]) => void;
+  // Opens the file picker when clicking the empty-workspace drop zone.
+  onImportFiles?: () => void;
 }) {
   const recentId = useId();
   // A press while an action runs does nothing, so a double click creates once.
   const running = useRef(false);
+  const [busyKind, setBusyKind] = useState<StartKind | null>(null);
   const recent = useMemo(
     () => (props.files ? recentFiles(props.recent, props.files) : []),
     [props.recent, props.files],
@@ -92,18 +96,21 @@ export function EmptyEditorGroup(props: {
     return create ? [{ ...tile, create }] : [];
   });
   const onDropFiles = props.files?.length === 0 ? props.onDropFiles : undefined;
+  const onImportFiles = props.files?.length === 0 ? props.onImportFiles : undefined;
 
   if (tiles.length === 0 && recent.length === 0 && !onDropFiles) {
     return <EmptyState data-testid="start-surface" title="Select a file" />;
   }
 
-  function run(create: CreateAction) {
+  function run(kind: StartKind, create: CreateAction) {
     if (running.current) return;
     const pending = create();
     if (!(pending instanceof Promise)) return;
     running.current = true;
+    setBusyKind(kind);
     const release = () => {
       running.current = false;
+      setBusyKind(null);
     };
     void pending.then(release, release);
   }
@@ -124,15 +131,22 @@ export function EmptyEditorGroup(props: {
               <button
                 key={tile.kind}
                 type="button"
+                aria-busy={busyKind === tile.kind || undefined}
                 aria-keyshortcuts={
                   tile.shortcut ? shortcutAria(tile.shortcut, props.platform) : undefined
                 }
-                onClick={() => run(tile.create)}
-                className="group flex min-w-0 flex-col gap-2 rounded-lg text-left"
+                onClick={() => run(tile.kind, tile.create)}
+                className={`group flex min-w-0 flex-col gap-2 rounded-lg text-left transition-[transform,opacity] duration-75 active:scale-[0.99] ${
+                  busyKind !== null
+                    ? busyKind === tile.kind
+                      ? "cursor-wait opacity-75"
+                      : "opacity-50"
+                    : ""
+                }`}
               >
                 <span
                   aria-hidden
-                  className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2"
+                  className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2 group-active:bg-selected"
                 >
                   {START_TILE_ART[tile.kind]}
                 </span>
@@ -153,7 +167,7 @@ export function EmptyEditorGroup(props: {
             ))}
           </div>
         ) : null}
-        {onDropFiles ? <DropZone onDrop={onDropFiles} /> : null}
+        {onDropFiles ? <DropZone onDrop={onDropFiles} onImportFiles={onImportFiles} /> : null}
         {recent.length > 0 ? (
           <section aria-labelledby={recentId}>
             <h2 id={recentId} className="pb-2 text-[12px] font-medium text-subtle">
@@ -163,6 +177,7 @@ export function EmptyEditorGroup(props: {
             <ul className="-mx-2">
               {recent.map((file) => {
                 const kind = listedFileKind(file.path, file.kind);
+                const folder = dirnameOf(file.path);
                 return (
                   <li key={file.path}>
                     <button
@@ -178,6 +193,9 @@ export function EmptyEditorGroup(props: {
                         className={fileTone(kind)}
                       />
                       <span className="min-w-0 truncate">{fileName(file.path)}</span>
+                      {folder ? (
+                        <span className="min-w-0 truncate text-[12px] text-subtle">{folder}</span>
+                      ) : null}
                     </button>
                   </li>
                 );
@@ -195,33 +213,49 @@ function hasFiles(event: DragEvent): boolean {
 }
 
 // Files dropped here land at the workspace root, as on the Explorer's empty space.
-function DropZone(props: { onDrop: (files: File[]) => void }) {
+function DropZone(props: { onDrop: (files: File[]) => void; onImportFiles?: () => void }) {
   const [over, setOver] = useState(false);
-  return (
-    <div
-      data-testid="start-drop"
-      onDragOver={(event) => {
-        if (!hasFiles(event)) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
-        setOver(true);
-      }}
-      onDragLeave={(event) => {
-        if (
-          !(
-            event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)
-          )
-        )
-          setOver(false);
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
+  const dragProps = {
+    "data-testid": "start-drop",
+    onDragOver: (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setOver(true);
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (
+        !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))
+      )
         setOver(false);
-        const files = [...event.dataTransfer.files];
-        if (files.length > 0) props.onDrop(files);
-      }}
-      className={`flex h-11 items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${over ? "border-accent bg-hover text-ink" : "border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] text-subtle"}`}
-    >
+    },
+    onDrop: (event: DragEvent) => {
+      event.preventDefault();
+      setOver(false);
+      const files = [...event.dataTransfer.files];
+      if (files.length > 0) props.onDrop(files);
+    },
+  };
+  const className = `flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-dashed text-[13px] transition-colors duration-100 ${
+    over
+      ? "border-accent bg-hover text-ink"
+      : "border-[color-mix(in_srgb,var(--dohc-line),var(--dohc-muted)_60%)] text-subtle"
+  }`;
+  if (props.onImportFiles) {
+    return (
+      <button
+        type="button"
+        {...dragProps}
+        onClick={props.onImportFiles}
+        className={`${className} cursor-pointer hover:border-ink/40 hover:bg-hover hover:text-ink`}
+      >
+        <Upload size={16} aria-hidden />
+        Drop files here or click to add them
+      </button>
+    );
+  }
+  return (
+    <div {...dragProps} className={className}>
       <Upload size={16} aria-hidden />
       Drop files here to add them
     </div>

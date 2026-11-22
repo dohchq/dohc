@@ -25,7 +25,7 @@ import type { Dispatch, RefObject, SetStateAction } from "react";
 import { Extension, getMarkRange, type Editor } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
-import { ExternalLink, Link as LinkIcon, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Link as LinkIcon, Trash2 } from "lucide-react";
 import {
   activateReadOnlyLinkHref,
   normalizeLinkUrl,
@@ -51,6 +51,7 @@ export type LinkMenuState =
       hasLink: boolean;
       x: number;
       y: number;
+      bottom?: number | null;
       maxHeight: number;
       placement: FloatingMenuPlacement;
     };
@@ -106,6 +107,7 @@ export function computeLinkMenuState(
 
   let x = 12;
   let y = 40;
+  let bottom: number | null = null;
   let maxHeight = FLOATING_MENU_MAX_HEIGHT;
   let placement: FloatingMenuPlacement = "below";
   try {
@@ -117,6 +119,7 @@ export function computeLinkMenuState(
     });
     x = position.x;
     y = position.y;
+    bottom = position.bottom ?? null;
     maxHeight = position.maxHeight;
     placement = position.placement;
   } catch {
@@ -131,6 +134,7 @@ export function computeLinkMenuState(
     hasLink: href != null,
     x,
     y,
+    bottom,
     maxHeight,
     placement,
   };
@@ -301,6 +305,8 @@ export function LinkMenu({
 }) {
   const [value, setValue] = useState("");
   const [invalid, setInvalid] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const key = state.open ? `${state.from}:${state.to}:${state.url}` : "closed";
@@ -309,9 +315,16 @@ export function LinkMenu({
     if (!state.open) return;
     setValue(state.url);
     setInvalid(false);
+    setCopied(false);
     const frame = requestAnimationFrame(() => inputRef.current?.select());
     return () => cancelAnimationFrame(frame);
   }, [key]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!state.open) return;
@@ -320,6 +333,7 @@ export function LinkMenu({
       event.preventDefault();
       event.stopPropagation();
       onDismiss();
+      editor?.commands.focus();
     }
     function onPointerDown(event: MouseEvent) {
       if (containerRef.current?.contains(event.target as Node)) return;
@@ -331,7 +345,7 @@ export function LinkMenu({
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("mousedown", onPointerDown, true);
     };
-  }, [state.open, onDismiss]);
+  }, [state.open, onDismiss, editor]);
 
   if (!state.open || !editor || !isEditableEditor(editor)) return null;
   const openState = state;
@@ -351,6 +365,19 @@ export function LinkMenu({
     onDismiss();
   }
 
+  function copyUrl() {
+    const target = normalizedPreview ?? value.trim();
+    if (!target || typeof navigator === "undefined" || !navigator.clipboard?.writeText) return;
+    void navigator.clipboard.writeText(target).then(
+      () => {
+        setCopied(true);
+        if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+      },
+      () => undefined,
+    );
+  }
+
   const normalizedPreview = normalizeLinkUrl(value);
 
   return (
@@ -358,7 +385,11 @@ export function LinkMenu({
       ref={containerRef}
       className="dohc-link-menu"
       data-placement={state.placement}
-      style={{ left: state.x, top: state.y }}
+      style={
+        state.placement === "above" && state.bottom != null
+          ? { left: state.x, bottom: state.bottom }
+          : { left: state.x, top: state.y }
+      }
       onMouseDown={(event) => {
         // Let the input itself receive focus/caret; only block the editor
         // from stealing selection when clicking the surrounding chrome.
@@ -384,6 +415,28 @@ export function LinkMenu({
             }
           }}
         />
+        <button
+          type="button"
+          className="dohc-link-menu__button"
+          aria-label="Apply link"
+          title="Apply link"
+          disabled={!normalizedPreview}
+          onClick={confirm}
+        >
+          <Check size={13} aria-hidden />
+        </button>
+        {openState.hasLink ? (
+          <button
+            type="button"
+            className="dohc-link-menu__button"
+            aria-label="Copy URL"
+            title={copied ? "Copied" : "Copy URL"}
+            disabled={!normalizedPreview}
+            onClick={copyUrl}
+          >
+            {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
+          </button>
+        ) : null}
         <button
           type="button"
           className="dohc-link-menu__button"
@@ -430,6 +483,7 @@ export function LinkBubbleButton({
     <button
       type="button"
       aria-label="Link"
+      aria-pressed={active}
       title={`Link (${shortcutTitle("editor-link", window.dohcDesktop?.platform)})`}
       className={`dohc-bubble-menu__button${active ? " is-active" : ""}`}
       onClick={() => onOpen(computeLinkMenuState(editor.view))}

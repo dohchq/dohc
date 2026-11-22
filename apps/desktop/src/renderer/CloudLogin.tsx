@@ -1,5 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Cloud, ExternalLink, X } from "lucide-react";
+import { Cloud, ExternalLink, Loader2, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
@@ -12,7 +12,15 @@ import {
   useConnectionNotices,
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
-import { FieldError, IconButton, Pill, PrimaryButton, RetryRow } from "./ui/controls";
+import {
+  FieldError,
+  IconButton,
+  Pill,
+  PrimaryButton,
+  RetryRow,
+  SecondaryButton,
+} from "./ui/controls";
+import { CopyButton } from "./ui/CopyButton";
 
 const SETUP_GUIDE_URL = "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
 
@@ -87,6 +95,7 @@ export function CloudLogin(
   const [statusAttempt, setStatusAttempt] = useState(0);
   // Inline only for what the user can fix in the field in front of them.
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
+  const [serverUrlTouched, setServerUrlTouched] = useState(false);
   const [serverUrl, setServerUrl] = useState(props.initialServerUrl ?? "");
   // Reported by the server itself: whether it answers from the open internet
   // or only from a private network.
@@ -158,6 +167,7 @@ export function CloudLogin(
     clearPollTimer();
     setPhase({ kind: "loading" });
     setAddressProblem(null);
+    setServerUrlTouched(false);
     setServerUrl(props.initialServerUrl ?? "");
     setNetworkAccess(null);
     void bridge()
@@ -250,7 +260,14 @@ export function CloudLogin(
     }, 3000);
   }
 
+  function cancelCode() {
+    sessionRef.next();
+    clearPollTimer();
+    setPhase({ kind: "disconnected" });
+  }
+
   function submitConnect() {
+    setServerUrlTouched(true);
     const address = checkServerAddress(serverUrl);
     if ("problem" in address) {
       setAddressProblem(address.problem);
@@ -413,11 +430,13 @@ export function CloudLogin(
               data-unsaved={serverUrl.trim() !== "" && !connecting ? "" : undefined}
               value={serverUrl}
               onChange={(event) => {
+                setServerUrlTouched(true);
                 setServerUrl(event.currentTarget.value);
                 setAddressProblem(null);
               }}
               onBlur={() => {
                 if (connecting) return;
+                if (!serverUrlTouched && serverUrl.trim() === "") return;
                 const address = checkServerAddress(serverUrl);
                 setAddressProblem("problem" in address ? address.problem : null);
               }}
@@ -473,21 +492,43 @@ export function CloudLogin(
           <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
             Approve this device in your browser.
           </p>
+          <div className="my-3 flex items-center justify-between gap-2 rounded-md border border-line bg-panel-2 px-3 py-2">
+            <p
+              data-testid="cloud-user-code"
+              className="m-0 flex-1 text-center font-mono text-2xl font-medium tracking-[0.04em] text-ink"
+            >
+              {phase.userCode}
+            </p>
+            <CopyButton
+              iconOnly
+              label="Copy code"
+              testId="cloud-copy-code"
+              getText={() => phase.userCode}
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <PrimaryButton
+              data-testid="cloud-open-browser"
+              onClick={() => void openLinkExternally(phase.verificationUri)}
+              className="flex items-center gap-1.5"
+            >
+              <ExternalLink size={12} aria-hidden />
+              Open browser
+            </PrimaryButton>
+            <SecondaryButton data-testid="cloud-login-cancel" onClick={cancelCode}>
+              Cancel
+            </SecondaryButton>
+          </div>
           <p
-            data-testid="cloud-user-code"
-            className="my-3 text-center font-mono text-2xl font-medium tracking-[0.04em] text-ink"
+            role="status"
+            data-testid="cloud-waiting-status"
+            className="mb-0 mt-2 flex items-center gap-1.5 text-[12px] text-subtle"
           >
-            {phase.userCode}
-          </p>
-          <PrimaryButton
-            data-testid="cloud-open-browser"
-            onClick={() => void openLinkExternally(phase.verificationUri)}
-            className="flex items-center gap-1.5"
-          >
-            <ExternalLink size={12} aria-hidden />
-            Open browser
-          </PrimaryButton>
-          <p role="status" className="mb-0 mt-2 text-[12px] text-subtle">
+            <Loader2
+              size={12}
+              aria-hidden
+              className="shrink-0 animate-spin motion-reduce:animate-none"
+            />
             Waiting for approval
           </p>
         </div>

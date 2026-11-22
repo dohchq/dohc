@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { X } from "lucide-react";
+import { CalendarDays, SquareKanban, Table2, X } from "lucide-react";
 import { isComposingKey } from "../ui/keys";
 import type { CollectionSchema, ViewDefinition, ViewKind } from "@dohc/workspace-contracts";
 import { Overlay } from "../Overlay";
 import {
   DangerButton,
+  FieldError,
   IconButton,
   PrimaryButton,
   SecondaryButton,
@@ -24,6 +25,11 @@ const VIEW_KIND_LABELS: Record<ViewKind, string> = {
   table: "Table",
   board: "Board",
   calendar: "Calendar",
+};
+const VIEW_KIND_ICONS: Record<ViewKind, typeof Table2> = {
+  table: Table2,
+  board: SquareKanban,
+  calendar: CalendarDays,
 };
 
 export function ViewsDialog(props: {
@@ -127,7 +133,7 @@ export function ViewsDialog(props: {
     <Overlay onClose={props.onClose}>
       <div
         data-testid="collection-views-dialog"
-        className="dohc-elevated flex w-130 max-w-[85vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+        className="dohc-elevated dohc-pop-in flex max-h-[85vh] w-130 max-w-[85vw] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
           <h2 className="m-0 flex-1 text-base font-semibold text-ink">Views</h2>
@@ -167,6 +173,17 @@ export function ViewsDialog(props: {
               </div>
             ) : (
               <div key={view.name} className="flex h-8 items-center gap-2 rounded-md px-2">
+                {(() => {
+                  const Icon = VIEW_KIND_ICONS[view.kind];
+                  return (
+                    <Icon
+                      size={14}
+                      strokeWidth={1.9}
+                      aria-hidden
+                      className="shrink-0 text-subtle"
+                    />
+                  );
+                })()}
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
                 <span className="shrink-0 text-[12px] text-subtle">
                   {VIEW_KIND_LABELS[view.kind]}
@@ -274,7 +291,7 @@ export function ViewsDialog(props: {
             Create view
           </SecondaryButton>
         </div>
-        {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
+        {error ? <FieldError id="collection-views-error">{error}</FieldError> : null}
       </div>
     </Overlay>
   );
