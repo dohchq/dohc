@@ -235,6 +235,7 @@ export function createNamedLiveBrowserTransport<
     const unsubscribe = provider.subscribe((value) => {
       if (value.status === "live") {
         everLive = true;
+        typingStopped = false;
         clearTimeout(attempt?.timer);
         reconnectDelayMs = 250;
         accessStoodAt = Date.now();

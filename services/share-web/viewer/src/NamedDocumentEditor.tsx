@@ -40,12 +40,12 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
       : state.lastApplied
         ? "Changes saved"
         : "Ready to edit";
+  const limit = liveConnectionLimitMessage(state.reason);
+  if (limit) return limit;
   const takesEdits = namedLiveEditable(state);
   if (state.typingAhead && state.pendingUpdates && (takesEdits || OPENING.includes(state.status)))
     return "Not sent yet. Your changes are only in this tab.";
   if (OPENING.includes(state.status)) return "Opening the file…";
-  const limit = liveConnectionLimitMessage(state.reason);
-  if (limit) return limit;
   if (state.status === "quarantined")
     return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused")
@@ -248,7 +248,7 @@ export function NamedDocumentEditor({
     };
   }, [session, onState]);
   const working =
-    state.status === "live" || OPENING.includes(state.status) || namedLiveEditable(state);
+    state.status === "live" || (OPENING.includes(state.status) && !state.pendingUpdates);
   const status = (
     <p
       className={working ? "named-document-status" : "named-document-status stopped"}

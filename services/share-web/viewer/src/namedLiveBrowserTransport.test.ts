@@ -444,6 +444,24 @@ describe("named browser transport", () => {
     expect(f.value.body.toString()).toContain("base draft offline opening");
     expect(f.socket.listenerCount).toBe(0);
   });
+  it("takes typing while it reconnects after it was live, even when its first open failed", async () => {
+    const f = fixture(),
+      failing = f.value.reconnect();
+    (await f.socketAt(0)).close();
+    await failing;
+    expect(f.value.state()).toMatchObject({ status: "disconnected", typingStopped: true });
+    const connecting = f.value.reconnect(),
+      socket = await f.socketAt(1),
+      peer = host(socket, f.value);
+    socket.open();
+    await connecting;
+    await peer.greet();
+    await peer.initial(document("base"));
+    socket.close();
+    expect(f.value.state()).toMatchObject({ status: "disconnected", typingStopped: false });
+    expect(edit(f.value, " offline")).toBe(true);
+    expect(f.value.body.toString()).toContain("base offline");
+  });
   it("takes no typing once it stops reconnecting by itself, and keeps the waiting draft", async () => {
     const f = await live();
     edit(f.value, " draft");

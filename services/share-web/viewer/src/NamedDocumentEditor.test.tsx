@@ -306,6 +306,11 @@ it.each([
     true,
     "Not sent yet. Your changes are only in this tab.",
   ],
+  [
+    { reason: "live_person_limit", pendingUpdates: 2 },
+    true,
+    LIVE_CONNECTION_LIMIT_MESSAGES.live_person_limit,
+  ],
   [{ reason: "paused" }, false, "Editing paused. Check your connection, then retry."],
 ] as const)(
   "after it was live, a page that disconnects with %o takes typing: %s",
