@@ -45,12 +45,12 @@ function exchange(path: string, value: unknown) {
 }
 
 it.skipIf(process.platform === "win32")(
-  "keeps the operator socket path short whatever the temp folder",
+  "fits the operator socket in macOS's own temp folder",
   () => {
     vi.stubEnv("TMPDIR", "/var/folders/9d/l02zfgrs7c16twd3wbpdmhkc0000gn/T/");
     try {
       const path = operatorSocketPath({});
-      expect(path.startsWith("/tmp/dohc-relay-operator-")).toBe(true);
+      expect(path.startsWith(process.platform === "linux" ? "/tmp/" : "/var/folders/")).toBe(true);
       expect(Buffer.byteLength("/private" + path)).toBeLessThan(104);
     } finally {
       vi.unstubAllEnvs();
