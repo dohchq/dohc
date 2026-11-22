@@ -53,8 +53,7 @@ const MAX_ROW_HEIGHT = 1_000_000;
 
 const text = (value: unknown) => typeof value === "string";
 const textOrNone = (value: unknown) => value === null || typeof value === "string";
-const oneLine = (value: unknown) => typeof value === "string" && !/[
-]/.test(value);
+const oneLine = (value: unknown) => typeof value === "string" && !/[\n\r]/.test(value);
 const yesOrNo = (value: unknown) => typeof value === "boolean";
 const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 const integerIn = (least: number, most: number) => (value: unknown) =>

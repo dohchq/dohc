@@ -339,9 +339,8 @@ describe("reading any sequence", () => {
       readBodyLeaves(schema, [{ type: "codeBlock", attrs: { language }, path: [], inline: [] }])
         .firstChild!.attrs.language as unknown;
     expect(code("ts")).toBe("ts");
-    expect(code("ts
-break")).toBeNull();
-    expect(code("tsbreak")).toBeNull();
+    expect(code("ts\nbreak")).toBeNull();
+    expect(code("ts\rbreak")).toBeNull();
     const callout = (attrs: Record<string, unknown>) =>
       readBodyLeaves(schema, [
         {
@@ -355,9 +354,7 @@ break")).toBeNull();
       calloutType: "warning",
       title: "Careful",
     });
-    expect(callout({ calloutType: "warning
-> x", title: "Care
-ful" })).toMatchObject({
+    expect(callout({ calloutType: "warning\n> x", title: "Care\nful" })).toMatchObject({
       calloutType: "note",
       title: "",
     });

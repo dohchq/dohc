@@ -54,8 +54,7 @@ The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Y
 | `orderedList.start` | whole number 0 to 999,999,999 | 1 |
 | `tableCell.colspan`, `tableCell.rowspan`, `tableHeader.colspan`, `tableHeader.rowspan` | whole number 1 to 1,000 | 1 |
 | `orderedList.type`, `wikilink.label`, `image.title` | string or null | null |
-| `codeBlock.language` | null, or a string with no line break (`
-` or ``) | null |
+| `codeBlock.language` | null, or a string with no line break (`\n` or `\r`) | null |
 | `callout.fold` | `""`, `"+"` or `"-"` | `""` |
 | `callout.calloutType` | string with no line break | `"note"` |
 | `callout.title` | string with no line break | `""` |
