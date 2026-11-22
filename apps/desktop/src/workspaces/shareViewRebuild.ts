@@ -360,10 +360,11 @@ export function parseShareViewRebuildAnswer(
 }
 
 const CHANGE_FAILED =
-  "dohc could not change files in this workspace. Check that no other program has them open and the disk has room.";
+  "It could not change files in this workspace. Check that no other program has them open and the disk has room.";
 
 // Why each code the engine stops a rebuild with stopped it, if dohc knows,
-// and what the person can do. A title says what failed.
+// and what the person can do. Each sits under the title "dohc could not
+// update access", so it starts with "It" rather than naming dohc again.
 const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   // On Windows a rename that a held file blocks fails as access denied, as
   // a real denial does, so the words can't be sure.
@@ -382,11 +383,10 @@ const REBUILD_REFUSALS: Partial<Record<string, string>> = {
   // The scan could not read a path. A file another program holds is one
   // cause, a permission another, so the words don't say which.
   "share-view-rebuild-disk-unreadable":
-    "dohc could not read a file in this workspace. If another program has it open, close it, then choose Try again.",
+    "It could not read a file in this workspace. If another program has it open, close it, then choose Try again.",
   "share-view-rebuild-filesystem-unreadable":
-    "dohc could not read which disk this workspace's .dohc folder is on.",
-  "share-view-rebuild-jobs-unfinished":
-    "dohc could not finish writing the files in this workspace.",
+    "It could not read which disk this workspace's .dohc folder is on.",
+  "share-view-rebuild-jobs-unfinished": "It could not finish writing the files in this workspace.",
   "share-view-rebuild-filesystems-differ":
     "This workspace's .dohc folder is spread over more than one disk. Move it onto one disk, then choose Try again.",
   "share-view-rebuild-swap-unrecognized":
@@ -400,7 +400,7 @@ const REBUILD_STOPS_AT: Partial<Record<string, (path: string) => string>> = {
   "share-view-rebuild-linked-folder": (path) =>
     `The file or folder at ${path} is a link. Put what it links to in its place, then choose Try again.`,
   "share-view-rebuild-disk-unreadable": (path) =>
-    `dohc could not read ${path}. If another program has it open, close it, then choose Try again.`,
+    `It could not read ${path}. If another program has it open, close it, then choose Try again.`,
 };
 
 // A stop's words fit the view's bound with room to spare.

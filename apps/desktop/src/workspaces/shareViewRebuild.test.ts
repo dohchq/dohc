@@ -403,9 +403,9 @@ describe("the words for a stopped rebuild", () => {
   // A title says what failed. The body says why, if dohc knows, and what to
   // do, one instruction to a sentence. Copy details keep the engine's code.
   const UNCHANGED =
-    "dohc could not change files in this workspace. Check that no other program has them open and the disk has room.";
+    "It could not change files in this workspace. Check that no other program has them open and the disk has room.";
   const UNREAD =
-    "dohc could not read a file in this workspace. If another program has it open, close it, then choose Try again.";
+    "It could not read a file in this workspace. If another program has it open, close it, then choose Try again.";
   it.each([
     [
       "share-view-rebuild-file-held",
@@ -421,11 +421,11 @@ describe("the words for a stopped rebuild", () => {
     ["share-view-rebuild-disk-unreadable", UNREAD],
     [
       "share-view-rebuild-filesystem-unreadable",
-      "dohc could not read which disk this workspace's .dohc folder is on.",
+      "It could not read which disk this workspace's .dohc folder is on.",
     ],
     [
       "share-view-rebuild-jobs-unfinished",
-      "dohc could not finish writing the files in this workspace.",
+      "It could not finish writing the files in this workspace.",
     ],
     [
       "share-view-rebuild-filesystems-differ",
@@ -460,7 +460,7 @@ describe("the words for a stopped rebuild", () => {
     [
       "share-view-rebuild-disk-unreadable",
       "private/vm.vhdx",
-      "dohc could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.",
+      "It could not read private/vm.vhdx. If another program has it open, close it, then choose Try again.",
     ],
     [
       "share-view-rebuild-linked-folder",
@@ -479,7 +479,7 @@ describe("the words for a stopped rebuild", () => {
   it("shortens a long path to its first folder and its name", () => {
     const path = `notes/${"deep/".repeat(500)}vm.vhdx`;
     const stop = stoppedAt("share-view-rebuild-disk-unreadable", path);
-    expect(stop?.detail).toMatch(/^dohc could not read notes\/…\/(deep\/)+vm\.vhdx\. If another/u);
+    expect(stop?.detail).toMatch(/^It could not read notes\/…\/(deep\/)+vm\.vhdx\. If another/u);
     expect(stop!.detail.length).toBeLessThan(400);
   });
 
@@ -487,14 +487,14 @@ describe("the words for a stopped rebuild", () => {
     const path = `${"long folder ".repeat(10)}/${"a long name ".repeat(20)}.md`;
     expect(path.length).toBeGreaterThan(300);
     expect(stoppedAt("share-view-rebuild-disk-unreadable", path)?.detail).toBe(
-      `dohc could not read ${path}. If another program has it open, close it, then choose Try again.`,
+      `It could not read ${path}. If another program has it open, close it, then choose Try again.`,
     );
   });
 
   it("cuts a path that is one long name in the middle, keeping its end and extension", () => {
     const path = `${"draft ".repeat(60)}final (2).md`;
     const stop = stoppedAt("share-view-rebuild-disk-unreadable", path);
-    expect(stop?.detail).toMatch(/^dohc could not read draft draft .*…l \(2\)\.md\. If another/u);
+    expect(stop?.detail).toMatch(/^It could not read draft draft .*…l \(2\)\.md\. If another/u);
     expect(stop!.detail.length).toBeLessThan(400);
   });
 
