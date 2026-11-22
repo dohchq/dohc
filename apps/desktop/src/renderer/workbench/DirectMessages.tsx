@@ -211,15 +211,12 @@ export function DirectPeopleSection(
           })}
         </ul>
       ) : (
-        <NavRow
-          testId="chats-new-dm"
-          onClick={props.onNew}
-          icon={
-            <PenSquare size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
-          }
-          label="New message"
-          muted
-        />
+        <p
+          data-testid="chats-dms-empty"
+          className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted"
+        >
+          No direct messages yet.
+        </p>
       )}
       {menu && menuConversation && ready ? (
         <Menu

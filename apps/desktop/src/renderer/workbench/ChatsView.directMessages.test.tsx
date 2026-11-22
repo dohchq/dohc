@@ -136,6 +136,15 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dms-section")).toBeNull();
   });
 
+  it("puts one muted line under an empty People, with New message only in its header", async () => {
+    signedIn([]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    expect((await screen.findByTestId("chats-dms-empty")).textContent).toBe(
+      "No direct messages yet.",
+    );
+    expect(screen.getAllByRole("button", { name: "New message" })).toHaveLength(1);
+  });
+
   it("lists each conversation by the other person's name, with unread, preview, and blocked marks, and no email", async () => {
     signedIn([
       conversation({ unread: 2 }),
@@ -910,7 +919,7 @@ describe("ChatsView direct messages", () => {
     members([{ memberId: "sam", name: "Sam Rivera" }]);
     bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: sam });
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await screen.findAllByTestId("chats-dm-new-member");
     const to = screen.getByTestId("chats-dm-recipients");
     fireEvent.keyDown(to, { key: "Enter", isComposing: true });
@@ -931,7 +940,7 @@ describe("ChatsView direct messages", () => {
     history([sent(1, VIEWER, "First")]);
     const onError = vi.fn();
     renderView(vi.fn(), onError, { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
     await user.type(composer, "First{Enter}");
@@ -953,7 +962,7 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directStart.mockRejectedValueOnce(new Error(DIRECT_START_INACTIVE_MESSAGE));
     const onError = vi.fn();
     renderView(vi.fn(), onError, { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await user.click((await screen.findAllByTestId("chats-dm-new-member"))[0]!);
     await user.type(screen.getByTestId("chats-dm-new-composer"), "First{Enter}");
     await waitFor(() => expect(onError).toHaveBeenCalled());
@@ -977,7 +986,7 @@ describe("ChatsView direct messages", () => {
     bridgeMock.directStart.mockResolvedValue({ conversationId: "conversation-sam", seq: 1 });
     history([sent(1, VIEWER, "Lunch?")]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     await screen.findByTestId("chats-dm-new");
     const options = await screen.findAllByTestId("chats-dm-new-member");
     // Active members other than the viewer, by name, never by email.
