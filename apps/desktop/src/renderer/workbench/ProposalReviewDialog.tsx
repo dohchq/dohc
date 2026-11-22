@@ -112,13 +112,13 @@ function ProposalFileSection(props: {
         className="dohc-focus-row flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
-        {size ? <span className="shrink-0 text-[11px] text-subtle">{size}</span> : null}
-        <span className="shrink-0 text-[11px] text-subtle">{operationLabel(file.operation)}</span>
+        {size ? <span className="shrink-0 text-[12px] text-subtle">{size}</span> : null}
+        <span className="shrink-0 text-[12px] text-subtle">{operationLabel(file.operation)}</span>
       </button>
       {file.drifted ? (
         <p
           data-testid="proposal-review-drift"
-          className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[11px] leading-4 text-warning"
+          className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[12px] leading-4 text-warning"
         >
           This file changed since they sent it.
         </p>

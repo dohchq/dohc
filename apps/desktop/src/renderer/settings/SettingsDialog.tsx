@@ -1294,7 +1294,7 @@ export function SettingsDialog(props: {
               <div
                 key={`${index}-${warning}`}
                 data-testid={desktopPins.settingsWarning}
-                className="flex items-center gap-2 text-[11px] text-warning"
+                className="flex items-center gap-2 text-[12px] text-warning"
               >
                 <AlertTriangle size={12} aria-hidden />
                 {warning}

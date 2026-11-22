@@ -721,7 +721,7 @@ export function SitePreviewPage(props: {
           {site?.title ?? props.siteRoot}
         </span>
         {site?.authority.kind === "share" ? (
-          <span data-testid="site-preview-shared-label" className="shrink-0 text-[11px] text-muted">
+          <span data-testid="site-preview-shared-label" className="shrink-0 text-[12px] text-muted">
             Shared
           </span>
         ) : null}
@@ -794,7 +794,7 @@ export function SitePreviewPage(props: {
           {preview && previewUrlAllowed ? (
             <span
               data-testid="site-preview-mode"
-              className="hidden text-[11px] text-subtle sm:inline"
+              className="hidden text-[12px] text-subtle sm:inline"
             >
               {modeLabel(preview.mode)}
             </span>
@@ -816,7 +816,7 @@ export function SitePreviewPage(props: {
                 <Settings2 size={13} aria-hidden />
               </summary>
               <div className="absolute right-0 top-8 z-20 w-40 rounded-lg border border-line bg-panel p-1 shadow-lg">
-                <div className="px-2 py-1 text-[11px] text-subtle">Run preview as</div>
+                <div className="px-2 py-1 text-[12px] text-subtle">Run preview as</div>
                 {modes.map((mode) => (
                   <button
                     key={mode}
@@ -939,7 +939,7 @@ export function SitePreviewPage(props: {
                   logs={previewLogs}
                   open={logsOpen}
                   onToggle={setLogsOpen}
-                  className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]"
+                  className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[12px]"
                 />
               ) : null}
             </div>
@@ -975,7 +975,7 @@ export function SitePreviewPage(props: {
                   logs={previewLogs}
                   open={logsOpen}
                   onToggle={setLogsOpen}
-                  className="max-h-36 w-full max-w-3xl overflow-auto border-t border-line bg-panel px-3 py-2 text-left text-[11px]"
+                  className="max-h-36 w-full max-w-3xl overflow-auto border-t border-line bg-panel px-3 py-2 text-left text-[12px]"
                 />
               ) : null}
             </div>

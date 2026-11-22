@@ -236,7 +236,7 @@ const invalid = (shown: Shown) =>
 function Problem({ shown }: { shown: Shown }) {
   if (shown === null) return null;
   return (
-    <p id={shown.id} data-problem className="m-0 mt-1 text-[11px] leading-snug text-danger">
+    <p id={shown.id} data-problem className="m-0 mt-1 text-[12px] leading-snug text-danger">
       {shown.text}
     </p>
   );
@@ -3327,7 +3327,7 @@ export function AutomationBuilder(props: {
                 aria-label={`Step ${number}, ${BRANCH_LABELS[branch]}`}
                 className="flex flex-col gap-2 border-l border-line pl-2"
               >
-                <span className="text-[11px] font-medium text-muted">{BRANCH_LABELS[branch]}</span>
+                <span className="text-[12px] font-medium text-muted">{BRANCH_LABELS[branch]}</span>
                 {stepList(`${key}/${branch}`, entry.branches![branch])}
               </div>
             ))}

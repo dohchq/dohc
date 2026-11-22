@@ -91,7 +91,7 @@ export const FolderChip = forwardRef<
       >
         {props.folder ?? props.placeholder}
       </code>
-      <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
+      <span aria-hidden className="shrink-0 text-[12px] text-subtle group-hover:text-ink">
         {props.folder ? "Change" : "Browse"}
       </span>
     </button>

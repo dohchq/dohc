@@ -82,7 +82,7 @@ export const FEED_TOOLBAR = "top-1 right-9";
 // Home's rows have no unread count, so their toolbar sits at the row's edge.
 export const HOME_TOOLBAR = "top-1 right-2";
 export const FEED_META =
-  "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
+  "mt-1.5 flex flex-wrap items-center gap-3 text-[12px] tabular-nums text-subtle";
 
 export function ActionButton(props: {
   testId?: string;
@@ -305,7 +305,7 @@ export function PostCard(props: {
               />
             ) : null}
             {props.groupLabel ? (
-              <span className="truncate text-[11px] tabular-nums text-subtle">
+              <span className="truncate text-[12px] tabular-nums text-subtle">
                 {props.groupLabel}
               </span>
             ) : null}
@@ -313,7 +313,7 @@ export function PostCard(props: {
               data-testid="chats-post-time"
               dateTime={time.iso}
               title={time.label}
-              className="shrink-0 text-[11px] tabular-nums text-subtle"
+              className="shrink-0 text-[12px] tabular-nums text-subtle"
             >
               {formatShortTime(createdAtMs)}
             </time>

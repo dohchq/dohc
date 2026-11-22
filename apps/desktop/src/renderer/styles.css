@@ -1600,7 +1600,7 @@ body {
   margin-top: 5px;
   padding: 0 2px;
   color: var(--dohc-danger);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* ── find & replace ───────────────────────────────────────────────────
@@ -1683,7 +1683,7 @@ body {
   min-width: 36px;
   color: var(--dohc-subtle);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -1725,7 +1725,7 @@ body {
   background: transparent;
   padding: 4px 8px;
   color: var(--dohc-muted);
-  font-size: 11px;
+  font-size: 12px;
   transition:
     background-color 100ms ease-out,
     color 100ms ease-out;
@@ -2493,7 +2493,7 @@ body {
   padding-top: 8px;
   color: var(--dohc-subtle);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 [data-theme='dark'] .dohc-outline-panel {

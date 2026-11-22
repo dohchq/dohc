@@ -7306,7 +7306,7 @@ function WorkspaceShell(props: {
               reportShellError("Could not refresh history.", error),
             )
           }
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
+          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
         >
           Try again
         </button>
@@ -8205,7 +8205,7 @@ function WorkspaceShell(props: {
                               <span
                                 data-testid="shared-view-excluded"
                                 title={shareNoticePaths(shareExcludedPaths).join("\n")}
-                                className="flex min-w-0 max-w-[280px] shrink items-center gap-1.5 truncate rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+                                className="flex min-w-0 max-w-[280px] shrink items-center gap-1.5 truncate rounded bg-warning/10 px-1.5 py-0.5 text-[12px] text-warning"
                               >
                                 {shareUnjournalableNotice(shareExcludedPaths)}
                               </span>
@@ -8218,7 +8218,7 @@ function WorkspaceShell(props: {
                                       data-testid="shared-view-refused"
                                       data-kind={line.kind}
                                       title={line.detail}
-                                      className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+                                      className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[12px] text-warning"
                                     >
                                       {line.text}
                                       <button
@@ -8247,7 +8247,7 @@ function WorkspaceShell(props: {
                                               );
                                             });
                                         }}
-                                        className="shrink-0 rounded border border-warning/40 px-1 text-[10px] text-warning hover:bg-warning/20"
+                                        className="shrink-0 rounded border border-warning/40 px-1 text-[12px] text-warning hover:bg-warning/20"
                                       >
                                         Dismiss
                                       </button>
@@ -8266,7 +8266,7 @@ function WorkspaceShell(props: {
                                 <span
                                   data-testid="share-changes-state"
                                   data-state={myShareChange.state}
-                                  className="flex min-w-0 items-center gap-1.5 text-[11px]"
+                                  className="flex min-w-0 items-center gap-1.5 text-[12px]"
                                 >
                                   <span className="min-w-0 truncate">
                                     {myShareChange.state === "open"
@@ -8281,7 +8281,7 @@ function WorkspaceShell(props: {
                                     <>
                                       <span
                                         data-testid="share-changes-count"
-                                        className="shrink-0 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted"
+                                        className="shrink-0 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[12px] text-muted"
                                       >
                                         {myShareChange.files === 1
                                           ? "1 file"
@@ -8296,7 +8296,7 @@ function WorkspaceShell(props: {
                                         onClick={() =>
                                           void withdrawShareChanges(myShareChange.proposalId)
                                         }
-                                        className="shrink-0 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+                                        className="shrink-0 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                                       >
                                         Withdraw
                                       </button>
@@ -8313,7 +8313,7 @@ function WorkspaceShell(props: {
                                 {shareChangesEmpty ? (
                                   <span
                                     data-testid="share-changes-empty"
-                                    className="min-w-0 truncate text-[11px]"
+                                    className="min-w-0 truncate text-[12px]"
                                   >
                                     You have no changes to send yet.
                                   </span>
@@ -8325,7 +8325,7 @@ function WorkspaceShell(props: {
                                     data-testid="share-changes-skipped"
                                     data-skipped={shareChangesSkipped.outsideShare || undefined}
                                     data-more-pending={shareChangesSkipped.morePending || undefined}
-                                    className="min-w-0 truncate text-[11px] text-warning"
+                                    className="min-w-0 truncate text-[12px] text-warning"
                                   >
                                     {/* Both facts, when both are true. An either/or line drops
                       "more pending" exactly when a submit was largest — the
@@ -8349,7 +8349,7 @@ function WorkspaceShell(props: {
                                   data-testid="share-changes-send"
                                   disabled={shareChangesSubmitting || !workspaceIsReady}
                                   onClick={() => void sendShareChanges()}
-                                  className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+                                  className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                                 >
                                   <Send size={11} aria-hidden />
                                   {shareChangesSubmitting ? "Sending…" : "Send changes"}
@@ -8362,7 +8362,7 @@ function WorkspaceShell(props: {
                                 data-testid="shared-view-refresh"
                                 disabled={shareRefreshing || !workspaceIsReady}
                                 onClick={() => void refreshShareView()}
-                                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+                                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50"
                               >
                                 <RefreshCw
                                   size={11}
@@ -9552,7 +9552,7 @@ function WorkspaceShell(props: {
                                 >
                                   <PathLine
                                     path={displayPath(props.workspace.rootPath)}
-                                    className="justify-center text-[11px] leading-4 text-muted"
+                                    className="justify-center text-[12px] leading-4 text-muted"
                                   />
                                 </p>
                                 {/* The button is the next step for a folder that can never be a workspace. */}

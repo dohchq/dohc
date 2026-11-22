@@ -232,7 +232,7 @@ function ChangedOutsideNotice(props: { onReload: () => void }) {
   return (
     <div
       data-testid="changed-outside-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>{CHANGED_OUTSIDE_NOTICE}</span>
       <button
@@ -253,7 +253,7 @@ function DeletedWhileEditingNotice(props: {
   return (
     <div
       data-testid="deleted-while-editing-notice"
-      className="border-b border-line bg-panel px-4 py-1 text-[11px] text-danger"
+      className="border-b border-line bg-panel px-4 py-1 text-[12px] text-danger"
     >
       {goneNotice(props.cause, props.hasSetAsideEdit)}
     </div>

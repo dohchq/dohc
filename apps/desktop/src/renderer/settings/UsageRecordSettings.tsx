@@ -223,7 +223,7 @@ export function UsageRecordCard(props: {
           What dohc records about use
         </h3>
         {readable?.since ? (
-          <span className="tabular-nums text-[11px] text-subtle">
+          <span className="tabular-nums text-[12px] text-subtle">
             since {dayWords(readable.since, props.today)}
           </span>
         ) : null}
@@ -322,7 +322,7 @@ export function UsageRecordCard(props: {
               <code
                 data-testid="usage-record-file"
                 title={view.file}
-                className="min-w-0 select-text truncate font-sans text-[11px] text-ink"
+                className="min-w-0 select-text truncate font-sans text-[12px] text-ink"
               >
                 {view.file}
               </code>
@@ -356,7 +356,7 @@ function SetAsideRow(props: { name: string; busy?: boolean | undefined; onRestor
       <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
       <code
         title={props.name}
-        className="min-w-0 select-text truncate font-sans text-[11px] text-ink"
+        className="min-w-0 select-text truncate font-sans text-[12px] text-ink"
       >
         {props.name}
       </code>

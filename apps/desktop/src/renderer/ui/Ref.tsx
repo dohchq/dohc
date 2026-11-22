@@ -62,7 +62,7 @@ export function Ref(props: {
       {props.folder && dir ? (
         <span
           aria-hidden={spelled ? undefined : true}
-          className="min-w-0 shrink-[4] truncate text-[11px] tabular-nums text-subtle"
+          className="min-w-0 shrink-[4] truncate text-[12px] tabular-nums text-subtle"
         >
           {dir}
         </span>

@@ -201,7 +201,7 @@ export function AgentsMcpSettings(props: {
       />
 
       {retry ? (
-        <div data-testid="mcp-load-error" className="mt-3 flex justify-end text-[11px]">
+        <div data-testid="mcp-load-error" className="mt-3 flex justify-end text-[12px]">
           <button
             type="button"
             disabled={busy}

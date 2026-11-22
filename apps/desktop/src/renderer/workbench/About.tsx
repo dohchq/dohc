@@ -365,7 +365,7 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
       <time
         dateTime={when.iso}
         title={when.label}
-        className="shrink-0 text-[11px] tabular-nums text-subtle"
+        className="shrink-0 text-[12px] tabular-nums text-subtle"
       >
         {formatShortTime(props.thread.updatedAtMs)}
       </time>
@@ -880,7 +880,7 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
       <time
         dateTime={when.iso}
         title={when.label}
-        className="shrink-0 text-[11px] tabular-nums text-subtle"
+        className="shrink-0 text-[12px] tabular-nums text-subtle"
       >
         {formatShortTime(mention.message.createdAtMs)}
       </time>
@@ -1421,11 +1421,11 @@ function AccessRowView(props: { row: AccessRow }) {
         {who}
       </span>
       {row.status !== "active" ? (
-        <span className="shrink-0 text-[11px] text-muted">
+        <span className="shrink-0 text-[12px] text-muted">
           {row.status === "damaged" ? "damaged" : "ended"}
         </span>
       ) : level ? (
-        <span className="shrink-0 text-[11px] text-muted">Can {level.label.toLowerCase()}</span>
+        <span className="shrink-0 text-[12px] text-muted">Can {level.label.toLowerCase()}</span>
       ) : null}
     </div>
   );
@@ -1588,7 +1588,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
           title={formatChatTime(answer.checkedAtMs).label}
-          className="shrink-0 text-[11px] tabular-nums text-subtle"
+          className="shrink-0 text-[12px] tabular-nums text-subtle"
         >
           {formatShortTime(answer.checkedAtMs)}
         </time>
@@ -1596,7 +1596,7 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
       {props.scope ? (
         <span
           data-testid={`${props.testId}-scope`}
-          className="whitespace-nowrap text-[11px] text-subtle"
+          className="whitespace-nowrap text-[12px] text-subtle"
         >
           {props.scope}
         </span>

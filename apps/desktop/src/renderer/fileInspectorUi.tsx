@@ -117,7 +117,7 @@ export function OpeningState() {
       data-state="opening"
       role="status"
       title={OPENING_TITLE}
-      className={slow ? "min-w-0 truncate text-[11px] leading-4 text-subtle" : "sr-only"}
+      className={slow ? "min-w-0 truncate text-[12px] leading-4 text-subtle" : "sr-only"}
     >
       Opening…
     </span>
@@ -155,7 +155,7 @@ export function DocumentControls(props: {
           if (toggle.disabled) return;
           toggle.onClick?.();
         }}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
       >
         {toggle.label}
       </button>
@@ -188,7 +188,7 @@ export function EngineMayHoldDocumentNotice(props: {
   return (
     <div
       data-testid="engine-may-hold-document-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       {/* "document", the noun the editing controls beside this already use
           ("You can edit this document when it finishes opening.").
@@ -329,7 +329,7 @@ export function ReadOnlyPropertiesFlag(props: {
     <span
       data-testid={props.testId}
       role={props.role}
-      className={`flex min-w-0 max-w-full items-center gap-2 text-[11px] ${props.className ?? ""}`}
+      className={`flex min-w-0 max-w-full items-center gap-2 text-[12px] ${props.className ?? ""}`}
     >
       <span className="flex min-w-0 items-center gap-1">
         <Lock aria-hidden size={12} className="shrink-0 text-warning" />
@@ -547,7 +547,7 @@ export function EngineArtifactAssetsInvalidNotice(props: {
   return (
     <div
       data-testid="engine-artifact-assets-invalid-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>dohc could not verify this drawing's images. The drawing is read-only.</span>
       <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
@@ -641,7 +641,7 @@ export function SetAsideEditRow(props: {
   return (
     <div
       data-testid="orphaned-draft-notice"
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[12px]"
     >
       <span className="text-danger">{props.message}</span>
       <div className="flex items-center gap-2">
@@ -659,7 +659,7 @@ export function MarkdownSourceStrip(props: {
   getText: ComponentProps<typeof CopyButton>["getText"];
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
+    <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[12px] text-muted">
       <span>{props.words}</span>
       <CopyButton testId="markdown-source-copy" getText={props.getText} />
     </div>
@@ -674,7 +674,7 @@ export function EngineRemovalInProgressNotice(props: {
     <div
       data-testid="engine-removal-in-progress-notice"
       data-operation={props.removal.operation}
-      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[12px] text-warning"
     >
       <span>{props.removal.message} Wait for it to finish.</span>
       <button type="button" onClick={props.onRetry} className="text-subtle hover:text-ink">

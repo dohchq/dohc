@@ -199,7 +199,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
                       : "Record changed"}
                 </span>
               </div>
-              <dl className="my-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
+              <dl className="my-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
                 {Object.entries(change.key).map(([key, value]) => (
                   <div key={key} className="flex gap-1">
                     <dt>{fieldLabel(change.table, key)}:</dt>
@@ -250,7 +250,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
               </div>
               {unchanged.length > 0 && (
                 <details className="mt-2">
-                  <summary className="cursor-pointer text-[11px] text-muted">
+                  <summary className="cursor-pointer text-[12px] text-muted">
                     {unchanged.length} unchanged {unchanged.length === 1 ? "field" : "fields"}
                   </summary>
                   <dl className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-2 text-[12px] text-muted">
@@ -270,7 +270,7 @@ function ScopedPreview(props: MigrationDataPreviewProps) {
         })
       )}
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] text-muted">
+        <span className="text-[12px] text-muted">
           {busy ? "Loading changes…" : `Page ${history.length + 1}`}
         </span>
         <div className="flex gap-2">

@@ -295,7 +295,7 @@ const ROW_ACTIONS_CLASS = "mt-1 flex flex-wrap items-center gap-1";
 // A worded action is a bordered button on a toast and on its row, so inside
 // a row that opens it still reads as its own target.
 const ACTION_CLASS =
-  "h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+  "h-6 shrink-0 rounded border border-line px-2 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink";
 const ROW_ACTION_CLASS = `${ACTION_CLASS} disabled:opacity-50 aria-busy:opacity-50`;
 
 // A row counts as read the moment the pointer or keyboard focus reaches it.
@@ -411,7 +411,7 @@ function RowCorner(props: {
 // A sentence in place of a row's text, such as why its target is gone.
 function RowNote(props: { note: string }) {
   return (
-    <p role="status" className="m-0 mt-0.5 text-[11px] leading-snug text-ink">
+    <p role="status" className="m-0 mt-0.5 text-[12px] leading-snug text-ink">
       {props.note}
     </p>
   );
@@ -501,7 +501,7 @@ function useDetails(props: {
         </span>
         <pre
           tabIndex={0}
-          className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted"
+          className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[12px] leading-snug text-muted"
         >
           {report}
         </pre>
@@ -626,7 +626,7 @@ function NoticeText(props: {
             id={`${id}-body`}
             data-row-above={open ? "" : undefined}
             onClick={openOnClick ?? openRowOnClick}
-            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
+            className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[12px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
             {byFacts && !open ? lines.slice(0, 3).join("\n") : props.body}
           </p>
@@ -636,7 +636,7 @@ function NoticeText(props: {
             data-testid={`${props.testId}-paths`}
             data-row-above={open ? "" : undefined}
             onClick={openRowOnClick}
-            className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-muted"
+            className="m-0 mt-0.5 list-none p-0 text-[12px] leading-snug text-muted"
           >
             {shownPaths.map((path) => (
               <li
@@ -650,7 +650,7 @@ function NoticeText(props: {
           </ul>
         ) : null}
         {props.after && (open || !hidden) ? (
-          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">
+          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[12px] leading-snug text-muted">
             {props.after}
           </p>
         ) : null}
@@ -661,7 +661,7 @@ function NoticeText(props: {
             aria-expanded={more}
             aria-controls={props.body ? `${id}-title ${id}-body` : `${id}-title`}
             onClick={() => show(!more)}
-            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
+            className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
           >
             {more ? "Show less" : "Show more"}
             <ChevronDown
@@ -1167,7 +1167,7 @@ export function WorkspaceErrorToast(props: {
                 <p
                   id={reasonId}
                   data-testid="workspace-shell-error-retry-reason"
-                  className="m-0 mt-0.5 select-text text-[11px] leading-snug text-muted"
+                  className="m-0 mt-0.5 select-text text-[12px] leading-snug text-muted"
                 >
                   {error.retryBlocked}
                 </p>
@@ -1309,7 +1309,7 @@ export function LocalNoticeRow(props: {
                     <p
                       key={action.label}
                       id={`${reasonId}-${index}`}
-                      className="m-0 mt-0.5 text-[11px] leading-snug text-muted"
+                      className="m-0 mt-0.5 text-[12px] leading-snug text-muted"
                     >
                       {action.reason}
                     </p>
@@ -2399,7 +2399,7 @@ export function NoticeCenter(props: {
                           {sentToast.notice.body ? (
                             <span
                               data-testid="sent-notice-toast-body"
-                              className={`mt-0.5 block text-[11px] text-muted ${sentToastFails ? "max-h-[5.5em] overflow-y-auto overscroll-contain" : "line-clamp-2"}`}
+                              className={`mt-0.5 block text-[12px] text-muted ${sentToastFails ? "max-h-[5.5em] overflow-y-auto overscroll-contain" : "line-clamp-2"}`}
                             >
                               {sentToast.notice.body}
                             </span>
@@ -2718,7 +2718,7 @@ export function NoticeCenter(props: {
                       readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
                       if (unreadSent > 0) props.onReadAllSentNotices?.();
                     }}
-                    className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                    className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
                   >
                     Mark all read
                   </button>
@@ -2765,7 +2765,7 @@ export function NoticeCenter(props: {
                                 ? "1 set-aside edit is waiting"
                                 : `${recoveryRows.length} set-aside edits are waiting`}
                             </p>
-                            <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                            <p className="m-0 mt-0.5 text-[12px] leading-snug text-muted">
                               Copy an edit to keep its text. Dismiss deletes it for good.
                             </p>
                             <RecoveryList rows={recoveryRows} />
@@ -2789,14 +2789,14 @@ export function NoticeCenter(props: {
                             >
                               Typing kept from a workspace no longer in your list
                             </p>
-                            <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                            <p className="m-0 mt-0.5 text-[12px] leading-snug text-muted">
                               Copy the typing to keep it. Dismiss deletes it for good.
                             </p>
                             <ul className="m-0 list-none p-0">
                               {keptTyping.map((kept) => (
                                 <li
                                   key={kept.recordId}
-                                  className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
+                                  className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[12px] last:border-b-0"
                                 >
                                   <span className="min-w-0 flex-1 truncate text-muted">
                                     {kept.path}
@@ -3006,7 +3006,7 @@ export function NoticeCenter(props: {
                                     {note ? (
                                       <p
                                         role="status"
-                                        className="m-0 mt-1 text-[11px] leading-snug text-ink"
+                                        className="m-0 mt-1 text-[12px] leading-snug text-ink"
                                       >
                                         {note}
                                       </p>
@@ -3023,7 +3023,7 @@ export function NoticeCenter(props: {
                           type="button"
                           data-testid="sent-notices-more"
                           onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                          className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                          className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
                         >
                           Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
                         </button>

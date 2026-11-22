@@ -30,7 +30,7 @@ function WrappedPath(props: { path: string }) {
   );
 }
 
-const DETAILS = "m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-muted";
+const DETAILS = "m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px] text-muted";
 
 // A tool card says what a person picks by: the tool, its version, and
 // whether it is signed in. Under the cards the chosen tool's permissions stay
@@ -68,7 +68,7 @@ export function AgentToolPicker(props: {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] text-muted">
+        <span className="text-[12px] text-muted">
           {loading ? "Looking for installed tools…" : "Choose an installed tool"}
         </span>
         <SecondaryButton
@@ -105,7 +105,7 @@ export function AgentToolPicker(props: {
                 </span>
                 {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
               </span>
-              <span className="block text-[11px] text-muted">
+              <span className="block text-[12px] text-muted">
                 {loading
                   ? "Detecting…"
                   : !result
@@ -124,7 +124,7 @@ export function AgentToolPicker(props: {
                       ? "blocked"
                       : "unknown"
                 }
-                className="text-[11px]"
+                className="text-[12px]"
               >
                 {detected?.auth === "signed-in"
                   ? "Signed in"
@@ -135,10 +135,10 @@ export function AgentToolPicker(props: {
                       : "Sign-in unknown"}
               </ToolReadiness>
               {!supported ? (
-                <span className="mt-1 block text-[11px] text-muted">No launch profile yet</span>
+                <span className="mt-1 block text-[12px] text-muted">No launch profile yet</span>
               ) : null}
               {tool.id === "claude" && detected?.probe === "detected" && !compatible ? (
-                <span className="mt-1 block text-[11px] text-muted">
+                <span className="mt-1 block text-[12px] text-muted">
                   Update Claude Code to {CLAUDE_MIN_VERSION} or later to use this profile.
                 </span>
               ) : null}
@@ -154,11 +154,11 @@ export function AgentToolPicker(props: {
           </dd>
         </dl>
       ) : props.usingCommand ? (
-        <p data-testid="agent-tool-using-command" className="m-0 text-[11px] text-muted">
+        <p data-testid="agent-tool-using-command" className="m-0 text-[12px] text-muted">
           Using your runner command.
         </p>
       ) : null}
-      <p className="m-0 text-[11px] text-muted">
+      <p className="m-0 text-[12px] text-muted">
         Detection does not test replies. Use Check to test a reply through dohc.
       </p>
       <details

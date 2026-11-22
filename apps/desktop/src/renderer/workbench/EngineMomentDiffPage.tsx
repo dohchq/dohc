@@ -750,7 +750,7 @@ export function EngineMomentDiffPage({
             {beforeIsBinary || afterIsBinary ? (
               <p
                 data-testid="engine-diff-binary-side"
-                className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[11px] leading-4 text-subtle"
+                className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[12px] leading-4 text-subtle"
               >
                 {afterIsBinary
                   ? `This file became a binary file. Its ${moment.afterBinary?.byteLength ?? 0} bytes are not shown in text diffs.`

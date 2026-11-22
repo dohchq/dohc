@@ -1526,7 +1526,7 @@ export function CollectionPage({
       {drainCapped ? (
         <div
           data-testid="collection-drain-cap"
-          className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-muted"
+          className="shrink-0 border-b border-line px-3 py-1 text-[12px] text-muted"
         >
           This view shows only the first {state.records.length} records.
         </div>

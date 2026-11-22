@@ -218,7 +218,7 @@ export function DmRequestListItem(props: {
           <span className="block truncate text-[12px] font-medium text-ink">
             {props.request.granterEmail ?? "A teammate"}
           </span>
-          <span className="block text-[10px] text-muted">
+          <span className="block text-[12px] text-muted">
             {pending ? "Wants to message you" : "Declined"}
           </span>
         </span>
@@ -230,7 +230,7 @@ export function DmRequestListItem(props: {
                 data-testid="chats-dm-request-accept"
                 data-invitation={props.request.shareId}
                 onClick={props.onAccept}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink"
+                className="h-6 shrink-0 rounded border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink"
               >
                 Accept
               </button>
@@ -241,7 +241,7 @@ export function DmRequestListItem(props: {
                 data-testid="chats-dm-request-decline"
                 disabled={props.busy}
                 onClick={props.onDecline}
-                className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+                className="h-6 shrink-0 rounded border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
               >
                 Decline
               </button>
@@ -253,7 +253,7 @@ export function DmRequestListItem(props: {
             data-testid="chats-dm-request-again"
             disabled={props.busy}
             onClick={props.onRequestAgain}
-            className="h-6 shrink-0 rounded border border-line px-2 text-[10px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+            className="h-6 shrink-0 rounded border border-line px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Move back to requests
           </button>

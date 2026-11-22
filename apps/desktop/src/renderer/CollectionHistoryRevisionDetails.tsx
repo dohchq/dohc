@@ -108,7 +108,7 @@ export function CollectionHistoryRevisionDetails(
               >
                 <h3 className="m-0 flex items-center justify-between gap-2 text-[12px] font-semibold">
                   {index ? "After" : "Before"}
-                  <span className="tabular-nums text-[11px] font-normal text-muted">
+                  <span className="tabular-nums text-[12px] font-normal text-muted">
                     Revision {version.revision.revision}
                   </span>
                 </h3>
@@ -121,7 +121,7 @@ export function CollectionHistoryRevisionDetails(
                           <li key={field.fieldId} className="flex items-center gap-2">
                             <FieldTypeIcon type={field.type} className="shrink-0 text-muted" />
                             <span className="min-w-0 break-words">{field.name}</span>
-                            <span className="ml-auto text-[11px] text-muted">{field.type}</span>
+                            <span className="ml-auto text-[12px] text-muted">{field.type}</span>
                             {field.type !== "button" && field.required ? (
                               <span title="Required" className="text-muted">
                                 <span aria-hidden="true">*</span>

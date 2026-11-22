@@ -35,7 +35,7 @@ export function ImageView({ url, path }: { url: string; path: string }) {
           </div>
         )}
       </div>
-      <div className="border-t border-line px-4 py-1.5 text-[11px] text-subtle">
+      <div className="border-t border-line px-4 py-1.5 text-[12px] text-subtle">
         {name}
         {dims ? ` · ${dims.w}×${dims.h}` : ""}
       </div>

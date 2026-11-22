@@ -129,7 +129,7 @@ export function CollectionAttachmentInput(
           </SecondaryButton>
         </div>
       ) : (
-        <span className="text-[11px] text-subtle">Up to 5 MB</span>
+        <span className="text-[12px] text-subtle">Up to 5 MB</span>
       )}
       {invalid ? (
         <p role="alert" className="m-0 text-[12px] text-danger">

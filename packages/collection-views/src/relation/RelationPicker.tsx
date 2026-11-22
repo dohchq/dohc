@@ -127,13 +127,13 @@ export function RelationPicker({
         className="w-full rounded border border-line bg-bg px-1 text-[13px] placeholder:text-subtle"
       />
       {error !== null ? (
-        <span className="text-[11px] text-danger">
+        <span className="text-[12px] text-danger">
           dohc could not read the related collection's records. {error}
         </span>
       ) : records === null ? (
-        <span className="text-[11px] text-subtle">Loading records...</span>
+        <span className="text-[12px] text-subtle">Loading records...</span>
       ) : shown.length === 0 ? (
-        <span className="text-[11px] text-muted">
+        <span className="text-[12px] text-muted">
           {search.trim() === ""
             ? "No records in the related collection yet."
             : `No records match "${search.trim()}".`}
@@ -187,7 +187,7 @@ export function RelationPicker({
         </span>
       )}
       {error === null && records !== null && truncated ? (
-        <span className="text-[11px] text-muted">
+        <span className="text-[12px] text-muted">
           The list shows only the first {records.length} records.
         </span>
       ) : null}

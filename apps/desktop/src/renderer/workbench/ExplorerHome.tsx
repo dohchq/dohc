@@ -1085,7 +1085,7 @@ const HomeRow = memo(function HomeRow(props: {
             </span>
           ) : null}
           {notVersioned && !cause ? (
-            <span data-testid="home-row-not-versioned" className="shrink-0 text-[11px] text-subtle">
+            <span data-testid="home-row-not-versioned" className="shrink-0 text-[12px] text-subtle">
               {NOT_VERSIONED}
             </span>
           ) : null}

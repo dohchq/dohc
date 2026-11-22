@@ -147,7 +147,7 @@ function RunLink(props: {
     return (
       <span
         data-testid="record-history-run-not-here"
-        className="shrink-0 px-1.5 text-[11px] text-subtle"
+        className="shrink-0 px-1.5 text-[12px] text-subtle"
       >
         {RUN_NOT_HERE}
       </span>
@@ -159,7 +159,7 @@ function RunLink(props: {
       type="button"
       aria-describedby={props.describedBy}
       onClick={() => props.onOpenRun(author.automationId, claimId, author.name)}
-      className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+      className="shrink-0 rounded-md px-1.5 py-0.5 text-[12px] text-muted transition-colors hover:bg-hover hover:text-ink"
     >
       View run
     </button>
@@ -188,14 +188,14 @@ function GroupRow(props: {
         <time
           dateTime={new Date(group.recordedAtMs).toISOString()}
           title={new Date(group.recordedAtMs).toLocaleString()}
-          className="ml-auto shrink-0 tabular-nums text-[11px] text-subtle"
+          className="ml-auto shrink-0 tabular-nums text-[12px] text-subtle"
         >
           {relativeTime(group.recordedAtMs)}
         </time>
       </div>
       <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
         {group.changes.map((change) => (
-          <li key={change.historyId} className="break-words text-[11px] leading-snug text-ink">
+          <li key={change.historyId} className="break-words text-[12px] leading-snug text-ink">
             {change.field}: <span className="text-muted">{valueText(change.previous)} → </span>
             {valueText(change.next)}
           </li>

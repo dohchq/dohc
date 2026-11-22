@@ -581,7 +581,7 @@ export const TreeRow = memo(function TreeRow(props: {
           <span
             aria-hidden
             data-testid="tree-row-not-versioned"
-            className="shrink-0 text-[11px] text-subtle"
+            className="shrink-0 text-[12px] text-subtle"
           >
             {NOT_VERSIONED}
           </span>
