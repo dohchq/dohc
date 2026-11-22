@@ -17,25 +17,34 @@ fn count<'a>(lines: &[&'a str]) -> HashMap<&'a str, usize> {
     counts
 }
 
-/// The first line whose copies a clean merge lost or added. Anchors are lines
-/// that appear once in the base, both sides and the merge. Between neighbouring
-/// anchors of every longest chain that all four texts keep in order, and before
-/// its first or after its last, no line may have fewer copies in the merge than
-/// both sides have, or more than either side has.
 fn lost_or_added_copy(base: &str, local: &str, remote: &str, merged: &str) -> Option<String> {
-    let texts = [base, local, remote, merged].map(lines);
-    let counts = texts.each_ref().map(|text| count(text));
-    let once_in_three =
-        |line: &str| (0..3).all(|index| counts[index].get(line).copied() == Some(1));
-    if let Some(line) = texts[0]
-        .iter()
-        .find(|line| once_in_three(line) && counts[3].get(*line).copied() != Some(1))
-    {
-        return Some(format!("{line:?} should stay once"));
+    let sides = [base, local, remote].map(lines);
+    let readings = if merged.is_empty() {
+        vec![vec![], vec![""]]
+    } else {
+        vec![lines(merged)]
+    };
+    readings
+        .into_iter()
+        .map(|merged| lost_or_added_line_copy([&sides[0], &sides[1], &sides[2], &merged]))
+        .reduce(|first, second| first.and(second))
+        .unwrap()
+}
+
+fn lost_or_added_line_copy(texts: [&[&str]; 4]) -> Option<String> {
+    let counts = texts.map(count);
+    if let Some(line) = counts.iter().flat_map(HashMap::keys).find(|line| {
+        let [base, local, remote, merged] =
+            std::array::from_fn(|index| counts[index].get(*line).copied().unwrap_or(0));
+        base.max(local).max(remote) <= 1
+            && (base, local, remote) != (0, 1, 1)
+            && merged != if base == local { remote } else { local }
+    }) {
+        return Some(format!("{line:?} should follow the side that changed it"));
     }
     let anchors: Vec<[isize; 4]> = texts[0]
         .iter()
-        .filter(|line| once_in_three(line))
+        .filter(|line| (0..4).all(|index| counts[index].get(*line).copied() == Some(1)))
         .map(|line| {
             std::array::from_fn(|index| {
                 texts[index]
@@ -112,7 +121,6 @@ impl Random {
     }
 }
 
-/// Markdown-like lines: half blank, some dividers, the rest distinct text.
 fn markdown_line(random: &mut Random, serial: &mut usize, prefix: &str) -> String {
     *serial += 1;
     match random.below(20) {
@@ -140,8 +148,6 @@ fn one_line_edit(random: &mut Random, serial: &mut usize, base: &[String], prefi
     side.join("\n")
 }
 
-/// Paragraphs split by blank lines, edited by adding or removing a paragraph,
-/// or rewriting a line.
 fn paragraph_edits(
     random: &mut Random,
     serial: &mut usize,
@@ -170,7 +176,6 @@ fn paragraph_edits(
     side.join("\n")
 }
 
-/// The paragraphs of `base` with one of them moved to another place.
 fn move_paragraph(random: &mut Random, base: &[String]) -> String {
     let mut paragraphs: Vec<&String> = base.iter().filter(|line| !line.is_empty()).collect();
     let moved = paragraphs.remove(random.below(paragraphs.len()));

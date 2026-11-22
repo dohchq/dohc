@@ -978,8 +978,7 @@ function textLines(text: string): string[] {
   return text === "" ? [] : text.split("\n");
 }
 
-function keepsCopies(texts: [string, string, string, string]): boolean {
-  const lines = texts.map(textLines);
+function keepsCopies(lines: string[][]): boolean {
   const counts = new Map<string, number[]>();
   lines.forEach((text, index) => {
     for (const line of text) {
@@ -990,7 +989,11 @@ function keepsCopies(texts: [string, string, string, string]): boolean {
   });
   const onceInThree = (count: number[]): boolean =>
     count[0] === 1 && count[1] === 1 && count[2] === 1;
-  if ([...counts.values()].some((count) => onceInThree(count) && count[3] !== 1)) return false;
+  const followsChange = ([base, local, remote, merged]: number[]): boolean =>
+    Math.max(base!, local!, remote!) > 1 ||
+    (base === 0 && local === 1 && remote === 1) ||
+    merged === (base === local ? remote : local);
+  if (![...counts.values()].every(followsChange)) return false;
   const positions = new Map<string, number[]>();
   lines.forEach((text, index) => {
     text.forEach((line, position) => {
@@ -1090,9 +1093,8 @@ export function mergeMarkdown(base: string, local: string, remote: string): Mark
     lineHunks(baseLines, remoteLines, align(baseLines, remoteLines, keptByLocal)),
   );
   if (!merged) return { status: "conflict" };
-  const text = merged.join("\n");
-  return keepsCopies([base, local, remote, text])
-    ? { status: "merged", text }
+  return keepsCopies([baseLines, localLines, remoteLines, merged])
+    ? { status: "merged", text: merged.join("\n") }
     : { status: "conflict" };
 }
 

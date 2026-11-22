@@ -185,10 +185,21 @@ pub struct VersionFileChangePage {
 /// subsequence, and the remote side keeps the copies of repeated lines the
 /// local side kept, so both sides' changes to a run of repeated lines land on
 /// the same copy. Changes that touch merge once when both sides made the same
-/// change and conflict otherwise. A merge conflicts instead when, between two
-/// lines that appear once in every text, it would leave a line with fewer
-/// copies than both sides kept or more than either side has. Texts over
-/// [`MAX_MERGE_LINES`] lines conflict before the quadratic alignment.
+/// change and conflict otherwise.
+///
+/// A clean result is checked before it is returned, and conflicts instead
+/// when it fails either rule:
+///
+/// - A line that appears at most once in the base and each side, and that
+///   exactly one side added or removed, is added or removed in the merge too.
+/// - Between neighbouring lines of every longest chain of lines that appear
+///   once in all four texts and keep their order, no line has fewer copies in
+///   the merge than both sides kept or more than either side has. A check that
+///   would read more than `CHECK_WORK` times the lines of the sides and the
+///   merge conflicts.
+///
+/// Texts over [`MAX_MERGE_LINES`] lines conflict before the quadratic
+/// alignment.
 pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeResult {
     if local == remote {
         return MarkdownMergeResult::Merged(local.to_owned());
@@ -223,11 +234,10 @@ pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeRes
     ) else {
         return MarkdownMergeResult::Conflict;
     };
-    let merged = merged.join("\n");
-    if !keeps_copies([base, local, remote, &merged]) {
+    if !keeps_copies([&base_lines, &local_lines, &remote_lines, &merged]) {
         return MarkdownMergeResult::Conflict;
     }
-    MarkdownMergeResult::Merged(merged)
+    MarkdownMergeResult::Merged(merged.join("\n"))
 }
 
 /// Content equality for two comparison sides. A binary side compares by its
@@ -1420,9 +1430,6 @@ struct Hunk<'a> {
 const MATCH_SCORE: u32 = 1 << 16;
 const CHECK_WORK: usize = 4;
 
-/// The matched `(base, side)` line pairs of a longest common subsequence.
-/// Among those, it keeps the most base lines marked in `prefer`, then breaks
-/// ties by dropping base lines first.
 fn align(base: &[&str], side: &[&str], prefer: &[bool]) -> Vec<(usize, usize)> {
     let (rows, columns) = (base.len(), side.len());
     let width = columns + 1;
@@ -1458,7 +1465,6 @@ fn align(base: &[&str], side: &[&str], prefer: &[bool]) -> Vec<(usize, usize)> {
     pairs
 }
 
-/// The stretches of `base` that `side` replaced, between the matched `pairs`.
 fn hunks<'a>(base: &[&str], side: &'a [&'a str], pairs: &[(usize, usize)]) -> Vec<Hunk<'a>> {
     let mut hunks = Vec::new();
     let (mut base_start, mut side_start) = (0, 0);
@@ -1476,8 +1482,6 @@ fn hunks<'a>(base: &[&str], side: &'a [&'a str], pairs: &[(usize, usize)]) -> Ve
     hunks
 }
 
-/// Whether two hunks from different sides change the same place: they
-/// overlap, insert at the same line, or one inserts where the other starts.
 fn touches(left: &Hunk<'_>, right: &Hunk<'_>) -> bool {
     let left_inserts = left.base_start == left.base_end;
     let right_inserts = right.base_start == right.base_end;
@@ -1485,8 +1489,6 @@ fn touches(left: &Hunk<'_>, right: &Hunk<'_>) -> bool {
         || (left.base_start < right.base_end && right.base_start < left.base_end)
 }
 
-/// Apply both sides' hunks to `base`. Hunks that touch merge once when both
-/// sides turn that stretch into the same lines; otherwise the merge conflicts.
 fn combine<'a>(
     base: &[&'a str],
     local: Vec<Hunk<'a>>,
@@ -1537,7 +1539,6 @@ fn combine<'a>(
     Some(output)
 }
 
-/// The lines of `text`. An empty text has none.
 fn lines(text: &str) -> Vec<&str> {
     if text.is_empty() {
         Vec::new()
@@ -1546,26 +1547,18 @@ fn lines(text: &str) -> Vec<&str> {
     }
 }
 
-/// Whether, in each stretch between lines that appear once in every one of
-/// `[base, local, remote, merged]`, no line has fewer copies in the merge than
-/// both sides kept or more than either side has. The stretches run between the
-/// neighbouring lines of every longest chain of such lines that all four texts
-/// keep in the same order, so no choice between equally long chains can hide a
-/// lost copy. A line that appears once in the base and both sides must appear
-/// once in the merge. Reorderings that would take more than `CHECK_WORK` times
-/// the lines of the three results to check count as a conflict.
-fn keeps_copies(texts: [&str; 4]) -> bool {
-    let texts = texts.map(lines);
+fn keeps_copies(texts: [&[&str]; 4]) -> bool {
     let mut counts: HashMap<&str, [usize; 4]> = HashMap::new();
     for (index, text) in texts.iter().enumerate() {
-        for line in text {
+        for line in *text {
             counts.entry(line).or_default()[index] += 1;
         }
     }
-    if counts
-        .values()
-        .any(|count| matches!(count, [1, 1, 1, merged] if *merged != 1))
-    {
+    if counts.values().any(|&[base, local, remote, merged]| {
+        base.max(local).max(remote) <= 1
+            && (base, local, remote) != (0, 1, 1)
+            && merged != if base == local { remote } else { local }
+    }) {
         return false;
     }
     let mut positions: HashMap<&str, [usize; 4]> = HashMap::new();
@@ -1604,7 +1597,7 @@ fn keeps_copies(texts: [&str; 4]) -> bool {
         .filter(|&index| ending[index] + starting[index] == longest + 1)
         .collect();
     let first = [0; 4];
-    let last = texts.each_ref().map(Vec::len);
+    let last = texts.map(<[&str]>::len);
     let after = |index: usize| anchors[index].map(|position| position + 1);
     let mut budget = CHECK_WORK * (last[1] + last[2] + last[3]);
     let mut keeps = |starts: [usize; 4], ends: [usize; 4]| {
@@ -1637,7 +1630,7 @@ fn keeps_copies(texts: [&str; 4]) -> bool {
     true
 }
 
-fn stretch_keeps_copies(texts: &[Vec<&str>; 4], starts: [usize; 4], ends: [usize; 4]) -> bool {
+fn stretch_keeps_copies(texts: &[&[&str]; 4], starts: [usize; 4], ends: [usize; 4]) -> bool {
     let mut counts: HashMap<&str, [usize; 3]> = HashMap::new();
     for side in 1..4 {
         for line in &texts[side][starts[side]..ends[side]] {
