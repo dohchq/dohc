@@ -1,6 +1,16 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -45,6 +55,11 @@ import {
 } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
+
+function Session({ children }: { children: ReactNode }) {
+  return <WorkspaceSessionProvider workspaceId="test">{children}</WorkspaceSessionProvider>;
+}
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: Session });
 function localToday(): string {
   const now = new Date();
   const month = String(now.getMonth() + 1).padStart(2, "0");

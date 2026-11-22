@@ -5,7 +5,6 @@
     "apps/desktop/src/renderer/CloudLogin.tsx | cloudStatus #3",
     "apps/desktop/src/renderer/CollectionArchiveDialog.tsx | dataset:lifecycle",
     "apps/desktop/src/renderer/CollectionPage.tsx | getCollection",
-    "apps/desktop/src/renderer/CollectionPage.tsx | listAutomationPeople",
     "apps/desktop/src/renderer/CollectionPage.tsx | listCollections",
     "apps/desktop/src/renderer/CollectionPage.tsx | queryCollectionRecords",
     "apps/desktop/src/renderer/CollectionPage.tsx | queryCollectionRecords #2",
