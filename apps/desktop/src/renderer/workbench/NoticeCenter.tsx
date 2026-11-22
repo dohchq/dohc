@@ -3,6 +3,8 @@ import { modalReturnTarget } from "../modalFocus";
 import { onOverlayOpen } from "../overlayStack";
 import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
+import { resumeKeyboardMark } from "../keyboardNavigation";
+import { TARGET_FLASH_MS } from "./landOnMessage";
 import { automationReachCopy } from "../automationReachCopy";
 import {
   AlertTriangle,
@@ -1567,7 +1569,8 @@ export function NoticeCenter(props: {
     if (open) centerRef.current?.focus({ preventScroll: true });
   }, [open]);
   // A request to show one workspace error's row opens the panel and moves
-  // focus to that row, once per request.
+  // focus to that row, once per request. The row washes once, as a landing
+  // does, and a request pressed from the keyboard keeps the keyboard mark.
   const { showRequest } = props;
   const shownRequest = useRef<number | null>(null);
   useEffect(() => {
@@ -1581,6 +1584,15 @@ export function NoticeCenter(props: {
     const control = row?.querySelector<HTMLElement>(ROW_OPEN) ?? row;
     control?.scrollIntoView?.({ block: "nearest" });
     control?.focus({ preventScroll: true });
+    resumeKeyboardMark();
+    if (!row) return;
+    row.classList.add("dohc-target-flash");
+    const wash = () => row.classList.remove("dohc-target-flash");
+    const timer = setTimeout(wash, TARGET_FLASH_MS);
+    return () => {
+      clearTimeout(timer);
+      wash();
+    };
   }, [showRequest, open]);
   // Relative-time labels ("3m ago") are computed at render; tick every 30s
   // while the panel is open so they can't sit stale between state updates.
@@ -2500,9 +2512,11 @@ export function NoticeCenter(props: {
   const runLocalAction = (action: NoticeAction, from: HTMLElement) => {
     if (action.stays) {
       // The pressed step goes disabled while it works, which drops its focus,
-      // so the row's own stop takes it.
+      // so the row's own stop takes it, and then the outcome. A step pressed
+      // from the keyboard keeps the keyboard mark, so both show where focus is.
       const row = from.closest<HTMLElement>(NOTICE_ROW);
       rowStop(row ?? undefined)?.focus();
+      resumeKeyboardMark();
       keptFocus.current = row ? { row, before: new Set(rowsNow()) } : null;
       action.onClick();
       return;

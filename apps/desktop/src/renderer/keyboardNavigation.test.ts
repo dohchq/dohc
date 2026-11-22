@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import css from "./styles.css?raw";
-import { initKeyboardNavigation, KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
+import {
+  initKeyboardNavigation,
+  KEYBOARD_NAV_ATTRIBUTE,
+  resumeKeyboardMark,
+} from "./keyboardNavigation";
 
 describe("keyboard navigation", () => {
   let stop: () => void;
@@ -44,6 +48,25 @@ describe("keyboard navigation", () => {
 
     key("Tab");
     key("Enter");
+    expect(marked()).toBe(false);
+  });
+
+  it("brings back a mark Enter took away when a step moves focus later", () => {
+    key("Tab");
+    key("Enter");
+    expect(marked()).toBe(false);
+    resumeKeyboardMark();
+    expect(marked()).toBe(true);
+
+    press();
+    key("Enter");
+    resumeKeyboardMark();
+    expect(marked()).toBe(false);
+
+    key("Tab");
+    key("Enter");
+    press();
+    resumeKeyboardMark();
     expect(marked()).toBe(false);
   });
 
