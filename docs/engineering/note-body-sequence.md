@@ -2,7 +2,7 @@
 
 How a note's body is stored so that joining and splitting lines cannot double or lose text (#4038). The body is one sequence in which the start of each block is one item: a join deletes one item, a split inserts one, and nothing is copied.
 
-Sections 1 to 3 are frozen as of 2026-11-23: where the format lives, what is stored, and how it is read. A change to them goes through the owner of #4038 and is told to every lane building on them. Sections 4 and 5 are the rules writers and checks follow; the editor adapter and the server's checks finish and test them. Section 6 lists behaviour people can meet.
+Sections 1 to 3 are frozen as of 2026-11-23: where the format lives, what is stored, and how it is read. A change to them goes through the owner of #4038 and is told to every lane building on them. Section 4 is the rules writers follow; the editor adapter finishes and tests them. Section 5 is the rules the server's checks follow, as built and tested. Section 6 lists behaviour people can meet.
 
 The reader is `packages/ydoc-projection/src/bodySequenceGrammar.ts`, read from Yjs by `bodySequenceYjs.ts`. `packages/ydoc-projection/src/fixtures/body-sequence.json` holds stored notes and the documents they read as; every reader, in any language, must match it.
 
@@ -158,20 +158,32 @@ INLINE = letters, `escapedPunctuation`, `hardBreak`, `image`, `inlineAtom`, `mat
 
 ## 5. Checks
 
-- Rule for the whole section: nothing intake admits may later be refused by the save check, the registration check, or the engine. Intake is at least as strict as each of them for a format-2 note, and a test feeds each later check everything intake admitted.
-- Intake (per change, at the room and at each capture's `admitSubmission`), cheap, no rule across items:
-  - it looks at EVERY struct the change adds. One the same change also deletes may arrive as `ContentDeleted` or `GC`, or as a keyed `ContentAny` longer than 1 whose earlier values are the deleted ones (Yjs merges them on a reconnect); what can still be read of it is checked like any other value;
+Implemented for the relay in `bodySequenceIntake.ts` and `liveDocumentValidation.ts`, behind the setting `DOHC_RELAY_BODY_SEQUENCE_NOTES`. Set to `1`, the relay admits format-2 notes. Unset or `0`, every check refuses one as it did before the format existed. The relay and each validation worker it starts read the setting. `bodySequenceIntake.test.ts` tests these rules, and `bodySequenceChecks.test.ts` records what the checks did before them.
+
+- Rule for the whole section: nothing intake admits is later refused by the save check, the registration check, or the engine for what its `sequence` or its `containers` hold. A test feeds each later check everything intake admitted, from people's changes and from changes no editor would send.
+- A later check still refuses two things intake cannot see in one change, as it does for a format-1 note:
+  - capacity, which is measured on the whole note: its structs and elements, the Markdown it is written as, and how many values its properties hold;
+  - the note's properties and metadata, whose rules read the Markdown the note is written as. Through them two bodies are still refused: a raw block at the top that reads as a properties block, in a note with no properties, and a note with nothing to write that is marked as using CRLF line ends.
+- No check declares `sequence` or `containers` on a document. Yjs, where a text is declared, deletes formatting items on its own when a delete from someone else arrives (one person bolds a word, another deletes it), and those deletes are in no change. A document that never declares the sequence deletes nothing on its own, so every check reads the stored items and none rebuilds the note to compare. A delete of a formatting item is a delete like any other, whoever sends it.
+- A page that declares the sequence, as section 1 says an editor does, either stops that cleanup or sends what it deleted:
+  - stopped (`transaction._needFormattingCleanup = false` after each transaction), every page reads the same as the stored note at all times;
+  - sent, every page that sends ends as the stored note, and a page that cannot send can show other marks than the stored note until it loads the note again.
+- Intake (per change, at the room and in the journal check each capture's `admitSubmission` runs), cheap, no rule across items:
+  - it reads the change from the wire as the ordered cut does, then looks at EVERY struct the change adds, where Yjs placed it. One the same change also deletes may arrive as `ContentDeleted` or `GC`, or as a keyed `ContentAny` longer than 1 whose earlier values are the deleted ones (Yjs merges them on a reconnect); what can still be read of it is checked like any other value. An item that lands as a collected struct, because its parent arrived collected, is refused, as the cut refuses it;
   - it reads the note's format from its copy; a format-1 note takes no item under `sequence` or `containers`, a format-2 note none under `body`;
-  - it refuses a change that adds or deletes an item under `meta.schemaVersion`, also one that writes the value already there;
+  - it refuses a change after which `meta.schemaVersion` is not the same item: one that writes it, also with the same value or on a note that has none, and one that deletes it. A note becomes format 2 only by being registered with the marker;
   - under `sequence`: `ContentString`; `ContentFormat` whose key is exactly a mark name; `ContentType` `XmlElement` named `block` or an inline node; nothing keyed;
   - under such an element: only keyed items; a live one is `ContentAny` of length 1 whose key is an attribute that name has (`block`: `type`, `path`, `level`, `language`, `tex`, `source`); no unkeyed child;
   - under `containers`: only keyed items; a live one is `ContentAny` of length 1 whose key is `<id>` or `<id>.<attribute>` with `<attribute>` from the list in 2.2;
-  - a keyed item has no right origin (Yjs never writes one);
-  - every value is JSON-like (null, boolean, finite number, string, array, plain object; in `ContentAny` also a BigInt in int64; none in a `ContentFormat`, whose value Yjs's v1 update encoding, the one dohc uses, cannot carry a BigInt in), with no key named `__proto__`, no key twice in one object (read from the wire, not from the decoded object), and the depth, node and byte limits the later checks apply;
-  - no string anywhere (a letter run, a value, a key) holds a lone surrogate; no struct starts or ends, and no delete range starts or ends, between the two units of a surrogate pair;
-  - formatting cleanup is as today. Yjs, with a text declared, deletes formatting items on its own when changes meet (one person bolds a word, another deletes it), and those deletes are in no change. Today's checks refuse such a history for a format-1 note, inside one paragraph's text (`concurrentLiveDeletes.test.ts`). A format-2 note has the same exposure for the same pair of edits. This format does not change that policy and does not depend on it. Making the checks take such a history is the first job of the work on the server's checks, for both formats. If it cannot be done without storing marks differently, sections 2 and 3 change and every reader is told.
-- The full check before a save, for format 2: capacity, then read. It never refuses a note for what its sequence or records hold: reading is total and repairs every value. It does not rebuild the note and compare (format 1's fingerprint step has no meaning here).
-- Engine: the same reading rules in Rust, giving the existing `MarkdownNode` tree, pinned byte for byte against TypeScript on the shared fixtures.
+  - under `frontmatter` and `meta`: what a format-1 note takes there, and each metadata value is one its key can hold;
+  - a keyed item has no right origin (Yjs never writes one), and a keyed struct longer than 1 has every value but its last deleted by the same change;
+  - every value, in `ContentAny` and in `ContentFormat` alike, is JSON-like (null, boolean, finite number, BigInt in int64, string, array, plain object), at most 128 levels deep, with at most 262,144 values in one change, no key named `__proto__` and no key twice in one object. A value in `ContentFormat` is JSON text, so it holds no BigInt and no negative zero;
+  - the journal check reads `__proto__` and a key written twice from the wire. The room first trims a change to what the note lacks, and Yjs has by then dropped a `__proto__` key and kept the last of two equal keys, so the room stores that rewrite and does not refuse the change;
+  - no string anywhere (a letter run, a value, a key) holds a lone surrogate; no struct starts or ends, no delete range starts or ends, and no item is placed, between the two units of a surrogate pair. Yjs writes U+FFFD for each half of a pair an item is placed inside.
+- The full check before a save, for format 2: capacity, then read, then the rules for properties and metadata as for format 1. It never refuses a note for an item of its sequence or a record: reading is total and repairs every value. It does not rebuild the note and compare (format 1's fingerprint step has no meaning here). The registration check also refuses a format-2 note that shows anything under `body`.
+- A format-1 note's checks are unchanged. They still refuse a history in which Yjs cleaned formatting.
+- Old clients: today's editor binding, opened on a format-2 note, writes nothing as it opens, and intake refuses every edit it makes (`bodySequenceOldEditor.test.ts`).
+- Engine: the same reading rules in Rust, giving the existing `MarkdownNode` tree, pinned byte for byte against TypeScript on the shared fixtures. The engine's reader process runs the journal check with the setting off, and its own reading of a file saved outside dohc is format 1 only.
 - Before the engine writes this format, its Yjs library needs one patch: `clean_format_gap` (`vendor/yrs-0.27.3/src/types/text.rs`) scans past an embedded element as if it were not content, where Yjs stops. A local delete in the engine can then remove the formatting items on both sides of a boundary, and a letter someone types plain after that boundary at the same moment comes out marked. `crates/yrs-interop/tests/body_sequence.rs` records today's behaviour and must flip. The engine writes marks with attributed inserts, not `Text::format`, whose right edge differs from Yjs's.
 
 ## 6. Known behaviour
@@ -194,7 +206,7 @@ Accepted:
 - A letter typed in an empty line that someone joins away at the same moment lands at the end of the line above.
 
 Unchanged from today (Yjs inside one text), now also reachable across lines:
-- One person bolds a word while another deletes it: today's checks refuse the history (section 5).
+- One person bolds a word while another deletes it: Yjs deletes a formatting item on the page that receives the delete, and no change holds that delete. The checks take the history (section 5).
 - Bold ranges applied at the same moment that overlap can end shorter than either.
 - Two people undoing the same deletion of text restore it twice.
 - When a join or a delete removes the last item inside a marked range, Yjs drops the range; a letter someone else types or restores there at the same moment is plain. Undoing the join brings the mark back.
