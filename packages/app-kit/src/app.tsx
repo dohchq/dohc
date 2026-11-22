@@ -648,7 +648,7 @@ export function useDatasetMutation<TInput = unknown, TResult = unknown>(
 
   const retry = useCallback(async () => {
     const next = retained[0];
-    if (!next) return null;
+    if (!next || next.id < discardFloor.current) return null;
     const active = inFlightRetries.current.get(next.id);
     if (active) return active;
     const promise = execute(next).finally(() => {

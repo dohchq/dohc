@@ -296,14 +296,26 @@ describe("dohc/app", () => {
             SaveBad
           </button>
           {save.uncertain ? (
-            <button
-              type="button"
-              onClick={() => {
-                void save.retry().catch(() => {});
-              }}
-            >
-              Retry
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  void save.retry().catch(() => {});
+                }}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void save.retry().catch(() => {});
+                  save.discardPending();
+                  void save.retry().catch(() => {});
+                }}
+              >
+                RetryDiscardRetry
+              </button>
+            </>
           ) : null}
         </div>
       );
@@ -377,6 +389,17 @@ describe("dohc/app", () => {
       value: { result: { saved: true }, revision: 5, replayed: true },
     });
     await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).toBeNull());
+    expect(screen.getByText("uncertain:false")).toBeTruthy();
+
+    // Synchronous retry() -> discardPending() -> retry() sends only one RPC and never re-retains.
+    fireEvent.click(screen.getByRole("button", { name: "SaveB" }));
+    expect(fake.sent).toHaveLength(6);
+    fake.reply({ id: fake.sent[5]!.id, ok: false, status: 503 });
+    const rdr = await screen.findByRole("button", { name: "RetryDiscardRetry" });
+    fireEvent.click(rdr);
+    expect(fake.sent).toHaveLength(7);
+    fake.reply({ id: fake.sent[6]!.id, ok: false, status: 503 });
+    await waitFor(() => expect(screen.getByText("pending:false")).toBeTruthy());
     expect(screen.getByText("uncertain:false")).toBeTruthy();
     client.close();
   });
