@@ -110,6 +110,18 @@ pub const ROOT_SCENE_APP_STATE: &str = "excalidraw:app-state";
 /// Durable Excalidraw asset metadata, keyed by file id.
 pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 
+/// The engine's setting for format-2 notes. An engine started with this
+/// environment variable set to `1` reads a note whose `meta.schemaVersion`
+/// is 2 from [`ROOT_SEQUENCE`] and [`ROOT_CONTAINERS`], and admits it as a
+/// public baseline. Any other engine refuses such a note as a baseline and
+/// writes what is under [`ROOT_BODY`].
+pub const BODY_SEQUENCE_SETTING: &str = "DOHC_ENGINE_NOTE_BODY_SEQUENCE";
+
+fn body_sequence_setting() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(BODY_SEQUENCE_SETTING).is_ok_and(|value| value == "1"))
+}
+
 /// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
 /// failure the spike found.
@@ -487,15 +499,12 @@ impl Ydoc {
         doc.get_or_insert_map(ROOT_SCENE_ASSETS);
         Ydoc {
             doc,
-            reads_body_sequence: false,
+            reads_body_sequence: body_sequence_setting(),
         }
     }
 
-    /// Lets this document be a note whose body is one sequence (format 2,
-    /// `docs/engineering/note-body-sequence.md`). The engine's setting for
-    /// that format turns this on. Without it, a format-2 note is refused as
-    /// a public baseline and what is under its `body` root is what is written.
-    pub fn reading_body_sequence(mut self) -> Self {
+    #[cfg(test)]
+    pub(crate) fn reading_body_sequence(mut self) -> Self {
         self.reads_body_sequence = true;
         self
     }
