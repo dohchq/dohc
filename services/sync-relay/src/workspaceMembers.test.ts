@@ -585,6 +585,75 @@ describe("what a member reaches", () => {
     expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
   });
 
+  it("withholds a hidden folder's old names after its rule moves to the renamed folder", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "HR/access.yaml", "");
+    await ownerWrite(h, "HR/salaries-2026.md", "PRIVATE CONTENT");
+    expect(await pulledText(h, "ana", shareId)).not.toContain("HR/");
+
+    // The engine writes the destination rule before moving files, then removes the old rule.
+    await ownerWrite(h, "People/access.yaml", "");
+    await ownerRename(h, "HR/salaries-2026.md", "People/salaries-2026.md");
+    await ownerAppend(h, [
+      logOp("moment.append", {
+        momentId: `m-${ownerSeq++}`,
+        versionId: "main",
+        objectId: "object-HR/access.yaml",
+        path: "HR/access.yaml",
+        recordedAtMs: 5000,
+        operation: "delete",
+        payloadBeforeBlobSha256: ownerHeads.get("HR/access.yaml"),
+        payloadBeforePath: "HR/access.yaml",
+        payloadAfterBlobSha256: null,
+        payloadAfterPath: null,
+        metadata: { origin: "user" },
+        beforePresent: "null",
+      }),
+    ]);
+
+    const asMember = await pulledText(h, "ana", shareId);
+    expect(asMember).not.toContain("HR/");
+    expect(asMember).not.toContain("People/");
+    expect(asMember).not.toContain(sha256("PRIVATE CONTENT"));
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const asAdmin = await pulledText(h, "ana", shareId);
+    expect(asAdmin).toContain("HR/salaries-2026.md");
+    expect(asAdmin).toContain("People/salaries-2026.md");
+  });
+
+  it("serves a readable Group without naming its hidden folder", async () => {
+    const { h } = await seed();
+    await ownerWrite(h, "private/restricted/access.yaml", "");
+    await ownerAppend(h, [
+      logOp(
+        "chat.channel.create",
+        chatChannelCreate(LATER_GROUP, {
+          channelId: "chan-later",
+          name: "Discussion",
+          slug: "discussion",
+          kind: "channel",
+          type: "both",
+          purpose: "",
+          folderPath: "private/restricted",
+        }).payload,
+      ),
+    ]);
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const asMember = await pulledText(h, "ana", shareId);
+    expect(asMember).toContain("Discussion");
+    expect(asMember).not.toContain("private/restricted");
+    expect(asMember).toContain('"folderPath":"team"');
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    expect(await pulledText(h, "ana", shareId)).toContain('"folderPath":"private/restricted"');
+  });
+
   it("changes a member's page signature only when their reach changes, and marks moves across it in the pull", async () => {
     const { h, storage } = await seed();
     const ana = await invited(h, "ana");
