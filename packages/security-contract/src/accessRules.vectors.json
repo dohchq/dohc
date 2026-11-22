@@ -7,6 +7,7 @@
     { "name": "a byte order mark and CRLF", "text": "﻿members: comment\r\npeople:\r\n    bea@example.com: view\r\n", "rule": { "members": "comment", "people": { "bea@example.com": "view" } } },
     { "name": "CRLF with no line ending after the last line", "text": "members: view\r\npeople:\r\n  sam@example.com: edit", "rule": { "members": "view", "people": { "sam@example.com": "edit" } } },
     { "name": "a CR with no LF after it", "text": "members: view\r", "rule": null },
+    { "name": "two byte order marks", "text": "﻿﻿members: edit\n", "rule": null },
     { "name": "an indented comment inside people", "text": "people:\n  # the editors\n  sam@example.com: edit\n", "rule": { "members": null, "people": { "sam@example.com": "edit" } } },
     { "name": "a hash inside a plain email", "text": "people:\n  sam#1@example.com: edit\n", "rule": { "members": null, "people": { "sam#1@example.com": "edit" } } },
     { "name": "a comment that a lone CR ends", "text": "members: edit # note\r  bea@example.com: view\n", "rule": null },

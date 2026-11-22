@@ -41,6 +41,10 @@ pub enum RuntimeError {
     /// written; the caller plans the rest again.
     #[error("rule-merge-order-changed")]
     RuleMergeOrderChanged,
+    #[error(
+        "dohc stopped the merge. {path} has an open conflict. Resolve that conflict, then merge again."
+    )]
+    RuleMergeConflict { path: String },
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -201,6 +205,7 @@ impl RuntimeError {
             RuntimeError::AccessRuleChanged { .. } => "access-rule-changed",
             RuntimeError::AccessRuleNotHeld => "access-rule-not-held",
             RuntimeError::RuleMergeOrderChanged => "rule-merge-order-changed",
+            RuntimeError::RuleMergeConflict { .. } => "rule-merge-conflict",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",

@@ -4773,3 +4773,106 @@ fn a_merge_into_a_folder_with_two_rule_files_does_not_stop_partway() {
         );
     }
 }
+
+#[test]
+fn a_rule_conflict_blocks_merged_files_until_it_is_resolved() {
+    merged_files_wait_for_rule_conflict(false);
+}
+
+#[test]
+fn a_deleted_rule_conflict_blocks_merged_files_until_it_is_resolved() {
+    merged_files_wait_for_rule_conflict(true);
+}
+
+fn merged_files_wait_for_rule_conflict(delete_rule: bool) {
+    let f = Fixture::new();
+    f.versioned_write(write("team/access.yaml", VIEW, "base-rule"))
+        .unwrap();
+    create_version(&f, "feature");
+    if delete_rule {
+        let mut deletion = delete("team/access.yaml", "private-rule");
+        deletion.version_id = "feature".to_owned();
+        f.versioned_delete(deletion).unwrap();
+    } else {
+        version_write(&f, "feature", "team/access.yaml", NOBODY, "private-rule");
+    }
+    version_write(&f, "feature", "team/secret.md", "not yet shared", "secret");
+    f.versioned_write(write("team/access.yaml", EDIT, "main-rule"))
+        .unwrap();
+    merge_rule(&f, "feature", &owned(&["team/access.yaml"]), 50).unwrap();
+    let before = f.journal();
+    let result = merge_rule(&f, "feature", &owned(&["team/secret.md"]), 51);
+    assert!(
+        result.is_err(),
+        "a file merged under a conflicted rule: {result:?}"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Resolve that conflict, then merge again.")
+    );
+    assert_eq!(f.journal(), before);
+    assert!(!f.root().join("team/secret.md").exists());
+    f.runtime
+        .block_on(f.actor.conflict_resolve_indexed(
+            dohc_engine_runtime::ResolveTextConflict {
+                workspace_id: WS.to_owned(),
+                conflict_id: "conflict-50".to_owned(),
+                conflict_answer_budget_bytes: usize::MAX,
+                resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+                object_id: "resolved-rule".to_owned(),
+                write_moment_id: "resolved-rule-write".to_owned(),
+                delete_moment_id: "resolved-rule-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 52,
+                request_id: None,
+            },
+            dohc_engine_collab::LeaseRegistry::new(),
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .unwrap();
+    merge_rule(&f, "feature", &owned(&["team/secret.md"]), 53).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/secret.md")).unwrap(),
+        "not yet shared"
+    );
+    assert_eq!(
+        &f.journal()[before.len()..],
+        [
+            if delete_rule {
+                "delete team/access.yaml"
+            } else {
+                "write team/access.yaml"
+            },
+            "write team/secret.md",
+        ]
+    );
+}
+
+#[test]
+fn a_future_rule_time_does_not_block_narrowing_or_its_files() {
+    for ahead in [Duration::from_secs(1), Duration::from_secs(86_400)] {
+        let f = ruled_team();
+        let before = f.journal();
+        f.put("team/access.yaml", NOBODY);
+        f.put("team/a.md", "alpha 2");
+        f.settle();
+        filetime::set_file_mtime(
+            f.root().join("team/access.yaml"),
+            filetime::FileTime::from_system_time(SystemTime::now() + ahead),
+        )
+        .unwrap();
+        f.capture_ok(&["team/a.md", "team/access.yaml"]);
+        assert_eq!(
+            &f.journal()[before.len()..],
+            ["write team/access.yaml", "write team/a.md"]
+        );
+        assert!(f.holds().is_empty());
+    }
+}
