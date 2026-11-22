@@ -124,6 +124,7 @@ function tokensBetween(doc: ProseMirrorNode, from: number, to: number): Token[] 
 }
 
 type Unit = { key: string; pos: number };
+const BLOCK_START = "\0";
 
 function unitsBetween(doc: ProseMirrorNode, from: number, to: number): Unit[] {
   const units: Unit[] = [];
@@ -134,7 +135,7 @@ function unitsBetween(doc: ProseMirrorNode, from: number, to: number): Unit[] {
       for (let at = 0; at < letters.length; at++)
         units.push({ key: letters[at]!, pos: first + at });
     } else if (node.isInline) units.push({ key: `\0${node.type.name}`, pos });
-    else if (holdsNoBlocks(node) && pos >= from) units.push({ key: "\0", pos });
+    else if (holdsNoBlocks(node) && pos >= from) units.push({ key: BLOCK_START, pos });
     return !node.isInline;
   });
   return units;
@@ -426,7 +427,7 @@ function writeBlockStartsThatDiffer(writing: BodyWriting, after: ProseMirrorNode
     const newEnd = tail > 0 ? wanted[wanted.length - tail]!.pos : b;
     const oldStart = gone[0]?.pos ?? oldEnd;
     const newStart = come[0]?.pos ?? newEnd;
-    const starts = (units: readonly Unit[]) => units.every((unit) => unit.key === " ");
+    const starts = (units: readonly Unit[]) => units.every((unit) => unit.key === BLOCK_START);
     const adds = gone.length === 0 && starts(come) && cutsNoContainer(after, newStart, newEnd);
     const drops = come.length === 0 && starts(gone) && cutsNoContainer(read, oldStart, oldEnd);
     if (!adds && !drops) return false;
