@@ -72,7 +72,7 @@ it("refuses a document with no native history at once, and holds one with no sha
     ok: false,
     code: "live-start-failing",
     error:
-      "The server can't start live editing for this document. It keeps trying, and its owner can resume it to try now.",
+      "The server can't start live editing for this document. Its owner can resume it to try again.",
   });
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
   f.host.failing.mockReturnValue(undefined);

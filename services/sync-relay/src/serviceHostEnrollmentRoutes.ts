@@ -424,7 +424,7 @@ export function serviceHostReadiness(options: {
   function state(row: ServiceHostEnrollment): ServiceHostDocumentState {
     const base = { path: row.path, objectId: row.objectId };
     // Not live yet. A host that is down says only that, and a held document reads as Preparing. A document whose
-    // activation keeps failing says why, while the host keeps trying it.
+    // activation keeps failing says why, while its start clock runs.
     const starting = (): ServiceHostDocumentState => {
       if (host.unavailable) return { ...base, status: "unavailable" };
       const failing = host.holdReason(row) === undefined ? host.failing(row) : undefined;

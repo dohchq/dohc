@@ -690,7 +690,7 @@ export async function startSelfHostedLiveHost(options: {
     holdReason(document: { workspaceId: string; objectId: string }) {
       return current?.holdReason(document);
     },
-    /** Why the running daemon keeps failing to start the document, once its owner sees it. It keeps trying. */
+    /** Why the running daemon keeps failing to start the document, once its owner sees it, until its start clock runs out. */
     failing(document: { workspaceId: string; objectId: string }) {
       return current?.failing(document);
     },

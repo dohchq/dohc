@@ -51,7 +51,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "live-history-over-budget":
     "This document's edit history is too long for this server to check, so live editing can't start for it.",
   "live-start-failing":
-    "The server can't start live editing for this document. It keeps trying, and its owner can resume it to try now.",
+    "The server can't start live editing for this document. Its owner can resume it to try again.",
 };
 const REFUSED = "This server cannot continue this document until its owner tries again.";
 
